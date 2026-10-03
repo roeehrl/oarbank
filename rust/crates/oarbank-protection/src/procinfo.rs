@@ -22,6 +22,8 @@ pub mod procfs {
         pub state: char,
         pub ppid: i32,
         pub pgrp: i32,
+        /// The foreground process group of the process's controlling terminal (-1: none).
+        pub tpgid: i32,
         pub flags: u64,
         /// Major page faults: pages read in from disk (the pageins of macOS's rusage).
         pub majflt: u64,
@@ -55,6 +57,7 @@ pub mod procfs {
             state: f.first()?.chars().next()?,
             ppid: i(1)?,
             pgrp: i(2)?,
+            tpgid: i(5)?,
             flags: n(6)?,
             majflt: n(9)?,
             utime: n(11)?,
@@ -344,7 +347,8 @@ mod tests {
     fn parses_stat_status_cmdline_and_schedstat() {
         let s = parse_stat(STAT).unwrap();
         assert_eq!(s.comm, "py (train) x");
-        assert_eq!((s.state, s.ppid, s.pgrp, s.majflt, s.utime, s.stime, s.starttime), ('S', 2171, 4242, 37, 1520, 230, 482113));
+        assert_eq!((s.state, s.ppid, s.pgrp, s.tpgid, s.majflt, s.utime, s.stime, s.starttime),
+                   ('S', 2171, 4242, 4242, 37, 1520, 230, 482113));
         assert!(s.is_live_user_process());
         let kthread = parse_stat("2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 2 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 0 1 0 0 0 0 0").unwrap();
         assert!(!kthread.is_live_user_process());

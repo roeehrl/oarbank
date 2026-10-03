@@ -18,7 +18,7 @@ pub use procs::{
 pub use security::{satisfies, signing};
 
 use crate::gpu::GpuTimes;
-use crate::signals::{frontmost, Front, Meter, ProcCounters};
+use crate::signals::{frontmost, Front, FrontReading, Meter, ProcCounters};
 use crate::spawn_registry::{Actuator, Signal};
 
 /// rusage V6 counters, AGX GPU time and the frontmost app.
@@ -38,8 +38,11 @@ impl Meter for NativeMeter {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         gpu_time_by_pid().map(GpuTimes::known)
     }
-    fn front(&mut self) -> Front {
-        frontmost_pid().map_or(Front::Unknown, Front::App)
+    fn front(&mut self) -> FrontReading {
+        match frontmost_pid() {
+            Some(pid) => FrontReading::new(Front::App(pid), "lsappinfo"),
+            None => FrontReading::new(Front::Unknown, "unknown: lsappinfo names no front app"),
+        }
     }
 }
 

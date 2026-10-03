@@ -32,6 +32,7 @@ pub mod sources;
 pub mod spawn_registry;
 pub mod table;
 pub mod telemetry;
+pub mod x11;
 
 pub use capacity::{
     CapacityInputs, CapacityModel, CapacityResult, Enforce, Enforcement, EnforcementAttempt,
@@ -58,7 +59,9 @@ pub use journal::{
 };
 pub use memory_guard::{GuardLevel, MemPressure, MemoryGuard, MemorySignals, SystemGates, Thermal};
 pub use model::{GroupSample, ProcessKey, ProcessRecord};
-pub use signals::{Front, GroupMetrics, Meter, NullMeter, Presence, PresenceReading, ProcCounters};
+pub use signals::{
+    Front, FrontReading, GroupMetrics, Meter, NullMeter, Presence, PresenceReading, ProcCounters,
+};
 pub use sources::{FileOwnerSources, NoOwnerSources, OwnerSources};
 pub use spawn_registry::{
     Actuator, FileRegistryStore, Member, Refusal, RegistryStore, Signal, SpawnRegistry,

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::presence::logind::{self, Session};
 use crate::signals::{Presence, PresenceReading};
 
-const PROPERTIES: [&str; 13] = [
-    "Id", "User", "Name", "Service", "Class", "Type", "Active", "Remote", "Seat", "Display", "IdleHint",
+const PROPERTIES: [&str; 14] = [
+    "Id", "User", "Name", "Service", "Class", "Type", "Active", "Remote", "Seat", "Display", "Leader", "IdleHint",
     "IdleSinceHint", "LockedHint",
 ];
 

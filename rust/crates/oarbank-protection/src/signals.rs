@@ -123,12 +123,29 @@ impl Front {
         }
     }
 
-    /// The telemetry form: "unknown", "nothing" or "app".
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Nothing => "nothing",
-            Self::App(_) => "app",
+}
+
+/// What is in front, and where it was read (or why it could not be).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrontReading {
+    pub front: Front,
+    pub source: String,
+}
+
+impl FrontReading {
+    pub fn new(front: Front, source: impl Into<String>) -> Self {
+        Self {
+            front,
+            source: source.into(),
+        }
+    }
+
+    /// The telemetry form: "app 812 (lsappinfo)", "nothing (no one at seat0)", or the reason it is unknown.
+    pub fn describe(&self) -> String {
+        match self.front {
+            Front::App(pid) => format!("app {pid} ({})", self.source),
+            Front::Nothing => format!("nothing ({})", self.source),
+            Front::Unknown => self.source.clone(),
         }
     }
 }
@@ -141,7 +158,7 @@ pub trait Meter: Send {
     /// Every process's accumulated GPU time, or None when the source is unavailable.
     fn gpu_times(&mut self) -> Option<GpuTimes>;
     /// What is in front.
-    fn front(&mut self) -> Front;
+    fn front(&mut self) -> FrontReading;
 }
 
 /// A meter that knows nothing (tests, and platforms without a backend yet).
@@ -155,8 +172,8 @@ impl Meter for NullMeter {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         None
     }
-    fn front(&mut self) -> Front {
-        Front::Unknown
+    fn front(&mut self) -> FrontReading {
+        FrontReading::new(Front::Unknown, "unknown: no meter")
     }
 }
 

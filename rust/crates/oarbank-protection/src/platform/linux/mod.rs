@@ -1,23 +1,27 @@
 //! The Linux backend: the process table and per-process scheduler counters from procfs, GPU time from DRM
-//! `fdinfo`, and presence from systemd-logind. The agent acts through its own process containers (cgroup leaves).
+//! `fdinfo`, presence and the session in front from systemd-logind, and an X11 session's front window from its
+//! X server. The agent acts through its own process containers (cgroup leaves).
 
+mod front;
 mod gpu;
 mod logind;
 mod procs;
 
 use std::time::Instant;
 
+pub use front::{x11_front, FrontReader};
 pub use gpu::{gpu_times, process_gpu};
 pub use logind::{sessions, NativePresence};
 pub use procs::{owner_uids, reader, start_time_us, NativeProcessSource, ProcessCounters};
 
 use crate::gpu::{drm, GpuTimes};
-use crate::signals::{Front, Meter, ProcCounters};
+use crate::signals::{FrontReading, Meter, ProcCounters};
 
-/// Scheduler counters from procfs and GPU time from DRM `fdinfo`.
-#[derive(Debug, Default)]
+/// Scheduler counters from procfs, GPU time from DRM `fdinfo`, and the front app.
+#[derive(Default)]
 pub struct NativeMeter {
     counters: ProcessCounters,
+    front: FrontReader,
     drm: drm::Usage,
     last: Option<Instant>,
 }
@@ -39,7 +43,7 @@ impl Meter for NativeMeter {
         self.last = Some(now);
         Some(t)
     }
-    fn front(&mut self) -> Front {
-        Front::Unknown
+    fn front(&mut self) -> FrontReading {
+        self.front.read(sessions().as_deref().map(Vec::as_slice))
     }
 }

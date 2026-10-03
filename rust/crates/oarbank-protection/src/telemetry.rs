@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::config::ProtectionConfig;
 use crate::controller::ProtectionTickResult;
 use crate::evaluator::{CombinedConstraint, RuleReport};
-use crate::signals::Front;
+use crate::signals::FrontReading;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProtectionTelemetry {
@@ -20,8 +20,9 @@ pub struct ProtectionTelemetry {
     pub rung: i32,
     pub budget_cores: Option<f64>,
     pub dynamic: String,
-    /// What was in front ("app", "nothing", "unknown"), when a rule or the implicit protection read it.
-    pub front: Option<&'static str>,
+    /// What was in front and where it was read ("app 812 (lsappinfo)", "nothing (…)", or why it is unknown),
+    /// when a rule or the implicit protection read it.
+    pub front: Option<String>,
 }
 
 impl ProtectionTelemetry {
@@ -29,7 +30,7 @@ impl ProtectionTelemetry {
         config: &ProtectionConfig,
         r: &ProtectionTickResult,
         config_error: Option<&str>,
-        front: Option<Front>,
+        front: Option<&FrontReading>,
     ) -> Self {
         Self {
             mode: config.mode.as_str().to_string(),
@@ -46,7 +47,7 @@ impl ProtectionTelemetry {
             rung: r.rung,
             budget_cores: r.budget_cores,
             dynamic: r.dynamic_reason.clone(),
-            front: front.map(Front::as_str),
+            front: front.map(FrontReading::describe),
         }
     }
 }

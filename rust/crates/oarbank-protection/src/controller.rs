@@ -20,7 +20,7 @@ use crate::json::{obj, opt_num, opt_str, rounded, strings};
 use crate::matcher;
 use crate::memory_guard::{GuardLevel, MemoryGuard, MemorySignals, SystemGates, VictimCandidate};
 use crate::model::{ProcessKey, ProcessRecord};
-use crate::signals::{Front, GroupMetrics, Meter, NullMeter, ProcCounters};
+use crate::signals::{Front, FrontReading, GroupMetrics, Meter, NullMeter, ProcCounters};
 use crate::sources::{NoOwnerSources, OwnerSources};
 use crate::table::{ProcessSource, ProcessSummaryRow, ProcessTable, UnsupportedProcessSource};
 use crate::telemetry::ProtectionTelemetry;
@@ -208,7 +208,7 @@ pub struct ProtectionController {
     config_error: Option<String>,
     source_error: Option<String>,
     /// What was in front on the last tick, when something needed it.
-    last_front: Option<Front>,
+    last_front: Option<FrontReading>,
     last_inputs: Option<CachedInputs>,
 }
 
@@ -265,8 +265,8 @@ impl ProtectionController {
     }
 
     /// What was in front on the last tick (None: nothing needed it).
-    pub fn last_front(&self) -> Option<Front> {
-        self.last_front
+    pub fn last_front(&self) -> Option<&FrontReading> {
+        self.last_front.as_ref()
     }
 
     pub fn last_reports(&self) -> &[RuleReport] {
@@ -369,12 +369,9 @@ impl ProtectionController {
             .iter()
             .any(|r| r.active_when.frontmost.is_some());
         let read_front = implicit_front || rules_front;
-        let front = if read_front {
-            self.meter.front()
-        } else {
-            Front::Unknown
-        };
-        self.last_front = read_front.then_some(front);
+        let reading = read_front.then(|| self.meter.front());
+        let front = reading.as_ref().map_or(Front::Unknown, |r| r.front);
+        self.last_front = reading;
         let gpu = self.read_gpu(i.now);
         // evaluate first (it decides which rules are active), then measure the active groups
         let r =
@@ -924,6 +921,6 @@ impl ProtectionController {
 
     /// The heartbeat's `telemetry.protection` for this tick's result.
     pub fn telemetry(&self, r: &ProtectionTickResult) -> ProtectionTelemetry {
-        ProtectionTelemetry::new(&self.config, r, self.config_error.as_deref(), self.last_front)
+        ProtectionTelemetry::new(&self.config, r, self.config_error.as_deref(), self.last_front.as_ref())
     }
 }

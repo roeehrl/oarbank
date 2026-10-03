@@ -23,6 +23,8 @@ pub mod logind {
         pub seat: String,
         /// The X11 display (":0") of an X11 session.
         pub display: String,
+        /// The session's leading process.
+        pub leader: i32,
         pub idle_hint: bool,
         /// CLOCK_REALTIME microseconds; 0: never tracked.
         pub idle_since_us: u64,
@@ -92,6 +94,7 @@ pub mod logind {
                 "Remote" => s.remote = yes,
                 "Seat" => s.seat = v.to_string(),
                 "Display" => s.display = v.to_string(),
+                "Leader" => s.leader = v.parse().unwrap_or(0),
                 "IdleHint" => s.idle_hint = yes,
                 "IdleSinceHint" => s.idle_since_us = v.parse().unwrap_or(0),
                 "LockedHint" => s.locked = yes,
@@ -211,7 +214,7 @@ mod tests {
         Active=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
         Id=5\nUser=501\nName=tnt\nService=sshd\nSeat=\nTTY=\nDisplay=\nRemote=no\nType=tty\nClass=user\n\
         Active=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
-        Id=7\nUser=1000\nName=ada\nService=gdm-password\nSeat=seat0\nTTY=tty2\nDisplay=:0\nRemote=no\nType=x11\n\
+        Id=7\nUser=1000\nName=ada\nService=gdm-password\nLeader=1690\nSeat=seat0\nTTY=tty2\nDisplay=:0\nRemote=no\nType=x11\n\
         Class=user\nActive=yes\nState=active\nIdleHint=yes\nIdleSinceHint=1790000000000000\nLockedHint=yes\n";
 
     #[test]
@@ -225,7 +228,7 @@ mod tests {
         assert_eq!((s[2].id.as_str(), s[2].uid, s[2].kind.as_str(), s[2].service.as_str()), ("5", 501, "tty", "sshd"));
         let g = &s[3];
         assert!(g.graphical() && g.is_person() && g.idle_hint && g.locked && g.active);
-        assert_eq!((g.seat.as_str(), g.display.as_str(), g.idle_since_us), ("seat0", ":0", 1_790_000_000_000_000));
+        assert_eq!((g.seat.as_str(), g.display.as_str(), g.leader, g.idle_since_us), ("seat0", ":0", 1690, 1_790_000_000_000_000));
         assert!(!s[0].is_person() && !s[1].is_person());
     }
 
