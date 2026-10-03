@@ -1,22 +1,24 @@
 //! The Windows backend: the process table and per-process counters from the native process list, GPU time from
-//! the GPU Engine performance counters, and presence from the sessions WTS lists. The agent acts through its own
-//! process containers (Job Objects).
+//! the GPU Engine performance counters, presence and the session in front from the sessions WTS lists, and the
+//! foreground window in the agent's own session. The agent acts through its own process containers (Job Objects).
 
+mod front;
 mod pdh;
 mod presence;
 mod procs;
 
 use std::sync::{Arc, Mutex};
 
+pub use front::{front, own_front};
 pub use pdh::{RawCounter, GPU_ENGINE_RUNNING_TIME};
 pub use presence::{own_idle_s, own_session, sessions, NativePresence};
 pub use procs::{command_line, processes, NativeProcessSource, ProcessCounters, Snapshots};
 
 use crate::gpu::{self, GpuTimes};
-use crate::signals::{Front, FrontReading, Meter, ProcCounters};
+use crate::signals::{FrontReading, Meter, ProcCounters};
 
-/// Counters from the native process list (shared with the table) and GPU time from the GPU Engine performance
-/// counters; no front app yet (unknown).
+/// Counters from the native process list (shared with the table), GPU time from the GPU Engine performance
+/// counters, and the front app.
 pub struct NativeMeter {
     counters: ProcessCounters,
     gpu: Option<RawCounter>,
@@ -45,6 +47,6 @@ impl Meter for NativeMeter {
         ))
     }
     fn front(&mut self) -> FrontReading {
-        FrontReading::new(Front::Unknown, "unknown: not read on Windows yet")
+        front()
     }
 }

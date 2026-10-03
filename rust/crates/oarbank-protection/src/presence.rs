@@ -180,6 +180,15 @@ pub mod wts {
         }
     }
 
+    /// The session whose desktop is on the screen: the console session when a person is at it, else the first
+    /// person's session (a Remote Desktop session).
+    pub fn front_session(sessions: &[Session], console: u32) -> Option<&Session> {
+        let people = || sessions.iter().filter(|s| s.is_person());
+        people()
+            .find(|s| s.id == console)
+            .or_else(|| people().next())
+    }
+
     /// The machine's presence: the least idle of the people's sessions, infinite with nobody logged on.
     /// `idle(id)` is a session's idle time where it can be read; a locked session has been idle at least since
     /// it was first seen locked (`locked_for(id)`); any other session makes the reading unknown (counted as
@@ -357,6 +366,23 @@ mod tests {
             wts::presence(&[locked], none, |_| Some(600.0)).idle_s,
             Some(600.0)
         );
+        assert_eq!(
+            wts::front_session(&[services.clone(), console.clone()], 1).map(|s| s.id),
+            Some(1)
+        );
+        let rdp = Session {
+            id: 3,
+            ..console.clone()
+        };
+        assert_eq!(
+            wts::front_session(&[rdp.clone(), console.clone()], 1).map(|s| s.id),
+            Some(1)
+        );
+        assert_eq!(
+            wts::front_session(&[services.clone(), rdp], 1).map(|s| s.id),
+            Some(3)
+        );
+        assert_eq!(wts::front_session(std::slice::from_ref(&services), 1), None);
         // disconnected (switched away, or a dropped Remote Desktop session) and nobody else: nobody is present
         let away = Session {
             state: 4,

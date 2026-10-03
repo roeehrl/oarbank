@@ -141,3 +141,25 @@ fn counters_estimate_run_queue_wait_from_thread_states() {
     eprintln!("{} busy threads on {cores} cores: {m:?}", cores * 2);
     assert!(m.cpu_stall.unwrap() > 0.25, "{m:?}");
 }
+
+/// From session 0 (the system service, and this ssh session) the foreground window is not readable: unknown
+/// while a person is at the console, nothing when nobody is logged on or the session is locked.
+#[test]
+#[ignore = "reads the live sessions"]
+fn the_front_follows_the_console_session() {
+    let r = windows::front();
+    eprintln!("own session {}; front {r:?}", windows::own_session());
+    let sessions = windows::sessions().unwrap();
+    let person = sessions.iter().any(|s| s.is_person());
+    if windows::own_session() == 0 && person {
+        assert!(r.front == Front::Unknown || r.front == Front::Nothing, "{r:?}");
+    }
+    if !person {
+        assert_eq!(r.front, Front::Nothing);
+    }
+    // inside the person's session (the personal scope's logon task) the foreground window is read
+    if windows::own_session() != 0 && sessions.iter().any(|s| s.id == windows::own_session() && s.locked == Some(false)) {
+        assert!(matches!(windows::own_front().front, Front::App(p) if p > 0), "{:?}", windows::own_front());
+        assert!(windows::own_idle_s().is_some());
+    }
+}
