@@ -1,8 +1,8 @@
 //! Native backends. macOS reads the process table through libproc and sysctl, code-signing identity
 //! through the Security framework, GPU time through IOKit, and acts through signals and `setpriority`.
-//! Linux reads procfs, DRM `fdinfo` and systemd-logind; Windows (the GPU Engine performance counters and the
-//! sessions WTS lists) so far reports an unsupported process table. On both, here is an actuator that never
-//! registers a process: the agent builds its registry there with its own actuator over its process containers.
+//! Linux reads procfs, DRM `fdinfo` and systemd-logind; Windows the native process list, the GPU Engine
+//! performance counters and the sessions WTS lists. On both, here is an actuator that never registers a
+//! process: the agent builds its registry there with its own actuator over its process containers.
 
 use crate::controller::Host;
 use crate::signals::{Meter, Presence, PresenceReading};
@@ -26,10 +26,13 @@ pub fn native_host() -> Host {
     let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) =
         (Box::new(linux::NativeProcessSource::new()), Box::new(linux::NativeMeter::new()));
     #[cfg(windows)]
-    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
-        Box::new(crate::table::UnsupportedProcessSource),
-        Box::new(windows::NativeMeter::new()),
-    );
+    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = {
+        let shared = windows::Snapshots::shared();
+        (
+            Box::new(windows::NativeProcessSource::new(shared.clone())),
+            Box::new(windows::NativeMeter::new(shared)),
+        )
+    };
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
         Box::new(crate::table::UnsupportedProcessSource),

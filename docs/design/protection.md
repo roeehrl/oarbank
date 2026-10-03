@@ -7,8 +7,7 @@ declare or loosen it.
 - **The contract** is `oarbank.contracts.protection` (schema 1, `schemas/protection-config-1.schema.json`), with a
   worked example in `src/oarbank/contracts/fixtures/protection-example.toml`.
 - **The engine** is the agent's `oarbank-protection` crate: a pure decision core over process, meter and owner sources,
-  with a native backend per OS (macOS and Linux; Windows so far meters GPU time and reads presence, with no process
-  table yet, so rules match nothing there).
+  with a native backend per OS (macOS, Linux and Windows).
 - **The central copy** is the `protection` section of the node's policy, edited in the console (versioned, with restore
   and canary). **The local copy** is `protection.json` beside the agent's home on the node. The agent unions both, and
   the stricter setting wins on every dimension, so the two never conflict.

@@ -71,7 +71,7 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Service manager (the launcher) | launchd: a LaunchAgent (personal scope) or a LaunchDaemon run by `_oarbank` (system scope) | systemd units, user or system (`Delegate=yes`) | the service manager, a service run by its virtual account with recovery actions, or a logon task for the personal scope |
 | Job container | a process group | a cgroup v2 leaf where systemd delegated the agent's cgroup (kill, freeze, usage), else a process group | a Job Object, kill-on-close for attempts |
 | Hard limits (`hard_limits` policy) | none | cgroup `cpu.max` and `memory.max` | Job Object limits |
-| Process inspection | libproc, `KERN_PROCARGS2`, code-signing identity | `/proc` | not yet |
+| Process inspection | libproc, `KERN_PROCARGS2`, code-signing identity | `/proc` (stat, status, cmdline, exe, schedstat) | the native process list (`NtQuerySystemInformation`: processes, threads' states, image paths), command lines |
 | Meters | rusage, IORegistry GPU time, memory pressure, thermal state, battery | `/proc`, DRM `fdinfo` GPU time, PSI memory pressure, thermal zones, power supplies, hybrid core types | `GlobalMemoryStatusEx`, GPU Engine counters, efficiency classes, power status |
 | Presence | HID idle, screen sharing | systemd-logind's sessions (desktop idle hints, terminal access times) | the sessions WTS lists (logged on, connected, locked), the last input in the user's own session |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
