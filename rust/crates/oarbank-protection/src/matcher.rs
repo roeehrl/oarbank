@@ -31,21 +31,34 @@ fn key_set(s: &Option<String>) -> Option<&str> {
     s.as_deref().filter(|s| !s.is_empty())
 }
 
-/// Does one process satisfy the match keys? All given keys must hold; an empty key is no key.
-pub fn matches(p: &ProcessRecord, m: &ProcessMatch) -> bool {
+/// How one process stands against a rule's match keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Match {
+    /// A key does not hold.
+    No,
+    /// Every key holds.
+    Yes,
+    /// No key fails, but one needs a fact the agent could not read (another account's path or arguments).
+    /// It counts as a match: a failed identity lookup never leaves a process unprotected.
+    Unreadable,
+}
+
+/// Check one process against the match keys: all given keys must hold; an empty key is no key.
+pub fn check(p: &ProcessRecord, m: &ProcessMatch) -> Match {
+    let mut unreadable = false;
     if let Some(r) = key_set(&m.requirement) {
         if !p.requirements_met.contains(r) {
-            return false;
+            return Match::No;
         }
     }
     if let Some(t) = key_set(&m.team_id) {
         if p.team_id.as_deref() != Some(t) {
-            return false;
+            return Match::No;
         }
     }
     if let Some(i) = key_set(&m.identifier) {
         if p.signing_id.as_deref() != Some(i) {
-            return false;
+            return Match::No;
         }
     }
     if !m.bundle_ids.is_empty()
@@ -54,38 +67,58 @@ pub fn matches(p: &ProcessRecord, m: &ProcessMatch) -> bool {
             .as_ref()
             .is_some_and(|b| m.bundle_ids.contains(b))
     {
-        return false;
+        return Match::No;
     }
     if let Some(pre) = key_set(&m.path_prefix) {
-        if !p.path.starts_with(pre) {
-            return false;
+        match &p.path {
+            Some(path) if !path.starts_with(pre) => return Match::No,
+            Some(_) => {}
+            None => unreadable = true,
         }
     }
     if let Some(c) = key_set(&m.path_contains) {
-        // the command line as `ps` shows it: the path plus arguments (a marker may sit in an argument)
-        let mut line = p.path.clone();
+        // the command line as `ps` shows it: the path plus arguments (a marker may sit in an argument); what
+        // is known may already hold it, else an unreadable part might
+        let mut line = p.path.clone().unwrap_or_default();
         for a in p.argv.iter().flatten().skip(1) {
             line.push(' ');
             line.push_str(a);
         }
         if !line.contains(c) {
-            return false;
+            if p.path.is_some() && p.argv.is_some() {
+                return Match::No;
+            }
+            unreadable = true;
         }
     }
     if let Some(n) = key_set(&m.name) {
-        if p.effective_comm() != n {
-            return false;
+        match p.effective_comm() {
+            Some(comm) if comm != n => return Match::No,
+            Some(_) => {}
+            None => unreadable = true,
         }
     }
     if let Some(rx) = key_set(&m.argv_regex) {
-        let (Some(argv), Some(re)) = (&p.argv, compiled(rx)) else {
-            return false;
-        };
-        if !re.is_match(&argv.join(" ")).unwrap_or(false) {
-            return false;
+        match &p.argv {
+            Some(argv) => {
+                let joined = argv.join(" ");
+                if !compiled(rx).is_some_and(|re| re.is_match(&joined).unwrap_or(false)) {
+                    return Match::No;
+                }
+            }
+            None => unreadable = true,
         }
     }
-    true
+    if unreadable {
+        Match::Unreadable
+    } else {
+        Match::Yes
+    }
+}
+
+/// Does one process satisfy the match keys (an unreadable fact counts as satisfying its key)?
+pub fn matches(p: &ProcessRecord, m: &ProcessMatch) -> bool {
+    check(p, m) != Match::No
 }
 
 /// The processes a rule protects, sorted by pid: the direct matches plus their tree (descendants through

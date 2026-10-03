@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use crate::config::{ProtectionConfig, ProtectionRule, ProtectionScope};
 use crate::gpu::GpuBusy;
 use crate::json::{opt_int, opt_num, rounded};
-use crate::matcher;
+use crate::matcher::{self, Match};
 use crate::model::{GroupSample, ProcessKey, ProcessRecord};
 
 /// What one source (a rule or a guard) demands this tick. There is no PID field: the evaluator cannot
@@ -215,6 +215,8 @@ pub struct RuleReport {
     pub id: String,
     pub active: bool,
     pub processes: usize,
+    /// Processes matched only because a fact a key needs could not be read (counted as matches, fail-safe).
+    pub unreadable: usize,
     pub cpu_cores: f64,
     pub footprint_gb: f64,
     pub reason: String,
@@ -223,7 +225,7 @@ pub struct RuleReport {
 impl RuleReport {
     pub fn to_json(&self) -> Value {
         serde_json::json!({
-            "id": self.id, "active": self.active, "processes": self.processes,
+            "id": self.id, "active": self.active, "processes": self.processes, "unreadable": self.unreadable,
             "cpu_cores": rounded(self.cpu_cores, 2), "footprint_gb": rounded(self.footprint_gb, 2), "reason": self.reason,
         })
     }
@@ -300,6 +302,10 @@ impl RuleEvaluator {
         self.states.retain(|k, _| live.contains(k.as_str()));
         for rule in &config.rules {
             let group = matcher::group(procs, &rule.match_, rule.tree);
+            let unreadable = group
+                .iter()
+                .filter(|p| matcher::check(p, &rule.match_) == Match::Unreadable)
+                .count();
             let cpu: f64 = group
                 .iter()
                 .map(|p| cpu_cores.get(&p.key()).copied().unwrap_or(0.0))
@@ -432,6 +438,7 @@ impl RuleEvaluator {
                 id: rule.id.clone(),
                 active: active && !rule.ignore,
                 processes: group.len(),
+                unreadable,
                 cpu_cores: cpu,
                 footprint_gb: mem,
                 reason: reason.into(),

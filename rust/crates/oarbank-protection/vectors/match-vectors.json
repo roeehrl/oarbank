@@ -59,6 +59,9 @@
    "bundle_id": "com.example.browser",
    "requirements_met": [
     "anchor apple generic and certificate leaf[subject.OU] = \"EQHXZ8M8AV\""
+   ],
+   "argv": [
+    "Web Browser"
    ]
   },
   {
@@ -69,7 +72,11 @@
    "team_id": "EQHXZ8M8AV",
    "signing_id": "com.example.browser.helper",
    "bundle_id": "com.example.browser.helper",
-   "comm": "Web Browser Help"
+   "comm": "Web Browser Help",
+   "argv": [
+    "Helper",
+    "--type=renderer"
+   ]
   },
   {
    "pid": 22,
@@ -78,7 +85,10 @@
    "path": "/Applications/Other.app/Contents/MacOS/Other",
    "team_id": "OTHERTEAM1",
    "signing_id": "com.example.other",
-   "bundle_id": "com.example.other"
+   "bundle_id": "com.example.other",
+   "argv": [
+    "Other"
+   ]
   },
   {
    "pid": 30,
@@ -133,6 +143,9 @@
    "path": "/Applications/Xcode.app/Contents/MacOS/Xcode",
    "requirements_met": [
     "anchor apple and identifier \"com.apple.dt.Xcode\""
+   ],
+   "argv": [
+    "Xcode"
    ]
   },
   {
@@ -160,7 +173,10 @@
    "ppid": 1,
    "start_us": 5000,
    "path": "/Applications/zoom.us.app/Contents/MacOS/zoom.us",
-   "bundle_id": "us.zoom.xos"
+   "bundle_id": "us.zoom.xos",
+   "argv": [
+    "zoom.us"
+   ]
   },
   {
    "pid": 60,
@@ -168,14 +184,20 @@
    "start_us": 6000,
    "path": "/opt/tools/a",
    "team_id": "",
-   "bundle_id": ""
+   "bundle_id": "",
+   "argv": [
+    "a"
+   ]
   },
   {
    "pid": 61,
    "ppid": 60,
    "start_us": 6100,
    "path": "/opt/tools/b",
-   "team_id": ""
+   "team_id": "",
+   "argv": [
+    "b"
+   ]
   },
   {
    "pid": 70,
@@ -209,7 +231,50 @@
    "ppid": 1,
    "start_us": 8100,
    "path": "relative-tool",
-   "comm": "rt"
+   "comm": "rt",
+   "argv": [
+    "rt"
+   ]
+  },
+  {
+   "pid": 90,
+   "ppid": 1,
+   "start_us": 9000,
+   "path": "/usr/lib/firefox/firefox",
+   "comm": "firefox",
+   "argv": [
+    "/usr/lib/firefox/firefox",
+    "-contentproc"
+   ]
+  },
+  {
+   "pid": 91,
+   "ppid": 1,
+   "start_us": 9100,
+   "path": "C:\\Program Files\\Blender Foundation\\Blender 4.2\\blender.exe",
+   "comm": "blender.exe",
+   "argv": [
+    "C:\\Program Files\\Blender Foundation\\Blender 4.2\\blender.exe",
+    "--background",
+    "scene.blend"
+   ]
+  },
+  {
+   "pid": 100,
+   "ppid": 1,
+   "start_us": 10000,
+   "comm": "python3",
+   "argv": [
+    "python3",
+    "train.py"
+   ]
+  },
+  {
+   "pid": 101,
+   "ppid": 1,
+   "start_us": 10100,
+   "path": "C:\\Users\\b\\venv\\Scripts\\python.exe",
+   "comm": "python.exe"
   }
  ],
  "cases": [
@@ -297,7 +362,8 @@
     30,
     31,
     32,
-    33
+    33,
+    100
    ]
   },
   {
@@ -307,7 +373,10 @@
    },
    "tree": "self",
    "expected": [
-    10
+    10,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -317,7 +386,10 @@
    },
    "tree": "self",
    "expected": [
-    31
+    31,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -327,7 +399,10 @@
    },
    "tree": "self",
    "expected": [
-    30
+    30,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -337,7 +412,10 @@
    },
    "tree": "self",
    "expected": [
-    10
+    10,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -394,7 +472,10 @@
    "tree": "self",
    "expected": [
     11,
-    30
+    30,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -404,17 +485,21 @@
    },
    "tree": "self",
    "expected": [
-    31
+    31,
+    32,
+    101
    ]
   },
   {
-   "name": "argv_regex empty argv matches ^$, unreadable argv never",
+   "name": "argv_regex empty argv matches ^$, unreadable argv always",
    "match": {
     "argv_regex": "^$"
    },
    "tree": "self",
    "expected": [
-    33
+    32,
+    33,
+    101
    ]
   },
   {
@@ -424,7 +509,9 @@
    },
    "tree": "self",
    "expected": [
-    34
+    32,
+    34,
+    101
    ]
   },
   {
@@ -434,7 +521,9 @@
    },
    "tree": "self",
    "expected": [
-    30
+    30,
+    32,
+    101
    ]
   },
   {
@@ -444,7 +533,9 @@
    },
    "tree": "self",
    "expected": [
-    31
+    31,
+    32,
+    101
    ]
   },
   {
@@ -454,7 +545,9 @@
    },
    "tree": "self",
    "expected": [
-    30
+    30,
+    32,
+    101
    ]
   },
   {
@@ -464,7 +557,9 @@
    },
    "tree": "self",
    "expected": [
-    34
+    32,
+    34,
+    101
    ]
   },
   {
@@ -474,8 +569,110 @@
    },
    "tree": "self",
    "expected": [
+    32,
     41,
-    42
+    42,
+    101
+   ]
+  },
+  {
+   "name": "a Windows path prefix",
+   "match": {
+    "path_prefix": "C:\\Program Files\\Blender Foundation\\"
+   },
+   "tree": "self",
+   "expected": [
+    91,
+    100
+   ]
+  },
+  {
+   "name": "a Windows image name",
+   "match": {
+    "name": "blender.exe"
+   },
+   "tree": "self",
+   "expected": [
+    91
+   ]
+  },
+  {
+   "name": "a Linux comm",
+   "match": {
+    "name": "firefox"
+   },
+   "tree": "self",
+   "expected": [
+    90
+   ]
+  },
+  {
+   "name": "an unreadable path satisfies path_prefix",
+   "match": {
+    "path_prefix": "/opt/trainer/"
+   },
+   "tree": "self",
+   "expected": [
+    100
+   ]
+  },
+  {
+   "name": "an unreadable path with a readable comm that differs",
+   "match": {
+    "path_prefix": "/opt/trainer/",
+    "name": "trainer"
+   },
+   "tree": "self",
+   "expected": []
+  },
+  {
+   "name": "unreadable arguments satisfy argv_regex",
+   "match": {
+    "argv_regex": "train\\.py"
+   },
+   "tree": "self",
+   "expected": [
+    11,
+    30,
+    32,
+    100,
+    101
+   ]
+  },
+  {
+   "name": "path_contains held by a readable path, arguments unreadable",
+   "match": {
+    "path_contains": "venv\\Scripts"
+   },
+   "tree": "self",
+   "expected": [
+    32,
+    100,
+    101
+   ]
+  },
+  {
+   "name": "path_contains with a readable path that lacks it and unreadable arguments",
+   "match": {
+    "path_contains": "--lr"
+   },
+   "tree": "self",
+   "expected": [
+    30,
+    32,
+    100,
+    101
+   ]
+  },
+  {
+   "name": "a readable argv decides argv_regex, an unreadable path does not",
+   "match": {
+    "argv_regex": "^python3 eval"
+   },
+   "tree": "self",
+   "expected": [
+    32,
+    101
    ]
   },
   {
@@ -486,7 +683,9 @@
    },
    "tree": "descendants",
    "expected": [
-    30
+    30,
+    32,
+    100
    ]
   },
   {
@@ -541,7 +740,8 @@
     61,
     70,
     71,
-    80
+    80,
+    100
    ]
   },
   {
@@ -553,7 +753,8 @@
    "tree": "self",
    "expected": [
     60,
-    61
+    61,
+    100
    ]
   },
   {
@@ -565,7 +766,8 @@
    "tree": "self",
    "expected": [
     60,
-    61
+    61,
+    100
    ]
   },
   {
@@ -588,7 +790,8 @@
    },
    "tree": "self",
    "expected": [
-    60
+    60,
+    100
    ]
   },
   {
@@ -623,7 +826,11 @@
     70,
     71,
     80,
-    81
+    81,
+    90,
+    91,
+    100,
+    101
    ]
   },
   {
@@ -636,7 +843,10 @@
     10,
     11,
     12,
-    14
+    14,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -646,7 +856,10 @@
    },
    "tree": "self",
    "expected": [
-    10
+    10,
+    32,
+    100,
+    101
    ]
   },
   {
@@ -658,7 +871,8 @@
    "expected": [
     11,
     12,
-    14
+    14,
+    100
    ]
   },
   {
@@ -669,7 +883,8 @@
    "tree": "descendants",
    "expected": [
     12,
-    14
+    14,
+    100
    ]
   },
   {
@@ -680,7 +895,8 @@
    "tree": "descendants",
    "expected": [
     70,
-    71
+    71,
+    100
    ]
   },
   {
@@ -725,7 +941,8 @@
    },
    "tree": "same_team",
    "expected": [
-    60
+    60,
+    100
    ]
   },
   {
@@ -739,7 +956,8 @@
     31,
     32,
     33,
-    34
+    34,
+    100
    ]
   },
   {

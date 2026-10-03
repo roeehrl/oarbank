@@ -168,7 +168,7 @@ fn frontmost_detection_returns_the_front_apps_bundle_id() {
         .expect("the front app has a bundle id")
         .to_string();
     let pid = macos::frontmost_pid().expect("the front app's pid");
-    let path = macos::path(pid);
+    let path = macos::path(pid).expect("the front app's path");
     assert_eq!(macos::bundle_id_for_path(&path), Some(bundle.clone()));
     let mut ctl = ProtectionController::new(None, Host::native());
     ctl.apply(
@@ -213,9 +213,9 @@ fn summary_lists_own_processes_with_identity_and_honours_exclusions() {
         .iter()
         .find(|r| r.pid == me)
         .expect("own process listed");
-    assert!(!mine.path.is_empty());
+    assert!(mine.path.as_ref().is_some_and(|p| !p.is_empty()));
     assert!(mine.start_us > 0);
-    assert!(!mine.argv.is_empty());
+    assert!(mine.argv.as_ref().is_some_and(|a| !a.is_empty()));
     let without = t.summary(5000, &HashSet::from([me]), now).unwrap();
     assert!(!without.iter().any(|r| r.pid == me));
     assert_eq!(t.summary(2, &HashSet::new(), now).unwrap().len(), 2);
@@ -346,7 +346,7 @@ fn gpu_active_rules_read_live_gpu_use() {
     let r = ctl.tick(&i);
     assert_eq!((r.reports[0].active, r.reports[0].reason.as_str()), (false, "condition not met"));
     if let Some(p) = busiest {
-        assert!(r.reports[1].active, "{} at {:.2} GPU busy", p.path, busy.by_pid[&p.pid]);
+        assert!(r.reports[1].active, "{:?} at {:.2} GPU busy", p.path, busy.by_pid[&p.pid]);
         assert_eq!(r.constraint.gpu_jobs, Some(0));
     }
     let mut top: Vec<(i32, f64)> = busy.by_pid.iter().map(|(&p, &b)| (p, b)).collect();

@@ -43,6 +43,19 @@ def test_shared_vectors_hold_for_the_python_matcher():
         assert [p["pid"] for p in PM.group(v["processes"], c["match"], c["tree"])] == c["expected"], c["name"]
 
 
+def test_unreadable_identity_counts_as_a_match_and_is_flagged():
+    procs = [{"pid": 1, "ppid": 0, "start_us": 1, "path": None, "comm": "trainer", "argv": None},
+             {"pid": 2, "ppid": 0, "start_us": 2, "path": r"C:\Tools\other.exe", "comm": "other.exe", "argv": ["other"]}]
+    cfg = {"rule": [{"id": "t", "match": {"path_prefix": "/opt/trainer/"}}, {"id": "w", "match": {"name": "other.exe"}}]}
+    assert PM.preview(cfg, procs) == [
+        {"rule": "t", "processes": [{"pid": 1, "path": None, "name": "trainer", "bundle_id": None, "unreadable": True}]},
+        {"rule": "w", "processes": [{"pid": 2, "path": r"C:\Tools\other.exe", "name": "other.exe", "bundle_id": None,
+                                     "unreadable": False}]}]
+    # the picker suggests the path, or the name when the path is unreadable
+    assert PM.suggest(procs[0]) == {"name": "trainer"} and PM.suggest(procs[1]) == {"path_prefix": r"C:\Tools\other.exe"}
+    assert PM.suggest_rule(procs[1])["id"] == "other-exe"
+
+
 def test_suggested_rules_are_valid_and_match_their_process():
     from oarbank.contracts import protection as P
     for p in PROCS:
@@ -61,8 +74,9 @@ def test_process_summary_is_stored_and_requested_by_a_preview(db):
     core.heartbeat(db, fresh(db, node), {"processes": PROCS})
     assert not core.heartbeat(db, fresh(db, node), {})["send_processes"]
     p = protection.preview(db, nid, {"schema": 1, "rule": [RULE]})
-    assert p["matches"] == [{"rule": "studio", "processes": [{"pid": 100, "path": PROCS[0]["path"], "bundle_id": "com.example.studio"},
-                                                             {"pid": 101, "path": PROCS[1]["path"], "bundle_id": None}]}]
+    assert p["matches"] == [{"rule": "studio", "processes": [
+        {"pid": 100, "path": PROCS[0]["path"], "name": "Studio Tool", "bundle_id": "com.example.studio", "unreadable": False},
+        {"pid": 101, "path": PROCS[1]["path"], "name": "render", "bundle_id": None, "unreadable": False}]}]
     assert p["diff"]["rules_added"] == ["studio"]
 
 

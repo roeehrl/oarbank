@@ -97,7 +97,7 @@ impl GroupMetrics {
 /// What the controller measures on the host each tick. Every source is feature-detected: None means
 /// unknown, and the controller then degrades fail-safe (no budget growth; guards intact).
 pub trait Meter: Send {
-    /// Cumulative counters for a same-user process (None: gone, or not permitted).
+    /// Cumulative counters for one of the owner's processes (None: gone, or not permitted).
     fn proc_counters(&mut self, pid: i32) -> Option<ProcCounters>;
     /// Every process's accumulated GPU time, or None when the source is unavailable.
     fn gpu_times(&mut self) -> Option<GpuTimes>;

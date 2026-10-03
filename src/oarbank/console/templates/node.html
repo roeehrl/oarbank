@@ -78,7 +78,7 @@
   {% set live = {} %}{% for r in T.rules or [] %}{% set _ = live.update({r.id: r}) %}{% endfor %}
   {% for r in P.rule or [] %}{% set l = live.get(r.id, {}) %}<tr><td class="mono">{{ r.id }}</td>
     <td>{% if l.active %}<span class="chip acc">active</span>{% else %}<span class="mut">{{ l.reason or 'not reported' }}</span>{% endif %}</td>
-    <td class="num">{{ l.processes if l.processes is defined else '' }}</td><td class="num">{{ l.cpu_cores if l.cpu_cores is defined else '' }}</td>
+    <td class="num">{{ l.processes if l.processes is defined else '' }}{% if l.unreadable %} <span class="mut" title="matched because their path or arguments could not be read (counted as matches, fail-safe)">({{ l.unreadable }} unreadable)</span>{% endif %}</td><td class="num">{{ l.cpu_cores if l.cpu_cores is defined else '' }}</td>
     <td class="num">{{ l.footprint_gb if l.footprint_gb is defined else '' }}</td><td class="mono small">{{ r.match | tojson }}</td></tr>
   {% else %}<tr><td colspan="6" class="mut">no rules: only the memory, thermal and battery guards apply</td></tr>{% endfor %}</table>
   <details class="small"><summary>Decision timeline ({{ decisions | length }})</summary>

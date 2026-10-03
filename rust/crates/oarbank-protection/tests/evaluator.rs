@@ -453,12 +453,14 @@ fn report_json_shape() {
         id: "a".into(),
         active: true,
         processes: 3,
+        unreadable: 1,
         cpu_cores: 0.456,
         footprint_gb: 4.111,
         reason: "active".into(),
     };
     assert_eq!(
         serde_json::to_value(&r).unwrap(),
-        json!({"id": "a", "active": true, "processes": 3, "cpu_cores": 0.46, "footprint_gb": 4.11, "reason": "active"})
+        json!({"id": "a", "active": true, "processes": 3, "unreadable": 1, "cpu_cores": 0.46, "footprint_gb": 4.11,
+               "reason": "active"})
     );
 }

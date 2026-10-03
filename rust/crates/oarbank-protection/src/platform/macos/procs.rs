@@ -10,6 +10,8 @@ use crate::signals::ProcCounters;
 use crate::table::{ProcessSource, RawProcess, SigningIdentity, SourceError};
 
 const PROC_PGRP_ONLY: u32 = 2;
+/// `pbi_status` of a process that has exited and not been reaped (sys/proc.h).
+const SZOMB: u32 = 5;
 const RUSAGE_INFO_V4: i32 = 4;
 const RUSAGE_INFO_V6: i32 = 6;
 const GB: f64 = 1_073_741_824.0;
@@ -109,15 +111,16 @@ pub fn start_time_us(pid: i32) -> Option<u64> {
     bsd_info(pid).map(|b| start_of(&b))
 }
 
-pub fn path(pid: i32) -> String {
+/// The executable's path (None: not readable).
+pub fn path(pid: i32) -> Option<String> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the buffer is PROC_PIDPATHINFO_MAXSIZE bytes.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     if n <= 0 {
-        return String::new();
+        return None;
     }
     buf.truncate(n as usize);
-    String::from_utf8_lossy(&buf).into_owned()
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// argv through KERN_PROCARGS2 (same-user processes only).
@@ -255,7 +258,8 @@ impl ProcessSource for NativeProcessSource {
         let mut out = vec![];
         for pid in pids.into_iter().filter(|p| !excluding.contains(p)) {
             let Some(b) = bsd_info(pid) else { continue };
-            if b.pbi_uid != uid {
+            // a zombie has exited: it holds no memory or CPU and no longer has a path
+            if b.pbi_uid != uid || b.pbi_status == SZOMB {
                 continue;
             }
             let (cpu_s, footprint_gb) = cpu_and_footprint(pid).unwrap_or((0.0, 0.0));

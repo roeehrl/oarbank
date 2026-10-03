@@ -23,12 +23,13 @@ PROCESSES = [
     # a signed browser and its helpers (same team, different identifiers)
     {"pid": 20, "ppid": 1, "start_us": 2000, "path": "/Applications/Web Browser.app/Contents/MacOS/Web Browser",
      "team_id": "EQHXZ8M8AV", "signing_id": "com.example.browser", "bundle_id": "com.example.browser",
-     "requirements_met": [CHROME_REQ]},
+     "requirements_met": [CHROME_REQ], "argv": ["Web Browser"]},
     {"pid": 21, "ppid": 20, "start_us": 2100, "path": "/Applications/Web Browser.app/Contents/Frameworks/Helper",
      "team_id": "EQHXZ8M8AV", "signing_id": "com.example.browser.helper", "bundle_id": "com.example.browser.helper",
-     "comm": "Web Browser Help"},
+     "comm": "Web Browser Help", "argv": ["Helper", "--type=renderer"]},
     {"pid": 22, "ppid": 1, "start_us": 2200, "path": "/Applications/Other.app/Contents/MacOS/Other",
-     "team_id": "OTHERTEAM1", "signing_id": "com.example.other", "bundle_id": "com.example.other"},
+     "team_id": "OTHERTEAM1", "signing_id": "com.example.other", "bundle_id": "com.example.other",
+     "argv": ["Other"]},
     # python processes told apart by argv
     {"pid": 30, "ppid": 1, "start_us": 3000, "path": "/Users/o/venvs/mlx/bin/python",
      "argv": ["python", "train.py", "--lr", "1e-4"]},
@@ -38,18 +39,29 @@ PROCESSES = [
     {"pid": 34, "ppid": 1, "start_us": 3400, "path": "/Users/o/bin/run", "argv": ["run", "--Mode=TRAIN", "épreuve"]},
     # code-signing requirement
     {"pid": 40, "ppid": 1, "start_us": 4000, "path": "/Applications/Xcode.app/Contents/MacOS/Xcode",
-     "requirements_met": [XCODE_REQ]},
+     "requirements_met": [XCODE_REQ], "argv": ["Xcode"]},
     {"pid": 41, "ppid": 40, "start_us": 4100, "path": "/usr/bin/clang", "argv": ["clang"]},
     {"pid": 42, "ppid": 41, "start_us": 4200, "path": "/usr/bin/ld", "argv": ["ld", "-o", "a.out"]},
     {"pid": 50, "ppid": 1, "start_us": 5000, "path": "/Applications/zoom.us.app/Contents/MacOS/zoom.us",
-     "bundle_id": "us.zoom.xos"},
+     "bundle_id": "us.zoom.xos", "argv": ["zoom.us"]},
     # odd identities: empty team and bundle strings, a self-parented process, a path ending in a slash
-    {"pid": 60, "ppid": 1, "start_us": 6000, "path": "/opt/tools/a", "team_id": "", "bundle_id": ""},
-    {"pid": 61, "ppid": 60, "start_us": 6100, "path": "/opt/tools/b", "team_id": ""},
+    {"pid": 60, "ppid": 1, "start_us": 6000, "path": "/opt/tools/a", "team_id": "", "bundle_id": "", "argv": ["a"]},
+    {"pid": 61, "ppid": 60, "start_us": 6100, "path": "/opt/tools/b", "team_id": "", "argv": ["b"]},
     {"pid": 70, "ppid": 70, "start_us": 7000, "path": "/opt/loop/self", "argv": ["self"]},
     {"pid": 71, "ppid": 70, "start_us": 7100, "path": "/opt/loop/child", "argv": ["child"]},
     {"pid": 80, "ppid": 1, "start_us": 8000, "path": "/opt/dir/", "argv": ["dir"]},
-    {"pid": 81, "ppid": 1, "start_us": 8100, "path": "relative-tool", "comm": "rt"},
+    {"pid": 81, "ppid": 1, "start_us": 8100, "path": "relative-tool", "comm": "rt", "argv": ["rt"]},
+    # Linux and Windows processes: comm is the kernel's short name (15 characters on Linux), the image file name on
+    # Windows; Windows paths keep their backslashes
+    {"pid": 90, "ppid": 1, "start_us": 9000, "path": "/usr/lib/firefox/firefox", "comm": "firefox",
+     "argv": ["/usr/lib/firefox/firefox", "-contentproc"]},
+    {"pid": 91, "ppid": 1, "start_us": 9100, "path": r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe",
+     "comm": "blender.exe", "argv": [r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe", "--background",
+                                     "scene.blend"]},
+    # another account's processes the agent may not inspect: an unreadable path (Linux), unreadable arguments
+    # (Windows); an unreadable fact counts as satisfying its key, a readable one still decides
+    {"pid": 100, "ppid": 1, "start_us": 10000, "comm": "python3", "argv": ["python3", "train.py"]},
+    {"pid": 101, "ppid": 1, "start_us": 10100, "path": r"C:\Users\b\venv\Scripts\python.exe", "comm": "python.exe"},
 ]
 
 
@@ -78,13 +90,24 @@ CASES = [
     case("a path ending in a slash has an empty last component", {"name": "dir"}),
     case("argv_regex", {"argv_regex": r"train\.py"}),
     case("argv_regex anchored on the joined argv", {"argv_regex": r"^python eval\.py$"}),
-    case("argv_regex empty argv matches ^$, unreadable argv never", {"argv_regex": "^$"}),
+    case("argv_regex empty argv matches ^$, unreadable argv always", {"argv_regex": "^$"}),
     case("argv_regex case-insensitive flag", {"argv_regex": "(?i)mode=train"}),
     case("argv_regex lookahead", {"argv_regex": r"python (?=train)"}),
     case("argv_regex negative lookahead", {"argv_regex": r"^python (?!train)"}),
     case("argv_regex backreference", {"argv_regex": r"(-)\1?lr"}),
     case("argv_regex unicode word", {"argv_regex": r"\bépreuve\b"}),
     case("argv_regex alternation and classes", {"argv_regex": r"^(ld|clang)( -o [a-z.]+)?$"}),
+    # Linux and Windows identities
+    case("a Windows path prefix", {"path_prefix": "C:\\Program Files\\Blender Foundation\\"}),
+    case("a Windows image name", {"name": "blender.exe"}),
+    case("a Linux comm", {"name": "firefox"}),
+    # unreadable facts
+    case("an unreadable path satisfies path_prefix", {"path_prefix": "/opt/trainer/"}),
+    case("an unreadable path with a readable comm that differs", {"path_prefix": "/opt/trainer/", "name": "trainer"}),
+    case("unreadable arguments satisfy argv_regex", {"argv_regex": r"train\.py"}),
+    case("path_contains held by a readable path, arguments unreadable", {"path_contains": r"venv\Scripts"}),
+    case("path_contains with a readable path that lacks it and unreadable arguments", {"path_contains": "--lr"}),
+    case("a readable argv decides argv_regex, an unreadable path does not", {"argv_regex": "^python3 eval"}),
     # several keys: all must hold
     case("path prefix + argv regex", {"path_prefix": "/Users/o/venvs/mlx/bin/python", "argv_regex": r"train\.py"},
          "descendants"),

@@ -9,32 +9,50 @@ from pathlib import Path
 VECTORS = Path(__file__).parent / "fixtures" / "protection-match-vectors.json"
 
 
-def matches(p: dict, m: dict) -> bool:
+def check(p: dict, m: dict) -> str:
+    """"no", "yes", or "unreadable": no key fails, but one needs a fact the agent could not read (another account's
+    path or arguments; None in the process summary). Unreadable counts as a match: a failed identity lookup never
+    leaves a process unprotected."""
+    unreadable = False
     if m.get("requirement") and m["requirement"] not in (p.get("requirements_met") or []):
-        return False
+        return "no"
     if m.get("team_id") and p.get("team_id") != m["team_id"]:
-        return False
+        return "no"
     if m.get("identifier") and p.get("signing_id") != m["identifier"]:
-        return False
+        return "no"
     bundles = m.get("bundle_id")
     if bundles:
         bundles = [bundles] if isinstance(bundles, str) else bundles
         if p.get("bundle_id") not in bundles:
-            return False
-    if m.get("path_prefix") and not (p.get("path") or "").startswith(m["path_prefix"]):
-        return False
+            return "no"
+    path, argv = p.get("path"), p.get("argv")
+    if m.get("path_prefix"):
+        if path is None:
+            unreadable = True
+        elif not path.startswith(m["path_prefix"]):
+            return "no"
     if m.get("path_contains"):
-        line = " ".join([p.get("path") or ""] + list((p.get("argv") or [])[1:]))
+        line = " ".join([path or ""] + list((argv or [])[1:]))
         if m["path_contains"] not in line:
-            return False
+            if path is not None and argv is not None:
+                return "no"
+            unreadable = True
     if m.get("name"):
-        comm = p.get("comm") or (p.get("path") or "").rsplit("/", 1)[-1]
-        if comm != m["name"]:
-            return False
+        comm = p.get("comm") or (path.rsplit("/", 1)[-1] if path is not None else None)
+        if comm is None:
+            unreadable = True
+        elif comm != m["name"]:
+            return "no"
     if m.get("argv_regex"):
-        if p.get("argv") is None or not re.search(m["argv_regex"], " ".join(p["argv"])):
-            return False
-    return True
+        if argv is None:
+            unreadable = True
+        elif not re.search(m["argv_regex"], " ".join(argv)):
+            return "no"
+    return "unreadable" if unreadable else "yes"
+
+
+def matches(p: dict, m: dict) -> bool:
+    return check(p, m) != "no"
 
 
 def group(procs: list[dict], match: dict, tree: str = "self") -> list[dict]:
@@ -76,15 +94,27 @@ def diff(old: dict, new: dict) -> dict:
 
 
 def preview(config: dict, procs: list[dict]) -> list[dict]:
-    """Per rule: which reported processes it would protect right now."""
-    return [{"rule": r["id"], "processes": [{"pid": p["pid"], "path": p.get("path"), "bundle_id": p.get("bundle_id")}
-                                            for p in group(procs, r.get("match") or {}, r.get("tree", "self"))]}
-            for r in (config.get("rule") or config.get("rules") or [])]
+    """Per rule: which reported processes it would protect right now (`unreadable`: matched only because a fact
+    its keys need could not be read)."""
+    out = []
+    for r in config.get("rule") or config.get("rules") or []:
+        m = r.get("match") or {}
+        out.append({"rule": r["id"], "processes": [
+            {"pid": p["pid"], "path": p.get("path"), "name": display_name(p), "bundle_id": p.get("bundle_id"),
+             "unreadable": check(p, m) == "unreadable"} for p in group(procs, m, r.get("tree", "self"))]})
+    return out
+
+
+def display_name(p: dict) -> str:
+    """A reported process's short name: the kernel's (p_comm, comm, the Windows image name), else the path's last
+    component (either separator), else empty (both unreadable)."""
+    return p.get("comm") or re.split(r"[\\/]", p.get("path") or "")[-1]
 
 
 def suggest(p: dict) -> dict:
     """The strongest match for one reported process (the picker's "protect this"): the code-signing team and
-    bundle survive updates and relocation; a path prefix is the fallback for unsigned tools."""
+    bundle survive updates and relocation; a path prefix is the fallback for unsigned tools (and every Linux and
+    Windows process), the name when the path is unreadable."""
     m: dict = {}
     if p.get("team_id"):
         m["team_id"] = p["team_id"]
@@ -93,14 +123,17 @@ def suggest(p: dict) -> dict:
     elif p.get("signing_id") and p.get("team_id"):
         m["identifier"] = p["signing_id"]
     if not m:
-        path = p.get("path") or ""
-        app = path.find(".app/")
-        m["path_prefix"] = path[:app + 5] if app > 0 else path
+        path = p.get("path")
+        if path:
+            app = path.find(".app/")
+            m["path_prefix"] = path[:app + 5] if app > 0 else path
+        else:
+            m["name"] = display_name(p)
     return m
 
 
 def suggest_rule(p: dict, existing_ids: set | None = None) -> dict:
-    base = re.sub(r"[^a-z0-9]+", "-", ((p.get("bundle_id") or (p.get("path") or "proc").rsplit("/", 1)[-1]).lower()))
+    base = re.sub(r"[^a-z0-9]+", "-", (p.get("bundle_id") or display_name(p) or "proc").lower())
     base = base.strip("-")[:48] or "proc"
     rid, k = base, 2
     while existing_ids and rid in existing_ids:

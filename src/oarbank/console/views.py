@@ -408,7 +408,8 @@ def protection_page(r, nid: str, now: float) -> dict | None:
     ids = {x.get("id") for x in cfg.get("rule") or []}
     matched = {p["pid"]: [m["rule"] for m in PM.preview(cfg, procs) if any(q["pid"] == p["pid"] for q in m["processes"])]
                for p in procs}
-    picker = [{**p, "rules": matched.get(p["pid"], []), "suggest": json.dumps(PM.suggest_rule(p, ids))} for p in procs]
+    picker = [{**p, "name": PM.display_name(p), "rules": matched.get(p["pid"], []), "suggest": json.dumps(PM.suggest_rule(p, ids))}
+              for p in procs]
     tel = jl(n["telemetry_json"], {}) or {}
     canary = r.get_setting("protection_canary")
     if canary:

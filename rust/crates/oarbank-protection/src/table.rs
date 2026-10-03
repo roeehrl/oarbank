@@ -9,14 +9,15 @@ use serde::Serialize;
 use crate::config::{ProtectionConfig, TreeScope};
 use crate::model::{ProcessKey, ProcessRecord};
 
-/// One same-user process as the platform reports it, before identity is resolved.
+/// One of the owner's processes as the platform reports it, before identity is resolved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RawProcess {
     pub pid: i32,
     pub ppid: i32,
     /// Microseconds since the epoch.
     pub start_us: u64,
-    pub path: String,
+    /// None: not readable (another account's process the agent may not inspect).
+    pub path: Option<String>,
     pub comm: String,
     /// Cumulative CPU time (user + system), seconds.
     pub cpu_s: f64,
@@ -39,12 +40,12 @@ pub enum SourceError {
     Unreadable(String),
 }
 
-/// The platform's view of the owner's processes. Implementations read only same-user processes and never
-/// act on them.
+/// The platform's view of the owner's processes (macOS: the agent's own account's; Linux and Windows: the
+/// processes of the people using the machine, see each backend). Implementations only read, never act.
 pub trait ProcessSource: Send {
-    /// Same-user processes, without the ones in `excluding` (the agent's own groups).
+    /// The owner's processes, without the ones in `excluding` (the agent's own groups).
     fn list(&mut self, excluding: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError>;
-    /// argv (same-user processes only); None when unreadable.
+    /// argv; None when unreadable.
     fn argv(&mut self, pid: i32) -> Option<Vec<String>>;
     fn signing(&mut self, pid: i32) -> SigningIdentity;
     /// Does the live process satisfy a code-signing requirement string?
@@ -76,7 +77,8 @@ impl ProcessSource for UnsupportedProcessSource {
     }
 }
 
-/// Per-process identity cache: `Some("")` is "resolved, nothing there", None is "not resolved yet".
+/// Per-process identity cache: `Some("")` is "resolved, nothing there", None is "not resolved yet". Unreadable
+/// arguments are not cached: they may become readable (a session helper reports them).
 #[derive(Debug, Clone, Default)]
 struct Identity {
     team_id: Option<String>,
@@ -97,14 +99,15 @@ pub struct Snapshot {
     pub cpu_cores: HashMap<ProcessKey, f64>,
 }
 
-/// A row of the console's process picker (heartbeat `processes`).
+/// A row of the console's process picker (heartbeat `processes`). A null path or argv is unreadable.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProcessSummaryRow {
     pub pid: i32,
     pub ppid: i32,
     pub start_us: u64,
-    pub path: String,
-    pub argv: Vec<String>,
+    pub path: Option<String>,
+    pub comm: String,
+    pub argv: Option<Vec<String>>,
     pub team_id: Option<String>,
     pub signing_id: Option<String>,
     pub bundle_id: Option<String>,
@@ -135,11 +138,11 @@ impl ProcessTable {
         }
     }
 
-    fn identity(&mut self, key: ProcessKey, path: &str) -> Identity {
+    fn identity(&mut self, key: ProcessKey, path: Option<&str>) -> Identity {
         match self.identities.get(&key) {
             Some(id) => id.clone(),
             None => Identity {
-                bundle_id: self.source.bundle_id(path),
+                bundle_id: path.and_then(|p| self.source.bundle_id(p)),
                 ..Identity::default()
             },
         }
@@ -177,9 +180,9 @@ impl ProcessTable {
         for rp in raw.into_iter().filter(|p| !excluding.contains(&p.pid)) {
             let key = ProcessKey::new(rp.pid, rp.start_us);
             seen.insert(key);
-            let mut id = self.identity(key, &rp.path);
+            let mut id = self.identity(key, rp.path.as_deref());
             if need_argv && id.argv.is_none() {
-                id.argv = Some(self.source.argv(rp.pid).unwrap_or_default());
+                id.argv = self.source.argv(rp.pid);
             }
             if need_signing && id.team_id.is_none() && id.signing_id.is_none() {
                 let s = self.source.signing(rp.pid);
@@ -226,7 +229,7 @@ impl ProcessTable {
         Ok(snap)
     }
 
-    /// The process picker's view (heartbeat `processes`): the same-user processes by resource use, with the
+    /// The process picker's view (heartbeat `processes`): the owner's processes by resource use, with the
     /// identity a rule can match on (signing resolved for these only, once per process). The agent's own groups
     /// are excluded. Paths and argv are truncated; argv is limited to 12 entries.
     pub fn summary(
@@ -254,27 +257,25 @@ impl ProcessTable {
         let mut out = Vec::with_capacity(rows.len());
         for (p, cores) in rows {
             let key = ProcessKey::new(p.pid, p.start_us);
-            let mut id = self.identity(key, &p.path);
+            let mut id = self.identity(key, p.path.as_deref());
             if id.team_id.is_none() && id.signing_id.is_none() {
                 let s = self.source.signing(p.pid);
                 id.team_id = Some(s.team_id.unwrap_or_default());
                 id.signing_id = Some(s.signing_id.unwrap_or_default());
             }
             if id.argv.is_none() {
-                id.argv = Some(self.source.argv(p.pid).unwrap_or_default());
+                id.argv = self.source.argv(p.pid);
             }
             out.push(ProcessSummaryRow {
                 pid: p.pid,
                 ppid: p.ppid,
                 start_us: p.start_us,
-                path: prefix(&p.path, 400),
+                path: p.path.as_deref().map(|s| prefix(s, 400)),
+                comm: p.comm.clone(),
                 argv: id
                     .argv
-                    .iter()
-                    .flatten()
-                    .take(12)
-                    .map(|a| prefix(a, 200))
-                    .collect(),
+                    .as_ref()
+                    .map(|a| a.iter().take(12).map(|a| prefix(a, 200)).collect()),
                 team_id: non_empty(&id.team_id),
                 signing_id: non_empty(&id.signing_id),
                 bundle_id: id.bundle_id.clone(),

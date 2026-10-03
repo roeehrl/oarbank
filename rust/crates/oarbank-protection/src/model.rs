@@ -11,9 +11,12 @@ pub struct ProcessRecord {
     pub ppid: i32,
     /// Start time in microseconds since the epoch.
     pub start_us: u64,
-    pub path: String,
-    /// The kernel's short name (p_comm, 16 characters on macOS); empty means "the path's last component".
+    /// The executable's path; None: not readable (another account's process the agent may not inspect).
+    pub path: Option<String>,
+    /// The kernel's short name (p_comm on macOS, 16 characters; comm on Linux, 15; the image file name on
+    /// Windows); empty means "the path's last component".
     pub comm: String,
+    /// The arguments; None: not resolved (no rule needs them) or not readable.
     pub argv: Option<Vec<String>>,
     pub team_id: Option<String>,
     pub signing_id: Option<String>,
@@ -27,12 +30,14 @@ pub struct ProcessRecord {
 }
 
 impl ProcessRecord {
+    /// A process whose path and arguments are readable, with no arguments (callers set the rest).
     pub fn new(pid: i32, ppid: i32, start_us: u64, path: &str) -> Self {
         Self {
             pid,
             ppid,
             start_us,
-            path: path.to_string(),
+            path: Some(path.to_string()),
+            argv: Some(vec![]),
             ..Self::default()
         }
     }
@@ -44,12 +49,13 @@ impl ProcessRecord {
         }
     }
 
-    /// The name a `name` matcher compares: p_comm, or the path's last component when there is none.
-    pub fn effective_comm(&self) -> &str {
+    /// The name a `name` matcher compares: the kernel's short name, or the path's last component when there is
+    /// none (None: neither is known).
+    pub fn effective_comm(&self) -> Option<&str> {
         if self.comm.is_empty() {
-            self.path.rsplit('/').next().unwrap_or("")
+            self.path.as_deref().and_then(|p| p.rsplit('/').next())
         } else {
-            &self.comm
+            Some(&self.comm)
         }
     }
 }

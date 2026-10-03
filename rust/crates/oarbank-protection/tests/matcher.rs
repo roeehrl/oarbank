@@ -5,7 +5,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::{gpu_app_rule, proc_, rule};
-use oarbank_protection::matcher::{group, matches};
+use oarbank_protection::matcher::{check, group, matches, Match};
 use oarbank_protection::*;
 use serde_json::{json, Value};
 
@@ -114,16 +114,37 @@ fn name_prefers_p_comm() {
 }
 
 #[test]
-fn regex_needs_argv() {
-    let m = ProcessMatch::from_json(&json!({"argv_regex": ".*"})).unwrap();
-    assert!(!matches(&proc_(1, 1, 1, "/bin/x"), &m)); // argv unknown: never matches
-    assert!(matches(
-        &ProcessRecord {
-            argv: Some(vec![]),
-            ..proc_(1, 1, 1, "/bin/x")
-        },
-        &m
-    ));
+fn an_unreadable_fact_counts_as_a_match_and_a_readable_one_still_decides() {
+    let argv = ProcessMatch::from_json(&json!({"argv_regex": r"train\.py"})).unwrap();
+    let unreadable_argv = ProcessRecord {
+        argv: None,
+        ..proc_(1, 1, 1, "/bin/x")
+    };
+    assert_eq!(check(&unreadable_argv, &argv), Match::Unreadable);
+    assert_eq!(check(&proc_(1, 1, 1, "/bin/x"), &argv), Match::No); // readable, no arguments
+    let unreadable_path = ProcessRecord {
+        path: None,
+        comm: "python3".into(),
+        argv: Some(vec!["python3".into(), "train.py".into()]),
+        ..ProcessRecord::default()
+    };
+    let prefix = ProcessMatch::from_json(&json!({"path_prefix": "/opt/trainer/"})).unwrap();
+    assert_eq!(check(&unreadable_path, &prefix), Match::Unreadable);
+    assert!(matches(&unreadable_path, &prefix));
+    // a readable key that fails decides, whatever else is unreadable
+    let both = ProcessMatch::from_json(&json!({"path_prefix": "/opt/trainer/", "name": "trainer"})).unwrap();
+    assert_eq!(check(&unreadable_path, &both), Match::No);
+    let held = ProcessMatch::from_json(&json!({"path_prefix": "/opt/trainer/", "argv_regex": "train"})).unwrap();
+    assert_eq!(check(&unreadable_path, &held), Match::Unreadable);
+    // path_contains: what is readable may already hold the marker
+    let contains = ProcessMatch::from_json(&json!({"path_contains": "train.py"})).unwrap();
+    assert_eq!(check(&unreadable_path, &contains), Match::Yes);
+    let elsewhere = ProcessMatch::from_json(&json!({"path_contains": "/opt/"})).unwrap();
+    assert_eq!(check(&unreadable_path, &elsewhere), Match::Unreadable);
+    assert_eq!(check(&proc_(1, 1, 1, "/bin/x"), &elsewhere), Match::No);
+    // with no comm and no path the name is unknown too
+    let name = ProcessMatch::from_json(&json!({"name": "x"})).unwrap();
+    assert_eq!(check(&ProcessRecord::default(), &name), Match::Unreadable);
 }
 
 /// One vector file: build the processes, run every case through the matcher.
@@ -146,7 +167,7 @@ fn check_vectors(path: PathBuf, min_cases: usize) {
             pid: p["pid"].as_i64().unwrap() as i32,
             ppid: p["ppid"].as_i64().unwrap() as i32,
             start_us: p["start_us"].as_u64().unwrap(),
-            path: s(p, "path").unwrap_or_default(),
+            path: s(p, "path"),
             comm: s(p, "comm").unwrap_or_default(),
             argv: p.get("argv").and_then(strs),
             team_id: s(p, "team_id"),

@@ -61,7 +61,7 @@ pause, evict); nothing here can signal a protected process. The node unions this
 
 <h2>Process picker <span class="small mut">(reported by the agent {{ processes_at | ago if processes_at else 'never' }}; refreshed when you preview)</span></h2>
 <table class="small"><tr><th class="num">pid</th><th>process</th><th>identity</th><th class="num">cpu</th><th class="num">GB</th><th>protected by</th><th><span class="sr-only">actions</span></th></tr>
-{% for p in picker %}<tr><td class="num">{{ p.pid }}</td><td class="mono" title="{{ p.path }}">{{ (p.path or '').rsplit('/', 1)[-1] }}{% if p.argv and p.argv | length > 1 %} <span class="mut">{{ p.argv[1:] | join(' ') | truncate(60) }}</span>{% endif %}</td>
+{% for p in picker %}<tr><td class="num">{{ p.pid }}</td><td class="mono" title="{{ p.path or 'path unreadable' }}">{{ p.name }}{% if p.argv is none %} <span class="mut">(arguments unreadable)</span>{% elif p.argv | length > 1 %} <span class="mut">{{ p.argv[1:] | join(' ') | truncate(60) }}</span>{% endif %}</td>
   <td class="mono small">{{ p.bundle_id or '' }}{% if p.team_id %} · {{ p.team_id }}{% endif %}</td>
   <td class="num">{{ p.cpu_cores }}</td><td class="num">{{ p.footprint_gb }}</td>
   <td>{% for r in p.rules %}<span class="chip acc">{{ r }}</span>{% endfor %}</td>

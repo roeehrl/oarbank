@@ -114,14 +114,16 @@ their process groups, deletes their workspaces, and does not report them.
                "thermal": 0, "on_battery": false, "hid_idle_s": 912.0, "screen_sharing": false, "fleet_rss_gb": 6.4,
                "disk_free_gb": 350.2, "services_running": ["example/vm"], "services_reserved_gb": 8.0,
                "guard": "clear", "protection": {"mode": "moderate", "active": ["…"], "rules": [{"id": "…", "active": true,
-               "processes": 3, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0, "budget_cores": 6}},
+               "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
+               "budget_cores": 6}},
  "capacity": { …Capacity… },
  "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused", "cpu_s": 55.2,
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "journal": [{"t": 1790000000.1, "seq": 41, "kind": "rule_active", "reason": "PROTECTION_ACTIVE", "rule": "zoom"}],
- "processes": [{"pid": 812, "ppid": 1, "start_us": 1790000000000000, "path": "/Applications/…", "argv": ["…"],
-                "team_id": "ABCDE12345", "signing_id": "…", "bundle_id": "…", "cpu_cores": 1.2, "footprint_gb": 2.3}]}
+ "processes": [{"pid": 812, "ppid": 1, "start_us": 1790000000000000, "path": "/Applications/…", "comm": "…",
+                "argv": ["…"], "team_id": "ABCDE12345", "signing_id": "…", "bundle_id": "…", "cpu_cores": 1.2,
+                "footprint_gb": 2.3}]}
 ```
 - **`clock`** (hello and heartbeat) is the agent's wall clock when it sent the request. oarbankd records the node's clock
   offset from it (see Clocks).
@@ -130,7 +132,9 @@ their process groups, deletes their workspaces, and does not report them.
   `journal_ack`, the highest seq it stored.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
   at most 80, the agent's own jobs excluded. The agent sends it every 5 minutes, or on the next heartbeat
-  after `send_processes`.
+  after `send_processes`. `comm` is the kernel's short name (the Windows image name); a null `path` or `argv` could
+  not be read (another account's process), and a rule key that needs it counts as holding (a rule's `unreadable`
+  counts the processes it matched that way).
 - **Leases.** oarbankd extends `expires_at = now + 60 s` for each listed attempt that is live server-side and
   shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, or it is `paused` by host
   protection. The agent bounds a pause at 10 minutes, then releases the attempt.

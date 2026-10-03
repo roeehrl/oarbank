@@ -38,7 +38,9 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
 
 - **Matchers:** code-signing identity (Team ID and signing identifier, or a designated requirement), bundle id, path
   prefix or substring, and an argv pattern. A signature survives updates and relocation; a path does not; argv is the
-  only way to tell one interpreter's script from another's. The console's process picker writes the matcher from the
+  only way to tell one interpreter's script from another's. A key whose fact the agent cannot read (another account's
+  path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
+  the processes it matched that way (`unreadable`). The console's process picker writes the matcher from the
   processes a node reports, and its preview uses a Python matcher held equal to the agent's by shared test vectors
   (`fixtures/protection-match-vectors.json`).
 - **Trees:** `self`, `descendants` (pid and parent tracking) or `same_team` (helpers signed by the same team).

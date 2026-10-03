@@ -1,29 +1,32 @@
 {
-  "comment": "D20: shared vectors for the Python rule-preview matcher and the agent's matcher in oarbank-protection (both test suites load this file). A process: pid, ppid, start_us, path, argv, team_id, signing_id, bundle_id, requirements_met. expected: the pids the rule's group contains.",
+  "comment": "D20: shared vectors for the Python rule-preview matcher and the agent's matcher in oarbank-protection (both test suites load this file). A process: pid, ppid, start_us, path, comm, argv, team_id, signing_id, bundle_id, requirements_met; a null path or argv is unreadable (another account's process), which counts as a match. expected: the pids the rule's group contains.",
   "processes": [
     {"pid": 10, "ppid": 1, "start_us": 1000, "path": "/Applications/GPU Trainer.app/Contents/Worker/releases/1/worker", "argv": ["worker"]},
     {"pid": 11, "ppid": 10, "start_us": 1100, "path": "/usr/bin/python3", "argv": ["python3", "train.py"]},
     {"pid": 12, "ppid": 11, "start_us": 1200, "path": "/bin/sh", "argv": ["sh", "-c", "x"]},
     {"pid": 13, "ppid": 10, "start_us": 500, "path": "/bin/zsh", "argv": ["zsh"]},
-    {"pid": 20, "ppid": 1, "start_us": 2000, "path": "/Applications/Web Browser.app/Contents/MacOS/Web Browser", "team_id": "EQHXZ8M8AV", "signing_id": "com.example.browser", "bundle_id": "com.example.browser"},
-    {"pid": 21, "ppid": 20, "start_us": 2100, "path": "/Applications/Web Browser.app/Contents/Frameworks/Helper", "team_id": "EQHXZ8M8AV", "signing_id": "com.example.browser.helper", "bundle_id": "com.example.browser.helper"},
+    {"pid": 20, "ppid": 1, "start_us": 2000, "path": "/Applications/Web Browser.app/Contents/MacOS/Web Browser", "team_id": "EQHXZ8M8AV", "signing_id": "com.example.browser", "bundle_id": "com.example.browser", "argv": ["Web Browser"]},
+    {"pid": 21, "ppid": 20, "start_us": 2100, "path": "/Applications/Web Browser.app/Contents/Frameworks/Helper", "team_id": "EQHXZ8M8AV", "signing_id": "com.example.browser.helper", "bundle_id": "com.example.browser.helper", "argv": ["Helper", "--type=renderer"]},
     {"pid": 30, "ppid": 1, "start_us": 3000, "path": "/Users/o/venvs/mlx/bin/python", "argv": ["python", "train.py", "--lr", "1e-4"]},
     {"pid": 31, "ppid": 1, "start_us": 3100, "path": "/Users/o/venvs/mlx/bin/python", "argv": ["python", "eval.py"]},
-    {"pid": 40, "ppid": 1, "start_us": 4000, "path": "/Applications/Xcode.app/Contents/MacOS/Xcode", "requirements_met": ["anchor apple and identifier \"com.apple.dt.Xcode\""]},
+    {"pid": 40, "ppid": 1, "start_us": 4000, "path": "/Applications/Xcode.app/Contents/MacOS/Xcode", "requirements_met": ["anchor apple and identifier \"com.apple.dt.Xcode\""], "argv": ["Xcode"]},
     {"pid": 41, "ppid": 40, "start_us": 4100, "path": "/usr/bin/clang", "argv": ["clang"]},
-    {"pid": 50, "ppid": 1, "start_us": 5000, "path": "/Applications/zoom.us.app/Contents/MacOS/zoom.us", "bundle_id": "us.zoom.xos"}
+    {"pid": 50, "ppid": 1, "start_us": 5000, "path": "/Applications/zoom.us.app/Contents/MacOS/zoom.us", "bundle_id": "us.zoom.xos", "argv": ["zoom.us"]},
+    {"pid": 60, "ppid": 1, "start_us": 6000, "path": null, "comm": "worker", "argv": null}
   ],
   "cases": [
-    {"name": "path_contains + descendants skips a reused ppid", "match": {"path_contains": "Worker/releases"}, "tree": "descendants", "expected": [10, 11, 12]},
-    {"name": "path_contains self", "match": {"path_contains": "Worker/releases"}, "tree": "self", "expected": [10]},
+    {"name": "path_contains + descendants skips a reused ppid", "match": {"path_contains": "Worker/releases"}, "tree": "descendants", "expected": [10, 11, 12, 60]},
+    {"name": "path_contains self", "match": {"path_contains": "Worker/releases"}, "tree": "self", "expected": [10, 60]},
     {"name": "team + bundle, same_team pulls helpers", "match": {"team_id": "EQHXZ8M8AV", "bundle_id": ["com.example.browser"]}, "tree": "same_team", "expected": [20, 21]},
     {"name": "team only", "match": {"team_id": "EQHXZ8M8AV"}, "tree": "self", "expected": [20, 21]},
-    {"name": "path prefix + argv regex", "match": {"path_prefix": "/Users/o/venvs/mlx/bin/python", "argv_regex": "train\\.py"}, "tree": "descendants", "expected": [30]},
+    {"name": "path prefix + argv regex", "match": {"path_prefix": "/Users/o/venvs/mlx/bin/python", "argv_regex": "train\\.py"}, "tree": "descendants", "expected": [30, 60]},
     {"name": "requirement + descendants", "match": {"requirement": "anchor apple and identifier \"com.apple.dt.Xcode\""}, "tree": "descendants", "expected": [40, 41]},
     {"name": "bundle list", "match": {"bundle_id": ["us.zoom.xos", "com.apple.FaceTime"]}, "tree": "self", "expected": [50]},
     {"name": "name (p_comm)", "match": {"name": "clang"}, "tree": "self", "expected": [41]},
     {"name": "identifier", "match": {"identifier": "com.example.browser.helper"}, "tree": "self", "expected": [21]},
     {"name": "no match", "match": {"bundle_id": ["com.example.none"]}, "tree": "descendants", "expected": []},
-    {"name": "path_contains sees arguments", "match": {"path_contains": "eval.py"}, "tree": "self", "expected": [31]}
+    {"name": "path_contains sees arguments", "match": {"path_contains": "eval.py"}, "tree": "self", "expected": [31, 60]},
+    {"name": "an unreadable path and arguments count as a match", "match": {"path_prefix": "/opt/trainer/"}, "tree": "self", "expected": [60]},
+    {"name": "a readable name that differs is no match, however much is unreadable", "match": {"path_prefix": "/opt/trainer/", "name": "trainer"}, "tree": "self", "expected": []}
   ]
 }

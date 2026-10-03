@@ -6,7 +6,7 @@
 </div>
 <table class="small" style="margin-top:6px"><tr><th>rule</th><th class="num">matches now</th><th>processes</th></tr>
 {% for r in p.matches %}<tr><td class="mono">{{ r.rule }}</td><td class="num">{{ r.processes | length }}</td>
-  <td class="mono small">{% for q in r.processes[:8] %}{{ q.pid }} {{ (q.path or '').rsplit('/', 1)[-1] }}{% if not loop.last %}, {% endif %}{% endfor %}{% if r.processes | length > 8 %} …{% endif %}{% if not r.processes %}<span class="mut">none right now</span>{% endif %}</td></tr>
+  <td class="mono small">{% for q in r.processes[:8] %}<span{% if q.unreadable %} title="matched because its path or arguments could not be read"{% endif %}>{{ q.pid }} {{ q.name }}{% if q.unreadable %}?{% endif %}</span>{% if not loop.last %}, {% endif %}{% endfor %}{% if r.processes | length > 8 %} …{% endif %}{% if not r.processes %}<span class="mut">none right now</span>{% endif %}</td></tr>
 {% else %}<tr><td colspan="3" class="mut">no rules</td></tr>{% endfor %}</table>
 <p class="small mut">{{ p.note }}</p>
 {% endif %}

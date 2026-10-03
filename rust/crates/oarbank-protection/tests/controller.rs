@@ -297,7 +297,7 @@ fn telemetry_and_status_shapes() {
     assert_eq!(t["active"], json!(["gpu-app"]));
     assert_eq!(
         t["rules"],
-        json!([{"id": "gpu-app", "active": true, "processes": 1, "cpu_cores": 0.0,
+        json!([{"id": "gpu-app", "active": true, "processes": 1, "unreadable": 0, "cpu_cores": 0.0,
                                     "footprint_gb": 4.0, "reason": "active"}])
     );
     assert_eq!(t["constraint"]["reserved_mem_gb"], json!(6.0));
@@ -439,7 +439,7 @@ fn raw(pid: i32, ppid: i32, path: &str, cpu_s: f64) -> RawProcess {
         pid,
         ppid,
         start_us: 1000 + pid as u64,
-        path: path.into(),
+        path: Some(path.into()),
         comm: String::new(),
         cpu_s,
         footprint_gb: 1.0,
@@ -551,7 +551,7 @@ fn tick_measures_protected_groups_and_feeds_the_dynamic_layer() {
     assert_eq!(
         row,
         json!({"pid": 7, "ppid": 1, "start_us": 1007, "path": "/Applications/Render.app/Contents/MacOS/t",
-                           "argv": ["p7", "--flag"], "team_id": "ABCDE12345", "signing_id": "id.7",
+                           "comm": "", "argv": ["p7", "--flag"], "team_id": "ABCDE12345", "signing_id": "id.7",
                            "bundle_id": "com.example.app", "cpu_cores": 0.0, "footprint_gb": 1.0})
     );
     assert!(ctl.process_summary(63.0, &HashSet::new()).is_none()); // not again until requested or 5 minutes pass
