@@ -316,10 +316,10 @@ mod tests {
         assert!(reg.register(pid, Some(1), None));
         assert!(reg.signal(pid, P::Signal::Stop, "pause").is_ok());
         #[cfg(target_os = "linux")]
-        assert!(paused(pid));
+        assert!(becomes_paused(pid, true), "never paused");
         assert!(reg.signal(pid, P::Signal::Cont, "resume").is_ok());
         #[cfg(target_os = "linux")]
-        assert!(!paused(pid));
+        assert!(becomes_paused(pid, false), "never resumed");
         let lowered = reg.set_background(pid, true, "lower_fleet");
         eprintln!("lowering available here: {}; lowered: {lowered:?}", can_lower());
         assert_eq!(lowered.is_ok(), can_lower(), "{lowered:?}");
@@ -340,15 +340,25 @@ mod tests {
         assert!(reg.signal(pid, P::Signal::Kill, "gone").is_err(), "a reaped container is never signalled again");
     }
 
-    /// Frozen in its cgroup container, or stopped by SIGSTOP when there is none.
+    /// Whether it comes to be paused (`want`) or running: frozen in its cgroup container, or stopped by SIGSTOP when
+    /// there is none. Both take effect after the call returns, so look until they do (a loaded host: up to 30 s).
     #[cfg(target_os = "linux")]
-    fn paused(pid: i32) -> bool {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Some(c) = crate::cgroup::container(pid) {
-            return std::fs::read_to_string(c.join("cgroup.events")).unwrap().lines().any(|l| l == "frozen 1");
+    fn becomes_paused(pid: i32, want: bool) -> bool {
+        let paused = || match crate::cgroup::container(pid) {
+            Some(c) => std::fs::read_to_string(c.join("cgroup.events")).unwrap().lines().any(|l| l == "frozen 1"),
+            None => {
+                let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+                s[s.rfind(')').unwrap() + 2..].starts_with('T')
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while paused() != want {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        s[s.rfind(')').unwrap() + 2..].starts_with('T')
+        true
     }
 
     /// Lowered: its leaf's background quota (Linux), the idle priority class (Windows).

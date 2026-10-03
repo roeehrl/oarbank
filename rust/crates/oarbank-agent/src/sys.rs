@@ -582,8 +582,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// The file's text once it has some (a loaded host may take seconds to start a Python: up to 30 s).
     fn wait_for(path: &Path) -> String {
-        for _ in 0..100 {
+        for _ in 0..600 {
             if let Some(s) = std::fs::read_to_string(path).ok().filter(|s| !s.is_empty()) {
                 return s;
             }

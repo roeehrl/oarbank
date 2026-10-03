@@ -582,7 +582,7 @@ mod tests {
         control.prepare(&mut cmd);
         let mut child = cmd.spawn().unwrap();
         control.started(child.id() as i32);
-        let wait = |f: &str| (0..100).find_map(|_| std::fs::read_to_string(ws.join(f)).ok().filter(|s| !s.is_empty())
+        let wait = |f: &str| (0..600).find_map(|_| std::fs::read_to_string(ws.join(f)).ok().filter(|s| !s.is_empty())
             .or_else(|| { std::thread::sleep(Duration::from_millis(50)); None }));
         assert!(wait("ready").is_some());
         control.write(json!({"pause": true})).unwrap();

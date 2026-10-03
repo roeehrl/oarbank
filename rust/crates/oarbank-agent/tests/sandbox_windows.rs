@@ -97,7 +97,8 @@ fn a_contained_runner_is_alone_in_its_job_with_the_shim() {
     let p = d.with_extension("policy.json");
     std::fs::write(&p, policy.to_string()).unwrap();
     let mut shim = Command::new(env!("CARGO_BIN_EXE_oarbank-agent")).arg("sandbox-exec").arg(&p).arg("--")
-        .args([py.as_str(), "-I", "-c", "import time; time.sleep(8)"])
+        .args([py.as_str(), "-I", "-c", "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text('up'); time.sleep(60)",
+               &d.join("up").display().to_string()])
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
         .creation_flags(0x0000_0200 | 0x0000_0008).spawn().unwrap();
     let shim_pid = shim.id();
@@ -116,8 +117,12 @@ fn a_contained_runner_is_alone_in_its_job_with_the_shim() {
         let first = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / std::mem::size_of::<usize>();
         buf[first..first + n].iter().map(|&p| p as u32).collect()
     };
-    // give a console host every chance to appear before judging
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // judge once the runner runs its own code: a console host, if one came, came with its start (a loaded host may
+    // take seconds to get there)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !d.join("up").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let others: Vec<u32> = members().into_iter().filter(|p| *p != shim_pid).collect();
     let contained: Vec<bool> = others.iter().map(|p| is_app_container(*p)).collect();
     unsafe {
