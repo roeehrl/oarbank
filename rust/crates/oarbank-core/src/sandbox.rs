@@ -3,12 +3,13 @@
 //!
 //! The profile text depends only on the policy's shape (counts and flags). Every path enters as a parameter
 //! (`sandbox_init_with_parameters`), never as text, after `realpath`, because the kernel matches resolved paths; each
-//! symlink met on the way gets its own metadata rule (`LINK_i`).
+//! symlink met on the way gets a metadata rule (`LINK_i`) on itself and on the directories above it, which
+//! `realpath` (CPython's startup among them) walks with lstat and readlink; reading stays limited to resolved roots.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-pub const PROFILE_VERSION: u32 = 2;
+pub const PROFILE_VERSION: u32 = 3;
 pub const BACKEND: &str = "seatbelt";
 pub const NET_MODES: [&str; 3] = ["none", "egress-allowlist", "egress-any"];
 
@@ -64,7 +65,7 @@ const RO: &str = r#"(allow file-read* file-map-executable process-exec (subpath 
 const RW: &str = r#"(allow file-read* file-write* (subpath (param "RW_{i}")))
 (allow file-read-metadata (path-ancestors (param "RW_{i}")))
 "#;
-const LINK: &str = r#"(allow file-read-metadata (literal (param "LINK_{i}")))
+const LINK: &str = r#"(allow file-read-metadata (literal (param "LINK_{i}")) (path-ancestors (param "LINK_{i}")))
 "#;
 const EGRESS_ANY: &str = r#"
 ;; grant: network egress-any (public addresses and DNS; never unix sockets, loopback or listening)
@@ -271,7 +272,7 @@ fn pure_parent_name(p: &str) -> (String, String) {
     }
 }
 
-/// Every symlink met while resolving a path, hop by hop (each needs a metadata rule on the link itself). Touches the
+/// Every symlink met while resolving a path, hop by hop (each needs a metadata rule on itself and its ancestors). Touches the
 /// filesystem (lstat, readlink); a path that does not exist simply has no more hops.
 pub fn links_of(p: &str) -> Result<Vec<String>, SandboxError> {
     links_of_depth(p, 0)
@@ -430,7 +431,7 @@ mod tests {
     #[test]
     fn text_depends_only_on_shape() {
         let t = render_text("runner", 1, 1, 0, "none", false, false, None, false).unwrap();
-        assert!(t.starts_with("(version 1)\n;; oarbank module sandbox, profile 2 (runner)\n"));
+        assert!(t.starts_with("(version 1)\n;; oarbank module sandbox, profile 3 (runner)\n"));
         assert!(t.contains("(subpath (param \"RO_0\"))") && !t.contains("RO_1") && !t.contains("network-outbound"));
         let a = render_text("runner", 1, 1, 0, "egress-allowlist", false, false, Some(47001), false).unwrap();
         assert!(a.contains("(remote ip \"localhost:47001\")"));

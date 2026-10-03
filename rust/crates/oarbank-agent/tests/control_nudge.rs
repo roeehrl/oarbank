@@ -43,21 +43,28 @@ fn scratch(name: &str) -> PathBuf {
     d
 }
 
-/// The test's Python: OARBANK_TEST_PYTHON, else the node runtime's (Windows), the SDK's environment (a real CPython,
-/// where macOS's /usr/bin/python3 is an Xcode stub), or the one on PATH. Its absolute path and the roots the sandbox
-/// must let it read, found the way runtime.rs finds them.
+/// The test's Python, found the way runtime.rs finds the node's: OARBANK_TEST_PYTHON (an absolute path), else the node
+/// runtime's (Windows), else the first python3 or python on PATH that can run the SDK (3.12+: macOS's /usr/bin/python3
+/// is an older Xcode stub). Its path as found, symlinks and all, is argv[0], as for real modules (Homebrew's
+/// bin/python3 is a chain of links into the Cellar), and the roots are those runtime.rs's probe reports.
 fn python() -> (String, Vec<String>) {
-    let sdk = Path::new(SDK_CONTROL).ancestors().nth(3).unwrap().join(".venv");
-    let found = [cfg!(windows).then(|| PathBuf::from(r"C:\Program Files\Oarbank\runtime\python.exe")),
-                 Some(sdk.join(if cfg!(windows) { r"Scripts\python.exe" } else { "bin/python" }))]
-        .into_iter().flatten().find(|p| p.exists()).map(|p| p.display().to_string());
-    let exe = std::env::var("OARBANK_TEST_PYTHON").ok().or(found).unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
-    let probe = "import json, os, sys\nr = {sys.prefix, sys.base_prefix, sys.exec_prefix, os.path.dirname(os.path.realpath(sys.executable))}\n\
-                 print(json.dumps({'exe': sys.executable, 'roots': sorted(r | {os.path.realpath(x) for x in r})}))";
-    let out = Command::new(&exe).args(["-I", "-c", probe]).output().unwrap_or_else(|e| panic!("{exe}: {e}"));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("the Python probe");
-    let roots = v["roots"].as_array().unwrap().iter().map(|r| r.as_str().unwrap().to_string()).collect();
-    (v["exe"].as_str().unwrap().to_string(), roots)
+    let exe_name = |n: &str| format!("{n}{}", std::env::consts::EXE_SUFFIX);
+    let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default().into_iter()
+        .flat_map(|d| [d.join(exe_name("python3")), d.join(exe_name("python"))]);
+    let candidates: Vec<PathBuf> = match std::env::var_os("OARBANK_TEST_PYTHON") {
+        Some(p) => vec![PathBuf::from(p)],
+        None => cfg!(windows).then(|| PathBuf::from(r"C:\Program Files\Oarbank\runtime\python.exe")).into_iter().chain(on_path).collect(),
+    };
+    let probe = "import json, os, sys\nassert sys.version_info >= (3, 12)\n\
+                 r = {sys.prefix, sys.base_prefix, sys.exec_prefix, os.path.dirname(os.path.realpath(sys.executable))}\n\
+                 print(json.dumps(sorted(r | {os.path.realpath(x) for x in r})))";
+    for exe in candidates.iter().filter(|p| p.is_file()) {
+        let Ok(out) = Command::new(exe).args(["-I", "-c", probe]).output() else { continue };
+        if let (true, Ok(roots)) = (out.status.success(), serde_json::from_slice::<Vec<String>>(&out.stdout)) {
+            return (exe.display().to_string(), roots);
+        }
+    }
+    panic!("no Python 3.12+ among {candidates:?} (set OARBANK_TEST_PYTHON)");
 }
 
 /// argv run under the module sandbox through `oarbank-agent sandbox-exec`, as sandbox.rs `wrap` builds it.
