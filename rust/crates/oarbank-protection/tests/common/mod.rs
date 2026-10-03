@@ -93,6 +93,8 @@ pub struct FakeState {
     pub starts: HashMap<i32, u64>,
     pub delivered: Vec<(i32, Signal)>,
     pub background: Vec<(i32, bool)>,
+    /// The OS refuses background scheduling (Linux without a delegated cgroup).
+    pub no_background: bool,
 }
 
 /// A fake OS for the spawn registry: start times per pid, and a log of what would have been delivered.
@@ -133,8 +135,12 @@ impl Actuator for FakeActuator {
         self.0.lock().unwrap().delivered.push((pgid, sig));
         0
     }
-    fn set_background(&self, pid: i32, on: bool) -> i32 {
-        self.0.lock().unwrap().background.push((pid, on));
+    fn set_background(&self, pgid: i32, on: bool) -> i32 {
+        let mut s = self.0.lock().unwrap();
+        if s.no_background {
+            return -1;
+        }
+        s.background.push((pgid, on));
         0
     }
 }

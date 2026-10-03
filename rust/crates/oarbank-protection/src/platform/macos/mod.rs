@@ -77,13 +77,22 @@ impl Actuator for NativeActuator {
         unsafe { libc::killpg(pgid, sig.raw()) }
     }
 
-    fn set_background(&self, pid: i32, on: bool) -> i32 {
+    /// Darwin background QoS (low priority, efficiency cores) for the leader and every member of its group; a
+    /// member that exited meanwhile is no failure.
+    fn set_background(&self, pgid: i32, on: bool) -> i32 {
         let prio = if on { libc::PRIO_DARWIN_BG } else { 0 };
-        // SAFETY: plain syscall on a verified member of a registered group.
-        unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid as libc::id_t, prio) }
-    }
-
-    fn group_members(&self, pgid: i32) -> Vec<i32> {
-        pids_in_group(pgid)
+        let mut members = pids_in_group(pgid);
+        if !members.contains(&pgid) {
+            members.push(pgid);
+        }
+        let mut rc = 0;
+        for pid in members {
+            // SAFETY: plain syscall on a member of a group the registry verified.
+            let r = unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid as libc::id_t, prio) };
+            if r != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                rc = r;
+            }
+        }
+        rc
     }
 }

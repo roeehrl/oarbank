@@ -116,6 +116,19 @@ mod imp {
         }
     }
 
+    /// Lower a container's processes to background scheduling, or restore them (host protection's lowering on
+    /// Linux: the container's background CPU quota, cgroup.rs; none without a delegated cgroup).
+    #[cfg(target_os = "linux")]
+    pub fn set_background(pgid: i32, on: bool) -> bool {
+        crate::cgroup::background(pgid, on)
+    }
+
+    /// Whether this node can lower its jobs (Linux: only with a delegated cgroup that has the cpu controller).
+    #[cfg(target_os = "linux")]
+    pub fn can_lower() -> bool {
+        crate::cgroup::cpu_controller()
+    }
+
     /// The agent is done with the container (its leader ended and was reaped).
     pub fn release(pgid: i32) {
         #[cfg(target_os = "linux")]
@@ -463,6 +476,54 @@ mod imp {
             }
         }
         ok
+    }
+
+    /// Lower a container's processes to background scheduling, or restore them (host protection's lowering on
+    /// Windows): the Job Object's priority class limit, idle while lowered (every member, and children started
+    /// later), and EcoQoS on each member (efficiency cores and lower clocks on hybrid CPUs). Restoring forces the
+    /// normal class back, then lifts the limit.
+    pub fn set_background(pgid: i32, on: bool) -> bool {
+        use windows_sys::Win32::System::JobObjects::{JobObjectExtendedLimitInformation, SetInformationJobObject,
+                                                     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_PRIORITY_CLASS};
+        use windows_sys::Win32::System::Threading::{ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+                                                    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                                                    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+                                                    PROCESS_SET_INFORMATION};
+        let class = if on { IDLE_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS };
+        let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        let ok = match job_of(pgid) {
+            Some(job) => unsafe {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                let mut len = 0u32;
+                QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &mut info as *mut _ as *mut _, size, &mut len) != 0 && {
+                    info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+                    info.BasicLimitInformation.PriorityClass = class;
+                    let set = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) != 0;
+                    if !on {
+                        info.BasicLimitInformation.LimitFlags &= !JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+                        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size);
+                    }
+                    set
+                }
+            },
+            None => each_member(pgid, PROCESS_SET_INFORMATION, |h| unsafe { SetPriorityClass(h, class) != 0 }),
+        };
+        // EcoQoS where the OS has it (Windows 11, 10 21H2): a request, so a refusal is no failure
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+            StateMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        };
+        each_member(pgid, PROCESS_SET_INFORMATION, |h| unsafe {
+            SetProcessInformation(h, ProcessPowerThrottling, &state as *const _ as *const _,
+                                  std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32) != 0
+        });
+        ok
+    }
+
+    /// Job Objects can always lower their members.
+    pub fn can_lower() -> bool {
+        true
     }
 
     /// The job hit its memory limit (the Job Object refuses the allocation; the process usually fails then).

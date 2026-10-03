@@ -1,8 +1,10 @@
-//! cgroup v2 leaves for jobs and services on Linux (docs/design/architecture.md, "Host interfaces": the job container
-//! is a cgroup v2 leaf with cgroup.kill, cgroup.freeze, cpu.max, memory.high and PSI). It works where systemd delegated
-//! the agent's cgroup (the unit has `Delegate=yes`; user units are delegated by default): the agent moves itself into
-//! an `agent` leaf, enables the cpu, memory and pids controllers for its children, and gives every container a sibling
-//! leaf. Without a delegated cgroup the agent keeps to process groups.
+//! cgroup v2 containers for jobs and services on Linux (docs/design/architecture.md, "Host interfaces": the job
+//! container is a cgroup v2 subtree with cgroup.kill, cgroup.freeze, cpu.max, memory.max and PSI). It works where
+//! systemd delegated the agent's cgroup (the unit has `Delegate=yes`; user units are delegated by default): the agent
+//! moves itself into an `agent` leaf, enables the cpu, memory and pids controllers for its children, and gives every
+//! container a sibling cgroup `c<leader>` holding the hard limits, whose `run` leaf holds the processes and, while
+//! host protection lowers the job, its background CPU quota. Without a delegated cgroup the agent keeps to process
+//! groups.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -52,41 +54,59 @@ fn enable_controllers(root: &Path) {
     }
 }
 
-fn leaf_name(pid: i32) -> String {
-    format!("c{pid}")
+/// The leaf of a container that holds its processes.
+const RUN: &str = "run";
+/// A lowered job's CPU quota: a tenth of one core per 100 ms period. The agent's cgroup and the owner's (the user
+/// slice) are scheduled apart, so no scheduling class an unprivileged agent can set makes a job yield to the
+/// owner's work; a quota does, while the job keeps running (its control document, its network sessions).
+const BACKGROUND_QUOTA: &str = "10000 100000";
+
+/// The container led by `pid`.
+pub fn container(pid: i32) -> Option<PathBuf> {
+    root().map(|r| r.join(format!("c{pid}"))).filter(|p| p.is_dir())
 }
 
-pub fn leaf(pid: i32) -> Option<PathBuf> {
-    root().map(|r| r.join(leaf_name(pid))).filter(|p| p.is_dir())
-}
-
-/// A leaf for the container led by `pid`, with `pid` moved into it (its later children start there).
+/// A container for the group led by `pid`, with `pid` moved into its leaf (its later children start there).
 pub fn adopt(pid: i32) -> std::io::Result<()> {
     let Some(r) = root() else { return Ok(()) };
     enable_controllers(r);
-    let p = r.join(leaf_name(pid));
-    std::fs::create_dir_all(&p)?;
-    std::fs::write(p.join("cgroup.procs"), pid.to_string())
+    let c = r.join(format!("c{pid}"));
+    std::fs::create_dir_all(c.join(RUN))?;
+    // the leaf's own cpu.max is the background quota; the container's holds the hard limit
+    let _ = std::fs::write(c.join("cgroup.subtree_control"), "+cpu");
+    std::fs::write(c.join(RUN).join("cgroup.procs"), pid.to_string())
 }
 
 pub fn pids(pid: i32) -> Option<Vec<i32>> {
-    let p = leaf(pid)?;
+    let p = container(pid)?.join(RUN);
     let s = std::fs::read_to_string(p.join("cgroup.procs")).ok()?;
     Some(s.lines().filter_map(|l| l.trim().parse().ok()).collect())
 }
 
-/// Kill every member at once (`cgroup.kill`, Linux 5.14); false when there is no leaf or no such file.
+/// Kill every member at once (`cgroup.kill`, Linux 5.14); false when there is no container or no such file.
 pub fn kill(pid: i32) -> bool {
-    leaf(pid).is_some_and(|p| std::fs::write(p.join("cgroup.kill"), "1").is_ok())
+    container(pid).is_some_and(|p| std::fs::write(p.join("cgroup.kill"), "1").is_ok())
 }
 
 pub fn freeze(pid: i32, on: bool) -> bool {
-    leaf(pid).is_some_and(|p| std::fs::write(p.join("cgroup.freeze"), if on { "1" } else { "0" }).is_ok())
+    container(pid).is_some_and(|p| std::fs::write(p.join("cgroup.freeze"), if on { "1" } else { "0" }).is_ok())
 }
 
-/// CPU seconds and memory of the whole leaf.
+/// Whether containers get the cpu controller (a delegated cgroup whose own processes all moved to the `agent` leaf),
+/// which lowering needs.
+pub fn cpu_controller() -> bool {
+    root().and_then(|r| std::fs::read_to_string(r.join("cgroup.subtree_control")).ok())
+        .is_some_and(|c| c.split_whitespace().any(|x| x == "cpu"))
+}
+
+/// Lower the job to its background CPU quota, or lift it; false when there is no container or no cpu controller.
+pub fn background(pid: i32, on: bool) -> bool {
+    container(pid).is_some_and(|p| std::fs::write(p.join(RUN).join("cpu.max"), if on { BACKGROUND_QUOTA } else { "max" }).is_ok())
+}
+
+/// CPU seconds and memory of the whole container.
 pub fn usage(pid: i32) -> Option<(f64, f64)> {
-    let p = leaf(pid)?;
+    let p = container(pid)?;
     let cpu = std::fs::read_to_string(p.join("cpu.stat")).ok()?.lines()
         .find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0) / 1e6;
     let mem = std::fs::read_to_string(p.join("memory.current")).ok().and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
@@ -95,7 +115,7 @@ pub fn usage(pid: i32) -> Option<(f64, f64)> {
 
 /// Hard limits: `cpu.max` as a quota of `cores` per 100 ms, `memory.max` in bytes (and no swap beyond it).
 pub fn limit(pid: i32, cores: f64, mem_gb: f64) -> bool {
-    let Some(p) = leaf(pid) else { return false };
+    let Some(p) = container(pid) else { return false };
     let mut ok = true;
     if cores > 0.0 {
         ok &= std::fs::write(p.join("cpu.max"), format!("{} 100000", (cores * 100_000.0).round() as u64)).is_ok();
@@ -107,16 +127,17 @@ pub fn limit(pid: i32, cores: f64, mem_gb: f64) -> bool {
     ok
 }
 
-/// The kernel's OOM killer ended a process of the leaf (`memory.events`).
+/// The kernel's OOM killer ended a process of the container (`memory.events`).
 pub fn oom_killed(pid: i32) -> bool {
-    let Some(p) = leaf(pid) else { return false };
+    let Some(p) = container(pid) else { return false };
     std::fs::read_to_string(p.join("memory.events")).ok().and_then(|s| s.lines()
         .find_map(|l| l.strip_prefix("oom_kill ")).and_then(|v| v.trim().parse::<u64>().ok())).is_some_and(|n| n > 0)
 }
 
-/// Remove an empty leaf.
+/// Remove an empty container.
 pub fn release(pid: i32) {
-    if let Some(p) = leaf(pid) {
+    if let Some(p) = container(pid) {
+        let _ = std::fs::remove_dir(p.join(RUN));
         let _ = std::fs::remove_dir(p);
     }
 }

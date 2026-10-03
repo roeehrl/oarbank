@@ -3,7 +3,7 @@
 //! target's current start time is read again, so a PID recycled into an owner process is never touched.
 //! Every actuation, allowed or refused, is journaled; the S16 checker replays that journal.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -51,14 +51,12 @@ impl Signal {
 pub trait Actuator: Send + Sync {
     /// Start time in microseconds since the epoch, or None if the process is gone or not visible.
     fn start_time(&self, pid: i32) -> Option<u64>;
-    /// Signal a whole process group (the leader created it).
+    /// Signal a whole process group (the leader created it); 0 on success.
     fn signal_group(&self, pgid: i32, sig: Signal) -> i32;
-    /// Move one process to background scheduling (E-cores) or back.
-    fn set_background(&self, pid: i32, on: bool) -> i32;
-    /// Members of a process group (all descendants of a registered leader).
-    fn group_members(&self, pgid: i32) -> Vec<i32> {
-        vec![pgid]
-    }
+    /// Move a whole group to background scheduling or back; 0 on success. What that is depends on the OS: macOS
+    /// background QoS (low priority, efficiency cores), a CPU quota on Linux, the idle priority class and EcoQoS
+    /// on Windows.
+    fn set_background(&self, pgid: i32, on: bool) -> i32;
 }
 
 /// For platforms without a backend yet: no start time is ever readable, so nothing registers or actuates.
@@ -150,6 +148,8 @@ pub enum Refusal {
     NotRegistered(i32),
     IdentityChanged(i32),
     Gone(i32),
+    /// The group is the agent's, but the OS did not carry the action out.
+    Failed(i32),
 }
 
 impl fmt::Display for Refusal {
@@ -158,6 +158,7 @@ impl fmt::Display for Refusal {
             Self::NotRegistered(p) => write!(f, "pid {p} is not in the spawn registry"),
             Self::IdentityChanged(p) => write!(f, "pid {p} was reused by another process"),
             Self::Gone(p) => write!(f, "pid {p} is gone"),
+            Self::Failed(p) => write!(f, "the OS did not carry out the action on group {p}"),
         }
     }
 }
@@ -334,7 +335,7 @@ impl SpawnRegistry {
                 Err(e)
             }
             Ok(m) => {
-                self.actuator.signal_group(pid, sig);
+                let ok = self.actuator.signal_group(pid, sig) == 0;
                 self.journal_record(
                     "actuation",
                     reason,
@@ -344,16 +345,21 @@ impl SpawnRegistry {
                         ("signal", Value::from(sig.raw())),
                         ("attempt", opt_int(m.attempt_id)),
                         ("service", opt_str(m.service.as_deref())),
+                        ("ok", Value::from(ok)),
                     ]),
                 );
-                Ok(())
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Refusal::Failed(pid))
+                }
             }
         }
     }
 
-    /// Move a registered group to background scheduling (E-cores) or back.
+    /// Move a registered group to background scheduling or back (see [`Actuator::set_background`]).
     pub fn set_background(&self, pid: i32, on: bool, reason: &str) -> Result<(), Refusal> {
-        let policy = if on { "darwin_bg" } else { "default" };
+        let policy = if on { "background" } else { "default" };
         match self.verify(pid) {
             Err(e) => {
                 self.journal_record(
@@ -368,12 +374,7 @@ impl SpawnRegistry {
                 Err(e)
             }
             Ok(m) => {
-                let mut targets: BTreeSet<i32> =
-                    self.actuator.group_members(pid).into_iter().collect();
-                targets.insert(pid);
-                for t in targets {
-                    self.actuator.set_background(t, on);
-                }
+                let ok = self.actuator.set_background(pid, on) == 0;
                 self.journal_record(
                     "actuation",
                     reason,
@@ -382,9 +383,14 @@ impl SpawnRegistry {
                         ("start_us", Value::from(m.start_us.to_string())),
                         ("policy", Value::from(policy)),
                         ("attempt", opt_int(m.attempt_id)),
+                        ("ok", Value::from(ok)),
                     ]),
                 );
-                Ok(())
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Refusal::Failed(pid))
+                }
             }
         }
     }

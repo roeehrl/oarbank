@@ -73,7 +73,8 @@ fn background_goes_through_the_same_check() {
     );
     assert_eq!(f.0.lock().unwrap().background, [(300, true)]);
     let recs = j.recent_records();
-    assert_eq!(recs[0].get("policy"), Some(&json!("darwin_bg")));
+    assert_eq!(recs[0].get("policy"), Some(&json!("background")));
+    assert_eq!(recs[0].get("ok"), Some(&json!(true)));
     assert_eq!(recs[0].get("attempt"), Some(&json!(1)));
     assert_eq!(recs[1].kind(), "actuation_refused");
     assert_eq!(reg.member(1).unwrap().service.as_deref(), Some("svc"));
@@ -81,6 +82,24 @@ fn background_goes_through_the_same_check() {
     assert!(reg.all().is_empty());
     // a process whose start time cannot be read is never registered
     assert!(!reg.register(999, None, None));
+}
+
+/// The OS may decline an action on one of the agent's own groups: the caller learns it, and the journal says so.
+#[test]
+fn a_declined_actuation_is_reported_not_hidden() {
+    let f = FakeActuator::new();
+    f.set_start(300, Some(5));
+    f.0.lock().unwrap().no_background = true;
+    let j = Arc::new(DecisionJournal::in_memory());
+    let reg = f.registry(Some(j.clone()));
+    assert!(reg.register(300, Some(1), None));
+    assert_eq!(reg.set_background(300, true, "lower_fleet"), Err(Refusal::Failed(300)));
+    let recs = j.recent_records();
+    assert_eq!((recs[0].kind(), recs[0].get("ok")), ("actuation", Some(&json!(false))));
+    assert_eq!(
+        Refusal::Failed(300).to_string(),
+        "the OS did not carry out the action on group 300"
+    );
 }
 
 /// PID-reuse fuzz: between a decision and its actuation the PID is recycled into an owner process at random;

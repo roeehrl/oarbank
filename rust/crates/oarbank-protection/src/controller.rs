@@ -104,6 +104,8 @@ pub struct TickInputs {
     pub user_idle_s: f64,
     /// perf + eff/2 cores; the dynamic budget's ceiling before reservations.
     pub allocatable_cores: f64,
+    /// The agent can lower its jobs here (see [`DynInputs::lowering`]).
+    pub lowering: bool,
 }
 
 impl TickInputs {
@@ -118,6 +120,7 @@ impl TickInputs {
             jobs: vec![],
             user_idle_s: 1e9,
             allocatable_cores: 0.0,
+            lowering: true,
         }
     }
 }
@@ -687,6 +690,7 @@ impl ProtectionController {
         di.any_protected_active = !self.evaluator.active_rules.is_empty();
         di.protection_started = !self.evaluator.started.is_empty();
         di.probe_requested = self.probe_requested;
+        di.lowering = i.lowering;
         self.probe_requested = false;
         di.jobs = i
             .jobs

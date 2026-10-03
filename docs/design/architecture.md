@@ -134,7 +134,9 @@ ignored, on POSIX; on Windows an inheritable auto-reset event, `OARBANK_CONTROL_
 on with the standard handles and nothing else), and runners re-read it only when nudged. Stop writes `stop` and nudges
 (plus SIGTERM on POSIX), then kills the container after the runner's `stop_grace_s`. Protection freezes `freeze_ok`
 runners through the containers (SIGSTOP of the process group on macOS, `cgroup.freeze` on Linux, suspending the Job
-Object on Windows) and pauses `cooperative_pause` runners through `control.json`. Exit codes 2, 3 and 75 count only with a `failure.json`, whose
+Object on Windows), pauses `cooperative_pause` runners through `control.json`, and lowers jobs through them too
+(background QoS on macOS; on Linux the background CPU quota of the container's `run` leaf, below the container that
+holds the hard limits; the Job Object's idle priority class and EcoQoS on Windows). Exit codes 2, 3 and 75 count only with a `failure.json`, whose
 `fault` (`job`, `host`, `transient`) decides who is charged. A failure spends one of the job's attempts when its end
 reason counts against the job; the job is quarantined once no node that could run it has attempts left under its
 stage's `retry.max_attempts` (the variant for that node's platform).

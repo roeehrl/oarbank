@@ -96,6 +96,7 @@ impl Protection {
         inputs.jobs = jobs;
         inputs.user_idle_s = idle;
         inputs.allocatable_cores = perf as f64 + eff as f64 / 2.0;
+        inputs.lowering = can_lower();
         let r = self.ctrl.tick(&inputs);
         self.actuate(&r, table);
         let limits = P::Limits::from_json(d.get("limits"));
@@ -182,9 +183,11 @@ impl Protection {
     }
 }
 
-/// Linux and Windows: protection acts on the agent's process containers (sys.rs), so a freeze is the leaf's
+/// Linux and Windows: protection acts on the agent's process containers (sys.rs), so a freeze is the container's
 /// `cgroup.freeze` (Linux, delegated; else SIGSTOP to the group) or NtSuspendProcess on every member of the Job Object
-/// (Windows). macOS keeps the protection crate's own actuator (signals and darwin background scheduling).
+/// (Windows), and lowering is the container's background CPU quota (Linux, delegated) or the Job Object's idle priority
+/// class with EcoQoS (Windows). macOS keeps the protection crate's own actuator (signals and darwin background
+/// scheduling).
 #[cfg(not(target_os = "macos"))]
 struct ContainerActuator;
 
@@ -204,13 +207,9 @@ impl P::Actuator for ContainerActuator {
         if procs::signal_group(pgid, s) { 0 } else { -1 }
     }
 
-    /// No background scheduling class to move a process into here (lowering is a macOS action).
-    fn set_background(&self, _pid: i32, _on: bool) -> i32 {
-        -1
-    }
-
-    fn group_members(&self, pgid: i32) -> Vec<i32> {
-        procs::group_pids(pgid)
+    /// The container's background CPU quota (Linux) or idle priority class and EcoQoS (Windows), sys.rs.
+    fn set_background(&self, pgid: i32, on: bool) -> i32 {
+        if crate::sys::set_background(pgid, on) { 0 } else { -1 }
     }
 }
 
@@ -227,6 +226,14 @@ fn enforce_caps(limits: &P::Limits, table: &Table, service_reserved_mem_gb: f64,
             j.wake.notify_one();
         }
     }
+}
+
+/// Whether this node can lower its jobs (Linux needs a delegated cgroup; macOS and Windows always can).
+fn can_lower() -> bool {
+    #[cfg(not(target_os = "macos"))]
+    return crate::sys::can_lower();
+    #[allow(unreachable_code)]
+    true
 }
 
 fn round1(x: f64) -> f64 {
@@ -289,10 +296,14 @@ mod caps_tests {
 mod tests {
     use super::*;
 
-    /// The registry admits the agent's own containers here, and protection's pause freezes them (Linux: the cgroup
-    /// leaf when delegated, else SIGSTOP to the group).
+    /// The registry admits the agent's own containers here, protection's pause freezes them (Linux: the cgroup
+    /// container when delegated, else SIGSTOP to the group), and lowering takes effect (Linux: the background CPU
+    /// quota, which needs a delegated cgroup; Windows: the idle priority class).
     #[test]
     fn protection_pauses_and_resumes_a_registered_container() {
+        // cgroups first, while this process has no children (as the agent's main does)
+        #[cfg(target_os = "linux")]
+        let _ = crate::cgroup::root();
         let mut cmd = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" });
         cmd.args(if cfg!(windows) { &["-n", "30", "127.0.0.1"][..] } else { &["30"][..] }).stdout(std::process::Stdio::null());
         crate::sys::new_group_std(&mut cmd);
@@ -309,6 +320,12 @@ mod tests {
         assert!(reg.signal(pid, P::Signal::Cont, "resume").is_ok());
         #[cfg(target_os = "linux")]
         assert!(!paused(pid));
+        let lowered = reg.set_background(pid, true, "lower_fleet");
+        eprintln!("lowering available here: {}; lowered: {lowered:?}", can_lower());
+        assert_eq!(lowered.is_ok(), can_lower(), "{lowered:?}");
+        assert_eq!(background(pid), lowered.is_ok());
+        assert_eq!(reg.set_background(pid, false, "restore").is_ok(), can_lower());
+        assert!(!background(pid));
         assert!(reg.signal(pid, P::Signal::Kill, "evict").is_ok());
         let _ = child.wait();
         drop(child);
@@ -323,14 +340,32 @@ mod tests {
         assert!(reg.signal(pid, P::Signal::Kill, "gone").is_err(), "a reaped container is never signalled again");
     }
 
-    /// Frozen in its cgroup leaf, or stopped by SIGSTOP when there is none.
+    /// Frozen in its cgroup container, or stopped by SIGSTOP when there is none.
     #[cfg(target_os = "linux")]
     fn paused(pid: i32) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Some(leaf) = crate::cgroup::leaf(pid) {
-            return std::fs::read_to_string(leaf.join("cgroup.events")).unwrap().lines().any(|l| l == "frozen 1");
+        if let Some(c) = crate::cgroup::container(pid) {
+            return std::fs::read_to_string(c.join("cgroup.events")).unwrap().lines().any(|l| l == "frozen 1");
         }
         let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
         s[s.rfind(')').unwrap() + 2..].starts_with('T')
+    }
+
+    /// Lowered: its leaf's background quota (Linux), the idle priority class (Windows).
+    fn background(pid: i32) -> bool {
+        #[cfg(target_os = "linux")]
+        return crate::cgroup::container(pid)
+            .and_then(|c| std::fs::read_to_string(c.join("run/cpu.max")).ok())
+            .is_some_and(|q| q.trim() != "max 100000");
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{GetPriorityClass, OpenProcess, IDLE_PRIORITY_CLASS,
+                                                        PROCESS_QUERY_LIMITED_INFORMATION};
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            let class = GetPriorityClass(h);
+            CloseHandle(h);
+            class == IDLE_PRIORITY_CLASS
+        }
     }
 }

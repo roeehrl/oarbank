@@ -586,6 +586,23 @@ fn rungs_and_reasons() {
     assert_eq!(o.rung, 0);
 }
 
+/// Where the OS cannot lower fleet jobs (Linux without a delegated cgroup), a job that would be lowered is paused
+/// when it can be; one that cannot be paused stays in the lowered set, which the agent reports undelivered.
+#[test]
+fn without_lowering_a_pausable_job_is_paused_instead() {
+    let mut c = DynamicController::new();
+    let mut i = DynInputs::new(0.0, ProtectionMode::FleetFirst, 8.0);
+    i.lower_rules = vec!["writing".into()];
+    i.jobs = vec![job(1, true, false), job(2, false, false)];
+    let o = c.step(&i);
+    assert_eq!((o.paused.len(), o.lowered.len()), (0, 2));
+    i.lowering = false;
+    let o = c.step(&i);
+    assert_eq!(o.paused.iter().copied().collect::<Vec<_>>(), [1]);
+    assert_eq!(o.lowered.iter().copied().collect::<Vec<_>>(), [2]);
+    assert_eq!(o.rung, 5);
+}
+
 // ---- signal formulas (SignalSourceTests)
 
 #[test]

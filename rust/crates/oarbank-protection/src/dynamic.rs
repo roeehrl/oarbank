@@ -95,6 +95,9 @@ pub struct DynInputs {
     /// A protect rule became active this tick (feed-forward: reset the budget to the reservation-based value).
     pub protection_started: bool,
     pub probe_requested: bool,
+    /// The OS can lower fleet jobs (false on Linux without a delegated cgroup): when it cannot, a job that would
+    /// be lowered is paused if it can be (never a larger allowance, S19).
+    pub lowering: bool,
 }
 
 impl DynInputs {
@@ -113,6 +116,7 @@ impl DynInputs {
             jobs: vec![],
             protection_started: false,
             probe_requested: false,
+            lowering: true,
         }
     }
 }
@@ -469,7 +473,7 @@ impl DynamicController {
             let lower_j = lower_all
                 || (dyn_lower && !exempt(j))
                 || (bw_mode && budget_shrunk && j.bandwidth.as_deref() == Some("high"));
-            if in_scope && j.pausable {
+            if (in_scope || (lower_j && !i.lowering)) && j.pausable {
                 o.paused.insert(j.attempt_id);
             } else if in_scope || lower_j {
                 o.lowered.insert(j.attempt_id);

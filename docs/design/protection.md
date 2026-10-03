@@ -63,7 +63,10 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   process whose open files the agent cannot read.
 - **Actions** (fleet-side only): `reserve` (cores and memory, as expressions over measured peaks such as
   `peak(300s).footprint + 2`), `cap_fleet` (slots, cores, threads, staging bandwidth, GPU jobs), `lower_fleet` (fleet
-  jobs to background QoS), `pause_fleet` (in scope `all`, `cpu`, `gpu` or `io`), `protect` (keep a metric of the
+  jobs to background scheduling: macOS background QoS, low priority on the efficiency cores; on Linux a CPU quota of a
+  tenth of a core on the job's cgroup, since the agent's cgroup and the owner's are scheduled apart and no class an
+  unprivileged agent can set yields to the owner; on Windows the Job Object's idle priority class with EcoQoS; where it
+  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`, `cpu`, `gpu` or `io`), `protect` (keep a metric of the
   protected group within a target: `cpu_stall`, `ipc_ratio`, `gpu_share`, `pageins_rate`, or `progress_rate` read from
   an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on.
   `ignore` only removes processes from the heuristic triggers.
