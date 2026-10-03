@@ -1,0 +1,60 @@
+# Oarbank: decisions
+
+The core (oarbankd, oarbank-console, oarbank, oarbank-agent and oarbank-launcher) is source-available: free for
+personal and noncommercial use, commercial licence from Codonic (D32); the module SDK is open source (Apache-2.0).
+Job modules are built against the SDK and the published protocol specs; a module author never edits, imports or reads
+core code.
+
+This page records the decisions that shape the core and why; code comments cite them by number. How the system is
+built is in [architecture.md](architecture.md), the wire protocol in [docs/protocol.md](../protocol.md) and the
+verification stack in [docs/verification.md](../verification.md). The console, operations and explanations are in
+[admin-console.md](admin-console.md); module GUIs follow the SDK's `spec/ui-contract.md`.
+
+## Decisions
+
+| # | Decision |
+|---|---|
+| D1 | Coordinator-side module logic runs **out of process**, first-party modules included. Nothing loads module code into oarbankd. |
+| D2 | Module ↔ oarbankd transport is newline-delimited **JSON-RPC 2.0 over stdio** with an MCP-style `initialize` handshake. No gRPC. |
+| D3 | Host protection has two parts, both **owner-set, never module-declared**. Each node has a priority mode (`fleet_first`, `moderate`, `strict_yield`). The owner writes protected-process rules; the central and local rule sets are unioned, and the most restrictive setting wins on each dimension. Actuation is limited to processes in the spawn registry (S16). The memory guard is absolute. ([protection.md](protection.md)) |
+| D3a | New nodes default to `moderate` with no rules. A rule protecting a GPU-bound process reserves **memory only**: such a process barely competes for CPU, so fleet CPU jobs never pause, drain or cap for it. |
+| D3b | `reserve` is an admission rule for CPU as well as memory. |
+| D3c | Private and undocumented OS signals are optional, feature-detected inputs that can only restrict fleet growth. |
+| D3d | Duty-cycling is off by default. Fleet GPU jobs run only while no protected group is using the GPU. |
+| D4 | **One baseline schema, no upgrade path.** The data model is generic (campaigns, module stores, results with digests) and is created fresh; a data directory from an older build is not migrated. |
+| D5 | `job_key` is keyed by the module-declared `compat` string. The module digest drives certification. |
+| D6 | Digest and hash verification are always on. *(Release signing: D31.)* |
+| D7 | The core is distributed **compiled**: the Python components as native code (never `.py` or bytecode), the agent as a native Rust binary. The SDK, specs and modules are Apache-2.0 with a DCO. *(Source availability: D32.)* |
+| D8 | Module processes run in the OS sandbox on the coordinator and on nodes, and the agent splits privileges (D27). There is no separate hardening stage: each mechanism ships with the feature it protects. |
+| D9 | The console has acceptance criteria of its own: agent throughput stays at or above 95% of the no-viewer baseline with five hostile viewers (the console load gate). |
+| D10 | oarbank-console is a separate, read-only process. oarbankd holds the agent API, the admin API (operation registry, explain) and the single database writer. |
+| D11 | htmx is pinned to 2.0.x, with a resync-first SSE contract; 4.x is adopted once it is tagged `latest` and passes the console's tests. |
+| D12 | Node samples are kept for 7 days in the database and served with fleet counters as Prometheus `/metrics`, cached off the writer lock. Long-term rollups are not built. |
+| D13 | The audit log is a never-pruned table with a SHA-256 hash chain. Hourly digests are signed with an Ed25519 key kept in the secret store and copied off the host. Verification runs hourly and raises a P5 alert on failure. |
+| D14 | One operation registry drives the API, CLI and GUI, with friction tiers T0–T3. A bulk operation moves up one tier. The emergency pause is T0 to engage and T1 to resume. A reason is required at T2 and above. |
+| D15 | Every editable resource carries a version (`If-Match`; 412 on mismatch, 428 when missing at T2+). Previews issue plan ids (409 on drift). Creations take an `Idempotency-Key`. |
+| D16 | One explain endpoint and document serve both the CLI and the GUI. Claim and explain share one pure predicate function, and tests check that they agree. |
+| D17 | Lifecycle and audit history are kept indefinitely. Any pruning archives first and leaves a visible watermark. |
+| D18 | Alerting is built into oarbankd: severities P1–P5, a pending period and flap collapse per rule, latched three-valued invariant conditions, acknowledgement with a useful/noise verdict for the precision review, and ntfy notifications. |
+| D19 | *(amended by D23)* No module HTML or JS ever runs in the console origin. Module UI is declarative and rendered by core templates. The only exception is D23's sandboxed, separate-origin iframe. |
+| D20 | Rule previews use a Python matcher kept equivalent to the agent's (`oarbank-protection`) by shared test vectors. Agent-reported match sets are the authority. |
+| D21 | Every operation declares a minimum role (viewer, operator, admin), enforced for console accounts and personal access tokens. |
+| D22 | **Domain workflows are module-owned.** The core keeps only a neutral *campaign*: a named job group with an owning module, priority, fair-share weight, state (running, paused, cancelled) and job counts, because scheduling needs one. Trials, baselines, searches and rankings live in the module, with its own records through host storage callbacks and its own GUI (D23). A test keeps module concepts out of the core. |
+| D23 | **Modules define their GUI through the SDK.** The UI contract (`ui_contract` version in the manifest and the handshake, with per-component fallback) covers a Modules navigation section; module pages and panels in fixed placements (overview, job tab, node tab, campaign panel, settings); about 16 host components; data bindings that are host-evaluated queries over the module's own rows, plus module-computed views cached per data version (a module is never on the render path); and actions that are registry operations `mod.<module>.<verb>`, registered at install, with tiers raised by declared effects and the preview, confirmation and audit drawn by the host. A **sandboxed iframe placement** is served from a separate origin with `sandbox="allow-scripts allow-forms"` (never `allow-same-origin`), the CSP `sandbox` header and scoped `frame-src`/`frame-ancestors`; its MessageChannel bridge can only read the module's own data and *request* registry operations, and the host draws every confirmation outside the frame. |
+| D24 | **The console's page renderer (templates and component macros) is published as Apache-2.0 in the SDK** (an exception to D7). `oarbank-sdk preview` renders a module's pages exactly as the console will, under the same CSP, with axe checks, against fixture data. |
+| D25 | **No network is required or assumed.** A fleet works with every node on one LAN, over Tailscale, over ZeroTier, or over any other VPN or mesh. Security never relies on the network being private: agent traffic is mutually authenticated TLS and the coordinator is authenticated by its identity key, not by an address. Admin and console access use Oarbank's own credentials. The coordinator move identifies its target by pairing code and keys (a tailnet StableID check is an optional extra). Discovery works on a LAN without any VPN. |
+| D26 | **The agent is written in Rust.** A shared core crate holds the byte-exact contracts (sandbox policy, portable paths, canonical JSON, bundle digest, protection matcher), used by the agent and, through PyO3, as the parity oracle for the SDK's Python. Per-OS backends sit behind host interfaces. |
+| D27 | **The agent runs as a system service with a privilege split:** a small launcher does install, update, rollback and spawning; the agent runs under a dedicated unprivileged account; a per-session helper reports presence and same-user process data (not built yet). A per-user "personal" scope stays available. |
+| D28 | **SDK protocol 1.0 is the cross-platform baseline:** open platform enums (`amd64`), `requires.os`, exec rules, `control.json` stop and pause instead of signals, `failure.json` faults, a per-OS environment, portable paths, RFC 8785 job keys, a bundle digest covering file modes, the capability sandbox contract (loopback excluded from egress), host tools as registry ids, and a broker endpoint URI. |
+| D29 | **Agents authenticate with mTLS:** short-lived P-256 client certificates for the node's own key, issued by the coordinator's internal CA from a CSR and renewed in-band. The coordinator stores only certificate fingerprints. |
+| D30 | **Sandbox floors and network model:** Linux at full parity from kernel 6.12 (older kernels report network enforcement unavailable); Windows 10 1809 minimum, with a small elevated helper for enforced allowlists; network is a `host:port` allowlist through an agent-run proxy, plus a separately approved full-trust `egress-any`; every node reports enforcement per capability and work is placed only where grants are enforced. |
+| D31 | **Platform order: macOS, then Windows, then Linux. Update trust follows TUF** (an offline vendor root; the coordinator is only a mirror). **Release signing is on by default** (`OARBANK_RELEASE_SIGNING=0` is developer mode): releases, agent builds, coordinator builds and coordinator moves are signed by the owner key set, and OS signatures are checked on top. |
+| D32 | **The core's repository may be public, source-available under PolyForm Strict 1.0.0, with a CLA.** Anyone may read it and use it for noncommercial purposes, but not change, build on or distribute it; commercial use needs a license from Codonic. CONTRIBUTING.md grants the limited right to fork and change a copy only to submit contributions; contributors sign CLA.md. The SDK stays Apache-2.0. Releases still ship the core compiled (D7). |
+| D33 | **Modules declare per-platform support, adjustments and placement** ([per-platform-modules.md](per-platform-modules.md)). Runner platforms (`requires.platforms`) and coordinator platforms (`requires.coordinator_platforms`) are separate, with optional reasons for what is unsupported; runner, coordinator and stage variants adjust exec, runtime, env, timeouts and resources per platform or OS; bundles may ship files per platform; goldens may expect a digest per platform. A `[placement]` policy (`mix` = any, same-os, same-arch or same-platform; unit = campaign, group, dataset or pipeline) keeps one unit of work on one platform class while other units use other classes. Defaults: campaigns bind by capacity, groups, datasets and pipelines by first claim; no automatic rebinding (an alert names the remedy); an unknown `mix` is the strictest. Windows is not yet a coordinator platform. **Built** (core 2.2, SDK 1.2.2; bench 2.4.0 runs one pinned campaign per platform). |
+
+## What every change keeps green
+
+The verification stack in [docs/verification.md](../verification.md): the coordinator's invariants (S1–S18 in
+`invariants.py`, which `oarbank verify` reports, with S20; S19 in the agent's property tests), the Hypothesis state machine, the simulator in single and split modes, the TLA+ models, the swarm, the
+contract and parity tests, the agent's Rust tests and its end-to-end tests against a real oarbankd, and the console
+load gate (D9).

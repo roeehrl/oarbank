@@ -1,0 +1,83 @@
+//! The macOS backend.
+
+mod cf;
+mod gpu;
+mod procs;
+mod security;
+
+use std::process::{Command, Stdio};
+
+pub use gpu::{creator_pid, gpu_time_by_pid};
+pub use procs::{
+    all_pids, argv, bundle_id_for_path, cpu_and_footprint, path, pids_in_group, proc_counters,
+    start_time_us, NativeProcessSource,
+};
+pub use security::{satisfies, signing};
+
+use crate::gpu::GpuTimes;
+use crate::signals::{frontmost, Meter, ProcCounters};
+use crate::spawn_registry::{Actuator, Signal};
+
+/// rusage V6 counters, AGX GPU time and the frontmost app.
+#[derive(Debug, Default)]
+pub struct NativeMeter;
+
+impl NativeMeter {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Meter for NativeMeter {
+    fn proc_counters(&mut self, pid: i32) -> Option<ProcCounters> {
+        proc_counters(pid)
+    }
+    fn gpu_times(&mut self) -> Option<GpuTimes> {
+        gpu_time_by_pid().map(GpuTimes::known)
+    }
+    fn frontmost_pid(&mut self) -> Option<i32> {
+        frontmost_pid()
+    }
+}
+
+/// Runs `/usr/bin/lsappinfo` (works from a LaunchAgent in the user's session and over ssh; no AppKit link).
+pub fn lsappinfo(args: &[&str]) -> Option<String> {
+    let out = Command::new("/usr/bin/lsappinfo")
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The frontmost application's pid (None: unknown).
+pub fn frontmost_pid() -> Option<i32> {
+    let asn = lsappinfo(&["front"]).and_then(|s| frontmost::serial_number(&s))?;
+    frontmost::parse_pid(&lsappinfo(&["info", "-only", "pid", &asn])?)
+}
+
+/// Signals and Darwin-background scheduling. Crate-private: reachable only through the spawn registry.
+pub(crate) struct NativeActuator;
+
+impl Actuator for NativeActuator {
+    fn start_time(&self, pid: i32) -> Option<u64> {
+        start_time_us(pid)
+    }
+
+    fn signal_group(&self, pgid: i32, sig: Signal) -> i32 {
+        // SAFETY: plain syscall; the registry verified (pid, start time) just before.
+        unsafe { libc::killpg(pgid, sig.raw()) }
+    }
+
+    fn set_background(&self, pid: i32, on: bool) -> i32 {
+        let prio = if on { libc::PRIO_DARWIN_BG } else { 0 };
+        // SAFETY: plain syscall on a verified member of a registered group.
+        unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid as libc::id_t, prio) }
+    }
+
+    fn group_members(&self, pgid: i32) -> Vec<i32> {
+        pids_in_group(pgid)
+    }
+}

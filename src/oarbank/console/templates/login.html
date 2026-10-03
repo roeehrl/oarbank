@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Oarbank</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/passkey.js" defer></script>
+</head>
+<body>
+<main class="login">
+<h1>Oarbank</h1>
+{% if error %}<div class="flash bad" role="alert">{{ error }}</div>{% endif %}
+{% if no_accounts %}
+<div class="card">
+  <p>No console account exists yet. On the coordinator, as the account that runs oarbankd:</p>
+  <pre class="mono">oarbank account create &lt;name&gt;
+oarbank console login --open</pre>
+</div>
+{% else %}
+<div class="card">
+  <button type="button" class="pri" data-passkey-login data-next="{{ next }}">Sign in with a passkey</button>
+  <p class="small mut" data-passkey-status role="status"></p>
+</div>
+<form class="card" method="post" action="/login">
+  <input type="hidden" name="next" value="{{ next }}">
+  <label>account <input name="name" autocomplete="username" required autofocus></label>
+  <label>password <input name="password" type="password" autocomplete="current-password" required></label>
+  <label>authenticator code <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required></label>
+  <button class="pri">Sign in</button>
+</form>
+<p class="small mut">On the coordinator, <span class="mono">oarbank console login --open</span> signs you in without a password.</p>
+{% endif %}
+</main>
+</body>
+</html>

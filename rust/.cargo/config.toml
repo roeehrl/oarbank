@@ -1,0 +1,4 @@
+# Windows binaries link the C runtime statically: a clean Windows machine has no VCRUNTIME140.dll, and the agent and
+# launcher must start before anything else is installed (the MSI's setup action runs the launcher).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

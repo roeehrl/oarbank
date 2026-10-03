@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block body %}
+<div id="fleet" class="live-tile" hx-get="/frag/fleet" hx-trigger="sse:tick, sse:resync" hx-swap="innerHTML">{{ body | safe }}</div>
+{% endblock %}

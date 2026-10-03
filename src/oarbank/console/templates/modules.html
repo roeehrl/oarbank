@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Modules · Oarbank{% endblock %}
+{% block body %}
+<h1>Modules</h1>
+<div class="grid">{% for x in modules %}
+<div class="card"><div class="row"><a href="/modules/{{ x.name }}"><b>{{ x.name }}</b></a><span class="chip">{{ x.version }}</span>
+  <span class="chip {{ 'ok' if x.host.state == 'ready' else ('bad' if x.host.state == 'fault' else '') }}">{{ x.host.state or 'stopped' }}</span>
+  {% if not x.enabled %}<span class="chip warn">disabled</span>{% endif %}</div>
+  <div class="small mut">{{ x.description }}</div>
+  <div class="small">stages {{ x.stages | join(', ') }}{% if x.has_ui %} · has pages{% endif %}</div></div>
+{% else %}<div class="card mut">No modules enabled. Install a bundle below, then enable it.</div>{% endfor %}</div>
+
+<h2>Lifecycle <span class="small mut">(bundles by digest; nothing is enabled on install; canary → promote; rollback keeps the previous version)</span></h2>
+<div class="card">
+  {% call m.op_form("modules.install", "", "Review install…", cls="pri", inline=False, multipart=True) %}
+  <label class="small">Bundle (.mfb from <span class="mono">oarbank-sdk bundle build</span>) <input type="file" name="bundle" accept=".mfb" required></label>
+  {% endcall %}
+  <div class="row" style="margin-top:6px">{{ m.op_form("modules.verify", "", "Verify every installed bundle") }}</div>
+</div>
+{% for s in store %}{% set ch = s.channel %}
+<div class="card" style="margin-top:8px">
+  <div class="row"><b>{{ s.name }}</b>
+    {% if ch.current %}<span class="chip ok">current {{ ch.current }}</span>{% else %}<span class="chip">not enabled</span>{% endif %}
+    {% if ch.previous %}<span class="chip">previous {{ ch.previous }}</span>{% endif %}
+    {% if ch.canary %}<span class="chip warn">canary {{ ch.canary }}</span>{% endif %}
+    {% if ch.disabled %}<span class="chip bad">disabled (kill switch)</span>{% endif %}
+    <span class="sp"></span>
+    {% if ch.current and not ch.disabled %}{{ m.op_form("modules.disable", s.name, "Disable (kill switch)", cls="danger", confirm="Stop dispatching " ~ s.name ~ " fleet-wide and requeue its live attempts?", reason_prompt=True) }}{% endif %}
+    {% if ch.current and ch.disabled %}{{ m.op_form("modules.enable", s.name, "Re-enable", confirm="Re-enable " ~ s.name ~ "?") }}{% endif %}
+    {% if ch.current %}{{ m.op_form("modules.cli_token", s.name, "CLI token", confirm="Mint a one-hour token scoped to " ~ s.name ~ "?") }}{% endif %}
+    {% if ch.canary or ch.previous %}{{ m.op_form("modules.rollback", s.name, "Roll back", confirm=("Abandon the canary of " if ch.canary else "Return every node to ") ~ s.name ~ (" " ~ ch.previous if not ch.canary else "") ~ "?", reason_prompt=True) }}{% endif %}
+    {% if ch.canary %}{{ m.op_form("modules.promote", s.name, "Review promotion…", cls="pri") }}{% endif %}
+    {% if ch.current and not ch.disabled %}{{ m.op_form("modules.check", s.name, "Check integrity", params={"deep": True}) }}{% endif %}
+  </div>
+  <div class="small">files the module stored: {{ s.files.n }} ({{ (s.files.bytes / 1e6) | round(1) }} MB) ·
+    integrity: {% if s.integrity %}<span class="chip {{ 'ok' if s.integrity.ok else 'bad' }}">{{ 'ok' if s.integrity.ok else 'FAILED' }}</span>
+    {{ s.integrity.scope }} check {{ s.integrity.at | ago }}{% for c in s.integrity.failed %}<span class="chip {{ 'bad' if c.severity == 'error' else 'warn' }}">{{ c.name }}{% if c.detail %}: {{ c.detail[:80] }}{% endif %}</span>{% endfor %}
+    {% else %}<span class="mut">not checked yet</span>{% endif %}</div>
+  {% if ch.canary %}<div class="small">canary nodes: {% for c in s.canary_state %}<span class="chip {{ 'ok' if c.state == 'certified' else 'warn' }}">{{ c.hostname }}: {{ c.state or 'installing' }}</span>{% endfor %}</div>{% endif %}
+  <table class="small" style="margin-top:6px"><tr><th>version</th><th>digest</th><th>bundle</th><th>installed and sandbox grants</th><th><span class="sr-only">actions</span></th></tr>
+  {% for v in s.versions %}<tr><td class="mono">{{ v.version }}</td><td class="mono" title="{{ v.content_digest }}">{{ v.content_digest[:15] }}…</td>
+    <td>{{ v.bundle_files }} files ({{ (v.bundle_bytes / 1e6) | round(1) }} MB)</td>
+    <td class="mut">{{ v.installed_at | ago }} by {{ v.installed_by }}
+      {% if v.sandbox.requests %}<div class="small">sandbox: {{ v.sandbox.requests }}
+        {% if v.sandbox.approved %}<span class="chip ok">approved</span>{% else %}<span class="chip warn">needs approval</span>
+        {{ m.op_form("modules.approve", s.name ~ "@" ~ v.version, "Review grants…", cls="pri") }}{% endif %}</div>{% endif %}</td>
+    <td class="row">
+      {% if not ch.current %}{{ m.op_form("modules.enable", s.name ~ "@" ~ v.version, "Enable", cls="pri", confirm="Enable " ~ s.name ~ " " ~ v.version ~ " on every node?") }}
+      {% elif v.version != ch.current and v.version != ch.canary %}
+        {% call m.op_form("modules.enable_canary", s.name ~ "@" ~ v.version, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes" size="1">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}
+        {% if v.version != ch.previous %}{{ m.op_form("modules.uninstall", s.name ~ "@" ~ v.version, "Uninstall…", cls="danger") }}{% endif %}
+      {% endif %}
+      {% call m.op_form("modules.pin", s.name ~ "@" ~ v.version, "Pin") %}<select name="p.node" aria-label="node to pin">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}
+    </td></tr>{% endfor %}</table>
+  {% if s.pins %}<div class="small">pins: {% for p in s.pins %}<span class="chip">{{ p.hostname or p.node_id }} → {{ p.version }}</span>
+    {% call m.op_form("modules.pin", s.name, "clear") %}<input type="hidden" name="p.node" value="{{ p.node_id }}"><input type="hidden" name="p.clear" value="true">{% endcall %}{% endfor %}</div>{% endif %}
+</div>{% endfor %}
+{% endblock %}

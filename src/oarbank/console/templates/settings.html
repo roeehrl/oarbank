@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Settings · Oarbank{% endblock %}
+{% block body %}
+<h1>Settings</h1>
+<div class="grid">
+<div class="card">
+  <b>Notifications (ntfy)</b>
+  {% call m.op_form("settings.notifications.update", "ntfy", "Save…", inline=False) %}
+    <div class="kv small">
+      <span>topic URL</span><input name="ntfy_url" aria-label="ntfy topic URL" value="{{ (s.ntfy.url if s.ntfy else '') or '' }}" placeholder="https://ntfy.sh/your-secret-topic" style="width:100%">
+      <span>token</span><input name="ntfy_token" aria-label="ntfy token" value="{{ s.ntfy.token if s.ntfy and s.ntfy.token else '' }}" style="width:100%">
+      <span>click link</span><input name="click_base" aria-label="click link base URL" value="{{ s.ntfy.click_base if s.ntfy and s.ntfy.click_base else '' }}" placeholder="https://oarbank.<tailnet>.ts.net" style="width:100%">
+    </div>
+  {% endcall %}
+</div>
+<div class="card">
+  <b>Access</b>
+  <div class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page. Host names the console and the
+  admin API answer to besides localhost (the remote mode): setting <span class="mono">console_hosts</span>, a JSON list.</div>
+</div>
+<div class="card">
+  <b>Host tools</b>
+  <div class="small mut">Modules ask for host tools by id (<span class="mono">[sandbox].tools</span>); this registry says where each
+  tool lives on each OS. An approved module's runners may read and execute exactly these paths.</div>
+  <table class="small">{% for id, t in (s.tool_registry or {}).items() %}<tr><td class="mono">{{ id }}</td>
+    <td>{% if t.trust == 'code-exec' %}<span class="chip warn">runs code</span>{% endif %}</td>
+    <td class="mono">{% for os_, ps in t.paths.items() %}{{ os_ }}: {{ ps | join(', ') }}<br>{% endfor %}</td></tr>
+  {% else %}<tr><td class="mut">No tools registered.</td></tr>{% endfor %}</table>
+  <details class="small"><summary>Add or change a tool…</summary>
+  {% call m.op_form("settings.tools.update", "", "Review…", inline=False) %}
+    <label>tool id <input name="target_input" class="mono" required placeholder="java17"></label>
+    <label>trust <select name="trust"><option value="read">read</option><option value="code-exec">code-exec (a JVM, an interpreter, a shell)</option></select></label>
+    <label>macOS paths (one per line) <textarea name="paths_darwin" rows="2" class="mono" style="width:100%" placeholder="/opt/homebrew/opt/openjdk@17"></textarea></label>
+    <label>Linux paths <textarea name="paths_linux" rows="2" class="mono" style="width:100%" placeholder="/usr/lib/jvm/java-17-openjdk-amd64"></textarea></label>
+    <label>Windows paths <textarea name="paths_windows" rows="2" class="mono" style="width:100%" placeholder="C:\Program Files\Eclipse Adoptium\jdk-17"></textarea></label>
+    <span class="mut">No paths removes the tool.</span>
+  {% endcall %}</details>
+</div>
+<div class="card">
+  <b>Releases</b> {{ m.op_form("releases.build", "release", "Build release", confirm="Build a release bundle from the installed modules? It is not deployed until promoted.") }}
+  <table class="small">{% for r in releases %}<tr><td class="mono">{{ r.release_id }}</td><td class="mono">{{ r.platform }}</td><td>{{ r.status }}</td><td class="mut">{{ r.created_at | ago }}</td>
+  <td>{% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
+    <details class="small"><summary>signature</summary>
+    {% call m.op_form("releases.attach_signature", r.release_id, "Attach", inline=False) %}
+      <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" placeholder="from: oarbank release sign {{ r.release_id }}"></textarea></label>
+      <label>signature <input name="p.signature" class="mono" style="width:100%"></label>
+    {% endcall %}</details></td></tr>{% endfor %}</table>
+  <details class="small"><summary>Release signing key (optional, D6)</summary>
+  {% call m.op_form("releases.pin_key", "release-key", "Pin key…", inline=False, reason_prompt=True) %}
+    <label>base64 Ed25519 public key <input name="p.pubkey" class="mono" style="width:100%" placeholder="oarbank release keygen"></label>
+    <label><input type="checkbox" name="p.rotate" value="true"> rotate (replace a pinned key)</label>
+  {% endcall %}</details>
+</div>
+<div class="card">
+  <b>Datasets</b>
+  <div class="small">{% for d in dscount %}<span class="chip">{{ d.kind }} {{ d.n }}</span> {% endfor %}</div>
+  <details class="small" style="margin-top:6px"><summary>Register a dataset (JSON)</summary>
+  {% call m.op_form("datasets.register", "", "Register…", inline=False) %}
+    <textarea name="params" rows="5" class="mono" style="width:100%" aria-label="dataset JSON"
+      placeholder='{"dataset_id": "...", "kind": "...", "module": "...", "meta": {...}, "files": [{"path": "...", "digest": "...", "size": 0}]}'></textarea>
+  {% endcall %}</details>
+</div>
+<div class="card">
+  <b>Other settings</b>
+  {% call m.op_form("settings.update", "", "Set…", inline=False) %}
+    <div class="small mut">A setting without its own control (e.g. <span class="mono">replica_rate</span>). The value is JSON.</div>
+    <label class="small">key <input name="target_input" class="mono" required></label>
+    <label class="small">value <input name="pj.value" class="mono" required></label>
+  {% endcall %}
+</div>
+<div class="card">
+  <b>Job modules</b>
+  <table class="small"><tr><th>module</th><th>v</th><th>stages</th><th>requires</th><th>host</th><th><span class="sr-only">actions</span></th></tr>
+  {% for x in modules %}<tr><td><a href="/modules/{{ x.name }}">{{ x.name }}</a></td><td>{{ x.version }}</td><td>{{ x.stages | join(', ') }}</td><td>{{ x.requires | join(', ') }}</td>
+  <td><span class="chip {{ 'ok' if x.host.state == 'ready' else ('bad' if x.host.state == 'fault' else '') }}" title="{{ x.host.last_error or '' }}">{{ x.host.state or 'stopped' }}</span>
+    <span class="mut">{{ x.host.calls or 0 }} calls, p99 {{ x.host.latency_p99_ms | num(1) }} ms</span></td>
+  <td>{{ m.op_form("modules.restart_host", x.name, "Restart") }}
+      {% if x.stages | length > 1 %}{% call m.op_form("modules.set_pipeline", x.name, "Pipeline…") %}<select name="mode" aria-label="pipeline mode"><option>single</option><option>split</option></select>{% endcall %}{% endif %}
+      {% if x.enabled %}{{ m.op_form("modules.disable", x.name, "Disable", confirm="Disable " ~ x.name ~ "? Dispatch stops fleet-wide and live attempts are requeued.") }}
+      {% else %}{{ m.op_form("modules.enable", x.name, "Enable", confirm="Re-enable " ~ x.name ~ "?") }}{% endif %}</td></tr>{% endfor %}</table>
+</div>
+</div>
+{% endblock %}

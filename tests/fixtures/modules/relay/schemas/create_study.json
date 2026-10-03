@@ -1,0 +1,9 @@
+{"type": "object", "required": ["name", "datasets", "baseline"],
+ "properties": {"name": {"type": "string", "title": "Name"},
+                "datasets": {"type": "array", "items": {"type": "string"}, "title": "Datasets"},
+                "baseline": {"type": "object", "title": "Baseline"},
+                "configs": {"type": "array", "items": {"type": "object"}, "title": "Configs"},
+                "priority": {"type": "integer", "title": "Priority"},
+                "placement": {"type": "object", "title": "Placement"},
+                "group_by": {"enum": ["trial", "dataset"], "title": "Group jobs by"},
+                "platforms": {"type": "array", "items": {"type": "string"}, "title": "Platforms"}}}

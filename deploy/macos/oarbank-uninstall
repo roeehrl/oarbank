@@ -1,0 +1,19 @@
+#!/bin/sh
+# Remove the Oarbank agent from this Mac: its service, then (with --purge) its home with the node's keys and caches,
+# then the programs. Run with sudo for a system install.
+set -eu
+BIN=/Library/Oarbank/bin
+scope=personal
+[ -f "/Library/LaunchDaemons/dev.codonic.oarbank.agent.plist" ] && scope=system
+if [ "$scope" = personal ] && [ "$(/usr/bin/id -u)" = 0 ]; then
+    user=$(/usr/bin/stat -f%Su /dev/console)
+    /bin/launchctl asuser "$(/usr/bin/id -u "$user")" /usr/bin/sudo -u "$user" "$BIN/oarbank-launcher" remove "$@"
+else
+    "$BIN/oarbank-launcher" remove --scope "$scope" "$@"
+fi
+if [ "$(/usr/bin/id -u)" = 0 ]; then
+    /bin/rm -rf /Library/Oarbank
+    /usr/sbin/pkgutil --forget dev.codonic.oarbank.agent >/dev/null 2>&1 || true
+else
+    echo "The programs in /Library/Oarbank stay; remove them with: sudo $0"
+fi

@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "product": "oarbank-agent",
+  "label": "dev.codonic.oarbank.agent",
+  "binaries": [
+    "oarbank-agent",
+    "oarbank-launcher"
+  ],
+  "scopes": {
+    "personal": {
+      "home": "{user_data}/agent",
+      "service": "user"
+    },
+    "system": {
+      "home": "{system_data}/agent",
+      "service": "system",
+      "account": {
+        "darwin": "_oarbank",
+        "linux": "oarbank",
+        "windows": null
+      }
+    }
+  },
+  "dirs": [
+    {
+      "path": "",
+      "mode": "0700"
+    },
+    {
+      "path": "versions",
+      "mode": "0755"
+    },
+    {
+      "path": "state",
+      "mode": "0700"
+    },
+    {
+      "path": "logs",
+      "mode": "0700"
+    },
+    {
+      "path": "run",
+      "mode": "0700"
+    }
+  ],
+  "join_code": {
+    "to": "state/join-code",
+    "mode": "0600"
+  },
+  "firewall": [],
+  "purge": [
+    ""
+  ]
+}

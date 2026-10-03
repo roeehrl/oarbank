@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Agent · Oarbank{% endblock %}
+{% block body %}
+<h1>Agent</h1>
+<p class="small mut">Each node updates its own oarbank-agent through oarbankd: it downloads the build assigned to its platform,
+checks it, installs it beside the running one, lets its running jobs finish and restarts on it. A build that fails to start,
+or is not confirmed within 10 minutes, is rolled back on that node automatically. No ssh.</p>
+{% macro build(sha) -%}{% if sha %}<span class="mono" title="{{ sha }}">{{ versions[sha] or '?' }} · {{ sha[:12] }}</span>{% else %}–{% endif %}{%- endmacro %}
+
+<h2>Channels</h2>
+{% for plat, ch in channels.items() %}
+<div class="card">
+  <div class="row">
+    <strong class="mono">{{ plat }}</strong>
+    {% if ch.current %}<span class="chip ok">current {{ build(ch.current) }}</span>{% else %}<span class="chip">no current build (each node keeps what it runs)</span>{% endif %}
+    {% if ch.previous %}<span class="chip">previous {{ build(ch.previous) }}</span>{% endif %}
+    {% if ch.canary %}<span class="chip warn">canary {{ build(ch.canary) }}</span>{% endif %}
+    <span class="sp"></span>
+    {% if ch.canary or ch.previous %}{{ m.op_form("agent.rollback", "agent", "Roll back", params={"platform": plat}, confirm=("Abandon the agent canary on " ~ plat ~ "?" if ch.canary else "Return every " ~ plat ~ " node to the previous agent build?"), reason_prompt=True) }}{% endif %}
+    {% if ch.canary %}{{ m.op_form("agent.promote", "agent", "Review promotion…", params={"platform": plat}, cls="pri") }}{% endif %}
+  </div>
+</div>
+{% else %}<p class="mut small">No agent build is enabled on any platform yet.</p>{% endfor %}
+
+<h2>Nodes</h2>
+<table class="small">
+  <tr><th>node</th><th>platform</th><th>runs</th><th>assigned</th><th>update</th></tr>
+  {% for n in nodes %}<tr>
+    <td>{{ n.hostname }}{% if n.canary %} <span class="chip warn">canary</span>{% endif %}</td>
+    <td class="mono">{{ n.platform or '?' }}</td>
+    <td class="mono">{{ n.agent_version or '?' }}{% if n.agent_build %} · {{ n.agent_build[:12] }}{% endif %}</td>
+    <td>{{ build(n.assigned) }}</td>
+    <td>{% if n.up_to_date %}<span class="chip ok">up to date</span>
+        {% else %}{% set st = n.update.state or 'pending' %}<span class="chip {{ 'bad' if st in ('failed', 'rolled_back', 'blocked') else 'warn' }}">{{ st | replace('_', ' ') }}</span>
+        {% if n.update.error %}<span class="mut">{{ n.update.error[:160] }}</span>{% endif %}{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="5" class="mut">No nodes enrolled.</td></tr>{% endfor %}
+</table>
+
+<h2>Vendor update metadata</h2>
+<div class="card">
+  <p class="small mut">Agents built with the vendor's TUF root install only builds the vendor's metadata lists: upload
+    what the vendor publishes (root, timestamp, snapshot, targets; also <span class="mono">oarbank vendor-metadata upload &lt;dir&gt;</span>).</p>
+  {% call m.op_form("vendor.metadata.upload", "", "Upload metadata", inline=False, multipart=True) %}
+  <label class="small">TUF metadata files <input type="file" name="metadata" multiple accept=".json" required></label>
+  {% endcall %}
+</div>
+
+<h2>Builds</h2>
+<div class="card">
+  {% call m.op_form("agent.upload", "", "Review upload…", cls="pri", inline=False, multipart=True) %}
+  <label class="small">oarbank-agent binary for any platform (macOS, Linux or Windows; its platform is read from the file) <input type="file" name="binary" required></label>
+  {% endcall %}
+</div>
+<table class="small" style="margin-top:8px">
+  <tr><th>version</th><th>platforms</th><th>sha256</th><th>size</th><th>uploaded</th><th>signed</th><th><span class="sr-only">actions</span></th></tr>
+  {% for b in builds %}<tr>
+    <td class="mono">{{ b.version }}</td><td class="mono">{{ b.platforms | join(', ') }}</td><td class="mono" title="{{ b.sha256 }}">{{ b.sha256[:12] }}…</td>
+    <td>{{ (b.size / 1048576) | round(1) }} MB</td><td class="mut">{{ b.uploaded_at | ago }} by {{ b.uploaded_by }}</td>
+    <td>{% if b.signed %}seq {{ b.seq }}{% else %}<span class="mut">no</span>{% endif %}</td>
+    <td class="row">
+      {% set fits = nodes | selectattr("platform", "in", b.platforms) | list %}
+      {% if fits %}
+      {% call m.op_form("agent.canary", b.sha256, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes for {{ b.version }}" size="1">{% for n in fits %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}
+      {% endif %}
+      {% if not b.signed %}<details><summary class="small">Sign…</summary>
+        {% call m.op_form("agent.sign", b.sha256, "Attach signature", inline=False) %}
+        <label class="small">statement <textarea name="p.statement" rows="2" required></textarea></label>
+        <label class="small">signature <input name="p.signature" required></label>
+        <span class="small mut">or run <span class="mono">oarbank agent sign {{ b.sha256[:12] }}</span></span>
+        {% endcall %}</details>{% endif %}
+    </td></tr>{% else %}<tr><td colspan="7" class="mut">No agent builds uploaded yet.</td></tr>{% endfor %}
+</table>
+{% endblock %}

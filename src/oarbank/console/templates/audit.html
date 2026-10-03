@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Audit · Oarbank{% endblock %}
+{% block body %}
+<h1>Audit log</h1>
+<p class="small mut">Every operation, accepted or refused, hash-chained (head #{{ head }}){% if digest %}; last signed digest covers #{{ digest.last_event_id }} ({{ digest.ts | ago }}){% endif %}. Never pruned.
+{{ m.op_form("audit.verify", "audit", "Verify chain now") }}</p>
+<form class="row small" method="get"><label>operation <input name="op" value="{{ op }}" placeholder="nodes.*"></label>
+  <label>target <input name="target" value="{{ target }}"></label><button>Filter</button></form>
+<table class="small"><tr><th>#</th><th>when</th><th>actor</th><th>source</th><th>operation</th><th>target</th><th>outcome</th><th>reason</th><th>error</th></tr>
+{% for r in rows %}<tr><td>{{ r.event_id }}</td><td class="mut">{{ r.ts | hm }}</td><td>{{ r.actor }}</td><td>{{ r.source }}</td>
+<td class="mono">{{ r.operation }}{% if r.dry_run %} (preview){% endif %}</td><td class="mono">{{ r.target_type }}:{{ r.target_id }}</td>
+<td><span class="chip {{ 'ok' if r.outcome == 'ok' else 'bad' }}">{{ r.outcome }}</span></td><td>{{ r.reason or '' }}</td><td class="mut">{{ r.error or '' }}</td></tr>
+{% else %}<tr><td colspan="9" class="mut">no operations yet</td></tr>{% endfor %}</table>
+{% if next_before %}<p><a href="/audit?before={{ next_before }}&op={{ op }}&target={{ target }}">Older</a></p>{% endif %}
+{% endblock %}

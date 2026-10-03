@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "description": "A Tailscale login, node:<id>, module:<id> or system:<component>.",
+      "pattern": "^([A-Za-z0-9._%+@-]+|node:[A-Za-z0-9_-]+|module:[a-z0-9.-]+|system:[a-z_]+)$",
+      "title": "Actor",
+      "type": "string"
+    },
+    "after": {
+      "default": null,
+      "title": "After"
+    },
+    "before": {
+      "default": null,
+      "title": "Before"
+    },
+    "category": {
+      "enum": [
+        "create",
+        "modify",
+        "remove",
+        "access"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "dry_run": {
+      "default": false,
+      "title": "Dry Run",
+      "type": "boolean"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Hash",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Idempotency Key"
+    },
+    "operation": {
+      "description": "Operation id from the registry.",
+      "title": "Operation",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "ok",
+        "rejected",
+        "conflict",
+        "denied",
+        "error"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "parent_event_id": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Bulk operations: the parent record.",
+      "title": "Parent Event Id"
+    },
+    "patch": {
+      "anyOf": [
+        {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "RFC 6902 patch, instead of before/after for large documents.",
+      "title": "Patch"
+    },
+    "plan_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Plan Id"
+    },
+    "prev_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Prev Hash",
+      "type": "string"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "request_id": {
+      "description": "ULID, returned as X-Request-Id and shown in GUI toasts.",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "source": {
+      "enum": [
+        "gui",
+        "cli",
+        "api",
+        "system",
+        "scheduler"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "target_id": {
+      "title": "Target Id",
+      "type": "string"
+    },
+    "target_type": {
+      "title": "Target Type",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "number"
+    },
+    "user_agent": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "User Agent"
+    }
+  },
+  "required": [
+    "event_id",
+    "ts",
+    "actor",
+    "source",
+    "request_id",
+    "operation",
+    "category",
+    "target_type",
+    "target_id",
+    "outcome",
+    "prev_hash",
+    "hash"
+  ],
+  "title": "AuditRecord",
+  "type": "object"
+}

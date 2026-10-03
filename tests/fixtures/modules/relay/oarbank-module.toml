@@ -1,0 +1,119 @@
+# relay: the core test suite's fixture module (not shipped), a cut-down copy of the SDK's invented render example and a
+# two-stage parameter search on purpose: a parameter set renders a scene dataset in one stage ("eval") or as the chain
+# render -> score, where only nodes with the "scorer" pool (from the "scorer" service) can score. Results carry a
+# score, a tile count and the rendered image's digest; goldens come from the module's settings, per node class.
+manifest = 1
+
+[module]
+id = "dev.codonic.oarbank.relay"
+version = "1.0.0"
+compat = "relay1"
+publisher = "oarbank"
+license = "Apache-2.0"
+codeowners = ["roeehrl"]
+stability = "experimental"
+description = "Core test fixture: eval, or render then score on a scorer pool"
+
+[requires]
+core = ">=2.0,<3"
+module_protocol = [1]
+runner_protocol = [1]
+service_protocol = [1]
+ui_contract = ">=1.0,<2"
+platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]
+
+[coordinator]
+exec = ["python", "-I", "{bundle}/relay_module.py"]
+runtime = { kind = "python" }
+capabilities = ["result.merge", "golden.compare", "op.plan", "op.apply", "ui.view.compute"]
+permissions = ["datasets:read", "settings:read:self", "store:read:self", "nodes:read", "jobs:read:self"]
+
+[runner]
+exec = ["python", "-I", "{bundle}/relay_runner.py"]
+runtime = { kind = "python" }
+capabilities = ["cancellable", "deterministic_output", "freeze_ok"]
+
+[[stages]]
+name = "eval"
+timeout_s = 1800
+requires = { needs_pools = ["scorer"], resources = { cpu = 1, mem_gb = 1.5 } }
+retry = { max_attempts = 3 }
+
+[[stages]]
+name = "render"
+timeout_s = 1800
+requires = { resources = { cpu = 1, mem_gb = 1.5 } }
+
+[[stages]]
+name = "score"
+after = "render"
+timeout_s = 600
+requires = { pools = { scorer = 1 }, resources = { cpu = 0.5, mem_gb = 1.0 } }
+
+[[services]]
+name = "scorer"
+exec = ["{bundle}/services/scorer.sh"]
+platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"]
+lifecycle = "on_demand"
+idle_timeout_s = 900
+start_timeout_s = 60
+provides = { capabilities = ["scorer"], pools = ["scorer"] }
+reserves_host_memory = true
+yieldable = true
+
+[bundle]
+executables = ["services/*.sh"]
+
+[results]
+schema = "schemas/result.schema.json"
+schema_version = 1
+determinism = "exact"
+digest = { version = 1, over = ["image_sha256"] }
+value = { field = "score", direction = "maximize" }
+fields = [
+  { name = "score", type = "number", indexed = true, ui = { column = "Score", format = ".6f" } },
+  { name = "tiles", type = "integer", ui = { column = "Tiles", format = ",d" } },
+  { name = "image_sha256", type = "string" },
+]
+
+[datasets]
+kinds = ["scene", "demo"]
+attrs = [{ name = "scene", type = "string", indexed = true }, { name = "frames", type = "string" }]
+
+[goldens]
+fixtures = "schemas/*.json"
+compare = "verb"
+
+[ui]
+digest_line = "score {score}"
+icon = "flask"
+pages = [{ id = "scores", title = "Scores", slot = "module.overview", file = "ui/pages/scores.json" }]
+panels = [{ id = "trials", title = "Trials", slot = "campaign.panel", file = "ui/panels/trials.json" }]
+
+[ui.views.scores]
+shape = "rows"
+inputs = ["results"]
+columns = [{ key = "trial", type = "integer" }, { key = "dataset", type = "dataset_ref" }, { key = "score", type = "number" }]
+
+[ui.views.trials]
+shape = "rows"
+params = { campaign = { type = "string" } }
+inputs = ["jobs", "store:trial"]
+columns = [{ key = "trial", type = "integer" }, { key = "label", type = "text" }, { key = "done", type = "integer" },
+           { key = "mean", type = "number" }]
+
+[[operations]]
+verb = "create_study"
+title = "Compare parameter sets"
+tier = "T1"
+target = "none"
+params_schema = "schemas/create_study.json"
+effects = ["campaigns.create", "jobs.enqueue", "store.write"]
+
+[[operations]]
+verb = "rerun_baseline"
+title = "Re-run the baseline"
+tier = "T2"
+target = "campaign"
+preview = true
+effects = ["jobs.enqueue"]

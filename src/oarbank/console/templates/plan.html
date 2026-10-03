@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Review {{ plan.op }} · Oarbank{% endblock %}
+{% block body %}
+<h1>Review: {{ entry.summary }}</h1>
+{% if drift %}<div class="flash bad" role="alert">{{ drift }}</div>{% endif %}
+<div class="card plan">
+  <div class="kv small">
+    <span class="mut">operation</span><span class="mono">{{ plan.op }} ({{ entry.tier }})</span>
+    <span class="mut">target</span><span class="mono">{{ plan.target }}</span>
+    {% if plan.params %}<span class="mut">change</span><pre>{{ plan.params | tojson(indent=1) }}</pre>{% endif %}
+    {% if plan.impact.matches is defined %}<span class="mut">live matches</span><span><table class="small">
+      {% for r in plan.impact.matches %}<tr><td class="mono">{{ r.rule }}</td><td class="num">{{ r.processes | length }}</td>
+      <td class="mono small">{% for q in r.processes[:8] %}{{ q.pid }} {{ (q.path or '').rsplit('/', 1)[-1] }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endfor %}</table></span>{% endif %}
+    {% if plan.impact.why is defined and plan.impact.why %}<span class="mut">not promotable</span><span>{% for w in plan.impact.why %}<div class="chip bad">{{ w }}</div>{% endfor %}</span>{% endif %}
+    <span class="mut">impact</span><pre>{{ plan.impact | tojson(indent=1) }}</pre>
+    {% if plan.versions %}<span class="mut">versions read</span><span class="mono">{{ plan.versions | tojson }}</span>{% endif %}
+    {% if plan.expires_at %}<span class="mut">plan</span><span class="mono">{{ plan.plan_id }} · valid until {{ plan.expires_at | hm }}</span>{% endif %}
+  </div>
+  <form method="post" action="/apply/{{ plan.op }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="plan_id" value="{{ plan.plan_id }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <input type="hidden" name="target" value="{{ plan.target }}">
+    <input type="hidden" name="confirm_name" value="{{ plan.confirm_name }}">
+    <input type="hidden" name="idem" value="{{ new_key() }}">
+    <label class="small">Reason (required)<textarea name="reason" required minlength="3" rows="2">{{ reason }}</textarea></label>
+    {% if plan.confirm_required %}
+    <label class="small">Type <b class="mono">{{ plan.confirm_name }}</b> to confirm
+      <input name="confirm" required autocomplete="off"></label>
+    {% endif %}
+    <div class="row" style="margin-top:8px"><a class="btn" href="{{ return_to or '/' }}" autofocus>Cancel</a>
+      <button class="{{ 'danger' if entry.tier == 'T3' else 'pri' }}">Apply {{ plan.op }}</button></div>
+  </form>
+</div>
+{% endblock %}

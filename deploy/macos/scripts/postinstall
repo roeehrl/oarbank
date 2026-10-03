@@ -1,0 +1,50 @@
+#!/bin/sh
+# Oarbank agent pkg: runs as root once the payload is in /Library/Oarbank.
+#
+# A first install configures the node when the installer was given what it needs, in /Library/Oarbank/etc (an
+# admin or MDM writes these before installing):
+#   join-code     an Oarbank join code (OB1-…); deleted once copied into the agent's home
+#   coordinator   or a coordinator URL (the owner then approves the node)
+#   system        present: install as a system service run as _oarbank (default: the console user's LaunchAgent)
+# Without them it only installs the programs and says how to finish. An upgrade restarts the service on the new
+# launcher; the agent's own version is the coordinator's to change (self-update).
+set -eu
+BIN=/Library/Oarbank/bin
+ETC=/Library/Oarbank/etc
+LABEL=dev.codonic.oarbank.agent
+user=$(/usr/bin/stat -f%Su /dev/console)
+uid=$(/usr/bin/id -u "$user" 2>/dev/null || echo 0)
+
+if [ -f "$ETC/system" ]; then scope=system; else scope=personal; fi
+if [ "$scope" = system ]; then
+    home="/Library/Application Support/Oarbank/agent"
+    target="system/$LABEL"
+else
+    uhome=$(/usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
+    home="$uhome/Library/Application Support/Oarbank/agent"
+    target="gui/$uid/$LABEL"
+fi
+
+if [ -f "$home/agent.json" ]; then
+    /bin/launchctl kickstart -k "$target" 2>/dev/null || true
+    echo "Oarbank: upgraded; the service restarted on the new launcher"
+    exit 0
+fi
+
+set --
+[ -f "$ETC/join-code" ] && set -- "$@" --join-code-file "$ETC/join-code"
+[ -f "$ETC/coordinator" ] && set -- "$@" --coordinator "$(/bin/cat "$ETC/coordinator")"
+if [ $# -eq 0 ]; then
+    echo "Oarbank: installed. Finish with: $BIN/oarbank-launcher setup --join-code <code>"
+    exit 0
+fi
+
+if [ "$scope" = system ]; then
+    "$BIN/oarbank-launcher" setup --scope system "$@"
+elif [ "$uid" -gt 0 ] && [ "$user" != root ]; then
+    /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" "$BIN/oarbank-launcher" setup "$@"
+else
+    echo "Oarbank: no one is logged in; finish with: $BIN/oarbank-launcher setup --join-code <code>"
+    exit 0
+fi
+/bin/rm -f "$ETC/join-code"

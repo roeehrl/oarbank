@@ -1,0 +1,952 @@
+{
+  "$defs": {
+    "ActiveWhen": {
+      "additionalProperties": false,
+      "description": "Any one trigger that holds activates the rule, after for_s.",
+      "properties": {
+        "cpu_cores_gt": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Cores Gt"
+        },
+        "footprint_gb_gt": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Footprint Gb Gt"
+        },
+        "for_s": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For S"
+        },
+        "frontmost": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frontmost"
+        },
+        "gpu_active": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuActive"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "ActiveWhen",
+      "type": "object"
+    },
+    "CapFleet": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_cores": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Cores"
+        },
+        "gpu_jobs": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gpu Jobs"
+        },
+        "pools": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "With slots = 0: only jobs reserving these pools may start, up to the tokens.",
+          "title": "Pools",
+          "type": "object"
+        },
+        "slots": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slots"
+        },
+        "staging_mbps": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Staging Mbps"
+        },
+        "threads": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threads"
+        }
+      },
+      "title": "CapFleet",
+      "type": "object"
+    },
+    "Cooldown": {
+      "additionalProperties": false,
+      "properties": {
+        "backoff": {
+          "default": 2.0,
+          "minimum": 1,
+          "title": "Backoff",
+          "type": "number"
+        },
+        "base_s": {
+          "default": 120,
+          "exclusiveMinimum": 0,
+          "title": "Base S",
+          "type": "number"
+        },
+        "max_s": {
+          "default": 3840,
+          "exclusiveMinimum": 0,
+          "title": "Max S",
+          "type": "number"
+        },
+        "window_s": {
+          "default": 3600,
+          "exclusiveMinimum": 0,
+          "title": "Window S",
+          "type": "number"
+        }
+      },
+      "title": "Cooldown",
+      "type": "object"
+    },
+    "During": {
+      "additionalProperties": false,
+      "description": "Phase-scoped extra actions while an owner-supplied source says a phase is on.",
+      "properties": {
+        "cap_fleet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapFleet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evict"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lower_fleet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LowerFleet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pause_fleet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PauseFleet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "protect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Protect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reserve": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reserve"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "During",
+      "type": "object"
+    },
+    "Evict": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "default": "all",
+          "enum": [
+            "all",
+            "cpu",
+            "gpu",
+            "io"
+          ],
+          "title": "Scope",
+          "type": "string"
+        }
+      },
+      "title": "Evict",
+      "type": "object"
+    },
+    "GpuActive": {
+      "additionalProperties": false,
+      "properties": {
+        "min_busy": {
+          "default": 0.05,
+          "description": "GPU busy seconds per second of the group's processes, summed over the GPU's engines, over the last sample interval. Usage that cannot be read counts as busy.",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Min Busy",
+          "type": "number"
+        }
+      },
+      "title": "GpuActive",
+      "type": "object"
+    },
+    "Implicit": {
+      "additionalProperties": false,
+      "properties": {
+        "frontmost_app": {
+          "default": true,
+          "title": "Frontmost App",
+          "type": "boolean"
+        },
+        "owner_stall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OwnerStall"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "Implicit",
+      "type": "object"
+    },
+    "LowerFleet": {
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "const": "e_cores",
+          "default": "e_cores",
+          "title": "To",
+          "type": "string"
+        }
+      },
+      "title": "LowerFleet",
+      "type": "object"
+    },
+    "Match": {
+      "additionalProperties": false,
+      "description": "Strongest first: a code-signing requirement or team id survives updates and relocation.",
+      "properties": {
+        "argv_regex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Argv Regex"
+        },
+        "bundle_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bundle Id"
+        },
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identifier"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "p_comm (weakest; truncated at 16 characters).",
+          "title": "Name"
+        },
+        "path_contains": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path Contains"
+        },
+        "path_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path Prefix"
+        },
+        "requirement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Code-signing requirement string (SecCodeCheckValidity).",
+          "title": "Requirement"
+        },
+        "team_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z0-9]{10}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team Id"
+        }
+      },
+      "title": "Match",
+      "type": "object"
+    },
+    "MemoryGuard": {
+      "additionalProperties": false,
+      "properties": {
+        "hard_free_pct": {
+          "default": 8,
+          "exclusiveMaximum": 100,
+          "exclusiveMinimum": 0,
+          "title": "Hard Free Pct",
+          "type": "number"
+        },
+        "min_reclaim_gb": {
+          "default": 2,
+          "minimum": 0,
+          "title": "Min Reclaim Gb",
+          "type": "number"
+        },
+        "soft_free_pct": {
+          "default": 12,
+          "exclusiveMaximum": 100,
+          "exclusiveMinimum": 0,
+          "title": "Soft Free Pct",
+          "type": "number"
+        },
+        "swap_growth_hard_mb_min": {
+          "default": 1024,
+          "minimum": 0,
+          "title": "Swap Growth Hard Mb Min",
+          "type": "number"
+        },
+        "swap_growth_soft_mb_min": {
+          "default": 256,
+          "minimum": 0,
+          "title": "Swap Growth Soft Mb Min",
+          "type": "number"
+        }
+      },
+      "title": "MemoryGuard",
+      "type": "object"
+    },
+    "NodeSection": {
+      "additionalProperties": false,
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/Timing"
+        },
+        "duty_cycle": {
+          "default": false,
+          "description": "D3d: SIGSTOP/SIGCONT time-slicing rung, off by default.",
+          "title": "Duty Cycle",
+          "type": "boolean"
+        },
+        "gpu_jobs": {
+          "default": "when_no_gpu_protected",
+          "enum": [
+            "never",
+            "when_no_gpu_protected",
+            "always"
+          ],
+          "title": "Gpu Jobs",
+          "type": "string"
+        },
+        "implicit": {
+          "$ref": "#/$defs/Implicit",
+          "description": "moderate/strict_yield only."
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryGuard"
+        },
+        "mode": {
+          "default": "moderate",
+          "enum": [
+            "fleet_first",
+            "moderate",
+            "strict_yield"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "pause": {
+          "default": false,
+          "description": "Local brake: no fleet work at all (local file only needs no coordinator).",
+          "title": "Pause",
+          "type": "boolean"
+        },
+        "private_signals": {
+          "default": true,
+          "description": "D3c: feature-detected private sources; they can only restrict.",
+          "title": "Private Signals",
+          "type": "boolean"
+        }
+      },
+      "title": "NodeSection",
+      "type": "object"
+    },
+    "OwnerStall": {
+      "additionalProperties": false,
+      "properties": {
+        "max": {
+          "default": 0.15,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Max",
+          "type": "number"
+        }
+      },
+      "title": "OwnerStall",
+      "type": "object"
+    },
+    "PauseFleet": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "default": "all",
+          "enum": [
+            "all",
+            "cpu",
+            "gpu",
+            "io"
+          ],
+          "title": "Scope",
+          "type": "string"
+        }
+      },
+      "title": "PauseFleet",
+      "type": "object"
+    },
+    "Protect": {
+      "additionalProperties": false,
+      "properties": {
+        "max": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max"
+        },
+        "max_slowdown": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Slowdown"
+        },
+        "metric": {
+          "enum": [
+            "cpu_stall",
+            "ipc_ratio",
+            "gpu_share",
+            "pageins_rate",
+            "progress_rate"
+          ],
+          "title": "Metric",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "window_s": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "title": "Window S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "metric"
+      ],
+      "title": "Protect",
+      "type": "object"
+    },
+    "Reserve": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu"
+        },
+        "mem_gb": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mem Gb"
+        }
+      },
+      "title": "Reserve",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "active_when": {
+          "anyOf": [
+            {
+              "const": "present",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/ActiveWhen"
+            }
+          ],
+          "default": "present",
+          "title": "Active When"
+        },
+        "cap_fleet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapFleet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "during": {
+          "items": {
+            "$ref": "#/$defs/During"
+          },
+          "title": "During",
+          "type": "array"
+        },
+        "enter_for_s": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enter For S"
+        },
+        "evict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evict"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "exit_after_s": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit After S"
+        },
+        "id": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "ignore": {
+          "default": false,
+          "description": "Only removes the processes from heuristic triggers; memory still counts.",
+          "title": "Ignore",
+          "type": "boolean"
+        },
+        "lower_fleet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LowerFleet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "match": {
+          "$ref": "#/$defs/Match"
+        },
+        "pause_fleet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PauseFleet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "protect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Protect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reserve": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reserve"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tree": {
+          "default": "self",
+          "enum": [
+            "self",
+            "descendants",
+            "same_team"
+          ],
+          "title": "Tree",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "match"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "properties": {
+        "enter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enter"
+        },
+        "event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event"
+        },
+        "exec": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Owner-written probe printing a number (never from a module).",
+          "title": "Exec"
+        },
+        "exit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit"
+        },
+        "jsonl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Jsonl"
+        },
+        "log_regex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Log Regex"
+        }
+      },
+      "title": "Source",
+      "type": "object"
+    },
+    "Timing": {
+      "additionalProperties": false,
+      "properties": {
+        "cooldown": {
+          "$ref": "#/$defs/Cooldown"
+        },
+        "enter_for_s": {
+          "default": 4,
+          "minimum": 0,
+          "title": "Enter For S",
+          "type": "number"
+        },
+        "exit_after_s": {
+          "default": 60,
+          "minimum": 0,
+          "title": "Exit After S",
+          "type": "number"
+        }
+      },
+      "title": "Timing",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "node": {
+      "$ref": "#/$defs/NodeSection"
+    },
+    "rule": {
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "title": "Rule",
+      "type": "array"
+    },
+    "schema": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema",
+      "type": "integer"
+    }
+  },
+  "title": "ProtectionConfig",
+  "type": "object"
+}

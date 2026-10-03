@@ -1,0 +1,3 @@
+[submodule "vendor/oarbank-sdk"]
+	path = vendor/oarbank-sdk
+	url = https://github.com/roeehrl/oarbank-sdk.git

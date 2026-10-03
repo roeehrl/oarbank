@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Campaigns · Oarbank{% endblock %}
+{% block body %}
+<h1>Campaigns</h1>
+<p class="small mut">A campaign is a module's batch of work (a parameter search, a benchmark sweep, ...). Modules create them from their own pages; what a campaign means is shown in its module's panel.</p>
+<form class="row small" method="get">
+  <label>module <select name="module"><option value="">any</option>{% for mname in modules %}<option {% if module == mname %}selected{% endif %}>{{ mname }}</option>{% endfor %}</select></label>
+  <label>state <select name="state"><option value="">any</option>{% for s in ['running','paused','done','cancelled'] %}<option {% if state == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <button>Filter</button></form>
+<table><tr><th>Campaign</th><th>module</th><th>state</th><th>placement</th><th class="num">priority</th><th class="num">weight</th><th class="num">done</th><th class="num">running</th><th class="num">failed</th><th>created</th></tr>
+{% for c in campaigns %}<tr><td><a href="/campaigns/{{ c.campaign_id }}">{{ c.name }}</a> <span class="mono small mut">{{ c.campaign_id }}</span></td>
+<td><a href="/modules/{{ c.module }}">{{ c.module }}</a></td><td><span class="chip">{{ c.state }}</span></td><td class="small">{{ c.placement.label }}{% if c.placement.stranded %} <span class="chip warn">stranded</span>{% endif %}</td>
+<td class="num">{{ c.priority }}</td><td class="num">{{ c.weight }}</td><td class="num">{{ c.jobs.d }} / {{ c.jobs.n }}</td>
+<td class="num">{{ c.jobs.l }}</td><td class="num">{{ c.jobs.f }}</td><td class="mut small">{{ c.created_at | ago }}</td></tr>
+{% else %}<tr><td colspan="10" class="mut">no campaigns yet: modules create them from their pages (see <a href="/modules">Modules</a>)</td></tr>{% endfor %}</table>
+{% endblock %}

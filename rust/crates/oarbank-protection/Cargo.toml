@@ -1,0 +1,19 @@
+[package]
+name = "oarbank-protection"
+description = "Host protection: owner rules, the memory guard, the dynamic controller, the spawn registry and the capacity engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# argv_regex and log_regex: lookaround and backreferences like Python's `re`, which the console's preview uses
+fancy-regex = "0.19"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Performance"] }

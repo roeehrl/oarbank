@@ -1,0 +1,4 @@
+{"ui_contract": "1.0", "title": "Scores",
+ "body": [{"type": "table", "source": {"view": "scores"},
+           "columns": [{"key": "trial", "type": "integer"}, {"key": "dataset", "type": "dataset_ref"},
+                       {"key": "score", "type": "number", "format": ".6f", "direction": "max"}]}]}

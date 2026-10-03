@@ -1,0 +1,76 @@
+# A worked example of node protection config, schema 1 (docs/design/protection.md).
+schema = 1
+
+[node]
+mode         = "moderate"
+gpu_jobs     = "when_no_gpu_protected"
+duty_cycle   = false
+implicit     = { frontmost_app = true, owner_stall = { max = 0.15 } }
+
+# TOML 1.0 inline tables must fit on one line, so the longer sections are ordinary tables.
+[node.memory]
+soft_free_pct = 12
+hard_free_pct = 8
+swap_growth_soft_mb_min = 256
+swap_growth_hard_mb_min = 1024
+min_reclaim_gb = 2
+
+[node.defaults]
+enter_for_s  = 4
+exit_after_s = 60
+cooldown     = { base_s = 120, backoff = 2.0, max_s = 3840, window_s = 3600 }
+
+[[rule]]
+id             = "gpu-trainer"
+match          = { path_contains = "GPU Trainer/releases" }
+tree           = "descendants"
+active_when    = { footprint_gb_gt = 3.0 }
+# Memory only: a GPU-bound trainer barely competes for CPU, so fleet CPU jobs keep running beside it (D3a).
+reserve        = { mem_gb = "peak(300s).footprint + 2" }
+[[rule.during]]
+source         = { jsonl = "~/events-*.jsonl", enter = "weights_uploading", exit = "weights_uploaded" }
+cap_fleet      = { staging_mbps = 0 }
+
+[[rule]]
+id          = "xcode-builds"
+match       = { requirement = 'anchor apple and identifier "com.apple.dt.Xcode"' }
+tree        = "descendants"
+active_when = { cpu_cores_gt = 1.0, for_s = 4 }
+lower_fleet = { to = "e_cores" }
+protect     = { metric = "cpu_stall", max = 0.10, window_s = 20 }
+
+[[rule]]
+id          = "chrome"
+match       = { team_id = "EQHXZ8M8AV" }
+tree        = "same_team"
+active_when = { frontmost = true }
+cap_fleet   = { cpu_cores = 6 }
+
+[[rule]]
+id          = "owner-mlx-train"
+match       = { path_prefix = "/Users/owner/venvs/mlx/bin/python", argv_regex = 'train\.py' }
+tree        = "descendants"
+active_when = "present"
+reserve     = { mem_gb = "peak(600s).footprint + 4" }
+pause_fleet = { scope = "gpu" }
+protect     = { metric = "progress_rate", source = { jsonl = "~/runs/current/events.jsonl", event = "step" }, max_slowdown = 0.05, window_s = 120 }
+
+[[rule]]
+id          = "games"
+match       = { path_prefix = "/Applications/Games/" }
+tree        = "descendants"
+# active while the game keeps the GPU busy at least 10 % of the time for 10 s; unreadable GPU usage counts as busy
+active_when = { gpu_active = { min_busy = 0.10 }, for_s = 10 }
+pause_fleet = { scope = "gpu" }
+
+[[rule]]
+id           = "calls"
+match        = { bundle_id = ["us.zoom.xos", "com.apple.FaceTime"] }
+active_when  = "present"
+pause_fleet  = { scope = "all" }
+exit_after_s = 120
+
+[[rule]]
+id     = "indexers"
+match  = { bundle_id = ["com.getdropbox.dropbox"] }
+ignore = true

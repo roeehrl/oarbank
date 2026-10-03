@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Job {{ j.job_id }} · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>Job {{ j.job_id }}</h1><span class="chip">{{ j.kind }}</span><span class="chip">{{ j.state }}</span>
+  <span class="sp"></span><span class="mono small mut">{{ j.job_key[:16] }}…</span></div>
+<p class="small"><a href="/explain/job/{{ j.job_id }}">Why is this job {{ j.state }}?</a>
+{% call m.op_form("jobs.set_priority", j.job_id, "Set priority") %}<input name="priority" type="number" value="{{ j.priority or 0 }}" style="width:70px" aria-label="priority">{% endcall %}</p>
+
+<div class="kv small card">
+  <span class="mut">campaign</span><span>{% if j.campaign_id %}<a href="/campaigns/{{ j.campaign_id }}">{{ j.campaign_id }}</a>{% endif %}{% for k, v in (j.labels or {}).items() %} · {{ k }} <span class="mono">{{ v }}</span>{% endfor %}</span>
+  <span class="mut">module / stage</span><span>{{ j.module }}{% if j.stage %} · {{ j.stage }}{% endif %}</span>
+  <span class="mut">dataset</span><span class="mono">{{ j.dataset_id or '–' }}</span>
+  <span class="mut">generation</span><span>{{ j.generation }} · failures {{ j.exec_failures }} · expirations {{ j.expirations }}</span>
+  <span class="mut">target node</span><span>{{ j.target_node or 'any' }}</span>
+  {% if spec.expected %}<span class="mut">expected</span><span class="mono">{{ spec.expected }}</span>{% endif %}
+</div>
+<h2>Attempts</h2>
+<table class="small"><tr><th>attempt</th><th>node</th><th>state</th><th>reason</th><th>phase</th><th class="num">cpu s</th><th>granted</th><th>ended</th></tr>
+{% for a in attempts %}<tr><td>{{ a.attempt_id }}</td><td>{{ a.hostname }}</td><td>{{ a.state }}</td><td>{{ a.end_reason or '' }}</td>
+<td>{{ a.phase or '' }}</td><td class="num">{{ a.cpu_s | num(0) }}</td><td class="mut">{{ a.granted_at | hm }}</td><td class="mut">{{ a.ended_at | hm if a.ended_at else '' }}</td></tr>{% endfor %}</table>
+<h2>Waterfall <span class="small mut">({{ waterfall.span_s | secs }} from creation)</span></h2>
+{% for row in waterfall.rows %}<div class="small">attempt {{ row.attempt_id }} on {{ row.node or '?' }} · {{ row.state }}{% if row.end_reason %} ({{ row.end_reason }}){% endif %}</div>
+<div class="wf" role="img" aria-label="attempt {{ row.attempt_id }} timeline">{% for g in row.segments %}<span class="{{ g.cls }}" style="left:{{ g.left }}%;width:{{ g.width }}%" title="{{ g.label }} {{ g.secs | secs }}">{{ g.label }}</span>{% endfor %}</div>
+{% else %}<p class="small mut">no attempts yet</p>{% endfor %}
+
+{% for p in panels or [] %}<h2>{{ p.title }} <span class="small mut">({{ p.module }})</span></h2>{{ p.html | safe }}{% endfor %}
+
+<h2>Results</h2>
+{% for r in results %}
+<div class="card" style="margin-bottom:8px">
+  <div class="row"><b>{{ r.module }}</b>{% if r.module_version %}<span class="small mut">{{ r.module_version }}</span>{% endif %}<b>value {{ r.value | num(6) if r.value is not none else '–' }}</b>
+    <span class="chip {{ 'ok' if r.canonical else ('warn' if r.accepted else 'bad') }}">{{ 'canonical' if r.canonical else r.reason }}</span>
+    <span class="sp"></span><span class="small mut">attempt {{ r.attempt_id }} · {{ r.at | ago }}</span></div>
+  <div class="small">{% for k, v in (r.fields or {}).items() if v is not mapping %}{{ k }} <b>{{ v }}</b> · {% endfor %}</div>
+  <div class="small mut">{% if r.mode %}mode {{ r.mode }} · {% endif %}digest {{ (r.digest or '')[:12] }}{% if r.digest_version %} (v{{ r.digest_version }}){% endif %}</div>
+  <details class="small"><summary>provenance</summary><pre>{{ r.prov | tojson(indent=1) }}</pre></details>
+</div>
+{% else %}<p class="mut">no results yet</p>{% endfor %}
+<h2>Logs</h2>
+{% for aid, text in logs.items() %}<div class="small mut">attempt {{ aid }}</div><pre>{{ text }}</pre>{% else %}<p class="mut">no logs</p>{% endfor %}
+<h2>Events</h2>
+<table class="small">{% for e in events %}<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td>{{ e.reason or '' }}</td><td class="mono">{{ e.payload_json or '' }}</td></tr>{% endfor %}</table>
+{% endblock %}

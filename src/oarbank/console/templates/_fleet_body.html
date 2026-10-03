@@ -1,0 +1,105 @@
+{% import "_macros.html" as m with context %}
+{% if fleet_state == 'active' %}<div class="row small" style="margin-bottom:6px"><span class="sp"></span>
+  {{ m.op_form("fleet.halt", "fleet", "Halt fleet", cls="danger", confirm="Halt the fleet? Every live attempt is released and requeued; no new leases.", reason_prompt=True) }}</div>{% endif %}
+{% if fleet_state != 'active' %}<div class="flash bad" role="alert">Fleet {{ fleet_state }}: no new leases.
+  {{ m.op_form("fleet.resume", "fleet", "Resume fleet…", cls="pri", reason_prompt=True) }}</div>{% endif %}
+{% if alerts %}
+<h2>Alerts{% if alerts_pending %} <span class="small mut">({{ alerts_pending }} pending: they notify only if they outlive their rule's pending period)</span>{% endif %}</h2>
+<div class="grid">{% for a in alerts %}
+  <div class="card alert"><div class="row"><span class="chip {{ 'bad' if a.severity in ('P4', 'P5') else 'warn' }}">{{ a.severity }}</span>
+    <b>{{ a.rule }}</b> <span class="mut small">{{ a.opened_at | ago }}</span>
+    {% if a.acked_by %}<span class="chip">acked by {{ a.acked_by }}</span>{% endif %}{% if a.snoozed %}<span class="chip">snoozed</span>{% endif %}</div>
+    <div>{{ a.detail }}</div>
+    <div class="small mut" style="margin-top:4px">Runbook: {{ a.runbook }}</div>
+    <div class="row small" style="margin-top:6px">
+      {{ m.op_form("alerts.ack", a.alert_id, "Ack: useful", params={"useful": true}) }}
+      {{ m.op_form("alerts.ack", a.alert_id, "Ack: noise", params={"useful": false}) }}
+      {{ m.op_form("alerts.snooze", a.alert_id, "Snooze 1 h", params={"minutes": 60}) }}
+      {{ m.op_form("alerts.resolve", a.alert_id, "Resolve", reason_prompt=a.severity == 'P5') }}
+    </div></div>
+{% endfor %}</div>
+{% endif %}
+
+{% if enrollments %}
+<h2>Waiting for approval</h2>
+<div class="grid">{% for e in enrollments %}
+  <div class="card"><div class="row"><b>{{ e.hostname }}</b><span class="chip">{{ e.peer_ip }}</span><span class="sp"></span>
+    {{ m.op_form("nodes.admit", e.enrollment_id, "Approve…", cls="pri") }}
+    {{ m.op_form("nodes.reject_enrollment", e.enrollment_id, "Reject", cls="danger", confirm="Reject " ~ e.hostname ~ "?") }}</div>
+    {% set hw = e.hw %}
+    <div class="small mut">{{ [hw.os, hw.arch, hw.cpu, (hw.memory_gb | num(1)) ~ ' GB' if hw.memory_gb is known, 'requested ' ~ (e.created_at | ago)] | select | join(' · ') }}</div></div>
+{% endfor %}</div>
+{% endif %}
+
+<h2>Nodes</h2>
+<div class="row small">{% call m.op_form("nodes.join_code", "", "Join code for a new machine…") %}<input name="p.label" aria-label="name for the new machine" placeholder="node name (optional)">{% endcall %}
+  <span class="mut">On the new machine: <span class="mono">oarbank-agent run --join &lt;code&gt;</span>; it is approved at once.</span></div>
+<div class="grid">
+{% for n in nodes %}
+  <div class="card">
+    <div class="row">
+      <a href="/nodes/{{ n.node_id }}"><b>{{ n.hostname }}</b></a>
+      {% if n.platform %}<span class="chip" title="platform {{ n.platform }}{% if n.os_version %}, {{ n.os }} {{ n.os_version }}{% endif %}">{{ {'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}.get(n.os, n.os) or n.platform }}{% if n.arch %} {{ n.arch }}{% endif %}</span>{% endif %}
+      {% if not n.online %}<span class="chip bad">offline</span>
+      {% elif n.lifecycle != 'ready' %}<span class="chip warn">{{ n.lifecycle }}</span>
+      {% elif n.desired_state != 'active' %}<span class="chip warn">{{ n.desired_state }}</span>
+      {% else %}<span class="chip ok">active</span>{% endif %}
+      {% if n.cap.binding_limit and n.cap.binding_limit.startswith('cap.') %}<span class="chip acc">capped: {{ n.cap.binding_limit[4:] }}{% if n.limits[n.cap.binding_limit[4:]] is defined %} {{ n.limits[n.cap.binding_limit[4:]] }}{% endif %}</span>{% endif %}
+      {% for r in (n.tel.protection or {}).get('active') or [] %}<span class="chip acc" title="protection rule active">protecting: {{ r }}</span>{% endfor %}
+      {% if n.tel.guard and n.tel.guard != 'clear' %}<span class="chip warn" title="{{ (n.tel.protection or {}).get('guard_reason') or '' }}">memory guard: {{ n.tel.guard }}</span>{% endif %}
+      <span class="sp"></span>{% if n.hw.cpu %}<span class="small mut">{{ n.hw.cpu }}</span>{% endif %}
+    </div>
+    <div class="row small" style="margin:3px 0">{% for m, st in n.mods.items() %}<span class="chip {{ 'ok' if st.state == 'certified' else ('warn' if st.state == 'certifying' else 'bad') }}" title="{{ st.reason or '' }}">{{ m }}{% if st.state != 'certified' %}: {{ st.state }}{% endif %}</span>{% else %}<span class="chip">no modules certified yet</span>{% endfor %}
+      </div>
+    {% set s = n.slots %}{% set pools = n.cap.pools or {} %}
+    <div class="small">{% if not s.reported %}jobs {{ n.live }} · <span class="mut">capacity not reported yet</span>
+      {%- elif s.held %}jobs {{ n.live }} · <b>no new jobs: {{ s.held }}</b>
+      {%- elif s.zero_why %}jobs {{ n.live }} · <b>no CPU slots: {{ s.zero_why }}</b>
+      {%- else %}jobs {{ n.live }} / {{ s.slots }} CPU slots{% if s.auto is not none %} <span class="mut">(auto {{ s.auto }})</span>{% endif %}{% endif %}
+      {%- if n.cap.mem_gb_free is known %} · {{ n.cap.mem_gb_free | num(1) }} GB free for jobs{% endif %}
+      {%- if pools %} · pools {% for p, k in pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %} · {{ n.done1h }} done/h</div>
+    <div class="bar"><i style="width:{{ (100 * n.live / s.slots) if s.reported and s.slots and not s.held else 0 }}%"></i></div>
+    <div class="row small mut">
+      {% if n.tel.mem_used_gb is known and n.hw.memory_gb is known %}<span>mem {{ n.tel.mem_used_gb | num(1) }} / {{ n.hw.memory_gb | num(1) }} GB</span>
+      {% elif n.tel.mem_used_gb is known %}<span>mem {{ n.tel.mem_used_gb | num(1) }} GB used</span>
+      {% elif n.hw.memory_gb is known %}<span>mem {{ n.hw.memory_gb | num(1) }} GB</span>{% endif %}
+      {% if n.pressure %}<span>pressure {{ n.pressure }}</span>{% endif %}
+      {% if n.heat %}<span>thermal {{ n.heat }}</span>{% endif %}
+      {% if n.tel.on_battery %}<span class="chip warn">battery</span>{% endif %}
+      {% if n.tel.hid_idle_s is known and n.tel.hid_idle_s < (n.policy.user_idle_s or 300) %}<span class="chip">user present</span>{% endif %}
+      {% if n.tel.services_running %}<span>services {{ n.tel.services_running | join(', ') }}</span>{% endif %}
+      <span>heartbeat {{ n.hb_age | secs if n.hb_age is not none else 'never' }}</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      {% if n.desired_state == 'active' %}
+      {{ m.op_form("nodes.pause", n.node_id, "Pause") }}
+      {{ m.op_form("nodes.drain", n.node_id, "Drain", confirm="Drain " ~ n.hostname ~ "? " ~ n.live ~ " running attempts finish; no new work.") }}
+      {% else %}
+      {{ m.op_form("nodes.resume", n.node_id, "Resume", cls="pri") }}
+      {% endif %}
+      <a class="btn" href="/nodes/{{ n.node_id }}">Details & caps</a>
+    </div>
+  </div>
+{% else %}
+  <div class="card mut">No nodes yet. Install the agent on a machine (macOS, Linux or Windows) and approve it here.</div>
+{% endfor %}
+</div>
+
+{% if discovered %}
+<h2>On the tailnet, not enrolled</h2>
+<div class="row">{% for d in discovered %}<span class="chip {{ 'ok' if d.online else '' }}">{{ d.name }}{% if not d.online %} (offline){% endif %}</span>{% endfor %}</div>
+{% endif %}
+
+<h2>Campaigns in progress</h2>
+<table><tr><th>Campaign</th><th class="num">done</th><th class="num">running</th><th class="num">failed</th><th class="num">ETA</th></tr>
+{% for s in campaigns %}
+<tr><td><a href="/campaigns/{{ s.campaign_id }}">{{ s.name }}</a> <span class="chip">{{ s.module }}</span> <span class="chip">{{ s.state }}</span></td>
+  <td class="num">{{ s.jobs.d or 0 }} / {{ s.jobs.n }}</td><td class="num">{{ s.jobs.l or 0 }}</td>
+  <td class="num">{{ s.jobs.f or 0 }}</td><td class="num">{{ s.eta_s | secs if s.eta_s is not none else '–' }}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">none</td></tr>{% endfor %}
+</table>
+
+<h2>Recent events</h2>
+<table class="small">{% for e in events %}
+<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td class="mut">{{ e.actor }}</td><td>{{ e.reason or '' }}</td></tr>
+{% endfor %}</table>

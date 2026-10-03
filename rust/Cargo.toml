@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/oarbank-core", "crates/oarbank-core-py", "crates/oarbank-protection", "crates/oarbank-agent", "crates/oarbank-launcher"]
+
+[workspace.package]
+version = "1.0.0-alpha.1"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+authors = ["Codonic"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

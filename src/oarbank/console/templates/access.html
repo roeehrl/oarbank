@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Access · Oarbank{% endblock %}
+{% block body %}
+<h1>Access</h1>
+<p class="small mut">Console accounts sign in with a password and an authenticator code, or a passkey. Nothing is trusted for being
+local: the CLI on the coordinator uses the owner's admin token, and scripts elsewhere use personal access tokens.</p>
+<table class="small">
+  <tr><th>account</th><th>role</th><th>state</th><th><span class="sr-only">actions</span></th></tr>
+  {% for a in accounts %}<tr><td>{{ a.name }}</td><td>{{ a.role }}</td><td>{% if a.disabled %}<span class="chip bad">disabled</span>{% else %}<span class="chip ok">enabled</span>{% endif %}</td>
+  <td class="row">
+    {{ m.op_form("access.accounts.update", a.name, "Enable…" if a.disabled else "Disable…", params={"disabled": not a.disabled}) }}
+    {% call m.op_form("access.accounts.update", a.name, "Set role…") %}<select name="p.role" aria-label="role for {{ a.name }}">{% for r in ('admin', 'operator', 'viewer') %}<option{% if r == a.role %} selected{% endif %}>{{ r }}</option>{% endfor %}</select>{% endcall %}
+    {{ m.op_form("access.accounts.reset_totp", a.name, "New TOTP…") }}
+    {{ m.op_form("access.login_link", a.name, "Sign-in link") }}
+  </td></tr>{% endfor %}
+</table>
+<div class="card">
+  <b>New account</b>
+  {% call m.op_form("access.accounts.create", "", "Review…", inline=False) %}
+    <label class="small">name <input name="target_input" required pattern="[a-z][a-z0-9_.\-]{1,31}"></label>
+    <label class="small">role <select name="p.role"><option>admin</option><option>operator</option><option selected>viewer</option></select></label>
+    <label class="small">password (optional, 12+ characters) <input type="password" name="p.password" autocomplete="new-password"></label>
+  {% endcall %}
+</div>
+<h2>Tokens</h2>
+<table class="small">{% for t in tokens %}<tr><td class="mono">{{ t.token_id }}</td><td>{{ t.account }}</td><td>{{ t.label }}</td><td>{{ t.role }}</td>
+  <td class="mut">expires {{ t.expires_at | ts }}</td><td>{% if t.revoked %}revoked{% else %}{{ m.op_form("access.tokens.revoke", t.token_id, "Revoke", confirm="Revoke this token?") }}{% endif %}</td></tr>
+{% else %}<tr><td class="mut">No tokens.</td></tr>{% endfor %}</table>
+<h2>Passkeys</h2>
+<table class="small">{% for k in passkeys %}<tr><td>{{ k.account }}</td><td>{{ k.label }}</td><td class="mono">{{ k.rp_id }}</td>
+  <td>{{ m.op_form("access.passkeys.remove", k.credential_id, "Remove", confirm="Remove this passkey?") }}</td></tr>
+{% else %}<tr><td class="mut">No passkeys.</td></tr>{% endfor %}</table>
+{% endblock %}

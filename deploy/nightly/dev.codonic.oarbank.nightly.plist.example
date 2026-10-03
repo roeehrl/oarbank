@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- scripts/nightly.sh as a macOS LaunchAgent. Replace REPO with the checkout's path, then:
+     cp deploy/nightly/dev.codonic.oarbank.nightly.plist.example ~/Library/LaunchAgents/dev.codonic.oarbank.nightly.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.codonic.oarbank.nightly.plist
+     Runs at 03:30 with low priority; reports go to ~/Library/Application Support/Oarbank/nightly/. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.codonic.oarbank.nightly</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>-lc</string><string>REPO/scripts/nightly.sh</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/tmp/oarbank-nightly.log</string>
+  <key>StandardErrorPath</key><string>/tmp/oarbank-nightly.log</string>
+</dict></plist>

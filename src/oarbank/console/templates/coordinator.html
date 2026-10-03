@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Coordinator · Oarbank{% endblock %}
+{% block body %}
+<h1>Coordinator</h1>
+<p class="small mut">Agents trust this coordinator's key, not its address. A move gives the new machine its own key, signed into place
+by this one; agents follow only that signed statement, after checking the new machine's identity, and never accept an older
+coordinator again. Running work continues through the move; dispatch pauses for about a minute.</p>
+
+<div class="card">
+  <div class="row"><span class="chip {{ 'ok' if s.role == 'active' else 'warn' }}">{{ s.role }}</span>
+    <span class="chip">epoch {{ s.epoch }}</span><span class="chip">phase {{ s.phase }}</span>
+    <span class="chip mono" title="identity key fingerprint">key {{ s.cik_fingerprint[:16] }}</span>
+    <span class="chip mono">{{ s.fleet_id }}</span></div>
+</div>
+
+{% set mv = s.move %}
+{% if mv and mv.state in ('pending', 'cutover') %}
+<div class="card" style="margin-top:8px" role="status">
+  <div class="row"><b>Move {{ mv.move_id }} {{ mv.state }}</b>
+    <span class="chip warn">to {{ mv.statement_doc.to.url }}</span>
+    <span class="chip">starts {{ mv.not_before | ts }}</span>
+    <span class="sp"></span>
+    {{ m.op_form("coordinator.cancel", "coordinator", "Cancel the move", cls="danger", confirm="Cancel the pending coordinator move? This coordinator keeps serving.", reason_prompt=True) }}
+  </div>
+  <div class="small mut">reason: {{ mv.reason or '–' }} · requested by {{ mv.actor }}</div>
+</div>
+{% endif %}
+
+<h2>Agents</h2>
+<table class="small">
+  <tr><th>machine</th><th>pinned key</th><th>confirmed</th><th>move</th><th><span class="sr-only">actions</span></th></tr>
+  {% for n in nodes %}<tr>
+    <td>{{ n.hostname }}</td>
+    <td class="mono">{% if n.cik_pinned %}{{ n.cik_pinned[:16] }}{% if n.cik_pinned != fp %} <span class="chip bad">differs</span>{% endif %}{% else %}<span class="mut">not yet</span>{% endif %}</td>
+    <td>{% if n.cik_confirmed == fp %}<span class="chip ok">confirmed</span>{% else %}<span class="mut">no</span>{% endif %}</td>
+    <td>{{ (n.move or {}).state or '–' }} <span class="mut">{{ ((n.move or {}).error or '')[:100] }}</span></td>
+    <td>{% if n.cik_pinned == fp and n.cik_confirmed != fp %}{{ m.op_form("nodes.confirm_identity", n.node_id, "Confirm " ~ n.cik_pinned[:8], confirm="Confirm that " ~ n.hostname ~ " pinned key " ~ fp[:16] ~ "?") }}{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="5" class="mut">No machines enrolled.</td></tr>{% endfor %}
+</table>
+
+<h2>Move to another machine</h2>
+<div class="card">
+  {% set p = s.plan %}
+  {% if not p or p.state in ('done', 'cancelled') %}
+  {% call m.op_form("coordinator.prepare", "", "Review plan…", cls="pri", inline=False) %}
+  <label class="small">target machine <select name="target_input" aria-label="target machine">{% for n in nodes %}<option value="{{ n.hostname }}">{{ n.hostname }}</option>{% endfor %}</select></label>
+  <span class="small mut">an enrolled node's agent installs the standby coordinator; for another host, run <span class="mono">oarbank coordinator prepare --to http://host:7443</span></span>
+  {% endcall %}
+  {% else %}
+  <div class="row"><span class="chip">plan {{ p.plan_id }}</span><span class="chip">{{ p.state }}</span><span class="chip mono">{{ p.target_url }}</span></div>
+  {% if p.state == 'paired' and not (mv and mv.state in ('pending','cutover')) %}
+  {% call m.op_form("coordinator.move", "coordinator", "Review move…", cls="pri", inline=False) %}
+  <label class="small">time lock <select name="p.timelock_s" aria-label="time lock"><option value="86400">24 hours (default)</option><option value="3600">1 hour (needs a reason)</option><option value="900">15 minutes (needs a reason)</option></select></label>
+  {% endcall %}
+  {% elif p.state == 'prepared' %}<div class="small mut">waiting for the standby coordinator to pair (it uses the code shown when you prepared the plan)</div>{% endif %}
+  {% endif %}
+</div>
+{% if mv and mv.state == 'awaiting_owner' %}
+<div class="card" style="margin-top:8px">
+  <b>This move waits for the owner's signature</b> <span class="small mut">(signing mode). Run <span class="mono">oarbank coordinator sign --owner-key &lt;key&gt;</span>, or paste a signature over the statement:</span>
+  {% call m.op_form("coordinator.sign_move", "coordinator", "Attach the owner's signature…", inline=False) %}
+  <label class="small">owner signature (base64) <input name="p.owner_sig" required></label>
+  {% endcall %}
+</div>
+{% endif %}
+
+<h2>Owner keys <span class="small mut">(signing mode: releases, agent builds and moves need an owner key; oarbankd never holds one)</span></h2>
+<div class="card">
+  <div class="small">Set or rotate with <span class="mono">oarbank owner set --key &lt;primary&gt; --backup-key &lt;backup&gt;</span>; the statements are signed on your own machine. To apply a statement you signed elsewhere:</div>
+  {% call m.op_form("owner.set_anchors", "coordinator", "Review owner key set…", inline=False) %}
+  <label class="small">statement <textarea name="p.statement" rows="2" required></textarea></label>
+  <label class="small">signatures (JSON list of {key, sig}) <textarea name="pj.signatures" rows="2" required></textarea></label>
+  {% endcall %}
+  <details><summary class="small">Turn owner signing off…</summary>
+  {% call m.op_form("owner.disable_signing", "coordinator", "Review…", cls="danger", inline=False) %}
+  <label class="small">owner-signed statement <textarea name="p.statement" rows="2" required></textarea></label>
+  <label class="small">signatures (JSON) <textarea name="pj.signatures" rows="2" required></textarea></label>
+  {% endcall %}</details>
+</div>
+
+<h2>Coordinator builds <span class="small mut">(a move installs a signed build for the target's platform; never run here)</span></h2>
+<div class="card">
+  {% call m.op_form("coordinator.builds.upload", "", "Review upload…", cls="pri", inline=False, multipart=True) %}
+  <label class="small">coordinator build archive (.tar.gz with oarbank-coordinator.json) <input type="file" name="archive" required></label>
+  {% endcall %}
+  <table class="small">{% for b in cbuilds %}<tr><td class="mono">{{ b.version }}</td><td class="mono">{{ b.platform }}</td>
+    <td class="mono" title="{{ b.sha256 }}">{{ b.sha256[:12] }}</td><td>{% if b.signature %}signed seq {{ b.seq }}{% else %}<span class="mut">unsigned</span>{% endif %}</td>
+    <td>{% if not b.signature %}<details><summary class="small">Sign…</summary>
+      {% call m.op_form("coordinator.builds.sign", b.sha256, "Attach signature", inline=False) %}
+      <label class="small">statement <textarea name="p.statement" rows="2" required></textarea></label>
+      <label class="small">signature <input name="p.signature" required></label>
+      <span class="small mut">or run <span class="mono">oarbank coordinator-build sign {{ b.sha256[:12] }}</span></span>
+      {% endcall %}</details>{% endif %}</td></tr>
+  {% else %}<tr><td class="mut">No coordinator builds.{% if not signing %} Signing is off (developer mode): a move bundles the running checkout.{% endif %}</td></tr>{% endfor %}</table>
+</div>
+
+{% if s.role == 'handed_off' %}
+<div class="card" style="margin-top:8px">{{ m.op_form("coordinator.finalize", "coordinator", "Finalize this old coordinator…", cls="danger") }}
+  <span class="small mut">after the 72-hour probation: stop redirecting agents; the data stays here for you to archive</span></div>
+{% endif %}
+{% endblock %}

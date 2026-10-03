@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ c.name }} · Oarbank{% endblock %}
+{% block body %}
+<div hx-get="/frag/campaign/{{ c.campaign_id }}" hx-trigger="sse:tick, sse:resync" hx-swap="innerHTML" class="live-tile">
+{% include "_campaign_body.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,153 @@
+# CI for the core (docs/design/architecture.md, "Packaging and CI"). It holds no signing keys: release artifacts are built unsigned and the
+# owner signs them. The SDK submodule is the public repository github.com/roeehrl/oarbank-sdk.
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coordinator:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - run: uv sync --extra dev --frozen
+      - run: uv run pytest -q -p no:cacheprovider --ignore=tests/rust
+
+  agent:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: uv sync --extra dev --frozen
+      - run: cargo test --workspace --locked
+        working-directory: rust
+      - run: uv run pytest -q -p no:cacheprovider tests/rust
+
+  rust-other-os:
+    # the agent, launcher and portable crates on Linux and Windows, x64 and arm64: unit tests on the real OS (the
+    # core's tests replay the SDK's vectors and schemas, so the submodule is checked out)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: clang for ring (Windows on Arm)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        run: scripts/windows-clang.ps1 -Install | Add-Content $env:GITHUB_PATH
+        shell: pwsh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo test --locked --workspace --exclude oarbank-core-py
+        working-directory: rust
+      - run: cargo build --locked --release -p oarbank-agent -p oarbank-launcher
+        working-directory: rust
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [coordinator, agent]
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: uv sync --extra dev --frozen
+      - run: scripts/package-macos.sh "${GITHUB_REF_NAME#v}"
+      - run: scripts/build-coordinator.sh "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oarbank-${{ github.ref_name }}-macos-unsigned
+          path: dist/
+
+  package-linux:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust-other-os]
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update -q && sudo apt-get install -y -q nfpm
+      - run: scripts/package-linux.sh "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oarbank-${{ github.ref_name }}-${{ matrix.os }}-unsigned
+          path: dist/
+
+  package-windows:
+    # oarbank-agent-<v>-windows-x64.msi and -arm64.msi: the script builds for the runner's architecture
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust-other-os]
+    strategy:
+      matrix:
+        include:
+          - {os: windows-2025, arch: x64}
+          - {os: windows-11-arm, arch: arm64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - name: clang for ring (Windows on Arm)
+        if: runner.arch == 'ARM64'
+        run: scripts/windows-clang.ps1 -Install | Add-Content $env:GITHUB_PATH
+        shell: pwsh
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          dotnet tool install --global wix --version 5.*
+          wix extension add --global WixToolset.Util.wixext/5.0.2
+      - run: scripts/package-windows.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oarbank-${{ github.ref_name }}-windows-${{ matrix.arch }}-unsigned
+          path: dist/
+

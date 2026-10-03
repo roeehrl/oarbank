@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ name }} · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>{{ name }}</h1>{% if mod %}<span class="chip">{{ mod.id }} {{ mod.version }}</span><span class="chip mono">compat {{ mod.compat }}</span>{% endif %}</div>
+{% if mod %}
+{% if mod.coordinator_unsupported %}<p class="chip bad">This coordinator cannot run the module: {{ mod.coordinator_unsupported }}</p>{% endif %}
+<div class="grid">
+<div class="card"><b>Module host</b>
+  <div class="kv small">
+    <span class="mut">state</span><span><span class="chip {{ 'ok' if mod.host.state == 'ready' else ('bad' if mod.host.state == 'fault' else '') }}">{{ mod.host.state or 'stopped' }}</span></span>
+    <span class="mut">pid</span><span>{{ mod.host.pid or '–' }}</span>
+    <span class="mut">respawns</span><span>{{ mod.host.restarts or 0 }}</span>
+    <span class="mut">calls / errors / timeouts</span><span>{{ mod.host.calls or 0 }} / {{ mod.host.errors or 0 }} / {{ mod.host.timeouts or 0 }}</span>
+    <span class="mut">verb latency p50 / p99</span><span>{{ mod.host.latency_p50_ms | num(1) }} / {{ mod.host.latency_p99_ms | num(1) }} ms</span>
+    <span class="mut">protocol</span><span>{{ mod.host.protocol_version or '–' }} · capabilities {{ (mod.host.capabilities or []) | join(', ') }}</span>
+    <span class="mut">last error</span><span class="mono">{{ mod.host.last_error or '' }}</span>
+  </div>
+  <div class="row" style="margin-top:6px">{{ m.op_form("modules.restart_host", name, "Restart host") }}</div>
+</div>
+<div class="card"><b>Manifest</b>
+  <div class="kv small"><span class="mut">stages</span><span>{{ mod.stages | join(', ') }}</span>
+  <span class="mut">requires</span><span>{{ mod.requires | join(', ') }}</span><span class="mut">enabled</span><span>{{ mod.enabled }}</span></div></div>
+</div>
+<h2>Platforms</h2>
+<table class="small"><tr><th>platform</th><th>runner (nodes)</th><th>coordinator side</th><th>nodes</th><th>certified</th></tr>
+{% for p in mod.platforms %}<tr><td class="mono">{{ p.platform }}{% if p.here %} <span class="chip">this coordinator</span>{% endif %}</td>
+  <td>{% if p.runner %}<span class="chip ok">runs</span>{% else %}<span class="mut">no</span>{% if p.runner_reason %} · {{ p.runner_reason }}{% endif %}{% endif %}</td>
+  <td>{% if p.coordinator %}<span class="chip ok">runs</span>{% else %}<span class="mut">no</span>{% if p.coordinator_reason %} · {{ p.coordinator_reason }}{% endif %}{% endif %}</td>
+  <td>{{ p.nodes }}</td><td>{{ p.certified }}</td></tr>{% endfor %}</table>
+{% else %}<p class="mut">coordinator unreachable or no such module</p>{% endif %}
+<h2>Alerts</h2><table class="small">{% for a in alerts %}<tr><td>{{ a.state }}</td><td class="mut">{{ a.opened_at | ago }}</td><td>{{ a.detail }}</td></tr>{% else %}<tr><td class="mut">none</td></tr>{% endfor %}</table>
+<h2>Events</h2><table class="small">{% for e in events %}<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td>{{ e.reason }}</td></tr>{% else %}<tr><td class="mut">none</td></tr>{% endfor %}</table>
+<h2>stderr (tail)</h2><pre class="mono" hx-disable>{{ tail }}</pre>
+{% endblock %}

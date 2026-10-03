@@ -1,0 +1,34 @@
+{% import "_macros.html" as m with context %}
+<div class="row"><h1>{{ c.name }}</h1><span class="chip">{{ c.state }}</span><a class="chip" href="/modules/{{ c.module }}">{{ c.module }}</a>
+  <span class="chip" title="placement: what stays on one platform class (unit {{ placement.unit or 'none' }}, bind {{ placement.bind or '–' }}, rebind {{ placement.rebind or '–' }})">{{ placement.label }}</span>
+  <span class="sp"></span>
+  <span class="small mut">jobs {{ jobs.d }}/{{ jobs.n }} · running {{ jobs.l }} · failed {{ jobs.f }} · ETA {{ eta_s | secs if eta_s is not none else '–' }}</span></div>
+<div class="bar"><i style="width:{{ (100 * jobs.d / jobs.n) if jobs.n else 0 }}%"></i></div>
+<div class="row" style="margin:8px 0">{% set can = CAMPAIGN_OPS[c.state] %}
+  {% if 'campaigns.pause' in can %}{{ m.op_form("campaigns.pause", c.campaign_id, "Pause") }}{% endif %}
+  {% if 'campaigns.resume' in can %}{{ m.op_form("campaigns.resume", c.campaign_id, "Resume", cls="pri") }}{% endif %}
+  {% if jobs.f and 'campaigns.retry_failed' in can %}{{ m.op_form("campaigns.retry_failed", c.campaign_id, "Retry failed", confirm="Retry every failed job of " ~ c.name ~ "?") }}{% endif %}
+  {% if 'campaigns.set_weight' in can %}{% call m.op_form("campaigns.set_weight", c.campaign_id, "Set weight") %}<input name="p.weight" type="number" step="0.1" value="{{ c.weight or 1 }}" style="width:60px" aria-label="fair-share weight">{% endcall %}{% endif %}
+  {% if 'campaigns.set_priority' in can %}{% call m.op_form("campaigns.set_priority", c.campaign_id, "Set priority") %}<input name="p.priority" type="number" value="{{ c.priority or 0 }}" style="width:60px" aria-label="priority">{% endcall %}{% endif %}
+  {% if 'campaigns.set_placement' in can and not jobs.d and not placement.pin %}{% call m.op_form("campaigns.set_placement", c.campaign_id, "Set placement…") %}<select name="p.mix" aria-label="placement mix">{% for x in ('same-os', 'same-arch', 'same-platform') %}<option{% if x == placement.mix %} selected{% endif %}>{{ x }}</option>{% endfor %}</select>{% endcall %}{% endif %}
+  {% if 'campaigns.rebind_platform' in can and placement.units %}{% call m.op_form("campaigns.rebind_platform", c.campaign_id, "Rebind…") %}<select name="p.platform" aria-label="platform to move the campaign's work to">{% for p in platforms %}<option>{{ p }}</option>{% endfor %}</select>{% endcall %}{% endif %}
+  {% if 'campaigns.cancel' in can %}{{ m.op_form("campaigns.cancel", c.campaign_id, "Cancel…", cls="danger") }}{% endif %}
+  <a class="btn" href="/jobs?campaign={{ c.campaign_id }}">Jobs</a>
+</div>
+{% for a in placement_alerts %}<p class="small" role="status"><span class="chip warn">{{ 'stranded' if a.rule.startswith('placement_stranded') else 'rebound' }}</span> {{ a.detail }}</p>{% endfor %}
+{% if c.labels %}<div class="small mut">{% for k, v in c.labels.items() %}{{ k }} <span class="mono">{{ v }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endif %}
+
+{% for p in panels %}<h2>{{ p.title }} <span class="small mut">({{ p.module }})</span></h2>{{ p.html | safe }}
+{% endfor %}
+
+{% if results %}<h2>Results</h2>
+<table class="small"><tr><th>job</th><th>node</th><th>platform</th>{% for col in result_cols %}<th>{{ col.header }}</th>{% endfor %}<th>at</th></tr>
+{% for x in results %}<tr><td><a href="/jobs/{{ x.job_id }}">{{ x.name or x.job_id }}</a></td><td>{{ x.hostname or '–' }}</td><td class="mut">{{ x.platform or '–' }}</td>
+{% for cell in x.cells %}<td class="mono">{{ cell }}</td>{% endfor %}
+<td class="mut">{{ x.at | hm }}</td></tr>{% endfor %}</table>{% endif %}
+
+<h2>History</h2>
+{% if history or events %}
+<table class="small">{% for h in history %}<tr><td class="mut">{{ h.ts | hm }}</td><td>{{ h.operation }}</td><td class="mut">{{ h.actor }}</td><td>{{ h.outcome }}</td><td>{{ h.reason or '' }}</td></tr>{% endfor %}
+{% for e in events %}<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td class="mut">{{ e.actor or '' }}</td><td>{{ e.reason or '' }}</td><td></td></tr>{% endfor %}</table>
+{% else %}<p class="small mut">nothing yet</p>{% endif %}

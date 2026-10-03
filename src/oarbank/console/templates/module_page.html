@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ name }} · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>{{ name }}</h1><span class="chip">{{ man.module.id }} {{ man.module.version }}</span><span class="sp"></span>
+  <span class="small mut">{{ man.module.description }}</span></div>
+<nav class="row small mod-tabs-nav" aria-label="module sections">
+  {% for d in man.ui.pages %}<a href="{{ '/modules/' ~ name if d.slot == 'module.overview' else '/m/' ~ name ~ '/' ~ d.id }}"{% if tab == d.id or (tab == 'overview' and d.slot == 'module.overview') %} aria-current="page"{% endif %}>{{ d.title }}</a>{% endfor %}
+  <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a><a href="/settings">Settings</a><a href="/audit?op=mod.{{ name | replace('-', '_') }}.*">Operations audit</a>
+</nav>
+<div class="live-tile">{{ body | safe }}</div>
+{% endblock %}

@@ -1,0 +1,354 @@
+{
+  "$defs": {
+    "AsOf": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluated_at": {
+          "title": "Evaluated At",
+          "type": "number"
+        },
+        "snapshot_version": {
+          "title": "Snapshot Version",
+          "type": "integer"
+        },
+        "stale": {
+          "default": false,
+          "title": "Stale",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "snapshot_version",
+        "evaluated_at"
+      ],
+      "title": "AsOf",
+      "type": "object"
+    },
+    "Clause": {
+      "additionalProperties": false,
+      "properties": {
+        "matched": {
+          "title": "Matched",
+          "type": "integer"
+        },
+        "of": {
+          "title": "Of",
+          "type": "integer"
+        },
+        "predicate": {
+          "title": "Predicate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "predicate",
+        "matched",
+        "of"
+      ],
+      "title": "Clause",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "title": "Event Id",
+          "type": "integer"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "kind"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "Headline": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "text"
+      ],
+      "title": "Headline",
+      "type": "object"
+    },
+    "MatrixRow": {
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "title": "Node",
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/PredicateResult"
+          },
+          "title": "Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "node",
+        "results"
+      ],
+      "title": "MatrixRow",
+      "type": "object"
+    },
+    "PredicateResult": {
+      "additionalProperties": false,
+      "description": "One predicate evaluated for one (job, node): the unit claim() and explain() share.",
+      "properties": {
+        "code": {
+          "description": "Reason code reported when the predicate fails.",
+          "title": "Code",
+          "type": "string"
+        },
+        "layer": {
+          "enum": [
+            "admission",
+            "placement",
+            "ordering"
+          ],
+          "title": "Layer",
+          "type": "string"
+        },
+        "observed": {
+          "default": null,
+          "title": "Observed"
+        },
+        "outcome": {
+          "enum": [
+            "pass",
+            "fail",
+            "unknown"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "predicate": {
+          "description": "Stable predicate name with its argument, e.g. pool(docker_amd64) >= 1.",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "required": {
+          "default": null,
+          "title": "Required"
+        }
+      },
+      "required": [
+        "predicate",
+        "code",
+        "outcome",
+        "layer"
+      ],
+      "title": "PredicateResult",
+      "type": "object"
+    },
+    "Remedy": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "op": {
+          "description": "Operation id from the registry.",
+          "title": "Op",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "op",
+        "label"
+      ],
+      "title": "Remedy",
+      "type": "object"
+    },
+    "Subject": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Id"
+        },
+        "kind": {
+          "enum": [
+            "job",
+            "attempt",
+            "node",
+            "campaign",
+            "module",
+            "release",
+            "alert",
+            "protection"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "Subject",
+      "type": "object"
+    },
+    "SummaryRow": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "additionalProperties": true,
+          "title": "Detail",
+          "type": "object"
+        },
+        "evidence": {
+          "description": "Event ids.",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "nodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Nodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "SummaryRow",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "as_of": {
+      "$ref": "#/$defs/AsOf"
+    },
+    "clauses": {
+      "items": {
+        "$ref": "#/$defs/Clause"
+      },
+      "title": "Clauses",
+      "type": "array"
+    },
+    "evidence": {
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "explain": {
+      "const": 1,
+      "default": 1,
+      "title": "Explain",
+      "type": "integer"
+    },
+    "headline": {
+      "$ref": "#/$defs/Headline"
+    },
+    "journal": {
+      "description": "protection/attempt kinds: the decision records involved.",
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Journal",
+      "type": "array"
+    },
+    "matrix": {
+      "description": "Every node x every predicate (complete, not first-fail).",
+      "items": {
+        "$ref": "#/$defs/MatrixRow"
+      },
+      "title": "Matrix",
+      "type": "array"
+    },
+    "next_trigger": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Trigger"
+    },
+    "remedies": {
+      "items": {
+        "$ref": "#/$defs/Remedy"
+      },
+      "title": "Remedies",
+      "type": "array"
+    },
+    "subject": {
+      "$ref": "#/$defs/Subject"
+    },
+    "summary": {
+      "description": "Aggregated first: each distinct reason with the nodes it covers.",
+      "items": {
+        "$ref": "#/$defs/SummaryRow"
+      },
+      "title": "Summary",
+      "type": "array"
+    },
+    "system_actions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "System Actions",
+      "type": "array"
+    },
+    "verdict": {
+      "description": "Kind-specific state word, e.g. pending, running, admitting, blocked.",
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "required": [
+    "subject",
+    "as_of",
+    "verdict",
+    "headline"
+  ],
+  "title": "ExplainDocument",
+  "type": "object"
+}

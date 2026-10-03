@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+specs/tla2tools.jar
+specs/states/
+specs/*.bin
+dist/
+specs/out/

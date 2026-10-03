@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Windows agent package (docs/design/architecture.md, "Packaging and CI"): the agent and its launcher in Program Files\Oarbank, and the
+  node set up as a service run by its virtual account (oarbank-launcher setup scope system). For unattended and MDM
+  installs the join code comes from a property or a file:
+    msiexec /i oarbank-agent.msi /qn JOINCODEFILE=C:\path\join-code.txt      (preferred: never on a command line)
+    msiexec /i oarbank-agent.msi /qn JOINCODE=OB1-...
+    msiexec /i oarbank-agent.msi /qn COORDINATOR=https://coordinator:7443     (the owner then approves the node)
+  Without one, it installs the programs only. Uninstalling removes the service; the node's home in ProgramData stays.
+  Built by scripts/package-windows.ps1 with WiX 5 (wix build -d Version=... -d BinDir=...).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Oarbank agent" Manufacturer="Codonic" Version="$(var.Version)" UpgradeCode="{5D57D0BD-3099-53F1-B96A-619388A7265D}" Scope="perMachine"
+           Compressed="yes">
+    <!-- every build of a version carries the same MSI version (numeric only: 1.0.0-alpha.1 is 1.0.0), so a newer
+         build of it must replace the installed one rather than install beside it -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Oarbank agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Oarbank">
+        <Component Id="Binaries">
+          <File Id="Agent" Source="$(var.BinDir)\oarbank-agent.exe" KeyPath="yes" />
+        </Component>
+        <!-- the launcher, and the elevated helper it runs as a LocalSystem service (enforced egress allowlists:
+             helper_windows.rs); the agent's own service is set up by `oarbank-launcher setup` below -->
+        <Component Id="Launcher">
+          <File Id="Launcher" Source="$(var.BinDir)\oarbank-launcher.exe" KeyPath="yes" />
+          <!-- it opens the Base Filtering Engine, so it starts after it; ConfigureHelper below makes the start delayed
+               and adds the recovery actions, as the agent's service has (svc_windows.rs; Windows Installer's own
+               MsiServiceConfig tables fail with error 1939 on a fresh service) -->
+          <ServiceInstall Id="Helper" Name="OarbankHelper" DisplayName="Oarbank helper"
+                          Description="Lets Oarbank module sandboxes reach only their job's egress proxy on loopback"
+                          Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem" Arguments="helper-main">
+            <ServiceDependency Id="BFE" />
+          </ServiceInstall>
+          <ServiceControl Id="HelperControl" Name="OarbankHelper" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        </Component>
+        <!-- the node runtime beside the launcher: CPython 3.12 with the module SDK, and uv -->
+        <Directory Id="RUNTIMEFOLDER" Name="runtime" />
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main">
+      <ComponentRef Id="Binaries" />
+      <ComponentRef Id="Launcher" />
+      <Files Directory="RUNTIMEFOLDER" Include="$(var.RuntimeDir)\**" />
+    </Feature>
+
+    <Property Id="JOINCODE" Secure="yes" Hidden="yes" />
+    <Property Id="JOINCODEFILE" Secure="yes" />
+    <Property Id="COORDINATOR" Secure="yes" />
+
+    <SetProperty Id="SetupWithFile" Before="SetupWithFile" Sequence="execute" Condition="JOINCODEFILE"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --join-code-file &quot;[JOINCODEFILE]&quot;" />
+    <SetProperty Id="SetupWithCode" Before="SetupWithCode" Sequence="execute" Condition="JOINCODE"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --join-code [JOINCODE]" />
+    <SetProperty Id="SetupWithUrl" Before="SetupWithUrl" Sequence="execute" Condition="COORDINATOR"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --coordinator [COORDINATOR]" />
+    <SetProperty Id="ConfigureHelper" Before="ConfigureHelper" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-config" />
+    <SetProperty Id="RemoveNode" Before="RemoveNode" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; remove --scope system" />
+    <CustomAction Id="SetupWithFile" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
+    <CustomAction Id="SetupWithCode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
+    <CustomAction Id="SetupWithUrl" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
+    <CustomAction Id="ConfigureHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
+    <CustomAction Id="RemoveNode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="ConfigureHelper" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="SetupWithFile" After="InstallFiles" Condition="NOT Installed AND JOINCODEFILE" />
+      <Custom Action="SetupWithCode" After="SetupWithFile" Condition="NOT Installed AND JOINCODE AND NOT JOINCODEFILE" />
+      <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />
+      <Custom Action="RemoveNode" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

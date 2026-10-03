@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Account · Oarbank{% endblock %}
+{% block body %}
+<h1>{{ me.account }} <span class="chip">{{ me.role }}</span></h1>
+<div class="grid">
+<div class="card">
+  <b>Passkeys</b>
+  <table class="small">{% for k in passkeys %}<tr><td>{{ k.label }}</td><td class="mono">{{ k.rp_id }}</td><td class="mut">{{ k.created_at | ago }}</td>
+    <td>{{ m.op_form("access.passkeys.remove", k.credential_id, "Remove", confirm="Remove this passkey?") }}</td></tr>
+  {% else %}<tr><td class="mut">No passkeys.</td></tr>{% endfor %}</table>
+  <label class="small">name <input data-passkey-label value="passkey"></label>
+  <button type="button" data-passkey-register>Add a passkey</button>
+  <p class="small mut" data-passkey-status role="status">Passkeys work on http://localhost or the console's https host name, never on an IP address.</p>
+</div>
+<div class="card">
+  <b>Password</b>
+  {% call m.op_form("access.accounts.set_password", me.account, "Set password", inline=False) %}
+    <label class="small">new password (12+ characters) <input type="password" name="p.password" autocomplete="new-password" minlength="12" required></label>
+  {% endcall %}
+</div>
+<div class="card">
+  <b>Personal access tokens</b>
+  <div class="small mut">For scripts and the CLI on other machines (<span class="mono">OARBANK_TOKEN</span>).</div>
+  <table class="small">{% for t in tokens %}<tr><td class="mono">{{ t.token_id }}</td><td>{{ t.label }}</td><td>{{ t.role }}</td>
+    <td class="mut">expires {{ t.expires_at | ts }}</td>
+    <td>{% if t.revoked %}<span class="chip">revoked</span>{% else %}{{ m.op_form("access.tokens.revoke", t.token_id, "Revoke", confirm="Revoke this token?") }}{% endif %}</td></tr>
+  {% else %}<tr><td class="mut">No tokens.</td></tr>{% endfor %}</table>
+  {% call m.op_form("access.tokens.create", me.account, "Create…", inline=False) %}
+    <label class="small">label <input name="p.label"></label>
+    <label class="small">role <select name="p.role"><option>viewer</option><option>operator</option>{% if me.role == 'admin' %}<option>admin</option>{% endif %}</select></label>
+    <label class="small">days <input name="p.days" type="number" min="1" max="366" value="90"></label>
+  {% endcall %}
+</div>
+</div>
+<script src="/static/passkey.js" defer></script>
+{% endblock %}

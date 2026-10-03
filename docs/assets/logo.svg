@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Oarbank</title>
+  <!-- a bank of oars: three rowers pulling together, blades in the water -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#21577a"/>
+      <stop offset="1" stop-color="#143a52"/>
+    </linearGradient>
+    <clipPath id="tile"><rect width="512" height="512" rx="112"/></clipPath>
+    <g id="oar">
+      <rect x="-9" y="-200" width="18" height="250" rx="9" fill="#f6f1e7"/>
+      <rect x="-13" y="-214" width="26" height="46" rx="13" fill="#f6f1e7"/>
+      <path d="M -9 40 L -27 70 L -27 168 Q -27 186 -9 186 L 9 186 Q 27 186 27 168 L 27 70 L 9 40 Z" fill="#f6f1e7"/>
+    </g>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="url(#bg)"/>
+    <g transform="translate(258 246) scale(0.9) rotate(24)">
+      <use href="#oar" x="-96"/>
+      <use href="#oar" x="0"/>
+      <use href="#oar" x="96"/>
+    </g>
+    <path d="M -10 356 Q 64 336 128 356 T 256 356 T 384 356 T 522 356 L 522 522 L -10 522 Z" fill="#3f9fbd" opacity="0.55"/>
+    <path d="M -10 356 Q 64 336 128 356 T 256 356 T 384 356 T 522 356" fill="none" stroke="#9ad3e3" stroke-width="10" stroke-linecap="round"/>
+  </g>
+</svg>

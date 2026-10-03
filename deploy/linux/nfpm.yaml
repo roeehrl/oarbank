@@ -1,0 +1,37 @@
+# The Linux agent package (docs/design/architecture.md, "Packaging and CI"): deb and rpm from one description. scripts/package-linux.sh
+# fills ARCH, VERSION and the binaries' directory.
+name: oarbank-agent
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: Codonic <support@codonic.dev>
+description: |
+  Oarbank node agent: runs jobs from your Oarbank coordinator on this machine, confined (Landlock and seccomp),
+  and keeps the machine's own work protected.
+vendor: Codonic
+homepage: https://codonic.dev
+license: Proprietary
+contents:
+  - src: ${BIN_DIR}/oarbank-agent
+    dst: /usr/lib/oarbank/oarbank-agent
+    file_info: {mode: 0755}
+  - src: ${BIN_DIR}/oarbank-launcher
+    dst: /usr/lib/oarbank/oarbank-launcher
+    file_info: {mode: 0755}
+  - src: /usr/lib/oarbank/oarbank-launcher
+    dst: /usr/bin/oarbank-launcher
+    type: symlink
+  # the node runtime: CPython 3.12 with the module SDK, and uv (scripts/build-node-runtime.sh)
+  - src: ${RUNTIME_DIR}/
+    dst: /usr/lib/oarbank/runtime
+    type: tree
+  - dst: /etc/oarbank
+    type: dir
+    file_info: {mode: 0755}
+scripts:
+  postinstall: ./postinstall.sh
+  preremove: ./preremove.sh
+recommends:
+  - podman

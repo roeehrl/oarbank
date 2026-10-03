@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"allowEval": false, "allowScriptTags": false, "selfRequestsOnly": true, "historyCacheSize": 0, "includeIndicatorStyles": false}'>
+<meta name="csrf-token" content="{{ csrf }}">
+<title>{% block title %}Oarbank{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static-ui/ui.css">
+<link rel="stylesheet" href="/static/uplot.min.css">
+<script src="/static/htmx.min.js"></script>
+<script src="/static/htmx-sse.js"></script>
+<script src="/static/uplot.min.js"></script>
+<script src="/static/app.js" defer></script>
+<script src="/static-ui/ui.js" defer></script>
+</head>
+<body hx-ext="sse" sse-connect="/sse" data-version="{{ meta.version }}" data-boot="{{ meta.boot_id }}">
+{% import "_macros.html" as m with context %}
+<span hidden aria-hidden="true" hx-trigger="sse:heartbeat"></span>{# lets app.js see heartbeats (htmx-sse only emits listened events) #}
+<div id="stale-banner" role="status">Data may be out of date; last update <span id="stale-age"></span>. Reconnecting…</div>
+<header>
+  <b>Oarbank</b>
+  <a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}
+  {% if not meta.coordinator_ok %}<span class="chip bad">coordinator unreachable{% if meta.coordinator_down_since %} since {{ meta.coordinator_down_since | hm }}{% endif %}</span>{% endif %}
+  <span class="who">as of {{ meta.built_at | hm }} · <a href="/account">{{ actor }}</a></span>
+  <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Sign out</button></form>
+  {{ m.op_form("fleet.pause", "fleet", "Pause fleet", cls="danger", always=True) }}
+</header>
+<main>
+{% if flash %}<div class="flash {{ flash_kind }}" role="status">{{ flash }}</div>{% endif %}
+{% if coord %}<div class="flash warn" role="status">{% if coord.role == 'handed_off' %}This coordinator handed off; it only redirects agents now.
+{% elif coord.role == 'standby' %}This coordinator is a standby move target.
+{% else %}Coordinator move {{ coord.state | replace('_', ' ') }}{% if coord.to %} to <span class="mono">{{ coord.to }}</span>{% endif %}{% if coord.not_before and coord.state == 'pending' %}, starts {{ coord.not_before | ts }}{% endif %}{% if coord.phase not in ('idle',) %} ({{ coord.phase }}){% endif %}.{% endif %}
+<a href="/coordinator">Review{% if coord.state in ('pending', 'awaiting_owner') %} or cancel{% endif %}</a></div>{% endif %}
+{% block body %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ n.hostname }} · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/explain/node/{{ n.node_id }}">Why is this node (not) taking work?</a></p>
+<div class="row"><h1>{{ n.hostname }}</h1>
+  <span class="chip {{ 'ok' if n.online else 'bad' }}">{{ 'online' if n.online else 'offline' }}</span>
+  <span class="chip">{{ n.lifecycle }}</span><span class="chip">{{ n.desired_state }}</span>
+  {% if n.quarantine_reason %}<span class="chip bad">{{ n.quarantine_reason }}</span>{% endif %}
+  <span class="sp"></span><span class="mut small">{{ [n.node_id, 'agent ' ~ n.agent_version if n.agent_version, 'release ' ~ n.release_id if n.release_id] | select | join(' · ') }}</span>
+</div>
+
+<div class="grid">
+<div class="card">
+  <b>Hardware</b>
+  {% set hw, T0, s = n.hw, n.tel, n.slots %}
+  <div class="kv small" style="margin-top:6px">
+    {% if hw.cpu or hw.cores %}<span class="mut">CPU</span><span>{{ [hw.cpu, ('(' ~ hw.cores ~ ')' if hw.cpu else hw.cores) if hw.cores] | select | join(' ') }}</span>{% endif %}
+    {% if hw.gpus %}<span class="mut">GPU</span><span>{{ hw.gpus | join(', ') }}</span>{% endif %}
+    {% if hw.memory_gb is known %}<span class="mut">memory</span><span>{{ hw.memory_gb | num(1) }} GB</span>{% endif %}
+    {% if hw.os %}<span class="mut">system</span><span>{{ hw.os }}{% if hw.arch %} · {{ hw.arch }}{% endif %}</span>{% endif %}
+    {% if T0.disk_free_gb is known %}<span class="mut">disk free</span><span>{{ T0.disk_free_gb | num(0) }} GB</span>{% endif %}
+    {% if n.ts_ip %}<span class="mut">address</span><span class="mono">{{ n.ts_ip }}</span>{% endif %}
+    {% if T0.services_running is known %}<span class="mut">services running</span><span>{{ T0.services_running | join(', ') or 'none' }}</span>{% endif %}
+  </div>
+</div>
+<div class="card">
+  <b>Now</b>
+  <div class="kv small" style="margin-top:6px">
+    <span class="mut">jobs</span><span>{% if not s.reported %}{{ n.live }} running · capacity not reported yet
+      {%- elif s.held %}{{ n.live }} running · <b>no new jobs: {{ s.held }}</b>
+      {%- elif s.zero_why %}{{ n.live }} running · <b>no CPU slots: {{ s.zero_why }}</b>
+      {%- else %}{{ n.live }} running / {{ s.slots }} CPU slots{% if s.auto is not none %} (auto {{ s.auto }}){% endif %} · binding: <b>{{ s.binding or 'automatic capacity' }}</b>{% endif %}</span>
+    {% if n.cap.mem_gb_free is known %}<span class="mut">memory for jobs</span><span>{{ n.cap.mem_gb_free | num(1) }} GB free</span>{% endif %}
+    {% if n.cap.pools %}<span class="mut">pools</span><span>{% for p, k in n.cap.pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
+    {% if T0.services_reserved_gb %}<span class="mut">services hold</span><span>{{ T0.services_reserved_gb | num(1) }} GB</span>{% endif %}
+    {% set mem = [(T0.mem_used_gb | num(1)) ~ ' GB used' if T0.mem_used_gb is known, (T0.mem_free_pct | num(0)) ~ '% free' if T0.mem_free_pct is known,
+                  'fleet jobs ' ~ (T0.fleet_rss_gb | num(1)) ~ ' GB' if T0.fleet_rss_gb is known, 'swap ' ~ (T0.swap_used_gb | num(1)) ~ ' GB' if T0.swap_used_gb is known] | select | list %}
+    {% if mem %}<span class="mut">memory</span><span>{{ mem | join(' · ') }}</span>{% endif %}
+    {% if n.pressure or n.heat %}<span class="mut">pressure / thermal</span><span>{{ n.pressure or 'not reported' }} / {{ n.heat or 'not reported' }}</span>{% endif %}
+    {% if T0.guard %}<span class="mut">memory guard</span><span>{{ T0.guard }}</span>{% endif %}
+    {% set user = ['idle ' ~ (T0.hid_idle_s | secs) if T0.hid_idle_s is known, 'screen shared' if T0.screen_sharing,
+                   ('on battery' if T0.on_battery else 'on AC power') if T0.on_battery is known] | select | list %}
+    {% if user %}<span class="mut">user / power</span><span>{{ user | join(' · ') }}</span>{% endif %}
+  </div>
+</div>
+<div class="card">
+  <b>Controls</b>
+  <div class="row" style="margin-top:6px">
+    {% for st, op in [('active', 'nodes.resume'), ('paused', 'nodes.pause'), ('draining', 'nodes.drain')] %}
+    {{ m.op_form(op, n.node_id, st, cls=('pri' if n.desired_state == st else ''), confirm=('Drain ' ~ n.hostname ~ '?' if st == 'draining' else none)) }}{% endfor %}
+  </div>
+  <div class="row" style="margin-top:6px">
+    {{ m.op_form("nodes.run_doctor", n.node_id, "Run doctor") }}
+    {{ m.op_form("nodes.recertify", n.node_id, "Re-certify") }}
+    {% if n.lifecycle == 'quarantined' %}
+    {{ m.op_form("nodes.clear_quarantine", n.node_id, "Clear quarantine", confirm="Clear quarantine? The node must pass doctor and golden jobs again.") }}
+    {% else %}
+    {{ m.op_form("nodes.quarantine", n.node_id, "Quarantine", cls="danger", confirm="Quarantine " ~ n.hostname ~ "? " ~ n.live ~ " live attempts are revoked.", reason_prompt=True) }}
+    {% endif %}
+    {{ m.op_form("nodes.retire", n.node_id, "Retire…", cls="danger") }}
+  </div>
+</div>
+</div>
+
+<h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
+{% set P = n.policy.protection or {} %}{% set T = n.tel.protection or {} %}
+<div class="card">
+  <div class="row small">{% for c in conditions %}<span class="chip {{ c.tone }}" title="{{ c.message }}">{{ c.code }}</span>{% else %}<span class="chip ok">no conditions</span>{% endfor %}</div>
+  <div class="kv small" style="margin-top:6px">
+    <span class="mut">mode</span><span><b>{{ T.mode or (P.node or {}).mode or 'moderate' }}</b>{% if T.config_error %} <span class="chip bad">{{ T.config_error }}</span>{% endif %}</span>
+    <span class="mut">binding</span><span>{% for dim, src in ((T.constraint or {}).binding or {}).items() %}{{ dim }} ← <b>{{ src }}</b>{% if not loop.last %} · {% endif %}{% else %}nothing binds{% endfor %}</span>
+    <span class="mut">reserved</span><span>{{ (T.constraint or {}).reserved_cpu or 0 }} cores · {{ (T.constraint or {}).reserved_mem_gb or 0 }} GB</span>
+    <span class="mut">guard</span><span>{{ n.tel.guard or 'not reported' }}{% if T.guard_reason %}: {{ T.guard_reason }}{% endif %}</span>
+    <span class="mut">controller</span><span>rung {{ T.rung or 0 }}{% if T.budget_cores is defined and T.budget_cores is not none %} · budget {{ T.budget_cores }} cores{% endif %}{% if T.dynamic %} · {{ T.dynamic }}{% endif %}</span>
+  </div>
+  <table class="small" style="margin-top:6px"><tr><th>rule</th><th>state</th><th class="num">processes</th><th class="num">cpu</th><th class="num">footprint GB</th><th>match</th></tr>
+  {% set live = {} %}{% for r in T.rules or [] %}{% set _ = live.update({r.id: r}) %}{% endfor %}
+  {% for r in P.rule or [] %}{% set l = live.get(r.id, {}) %}<tr><td class="mono">{{ r.id }}</td>
+    <td>{% if l.active %}<span class="chip acc">active</span>{% else %}<span class="mut">{{ l.reason or 'not reported' }}</span>{% endif %}</td>
+    <td class="num">{{ l.processes if l.processes is defined else '' }}</td><td class="num">{{ l.cpu_cores if l.cpu_cores is defined else '' }}</td>
+    <td class="num">{{ l.footprint_gb if l.footprint_gb is defined else '' }}</td><td class="mono small">{{ r.match | tojson }}</td></tr>
+  {% else %}<tr><td colspan="6" class="mut">no rules: only the memory, thermal and battery guards apply</td></tr>{% endfor %}</table>
+  <details class="small"><summary>Decision timeline ({{ decisions | length }})</summary>
+  <table class="small">{% for d in decisions %}<tr><td class="mut">{{ d.t | hm }}</td><td>{{ d.kind }}</td><td class="mono">{{ d.reason }}</td><td>{{ d.rule or '' }}</td><td class="mono small">{{ d.detail }}</td></tr>
+  {% else %}<tr><td class="mut">no decisions journaled yet</td></tr>{% endfor %}</table></details>
+</div>
+
+<h2>Limits (user caps)</h2>
+<div class="card">
+<p class="small mut" style="margin-top:0">Every cap is off by default; the node then runs at its automatic capacity (which already honours the owner's protection
+rules, the memory guard, heat, battery and a present user). A cap can only lower capacity.{% if n.slots.reported %} Current binding limit: <b>{{ n.slots.binding or 'automatic capacity' }}</b>.{% endif %}</p>
+{% call m.op_form("nodes.set_caps", n.node_id, "Apply caps", cls="pri", confirm="Apply caps to " ~ n.hostname ~ "?", inline=False) %}
+<table>
+<tr><th style="width:90px">On</th><th>Cap</th><th>Value</th><th>Hardware / now</th></tr>
+{% set L = n.limits %}
+{% set cores = (n.hw.cores_total ~ ' cores') if n.hw.cores_total %}{% set ram = ((n.hw.memory_gb | num(1)) ~ ' GB in this machine') if n.hw.memory_gb is known %}
+{% set rows = [
+  ('cpu_cores', 'CPU cores', 'cores', [cores, 'caps concurrent jobs × threads']),
+  ('mem_gb', 'Memory', 'GB', [ram, 'for jobs and module services', ('fleet jobs use ' ~ (n.tel.fleet_rss_gb | num(1)) ~ ' GB now') if n.tel.fleet_rss_gb is known]),
+  ('jobs', 'Concurrent jobs', 'jobs', [(n.cap.auto_cpu_slots ~ ' automatic CPU slots now') if n.cap.auto_cpu_slots is known]),
+  ('vm_mem_gb', 'VM memory (services)', 'GB', [ram, 'a module VM service applies it at its next start']),
+  ('vm_cpus', 'VM CPUs (services)', 'cpus', [cores]),
+  ('disk_gb', 'Disk cache', 'GB', [((n.tel.disk_free_gb | num(0)) ~ ' GB free now') if n.tel.disk_free_gb is known]),
+  ('staging_mbps', 'Download bandwidth', 'Mbps', ['dataset staging']) ] %}
+{% for key, label, unit, notes in rows %}
+<tr>
+  <td><input type="checkbox" name="on_{{ key }}" aria-label="cap {{ label }}" {% if L[key] is defined and L[key] is not none %}checked{% endif %}
+ data-toggles-row></td>
+  <td>{{ label }}</td>
+  <td><input type="number" step="any" min="0" name="{{ key }}" aria-label="{{ label }} ({{ unit }})" style="width:90px"
+       value="{{ L[key] if L[key] is defined and L[key] is not none else '' }}" {% if not (L[key] is defined and L[key] is not none) %}disabled{% endif %}> {{ unit }}</td>
+  <td class="small mut">{{ notes | select | join(' · ') }}</td>
+</tr>
+{% endfor %}
+<tr>
+  <td><input type="checkbox" name="on_schedule" aria-label="work only inside a schedule" {% if L.schedule %}checked{% endif %}></td>
+  <td>Schedule</td>
+  <td colspan="2"><input type="time" name="sched_start" aria-label="schedule start" value="{{ L.schedule.start if L.schedule else '22:00' }}"> to
+    <input type="time" name="sched_end" aria-label="schedule end" value="{{ L.schedule.end if L.schedule else '07:30' }}">
+    {% for d in range(7) %}<label class="small"><input type="checkbox" name="sched_days" value="{{ d }}"
+      {% if not L.schedule or d in L.schedule.days %}checked{% endif %}>{{ ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d] }}</label>{% endfor %}
+    <span class="small mut">work only inside this window</span></td>
+</tr>
+</table>
+<div class="row" style="margin-top:8px">
+  <label>Enforcement <select name="enforce">
+    <option value="soft" {% if L.enforce != 'hard' %}selected{% endif %}>soft: stop admitting, let running jobs finish</option>
+    <option value="hard" {% if L.enforce == 'hard' %}selected{% endif %}>hard: also hand back youngest jobs to fit</option></select></label>
+  <span class="sp"></span>
+</div>
+{% endcall %}
+{% if L %}{% call m.op_form("nodes.set_caps", n.node_id, "Remove all caps", confirm="Remove all caps from " ~ n.hostname ~ "? It returns to automatic capacity.") %}<input type="hidden" name="clear_all" value="1">{% endcall %}{% endif %}
+</div>
+
+<h2>Policy</h2>
+<div class="card">
+{% call m.op_form("nodes.set_policy", n.node_id, "Save policy", confirm="Save policy for " ~ n.hostname ~ "? Role changes re-doctor and re-certify the node.", inline=False) %}
+<div class="row small">{% for k, v in n.policy.items() if k not in ('protection', 'module_settings') %}
+  <label>{{ k }} <input name="p_{{ k }}" value="{{ '' if v is none else (v | join(',') if k == 'disabled_services' else v) }}" style="width:{{ '220px' if k == 'disabled_services' else '70px' }}"></label>
+{% endfor %}</div>
+<div class="small mut">module settings: <span class="mono">{{ (n.policy.module_settings or {}) | tojson }}</span></div>
+{% endcall %}
+</div>
+
+<h2>Last 6 hours</h2>
+<div class="card"><div id="chart" data-series="{{ series }}"></div></div>
+
+{% for p in panels or [] %}<h2>{{ p.title }} <span class="small mut">({{ p.module }})</span></h2>{{ p.html | safe }}{% endfor %}
+
+<h2>Modules</h2>
+<table class="small"><tr><th>module</th><th>state</th><th>generation</th><th>release</th><th>since</th><th>reason</th></tr>
+{% for m, st in n.mods.items() %}<tr><td>{{ m }}</td><td><span class="chip {{ 'ok' if st.state == 'certified' else ('warn' if st.state == 'certifying' else 'bad') }}">{{ st.state }}</span></td>
+<td>{{ st.generation }}</td><td class="mono">{{ st.release or '' }}</td><td class="mut">{{ st.at | ago }}</td><td>{{ st.reason or '' }}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">waiting for the release install and doctor</td></tr>{% endfor %}</table>
+{% if n.doctor and n.doctor.modules %}
+<h2>Doctor</h2>
+{% for m, rep in n.doctor.modules.items() %}
+<div class="small"><b>{{ m }}</b> <span class="chip {{ 'ok' if rep.health == 'healthy' else ('mut' if rep.health == 'undetected' else 'bad') }}">{{ rep.health }}</span></div>
+<table class="small">{% for c in rep.checks %}<tr><td>{{ '✅' if c.ok else '❌' }}</td><td>{{ c.name }}</td><td class="mono">{{ c.detail }}</td></tr>{% endfor %}</table>
+{% endfor %}
+{% endif %}
+
+<h2>Recent attempts</h2>
+<table class="small"><tr><th>attempt</th><th>job</th><th>dataset</th><th>state</th><th>phase</th><th class="num">cpu s</th><th>reason</th><th>granted</th></tr>
+{% for a in attempts %}<tr><td>{{ a.attempt_id }}</td><td><a href="/jobs/{{ a.job_id }}">{{ a.job_id }}</a> <span class="mut">{{ a.kind }}</span></td>
+<td class="mono">{{ a.dataset_id }}</td><td>{{ a.state }}</td><td>{{ a.phase or '' }}</td><td class="num">{{ a.cpu_s | num(0) }}</td>
+<td>{{ a.end_reason or '' }}</td><td class="mut">{{ a.granted_at | ago }}</td></tr>{% endfor %}</table>
+
+<h2>Failures (24 h)</h2>
+<div class="row">{% for f in fails %}<span class="chip bad">{{ f.end_reason }} × {{ f.n }}</span>{% else %}<span class="mut">none</span>{% endfor %}</div>
+
+<h2>History (operations)</h2>
+<table class="small">{% for r in history %}<tr><td class="mut">{{ r.ts | hm }}</td><td class="mono">{{ r.operation }}</td><td>{{ r.actor }} ({{ r.source }})</td>
+<td><span class="chip {{ 'ok' if r.outcome == 'ok' else 'bad' }}">{{ r.outcome }}</span></td><td>{{ r.reason or '' }}</td></tr>
+{% else %}<tr><td class="mut">no operations on this node yet</td></tr>{% endfor %}</table>
+
+<h2>Events</h2>
+<table class="small">{% for e in events %}<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td class="mut">{{ e.actor }}</td><td>{{ e.reason or '' }}</td><td class="mono">{{ e.payload_json or '' }}</td></tr>{% endfor %}</table>
+{% endblock %}

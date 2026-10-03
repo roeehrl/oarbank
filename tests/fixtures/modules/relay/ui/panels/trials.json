@@ -1,0 +1,6 @@
+{"ui_contract": "1.0",
+ "body": [{"type": "table", "source": {"view": "trials", "params": {"campaign": "$campaign"}, "limit": 200},
+           "columns": [{"key": "trial", "label": "#", "type": "integer"}, {"key": "label", "label": "trial"},
+                       {"key": "done", "label": "done", "type": "integer"},
+                       {"key": "mean", "label": "mean score", "type": "number", "format": ".6f", "direction": "max"}]},
+          {"type": "action", "action": {"op": "self.rerun_baseline", "target": "$campaign", "hint": "queue the baseline again"}}]}

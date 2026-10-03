@@ -1,0 +1,54 @@
+:root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --mut:#5f6b7c; --line:#e4e7ec; --ok:#067647; --warn:#b54708;
+        --bad:#b42318; --acc:#2563d4; --chip:#eef2f7;
+        /* fills carry white text in both schemes (WCAG AA 4.5:1); the colours above are for text */
+        --okf:#067647; --warnf:#b54708; --badf:#b42318; --accf:#2563d4; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#171a21; --fg:#e7e9ee; --mut:#98a2b3; --line:#2a2f3a;
+        --chip:#232833; --acc:#6ea0ff; --ok:#32d583; --warn:#fdb022; --bad:#f97066; } }
+* { box-sizing:border-box } body { margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
+  background:var(--bg); color:var(--fg) }
+header { display:flex; gap:16px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line);
+  background:var(--card); position:sticky; top:0; z-index:5; flex-wrap:wrap }
+header b { font-size:16px } header a { color:var(--fg); text-decoration:none; opacity:.8 } header a:hover { opacity:1 }
+header .who { margin-left:auto; color:var(--mut); font-size:12px }
+main { padding:16px; max-width:1400px; margin:0 auto }
+a { color:var(--acc) } h2 { font-size:15px; margin:18px 0 8px } h1 { font-size:18px; margin:4px 0 12px }
+.grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)) }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap } .sp { flex:1 }
+.chip { display:inline-block; padding:1px 8px; border-radius:99px; background:var(--chip); font-size:12px; color:var(--mut) }
+.chip.ok { color:#fff; background:var(--okf) } .chip.warn { color:#fff; background:var(--warnf) }
+.chip.bad { color:#fff; background:var(--badf) } .chip.acc { color:#fff; background:var(--accf) }
+.mut { color:var(--mut) } .small { font-size:12px } .mono { font-family:ui-monospace,Menlo,monospace; font-size:12px }
+.bar { height:8px; background:var(--chip); border-radius:4px; overflow:hidden; margin:4px 0 }
+.bar > i { display:block; height:100%; background:var(--acc) }
+table { width:100%; border-collapse:collapse; background:var(--card) } th,td { text-align:left; padding:6px 8px;
+  border-bottom:1px solid var(--line); vertical-align:top } th { font-weight:600; color:var(--mut); font-size:12px }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums }
+.pos { color:var(--ok) } .neg { color:var(--bad) }
+button, .btn { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:7px;
+  padding:4px 10px; cursor:pointer; font-size:13px } button.pri { background:var(--accf); color:#fff; border-color:var(--accf) }
+button.danger { color:var(--bad) } form.inline { display:inline }
+input, select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:3px 6px }
+.alert { border-left:4px solid var(--bad); } pre { white-space:pre-wrap; word-break:break-all; max-height:420px; overflow:auto;
+  background:var(--chip); padding:8px; border-radius:6px }
+.kv { display:grid; grid-template-columns:max-content 1fr; gap:2px 12px }
+@media (max-width:640px) { main { padding:10px } .hide-sm { display:none } }
+
+.stale main .live-tile { opacity:.55 } .stale button:not([data-always]) { pointer-events:none; opacity:.5 }
+#stale-banner { display:none; background:var(--warnf); color:#fff; padding:6px 16px; font-size:13px }
+.stale #stale-banner { display:block }
+.flash { padding:6px 12px; border-radius:7px; margin-bottom:10px; background:var(--chip) }
+.flash.bad { background:var(--badf); color:#fff } .flash.ok { background:var(--okf); color:#fff }
+.fleet-state { font-size:12px } .plan pre { max-height:300px }
+textarea { width:100%; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px }
+
+.wf { position:relative; height:18px; background:var(--chip); border-radius:4px; margin:3px 0 }
+.wf span { position:absolute; top:0; height:100%; border-radius:3px; font-size:10px; color:#fff; overflow:hidden; white-space:nowrap; padding-left:3px }
+.seg-q { background:#98a2b3 } .seg-s { background:#6ea0ff } .seg-r { background:#2e6bd8 } .seg-f { background:#d68a00 } .seg-e { background:#12a150 }
+
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0 }
+/* htmx request indicators (htmx.config.includeIndicatorStyles is off: no injected <style> under the strict CSP) */
+.htmx-indicator { opacity:0 } .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity:1; transition:opacity 200ms ease-in }
+main.login { max-width: 26rem; margin: 3rem auto; }
+main.login form.card label { display: block; margin: .5rem 0; }
+main.login form.card input { width: 100%; }

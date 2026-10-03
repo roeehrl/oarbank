@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Protection · {{ n.hostname }} · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/nodes/{{ n.node_id }}">← {{ n.hostname }}</a></p>
+<div class="row"><h1>Protection on {{ n.hostname }}</h1>
+  <span class="chip {{ 'ok' if n.online else 'bad' }}">{{ 'online' if n.online else 'offline' }}</span>
+  <span class="chip">version {{ version }}</span><span class="chip acc">{{ prot.mode or mode }}</span>
+  {% if prot.rung %}<span class="chip warn">rung {{ prot.rung }}</span>{% endif %}
+  <span class="sp"></span>{{ m.op_form("protection.probe_now", n.node_id, "Run a pause probe now") }}
+</div>
+<p class="small mut">Owner-set only: rules protect your own processes from fleet work. Actions touch fleet jobs only (reserve, cap, lower,
+pause, evict); nothing here can signal a protected process. The node unions this with its local protection file, strictest wins.</p>
+
+<div class="grid">
+<div class="card">
+  <b>Mode</b>
+  {% call m.op_form("nodes.set_mode", n.node_id, "Set mode", cls="pri", confirm="Change the protection mode of " ~ n.hostname ~ "?", reason_prompt=True, inline=False) %}
+  <div class="small" style="margin:6px 0">{% for md, what in [('fleet_first', 'static rules and guards only; the fleet uses what is left'),
+      ('moderate', 'adaptive budget: grows while protected processes are unharmed, halves on harm; frontmost app and owner stall protected'),
+      ('strict_yield', 'pause fleet work at once on any protected activity; ramps back after 15 idle minutes')] %}
+    <label style="display:block"><input type="radio" name="p.mode" value="{{ md }}" {% if md == mode %}checked{% endif %}> <b>{{ md }}</b> <span class="mut">{{ what }}</span></label>{% endfor %}</div>
+  {% endcall %}
+</div>
+<div class="card">
+  <b>Controller now</b>
+  <div class="kv small" style="margin-top:6px">
+    <span class="mut">dynamic</span><span>{{ prot.dynamic or '–' }}</span>
+    <span class="mut">budget</span><span>{{ prot.budget_cores if prot.budget_cores is defined and prot.budget_cores is not none else '–' }} cores</span>
+    <span class="mut">binding</span><span>{% for dim, src in ((prot.constraint or {}).binding or {}).items() %}{{ dim }} ← <b>{{ src }}</b>{% if not loop.last %} · {% endif %}{% else %}nothing binds{% endfor %}</span>
+    <span class="mut">active rules</span><span>{{ (prot.active or []) | join(', ') or 'none' }}</span>
+  </div>
+</div>
+<div class="card">
+  <b>Canary</b>
+  {% if canary %}
+  <div class="kv small" style="margin-top:6px">
+    <span class="mut">node</span><span class="mono">{{ canary.node_id }} (version {{ canary.version }})</span>
+    <span class="mut">soaked</span><span>{{ canary.soak_s | secs }} · {{ canary.refused }} refused actuation(s)</span>
+    <span class="mut">by</span><span>{{ canary.actor }} · {{ canary.started_at | ago }}</span>
+  </div>
+  <div class="row" style="margin-top:6px">{{ m.op_form("protection.rules.canary", canary.node_id, "Review promotion to every node…", cls="pri", params={"promote": true}) }}</div>
+  <p class="small mut">The review shows whether it is promotable: a clean soak (no S16/S18 findings or refused actuations) of at least 10 minutes.</p>
+  {% else %}<p class="small mut">No canary running. Use "Canary on this node" below to try a rule set here first, then promote it.</p>{% endif %}
+</div>
+</div>
+
+<h2>Rules <span class="small mut">(protection schema 1, edited as JSON; the preview updates as you type)</span></h2>
+<div class="grid">
+<div class="card">
+  {% call m.op_form("protection.rules.update", n.node_id, "Review and apply…", cls="pri", inline=False) %}
+  <textarea id="prot-config" name="pj.config" aria-label="protection rules (JSON)" rows="26" class="mono" spellcheck="false" style="width:100%"
+    hx-get="/frag/nodes/{{ n.node_id }}/protection/preview" hx-trigger="input changed delay:400ms, load" hx-target="#prot-preview"
+    hx-swap="innerHTML">{{ config_text }}</textarea>
+  <div class="row" style="margin-top:6px"><button formaction="/do/protection.rules.canary" title="Apply to this node only, then promote after a clean soak">Canary on this node…</button>
+    <span class="sp"></span><span class="small mut">T2: you review the diff and live matches, and give a reason, before anything changes.</span></div>
+  {% endcall %}
+</div>
+<div class="card"><b>Live preview</b><div id="prot-preview" class="small" aria-live="polite"><span class="mut">computing…</span></div></div>
+</div>
+
+<h2>Process picker <span class="small mut">(reported by the agent {{ processes_at | ago if processes_at else 'never' }}; refreshed when you preview)</span></h2>
+<table class="small"><tr><th class="num">pid</th><th>process</th><th>identity</th><th class="num">cpu</th><th class="num">GB</th><th>protected by</th><th><span class="sr-only">actions</span></th></tr>
+{% for p in picker %}<tr><td class="num">{{ p.pid }}</td><td class="mono" title="{{ p.path }}">{{ (p.path or '').rsplit('/', 1)[-1] }}{% if p.argv and p.argv | length > 1 %} <span class="mut">{{ p.argv[1:] | join(' ') | truncate(60) }}</span>{% endif %}</td>
+  <td class="mono small">{{ p.bundle_id or '' }}{% if p.team_id %} · {{ p.team_id }}{% endif %}</td>
+  <td class="num">{{ p.cpu_cores }}</td><td class="num">{{ p.footprint_gb }}</td>
+  <td>{% for r in p.rules %}<span class="chip acc">{{ r }}</span>{% endfor %}</td>
+  <td><button type="button" data-add-rule="{{ p.suggest }}" data-target="prot-config" title="Append a rule for this process to the editor">protect…</button></td></tr>
+{% else %}<tr><td colspan="7" class="mut">no process summary yet: the agent sends one every 5 minutes, or at once after a preview asks</td></tr>{% endfor %}</table>
+
+<h2>Decision timeline <span class="small mut">(last {{ timeline.hours | int }} h, {{ timeline.events }} journal records)</span></h2>
+<div class="card">
+<svg viewBox="0 0 {{ timeline.width }} {{ 60 + 18 * (timeline.rows | length) }}" width="100%" role="img" aria-label="protection decision timeline" class="timeline">
+  {% for row in timeline.rows %}<text x="2" y="{{ 12 + 18 * loop.index0 }}" font-size="10" fill="currentColor">{{ row.rule }}</text>
+  {% set y = 3 + 18 * loop.index0 %}{% for s in row.spans %}<rect x="{{ s.x }}" y="{{ y }}" width="{{ s.w }}" height="12" fill="#2e6bd8" fill-opacity="0.35"><title>{{ row.rule }} active</title></rect>{% endfor %}{% endfor %}
+  <g transform="translate(0,{{ 18 * (timeline.rows | length) + 12 }})">
+    <path d="{{ timeline.rung }}" fill="none" stroke="#d92d20" stroke-width="1.5"><title>escalation rung (0–6)</title></path>
+    <path d="{{ timeline.budget }}" fill="none" stroke="#12a150" stroke-width="1.5" stroke-dasharray="4 3"><title>L1 budget (cores)</title></path>
+    {% for p in timeline.probes %}<circle cx="{{ p.x }}" cy="44" r="3" fill="#d68a00"><title>probe{% if p.harm is not none %}: harm {{ p.harm }}{% endif %}</title></circle>{% endfor %}
+    {% for g in timeline.guards %}<line x1="{{ g.x }}" x2="{{ g.x }}" y1="0" y2="40" stroke="#7a2e0e"><title>{{ g.reason }}</title></line>{% endfor %}
+  </g>
+</svg>
+<p class="small mut">Bands: rules active. Red: escalation rung. Green dashed: moderate-mode budget. Orange dots: pause probes. Brown lines: memory guard.</p>
+</div>
+
+<h2>Versions</h2>
+<table class="small"><tr><th>version</th><th>when</th><th>by</th><th>source</th><th>reason</th><th>rules</th><th><span class="sr-only">actions</span></th></tr>
+{% for h in history %}<tr><td>{{ h.version }}</td><td class="mut">{{ h.created_at | ago }}</td><td>{{ h.actor }}</td><td class="mono">{{ h.source }}</td>
+  <td>{{ h.reason or '' }}</td><td class="mono small">{{ (h.config.rule or []) | map(attribute='id') | join(', ') }} · {{ (h.config.node or {}).mode or 'moderate' }}</td>
+  <td>{% if not loop.first %}{{ m.op_form("protection.rules.restore", n.node_id, "Restore…", params={"version": h.version}) }}{% endif %}</td></tr>
+{% else %}<tr><td colspan="7" class="mut">no versioned edits yet (version 0 is the policy's section)</td></tr>{% endfor %}</table>
+{% endblock %}

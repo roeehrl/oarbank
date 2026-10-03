@@ -1,0 +1,18 @@
+[package]
+name = "oarbank-core-py"
+description = "Python bindings for oarbank-core, for parity tests against the SDK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "oarbank_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+oarbank-core = { path = "../oarbank-core" }
+serde_json.workspace = true
+pyo3 = { version = "0.29", features = ["abi3-py312", "extension-module"] }
+
+[build-dependencies]
+pyo3-build-config = "0.29"

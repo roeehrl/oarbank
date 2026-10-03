@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Events · Oarbank{% endblock %}
+{% block body %}
+<h1>Events & audit</h1>
+<form class="row small" method="get"><label>kind <input name="kind" value="{{ kind }}"></label><button>Filter</button></form>
+<table class="small"><tr><th>time</th><th>kind</th><th>actor</th><th>node</th><th>campaign</th><th>job</th><th>reason</th><th>details</th></tr>
+{% for e in events %}<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td>{{ e.actor }}</td>
+<td>{% if e.node_id %}<a href="/nodes/{{ e.node_id }}">{{ e.node_id }}</a>{% endif %}</td>
+<td>{% if e.campaign_id %}<a href="/campaigns/{{ e.campaign_id }}">{{ e.campaign_id }}</a>{% endif %}</td>
+<td>{% if e.job_id %}<a href="/jobs/{{ e.job_id }}">{{ e.job_id }}</a>{% endif %}</td><td>{{ e.reason or '' }}</td>
+<td class="mono">{{ (e.payload_json or '')[:200] }}</td></tr>{% endfor %}</table>
+{% endblock %}

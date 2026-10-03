@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Verify · Oarbank{% endblock %}
+{% block body %}
+<h1>Invariants</h1>
+<p class="small mut">Safety invariants S1–S15 as conditions (True is good), checked every minute. A violation opens a P5 alert that stays latched until resolved.</p>
+<table class="small"><tr><th>id</th><th>invariant</th><th>status</th><th>since</th><th>detail</th></tr>
+{% for c in conds %}<tr><td>{{ c.id }}</td><td class="mono">{{ c.name }}</td>
+<td><span class="chip {{ 'ok' if c.status == 'True' else 'bad' }}">{{ c.status }}</span></td><td class="mut">{{ c.last_transition_at | ago }}</td><td>{{ c.message }}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">not checked yet (oarbankd checks every minute)</td></tr>{% endfor %}</table>
+<h2>Invariant alerts</h2>
+<table class="small">{% for a in alerts %}<tr><td class="mono">{{ a.rule }}</td><td>{{ a.state }}</td><td class="mut">{{ a.opened_at | ago }}</td><td>{{ a.detail }}</td></tr>
+{% else %}<tr><td class="mut">none</td></tr>{% endfor %}</table>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Why? {{ doc.subject.kind }} {{ doc.subject.id }} · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>Why? {{ doc.subject.kind }} {{ doc.subject.id }}</h1><span class="chip">{{ doc.verdict }}</span>
+  <span class="sp"></span><span class="small mut">evaluated {{ doc.as_of.evaluated_at | hm }} with the claim path's own predicates</span></div>
+<div class="card"><b>{{ doc.headline.text }}</b> <span class="chip mono">{{ doc.headline.code }}</span>
+{% if doc.next_trigger %}<div class="small mut">{{ doc.next_trigger }}</div>{% endif %}</div>
+{% if doc.summary %}<h2>Summary</h2>
+<table class="small">{% for s in doc.summary %}<tr><td class="mono">{{ s.code }}</td><td>{{ s.nodes | join(', ') }}</td><td class="mono">{{ s.detail | tojson if s.detail else '' }}</td></tr>{% endfor %}</table>{% endif %}
+{% if doc.matrix %}<h2>Every node × every predicate</h2>
+{% for row in doc.matrix %}<details {% if loop.length == 1 %}open{% endif %}><summary><b>{{ row.node }}</b>
+  {% set bad = row.results | selectattr('outcome', 'ne', 'pass') | list %}{% if bad %}<span class="chip bad">{{ bad[0].code }}</span>{% else %}<span class="chip ok">eligible</span>{% endif %}</summary>
+<table class="small">{% for r in row.results %}<tr><td>{{ '✅' if r.outcome == 'pass' else ('❔' if r.outcome == 'unknown' else '❌') }}</td>
+<td class="mono">{{ r.predicate }}</td><td class="mut">{{ r.layer }}</td><td class="mono">{{ r.observed }}</td><td class="mono">{{ r.required }}</td><td class="mono">{{ r.code if r.outcome != 'pass' else '' }}</td></tr>{% endfor %}</table>
+</details>{% endfor %}{% endif %}
+{% if doc.clauses %}<h2>Clauses</h2><table class="small">{% for c in doc.clauses %}<tr><td class="mono">{{ c.predicate }}</td><td class="num">{{ c.matched }}/{{ c.of }}</td></tr>{% endfor %}</table>{% endif %}
+{% if doc.remedies %}<h2>Remedies</h2><div class="row">{% for r in doc.remedies %}<span class="chip">{{ r.op }}</span>{% endfor %}</div>{% endif %}
+{% endblock %}
