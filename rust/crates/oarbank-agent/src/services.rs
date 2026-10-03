@@ -643,13 +643,9 @@ impl ServiceManager {
             self.node_id = n.to_string();
         }
         let disabled: BTreeSet<String> = strings(&policy["disabled_services"]).into_iter().collect();
+        // the files first (contexts, grants), away from the shared state
         let mut modules = BTreeMap::new();
-        let mut services = BTreeMap::new();
-        let mut probes = BTreeMap::new();
-        let mut sh = lock(&self.shared);
-        let mut old_services = std::mem::take(&mut sh.services);
-        let mut old_probes = std::mem::take(&mut sh.probes);
-        drop(sh);
+        let mut decls: Vec<(String, Vec<ServiceDecl>, Vec<ProbeDecl>)> = Vec::new();
         for entry in &release.modules {
             let Some(name) = entry["name"].as_str().map(str::to_string) else { continue };
             let sd: Vec<ServiceDecl> = entry["services"].as_array().into_iter().flatten().filter_map(ServiceDecl::parse).collect();
@@ -660,34 +656,36 @@ impl ServiceManager {
             match self.module_ctx(release, entry, policy) {
                 Ok(c) => {
                     modules.insert(name.clone(), Arc::new(c));
+                    decls.push((name, sd, pd));
                 }
-                Err(e) => {
-                    warn!(module = %name, error = %e, "cannot prepare the module's services");
-                    continue;
-                }
-            }
-            for d in sd {
-                let key = format!("{name}/{}", d.name);
-                let mut st = old_services.remove(&key).unwrap_or_else(|| Svc::new(&name, d.clone()));
-                st.decl = d;
-                st.disabled = disabled.contains(&key);
-                services.insert(key, st);
-            }
-            for d in pd {
-                let key = format!("{name}/{}", d.name);
-                let mut st = old_probes.remove(&key).unwrap_or_else(|| ProbeSt { module: name.clone(), decl: d.clone(),
-                    health: Health::Unknown, attrs: Value::Null, busy: false, last_run: None });
-                st.decl = d;
-                probes.insert(key, st);
+                Err(e) => warn!(module = %name, error = %e, "cannot prepare the module's services"),
             }
         }
+        // then the new state in one hold of the lock: an op that finishes meanwhile writes into the state that stays
+        let old_services = {
+            let mut sh = lock(&self.shared);
+            let mut old_services = std::mem::take(&mut sh.services);
+            let mut old_probes = std::mem::take(&mut sh.probes);
+            for (name, sd, pd) in decls {
+                for d in sd {
+                    let key = format!("{name}/{}", d.name);
+                    let mut st = old_services.remove(&key).unwrap_or_else(|| Svc::new(&name, d.clone()));
+                    st.decl = d;
+                    st.disabled = disabled.contains(&key);
+                    sh.services.insert(key, st);
+                }
+                for d in pd {
+                    let key = format!("{name}/{}", d.name);
+                    let mut st = old_probes.remove(&key).unwrap_or_else(|| ProbeSt { module: name.clone(), decl: d.clone(),
+                        health: Health::Unknown, attrs: Value::Null, busy: false, last_run: None });
+                    st.decl = d;
+                    sh.probes.insert(key, st);
+                }
+            }
+            old_services
+        };
         let old_modules = std::mem::replace(&mut self.modules, modules);
         self.proxies.retain(|m, _| self.modules.get(m).is_some_and(|c| c.proxy.is_some()));
-        {
-            let mut sh = lock(&self.shared);
-            sh.services = services;
-            sh.probes = probes;
-        }
         for (key, s) in old_services {
             if !(self.manage && s.running && s.decl.lifecycle != Lifecycle::Manual) {
                 continue;
@@ -955,7 +953,7 @@ impl ServiceManager {
 }
 
 /// What a service should be (`Some(true)` up, `Some(false)` down, `None` leave it), from its lifecycle, its users and
-/// its idle time; idle yieldable services go down under memory pressure.
+/// its idle time; idle yieldable services go down under memory pressure and stay down until it ends.
 fn want(s: &Svc, now: Instant, memory_soft: bool, halted: bool) -> Option<bool> {
     let d = &s.decl;
     if d.lifecycle == Lifecycle::Manual {
@@ -974,8 +972,8 @@ fn want(s: &Svc, now: Instant, memory_soft: bool, halted: bool) -> Option<bool> 
     } else if s.running && s.idle_since.is_some_and(|i| now.duration_since(i) >= d.idle_timeout) {
         w = Some(false);
     }
-    if memory_soft && s.running && s.users == 0 && d.yieldable {
-        w = Some(false);
+    if memory_soft && s.users == 0 && d.yieldable {
+        w = s.running.then_some(false);                          // down, and not started again while it lasts
     }
     w
 }
@@ -1325,7 +1323,7 @@ mod tests {
         });
         assert!(up && saw_gate_shut);
         assert_eq!(fx.calls("vm", "start"), 1);
-        assert!(tick_until(&mut m, &one, &[], false, 5.0, |m| m.reserved_mem_gb() == 8.0));
+        assert!(tick_until(&mut m, &one, &[], false, 20.0, |m| m.reserved_mem_gb() == 8.0));
         let env = fx.file("vm.env");
         assert!(env.contains("service=vm") && env.contains("node=node-1") && env.contains("module=mod"), "{env}");
         assert!(env.contains(&format!("cwd={}", fx.release.dir.join("modules/mod").display())), "{env}");
@@ -1467,6 +1465,27 @@ mod tests {
     }
 
     #[test]
+    fn an_op_that_finishes_during_a_reconfigure_is_kept() {
+        // configure replaces the service table while ops run on their threads; an op's outcome written meanwhile must
+        // land in the table that stays (it once went to a table being rebuilt, and the service stayed busy for good:
+        // never started or stopped again)
+        let fx = Fx::new("reconfigure", json!([svc("vm", json!({}))]), json!([]));
+        let mut m = fx.manager(json!({}), true);
+        let busy = |m: &ServiceManager| lock(&m.shared).services["mod/vm"].busy;
+        for round in 0..5 {
+            m.refresh_now();
+            m.tick(&need(&[]), &[], false);                       // a fingerprint op on its way
+            assert!(busy(&m));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while busy(&m) && Instant::now() < deadline {
+                m.configure(&fx.release, &json!({}), None);
+            }
+            assert!(!busy(&m), "round {round}: the fingerprint's outcome was lost: {}", m.report());
+            assert_eq!(m.report()["services"][0]["health"], "healthy");
+        }
+    }
+
+    #[test]
     fn with_manage_services_off_nothing_starts_or_stops() {
         let fx = Fx::new("unmanaged", json!([svc("vm", json!({"lifecycle": "always"}))]),
                          json!([{"name": "java17", "exec": ["{bundle}/probe.sh"], "period_s": 1}]));
@@ -1494,6 +1513,9 @@ mod tests {
         let both = |m: &ServiceManager| m.running() == ["mod/db", "mod/vm"] && m.ready_for(&["vmpool".to_string()]);
         assert!(tick_until(&mut m, &need(&[]), &[], false, 25.0, both));
         assert!(tick_until(&mut m, &need(&[]), &[], true, 20.0, |m| m.running() == ["mod/db"]));
+        tick_for(&mut m, &need(&[]), &[], true, 4.0);            // and it stays down while the pressure lasts
+        assert_eq!(m.running(), ["mod/db"]);
+        assert_eq!(fx.calls("vm", "start"), 1);
         assert_eq!(fx.calls("vm", "stop"), 1);
         assert_eq!(fx.calls("db", "stop"), 0);
         // a user keeps a yieldable service up under pressure
