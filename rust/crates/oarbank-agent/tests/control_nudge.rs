@@ -3,8 +3,11 @@
 //! control event, passed through the AppContainer shim) within 200 ms. The agent's steps (jobs.rs ControlFile,
 //! sys.rs Nudge) are repeated here, as the agent is a binary: replace control.json atomically, then nudge.
 
+mod common;
+
+use common::{python, sandboxed, scratch};
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -35,61 +38,6 @@ except Stopped:
     print("stopped", flush=True)
     sys.exit(3)
 "#;
-
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("oarbank-ctl-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-/// The test's Python, found the way runtime.rs finds the node's: OARBANK_TEST_PYTHON (an absolute path), else the node
-/// runtime's (Windows), else the first python3 or python on PATH that can run the SDK (3.12+: macOS's /usr/bin/python3
-/// is an older Xcode stub). Its path as found, symlinks and all, is argv[0], as for real modules (Homebrew's
-/// bin/python3 is a chain of links into the Cellar), and the roots are those runtime.rs's probe reports.
-fn python() -> (String, Vec<String>) {
-    let exe_name = |n: &str| format!("{n}{}", std::env::consts::EXE_SUFFIX);
-    let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default().into_iter()
-        .flat_map(|d| [d.join(exe_name("python3")), d.join(exe_name("python"))]);
-    let candidates: Vec<PathBuf> = match std::env::var_os("OARBANK_TEST_PYTHON") {
-        Some(p) => vec![PathBuf::from(p)],
-        None => cfg!(windows).then(|| PathBuf::from(r"C:\Program Files\Oarbank\runtime\python.exe")).into_iter().chain(on_path).collect(),
-    };
-    let probe = "import json, os, sys\nassert sys.version_info >= (3, 12)\n\
-                 r = {sys.prefix, sys.base_prefix, sys.exec_prefix, os.path.dirname(os.path.realpath(sys.executable))}\n\
-                 print(json.dumps(sorted(r | {os.path.realpath(x) for x in r})))";
-    for exe in candidates.iter().filter(|p| p.is_file()) {
-        let Ok(out) = Command::new(exe).args(["-I", "-c", probe]).output() else { continue };
-        if let (true, Ok(roots)) = (out.status.success(), serde_json::from_slice::<Vec<String>>(&out.stdout)) {
-            return (exe.display().to_string(), roots);
-        }
-    }
-    panic!("no Python 3.12+ among {candidates:?} (set OARBANK_TEST_PYTHON)");
-}
-
-/// argv run under the module sandbox through `oarbank-agent sandbox-exec`, as sandbox.rs `wrap` builds it.
-fn sandboxed(bundle: &Path, ws: &Path, py: &str, roots: Vec<String>, argv: &[String]) -> Vec<String> {
-    let mut pol = oarbank_core::sandbox::Policy::new("dev.test.control");
-    pol.ro = [vec![bundle.display().to_string()], roots].concat();
-    pol.rw = vec![ws.display().to_string()];
-    pol.exe = Some(py.to_string());
-    let agent = env!("CARGO_BIN_EXE_oarbank-agent").to_string();
-    let mut out = vec![agent, "sandbox-exec".into()];
-    if cfg!(target_os = "macos") {
-        let (text, params) = oarbank_core::sandbox::render(&pol).unwrap();
-        let profile = bundle.join("runner.sb");
-        std::fs::write(&profile, text).unwrap();
-        out.push(profile.display().to_string());
-        out.extend(params.iter().map(|(k, v)| format!("{k}={v}")));
-    } else {
-        let policy = bundle.join("policy.json");
-        std::fs::write(&policy, serde_json::to_vec(&pol).unwrap()).unwrap();
-        out.push(policy.display().to_string());
-    }
-    out.push("--".into());
-    out.extend(argv.iter().cloned());
-    out
-}
 
 fn write_control(ws: &Path, seq: u64, mut doc: serde_json::Value) {
     doc["seq"] = seq.into();
@@ -238,7 +186,7 @@ fn a_sandboxed_runner_pauses_resumes_and_stops_on_the_agents_nudges() {
     std::fs::write(bundle.join("runner.py"), RUNNER).unwrap();
     write_control(&ws, 0, serde_json::json!({}));
     let (py, roots) = python();
-    let argv = sandboxed(&bundle, &ws, &py, roots, &[py.clone(), "-I".into(), bundle.join("runner.py").display().to_string(),
+    let argv = sandboxed("dev.test.control", &bundle, &ws, &py, roots, &[py.clone(), "-I".into(), bundle.join("runner.py").display().to_string(),
                                                      ws.display().to_string()]);
     let mut nudge = nudge::Nudge::new();
     let mut cmd = Command::new(&argv[0]);

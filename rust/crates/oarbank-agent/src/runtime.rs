@@ -36,7 +36,8 @@ impl Runtime {
 import json, os, sys, sysconfig
 p = sysconfig.get_paths()
 site = [p["purelib"], p["platlib"]]
-roots = {sys.prefix, sys.base_prefix, sys.exec_prefix, os.path.dirname(os.path.realpath(sys.executable))}
+# sys.executable: what the interpreter calls itself and execs again (multiprocessing); Homebrew's is its opt/ path
+roots = {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.executable, os.path.dirname(os.path.realpath(sys.executable))}
 roots |= {os.path.realpath(r) for r in list(roots)}
 extra = []
 for d in site:
