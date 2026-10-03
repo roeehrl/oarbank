@@ -120,6 +120,15 @@ CODES: list[ReasonCode] = [
     C("L1_HOLD_UNVALIDATED", "protection", "Fleet CPU budget held at {budget}: no validated signal for {rule}"),
     C("PROBE_HARM", "protection", "A pause probe measured harm {harm} to {rule}"),
     C("S16_GUARD", "protection", "Refused to act on process {pid}: it is not in the spawn registry ({why})", "P3"),
+    C("PROTECTION_FRONT_UNKNOWN", "protection", "The front app cannot be read here ({why}); frontmost rules count it as "
+      "in front", "P4"),
+    C("PROTECTION_PRESENCE_UNKNOWN", "protection", "Whether someone is at the machine cannot be read ({why}); it counts "
+      "as someone present", "P4"),
+    C("PROTECTION_UNREADABLE", "protection", "Rule {rule} matched {n} processes whose path or arguments could not be read "
+      "(counted as matches)", "P5"),
+    C("PROTECTION_NO_LOWERING", "protection", "This node cannot lower fleet jobs (no delegated cgroup with the cpu "
+      "controller): pausable jobs are paused instead", "P3"),
+    C("PROTECTION_SOURCE_ERROR", "protection", "The process table cannot be read: {error}", "P3"),
 
     # ---------------------------------------------------------------- how an attempt ended
     C("OK", "attempt_end", "Completed", wire=["ok"], node=False, job=False),

@@ -9,6 +9,7 @@ use crate::signals::{Meter, Presence, PresenceReading};
 use crate::table::ProcessSource;
 use crate::sources::FileOwnerSources;
 use crate::spawn_registry::Actuator;
+use crate::support::Os;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -42,6 +43,7 @@ pub fn native_host() -> Host {
         processes,
         meter,
         sources: Box::new(FileOwnerSources::new()),
+        os: Os::current(),
     }
 }
 

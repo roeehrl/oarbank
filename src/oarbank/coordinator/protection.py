@@ -31,15 +31,24 @@ def config_hash(config: dict) -> str:
     return hashlib.sha256(canonical_json(config).encode()).hexdigest()[:16]
 
 
-def validate(config: dict) -> dict:
-    """Check against schema 1 and return the config as written (stored verbatim, so diffs stay minimal)."""
+def validate(config: dict, os: str | None = None) -> dict:
+    """Check against schema 1, and against what a node of `os` can do when given (contracts.protection.refusals),
+    and return the config as written (stored verbatim, so diffs stay minimal)."""
     if not isinstance(config, dict):
         raise ProtectionError("the protection config must be an object")
     try:
         P.ProtectionConfig.model_validate(config)
     except ValueError as e:
         raise ProtectionError(str(e)[:800])
+    refused = P.refusals(config, os) if os else []
+    if refused:
+        raise ProtectionError(f"on {os}: " + "; ".join(refused)[:800])
     return config
+
+
+def node_os(db: DB, nid: str) -> str | None:
+    n = db.one("SELECT os FROM nodes WHERE node_id=?", (nid,))
+    return n["os"] if n else None
 
 
 def current(db: DB, nid: str) -> tuple[int, dict]:
@@ -70,9 +79,42 @@ def record_version(db: DB, nid: str, config: dict, actor: str, reason: str | Non
 
 def write_version(db: DB, nid: str, config: dict, actor: str, reason: str | None, source: str = "rules.update") -> int:
     from . import core
-    config = validate(config)
+    config = validate(config, node_os(db, nid))
     core.set_policy(db, nid, {"protection": config}, actor, reason=reason, source=source)
     return current(db, nid)[0]
+
+
+# ------------------------------------------------------------------ what the node cannot read now
+
+def runtime_conditions(tel: dict) -> list[dict]:
+    """What protection cannot read or do on a node right now, from its telemetry (the agent reports it; the config
+    already refused what its OS can never do): each with its code, tone, the reason code's values and a message.
+    The fail-safe defaults apply meanwhile, and these say which."""
+    out = []
+    prot = tel.get("protection") or {}
+    front = prot.get("front") or ""
+    if front.startswith("unknown"):
+        why = front.removeprefix("unknown: ")
+        out.append({"code": "PROTECTION_FRONT_UNKNOWN", "tone": "warn", "values": {"why": why},
+                    "message": f"the front app cannot be read here ({why}); frontmost rules count it as in front"})
+    presence = tel.get("presence") or ""
+    if presence.startswith("unknown"):
+        why = presence.removeprefix("unknown: ")
+        out.append({"code": "PROTECTION_PRESENCE_UNKNOWN", "tone": "warn", "values": {"why": why},
+                    "message": f"whether someone is at the machine cannot be read ({why}); it counts as someone present"})
+    for r in prot.get("rules") or []:
+        if r.get("unreadable"):
+            out.append({"code": "PROTECTION_UNREADABLE", "tone": "acc", "values": {"rule": r["id"], "n": r["unreadable"]},
+                        "message": f"rule {r['id']} matched {r['unreadable']} processes whose path or arguments could not be "
+                                   "read (counted as matches)"})
+    if prot.get("lowering") is False:
+        out.append({"code": "PROTECTION_NO_LOWERING", "tone": "warn", "values": {},
+                    "message": "this node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable "
+                               "jobs are paused instead"})
+    if prot.get("source_error"):
+        out.append({"code": "PROTECTION_SOURCE_ERROR", "tone": "bad", "values": {"error": prot["source_error"]},
+                    "message": f"the process table cannot be read: {prot['source_error']}"})
+    return out
 
 
 # ------------------------------------------------------------------ preview
@@ -94,7 +136,7 @@ def request_processes(db: DB, nid: str):
 def preview(db: DB, nid: str, config: dict) -> dict:
     """What a rule set would do on this node now: the diff against the current version, each rule's live
     matches among the reported processes, and the reported processes' age (a stale summary asks for a new one)."""
-    cfg = validate(config)
+    cfg = validate(config, node_os(db, nid))
     ver, cur = current(db, nid)
     procs, at = processes(db, nid)
     age = None if at is None else round(time.time() - at, 1)
@@ -112,7 +154,7 @@ CANARY_KEY = "protection_canary"
 
 
 def start_canary(db: DB, nid: str, config: dict, actor: str, reason: str | None) -> dict:
-    cfg = validate(config)
+    cfg = validate(config, node_os(db, nid))
     v = write_version(db, nid, cfg, actor, reason, source="rules.canary")
     c = {"node_id": nid, "config_hash": config_hash(cfg), "config": cfg, "version": v, "started_at": time.time(),
          "actor": actor}
@@ -147,9 +189,16 @@ def canary_health(db: DB) -> dict:
     return {"canary": {k: v for k, v in c.items() if k != "config"}, "promotable": not why, "why": why, "soak_s": int(soak)}
 
 
-def promote_targets(db: DB, c: dict) -> list[str]:
-    return [r["node_id"] for r in db.q("SELECT node_id FROM nodes WHERE lifecycle!='retired' AND node_id!=? ORDER BY node_id",
-                                       (c["node_id"],))]
+def promote_targets(db: DB, c: dict) -> tuple[list[str], dict[str, str]]:
+    """The nodes a canary's rules go to, and those skipped because their OS cannot run them (node -> why)."""
+    targets, skipped = [], {}
+    for r in db.q("SELECT node_id, os FROM nodes WHERE lifecycle!='retired' AND node_id!=? ORDER BY node_id", (c["node_id"],)):
+        refused = P.refusals(c["config"], r["os"]) if r["os"] else []
+        if refused:
+            skipped[r["node_id"]] = f"on {r['os']}: " + "; ".join(refused)
+        else:
+            targets.append(r["node_id"])
+    return targets, skipped
 
 
 def promote(db: DB, actor: str, reason: str | None, force: bool = False) -> dict:
@@ -157,10 +206,12 @@ def promote(db: DB, actor: str, reason: str | None, force: bool = False) -> dict
     if not h["promotable"] and not force:
         raise ProtectionError("canary not promotable: " + "; ".join(h["why"]))
     c = db.get_setting(CANARY_KEY)
-    done = {nid: write_version(db, nid, c["config"], actor, reason, source="rules.promote") for nid in promote_targets(db, c)}
+    targets, skipped = promote_targets(db, c)
+    done = {nid: write_version(db, nid, c["config"], actor, reason, source="rules.promote") for nid in targets}
     db.set_setting(CANARY_KEY, None)
-    db.event("protection_promoted", actor=actor, node_id=c["node_id"], config_hash=c["config_hash"], nodes=sorted(done))
-    return {"promoted": done, "config_hash": c["config_hash"]}
+    db.event("protection_promoted", actor=actor, node_id=c["node_id"], config_hash=c["config_hash"], nodes=sorted(done),
+             skipped=sorted(skipped))
+    return {"promoted": done, "skipped": skipped, "config_hash": c["config_hash"]}
 
 
 # ------------------------------------------------------------------ mode and probe

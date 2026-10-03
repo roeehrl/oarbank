@@ -91,7 +91,8 @@ class Match(_M):
     path_prefix: str | None = None
     path_contains: str | None = None
     argv_regex: str | None = None
-    name: str | None = Field(None, max_length=16, description="p_comm (weakest; truncated at 16 characters).")
+    name: str | None = Field(None, max_length=255, description="The kernel's short name, weakest: p_comm on macOS (16 "
+                             "characters), comm on Linux (15), the image file name on Windows.")
 
     @model_validator(mode="after")
     def _some(self):
@@ -140,7 +141,8 @@ class CapFleet(_M):
 
 
 class LowerFleet(_M):
-    to: Literal["e_cores"] = "e_cores"
+    to: Literal["background"] = Field("background", description="macOS background QoS, a CPU quota on Linux, the idle "
+                                      "priority class with EcoQoS on Windows.")
 
 
 class PauseFleet(_M):
@@ -232,3 +234,39 @@ class ProtectionConfig(_M):
 
 def load(path: str | Path) -> ProtectionConfig:
     return ProtectionConfig.model_validate(tomllib.loads(Path(path).read_text()))
+
+
+# ------------------------------------------------------------------------------------------ per OS
+
+OS_TOKENS = ("darwin", "linux", "windows")
+# the longest match.name that can match: p_comm keeps 16 characters, Linux's comm 15; a Windows image name is whole
+NAME_LIMIT = {"darwin": 16, "linux": 15, "windows": 255}
+NO_SIGNING = {"linux": "Linux executables carry no code-signing identity",
+              "windows": "Windows signatures (Authenticode) carry no Team ID or signing identifier"}
+SUPPORT_VECTORS = Path(__file__).parent / "fixtures" / "protection-support-vectors.json"
+
+
+def refusals(config: dict, os: str) -> list[str]:
+    """Why a (valid) protection section cannot run as written on a node of this OS: the agent's support.rs, held
+    equal by shared vectors (fixtures/protection-support-vectors.json). Empty: it can. An unknown OS refuses
+    nothing."""
+    out = []
+    for r in config.get("rule") or config.get("rules") or []:
+        rid, m = r.get("id"), r.get("match") or {}
+        why = NO_SIGNING.get(os)
+        if why:
+            for key in ("requirement", "team_id", "identifier"):
+                if m.get(key):
+                    out.append(f"rule {rid}: match.{key} is a macOS code-signing identity, and {why} "
+                               "(match on path_prefix, path_contains, name or argv_regex)")
+            if m.get("bundle_id"):
+                out.append(f"rule {rid}: match.bundle_id names a macOS app bundle, and {os} has none "
+                           "(match on path_prefix, path_contains, name or argv_regex)")
+        limit = NAME_LIMIT.get(os)
+        if limit and m.get("name") and len(m["name"]) > limit:
+            out.append(f"rule {rid}: match.name {m['name']!r} is longer than the {limit} characters {os} keeps of a "
+                       "process's name, so it would never match")
+        if (r.get("protect") or {}).get("metric") == "ipc_ratio" and os in NO_SIGNING:
+            out.append(f"rule {rid}: protect.metric = ipc_ratio needs per-process instruction and cycle counters, which "
+                       "only macOS gives an unprivileged agent (use progress_rate, cpu_stall or gpu_share)")
+    return out

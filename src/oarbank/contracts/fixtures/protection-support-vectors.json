@@ -1,0 +1,20 @@
+{
+  "comment": "Shared vectors for what a protection config can ask of each OS: the agent's support.rs and the coordinator's oarbank.contracts.protection.refusals give the same refusals. refused: a substring of each refusal, in order (empty: the rule runs as written there).",
+  "cases": [
+    {"name": "macOS matches on code-signing identity and bundles", "os": "darwin", "rule": {"id": "chrome", "match": {"team_id": "EQHXZ8M8AV", "bundle_id": ["com.google.Chrome"]}, "tree": "same_team", "reserve": {"mem_gb": 4}}, "refused": []},
+    {"name": "Linux has no code-signing identity", "os": "linux", "rule": {"id": "chrome", "match": {"team_id": "EQHXZ8M8AV"}, "tree": "same_team", "reserve": {"mem_gb": 4}}, "refused": ["rule chrome: match.team_id"]},
+    {"name": "Windows has no Team ID, signing identifier, requirement or app bundle", "os": "windows", "rule": {"id": "x", "match": {"requirement": "anchor apple", "identifier": "com.example.x", "bundle_id": "com.example.x"}, "evict": {}}, "refused": ["match.requirement", "match.identifier", "match.bundle_id"]},
+    {"name": "a list holding only the empty bundle id is still a bundle key", "os": "linux", "rule": {"id": "b", "match": {"bundle_id": [""], "path_prefix": "/opt/"}, "evict": {}}, "refused": ["match.bundle_id"]},
+    {"name": "Linux keeps 15 characters of a process's name", "os": "linux", "rule": {"id": "n", "match": {"name": "gnome-text-edit"}, "cap_fleet": {"slots": 0}}, "refused": []},
+    {"name": "a 16-character name never matches on Linux", "os": "linux", "rule": {"id": "n", "match": {"name": "Google Chrome He"}, "cap_fleet": {"slots": 0}}, "refused": ["match.name"]},
+    {"name": "macOS keeps 16", "os": "darwin", "rule": {"id": "n", "match": {"name": "Google Chrome He"}, "cap_fleet": {"slots": 0}}, "refused": []},
+    {"name": "a 17-character name never matches on macOS", "os": "darwin", "rule": {"id": "n", "match": {"name": "Google Chrome Hel"}, "cap_fleet": {"slots": 0}}, "refused": ["match.name"]},
+    {"name": "a Windows image name is the whole file name", "os": "windows", "rule": {"id": "wt", "match": {"name": "WindowsTerminal.exe", "argv_regex": "--profile"}, "lower_fleet": {}}, "refused": []},
+    {"name": "ipc_ratio needs instruction counters only macOS gives", "os": "linux", "rule": {"id": "ml", "match": {"path_prefix": "/opt/ml/"}, "protect": {"metric": "ipc_ratio", "max_slowdown": 0.1}}, "refused": ["protect.metric = ipc_ratio"]},
+    {"name": "and on Windows", "os": "windows", "rule": {"id": "ml", "match": {"path_prefix": "C:\\ml\\"}, "protect": {"metric": "ipc_ratio", "max_slowdown": 0.1}}, "refused": ["protect.metric = ipc_ratio"]},
+    {"name": "macOS has them", "os": "darwin", "rule": {"id": "ml", "match": {"path_prefix": "/opt/ml/"}, "protect": {"metric": "ipc_ratio", "max_slowdown": 0.1}}, "refused": []},
+    {"name": "everything else works on every OS", "os": "linux", "rule": {"id": "game", "match": {"path_prefix": "/opt/game/", "path_contains": "game", "argv_regex": "--fullscreen", "name": "game"}, "tree": "descendants", "active_when": {"frontmost": true, "cpu_cores_gt": 1, "footprint_gb_gt": 2, "gpu_active": {"min_busy": 0.1}, "for_s": 2}, "reserve": {"cpu": "peak(60s).cpu", "mem_gb": "peak(300s).footprint + 2"}, "cap_fleet": {"slots": 1, "gpu_jobs": 0}, "lower_fleet": {}, "pause_fleet": {"scope": "gpu"}, "protect": {"metric": "cpu_stall", "max": 0.2}}, "refused": []},
+    {"name": "and on Windows", "os": "windows", "rule": {"id": "game", "match": {"path_prefix": "C:\\Games\\", "name": "game.exe"}, "tree": "descendants", "active_when": {"frontmost": false, "gpu_active": {}}, "evict": {"scope": "all"}, "protect": {"metric": "pageins_rate", "max": 50}, "during": [{"source": {"jsonl": "C:\\Games\\phase.jsonl", "enter": "load", "exit": "play"}, "pause_fleet": {}}]}, "refused": []},
+    {"name": "several refusals in one rule, in order", "os": "windows", "rule": {"id": "all", "match": {"team_id": "EQHXZ8M8AV", "name": "x"}, "protect": {"metric": "ipc_ratio", "max_slowdown": 0.2}}, "refused": ["match.team_id", "protect.metric = ipc_ratio"]}
+  ]
+}

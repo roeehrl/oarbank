@@ -434,7 +434,7 @@ def _prot_config(db, req) -> dict:
     if cfg is None:
         raise core.ApiError(400, "missing_config", "params.config: the full protection section")
     try:
-        return protection.validate(cfg)
+        return protection.validate(cfg, protection.node_os(db, _nid(db, req)))
     except protection.ProtectionError as e:
         raise core.ApiError(422, "bad_protection", str(e))
 
@@ -470,7 +470,8 @@ def _canary_impact(db, r):
     if r.params.get("promote"):
         h = protection.canary_health(db)
         c = db.get_setting(protection.CANARY_KEY)
-        return {**h, "targets": protection.promote_targets(db, c) if c else []}
+        targets, skipped = protection.promote_targets(db, c) if c else ([], {})
+        return {**h, "targets": targets, "skipped": skipped}
     return {**protection.preview(db, _nid(db, r), _prot_config(db, r)), "canary": True,
             "then": "promote after a clean soak of %d s" % protection.CANARY_MIN_SOAK_S}
 

@@ -467,6 +467,7 @@ fn tick_measures_protected_groups_and_feeds_the_dynamic_layer() {
             processes: Box::new(host.clone()),
             meter: Box::new(host.clone()),
             sources: Box::new(NoOwnerSources),
+            os: None,
         },
     );
     ctl.apply(
@@ -566,6 +567,7 @@ fn scripted(host: &Shared, central: Value) -> ProtectionController {
             processes: Box::new(host.clone()),
             meter: Box::new(host.clone()),
             sources: Box::new(NoOwnerSources),
+            os: None,
         },
     );
     ctl.apply(Some(&central), &LocalProtection::Absent);

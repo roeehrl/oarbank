@@ -193,6 +193,8 @@ def node_conditions(n: dict) -> list[dict]:
         out.append({"code": "NOT_ADMITTING", "tone": "warn", "message": cap.get("why") or b})
     if prot.get("config_error"):
         out.append({"code": "PROTECTION_CONFIG_ERROR", "tone": "bad", "message": prot["config_error"]})
+    from ..coordinator import protection
+    out += [{k: c[k] for k in ("code", "tone", "message")} for c in protection.runtime_conditions(tel)]
     off = n.get("clock_offset_s") or 0
     if abs(off) > CLOCK_SKEW_S:
         out.append({"code": "CLOCK_SKEW", "tone": "warn",
@@ -395,6 +397,7 @@ def protection_page(r, nid: str, now: float) -> dict | None:
     """The rule editor's view: the current version and its history, the node's reported processes (the
     picker), the agent's live per-rule state, the running canary and the decision timeline."""
     from ..contracts import protection_match as PM
+    from ..coordinator import protection
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         return None
@@ -420,7 +423,20 @@ def protection_page(r, nid: str, now: float) -> dict | None:
     return {"n": {**n, "online": (n["last_heartbeat_at"] or 0) > now - OFFLINE_AFTER}, "config": cfg,
             "config_text": json.dumps(cfg, indent=2), "version": hist[0]["version"] if hist else 0, "history": hist,
             "picker": picker, "processes_at": n.get("processes_at"), "prot": tel.get("protection") or {},
-            "canary": canary, "timeline": timeline(r, nid, now), "mode": (cfg.get("node") or {}).get("mode", "moderate")}
+            "canary": canary, "timeline": timeline(r, nid, now), "mode": (cfg.get("node") or {}).get("mode", "moderate"),
+            "os_note": os_note(n.get("os")), "runtime": protection.runtime_conditions(tel)}
+
+
+def os_note(os: str | None) -> str | None:
+    """What rules can match on this node's OS (the rest is refused there)."""
+    from ..contracts import protection as P
+    if os not in P.NAME_LIMIT:
+        return None
+    limit = P.NAME_LIMIT[os]
+    if os == "darwin":
+        return f"macOS: every match key works; names keep {limit} characters."
+    return (f"{os}: match on path_prefix, path_contains, name (up to {limit} characters) or argv_regex. "
+            f"Code-signing identity, bundle ids and protect.metric = ipc_ratio are macOS-only and refused here.")
 
 
 def timeline(r, nid: str, now: float, hours: float = 6.0, width: int = 1000) -> dict:
@@ -469,9 +485,12 @@ def protection_preview(r, nid: str, config) -> dict:
     is reviewed as a plan)."""
     from ..contracts import protection as P, protection_match as PM
     P.ProtectionConfig.model_validate(config)
-    n = r.one("SELECT node_id, policy_json, processes_json, processes_at FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+    n = r.one("SELECT node_id, os, policy_json, processes_json, processes_at FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         raise ValueError(f"node {nid} not found")
+    refused = P.refusals(config, n["os"]) if n["os"] else []
+    if refused:
+        raise ValueError(f"on {n['os']}: " + "; ".join(refused))
     top = r.one("SELECT version, config_json FROM protection_versions WHERE node_id=? ORDER BY version DESC LIMIT 1", (n["node_id"],))
     cur = jl(top["config_json"], {}) if top else ((jl(n["policy_json"], {}) or {}).get("protection") or {})
     procs = jl(n["processes_json"], []) or []

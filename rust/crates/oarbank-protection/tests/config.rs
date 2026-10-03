@@ -288,3 +288,42 @@ fn gpu_active_parses_with_a_default_threshold_and_rejects_bad_ones() {
         assert!(e.starts_with("rule g: active_when.gpu_active"), "{bad}: {e}");
     }
 }
+
+/// What each OS can be asked: the shared vectors the coordinator's own tests use
+/// (src/oarbank/contracts/fixtures/protection-support-vectors.json).
+#[test]
+fn support_vectors_agree_with_python() {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../src/oarbank/contracts/fixtures/protection-support-vectors.json");
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    let cases = doc["cases"].as_array().unwrap();
+    assert!(cases.len() >= 10);
+    for c in cases {
+        let cfg = ProtectionConfig::from_json(&json!({"rule": [c["rule"]]}), "central").unwrap();
+        let os = support::Os::parse(c["os"].as_str().unwrap()).unwrap();
+        let got = support::refusals(&cfg, os);
+        let want: Vec<&str> = c["refused"].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+        assert_eq!(got.len(), want.len(), "{}: {got:?}", c["name"]);
+        for (g, w) in got.iter().zip(&want) {
+            assert!(g.contains(w), "{}: {g:?} lacks {w:?}", c["name"]);
+        }
+    }
+}
+
+/// The agent refuses a part that asks what its OS cannot do, as it refuses a broken one: the last good config
+/// stays, and the error names the rule.
+#[test]
+fn the_agent_refuses_what_its_os_cannot_do() {
+    let mut c = ProtectionController::new(None, Host::native());
+    let os = support::Os::current().unwrap();
+    let rule = if os == support::Os::Darwin {
+        json!({"id": "n", "match": {"name": "Google Chrome Hel"}, "evict": {}})
+    } else {
+        json!({"id": "t", "match": {"team_id": "EQHXZ8M8AV"}, "evict": {}})
+    };
+    c.apply(Some(&json!({"node": {"mode": "strict_yield"}, "rule": [rule]})), &LocalProtection::Absent);
+    let e = c.config_error().unwrap();
+    assert!(e.starts_with("central: rule "), "{e}");
+    assert_eq!(c.config().mode, ProtectionMode::Moderate, "the last good config (the default) stays");
+    assert!(c.config().rules.is_empty());
+}

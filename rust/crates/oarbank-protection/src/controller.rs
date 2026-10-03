@@ -22,6 +22,7 @@ use crate::memory_guard::{GuardLevel, MemoryGuard, MemorySignals, SystemGates, V
 use crate::model::{ProcessKey, ProcessRecord};
 use crate::signals::{Front, FrontReading, GroupMetrics, Meter, NullMeter, ProcCounters};
 use crate::sources::{NoOwnerSources, OwnerSources};
+use crate::support::{self, Os};
 use crate::table::{ProcessSource, ProcessSummaryRow, ProcessTable, UnsupportedProcessSource};
 use crate::telemetry::ProtectionTelemetry;
 
@@ -126,20 +127,22 @@ impl TickInputs {
 }
 
 /// The host interfaces the controller reads (never writes): the process table, the meters and the owner's
-/// sources.
+/// sources, and the OS whose limits a config must respect (None: no OS, nothing refused).
 pub struct Host {
     pub processes: Box<dyn ProcessSource>,
     pub meter: Box<dyn Meter>,
     pub sources: Box<dyn OwnerSources>,
+    pub os: Option<Os>,
 }
 
 impl Host {
-    /// Nothing measurable: an empty table, unknown metrics, no owner sources (tests and pure replays).
+    /// Nothing measurable: an empty table, unknown metrics, no owner sources, no OS (tests and pure replays).
     pub fn unavailable() -> Self {
         Self {
             processes: Box::new(UnsupportedProcessSource),
             meter: Box::new(NullMeter),
             sources: Box::new(NoOwnerSources),
+            os: None,
         }
     }
 
@@ -184,6 +187,7 @@ struct CachedInputs {
 
 pub struct ProtectionController {
     config: ProtectionConfig,
+    os: Option<Os>,
     pub evaluator: RuleEvaluator,
     pub memory_guard: MemoryGuard,
     pub dynamic: DynamicController,
@@ -212,7 +216,18 @@ pub struct ProtectionController {
     source_error: Option<String>,
     /// What was in front on the last tick, when something needed it.
     last_front: Option<FrontReading>,
+    /// Whether the agent could lower its jobs on the last tick.
+    lowering: bool,
     last_inputs: Option<CachedInputs>,
+}
+
+/// Parse one part of the config and refuse what cannot work on the host's OS (support.rs).
+fn for_os(j: &Value, source: &str, os: Option<Os>) -> Result<ProtectionConfig, String> {
+    let cfg = ProtectionConfig::from_json(j, source).map_err(|e| e.to_string())?;
+    match os.map(|os| support::refusals(&cfg, os)) {
+        Some(r) if !r.is_empty() => Err(r.join("; ")),
+        _ => Ok(cfg),
+    }
 }
 
 fn signals_json(signals: &BTreeMap<String, f64>) -> Map<String, Value> {
@@ -227,6 +242,7 @@ impl ProtectionController {
     pub fn new(journal: Option<Arc<DecisionJournal>>, host: Host) -> Self {
         Self {
             config: ProtectionConfig::default(),
+            os: host.os,
             evaluator: RuleEvaluator::new(),
             memory_guard: MemoryGuard::new(),
             dynamic: DynamicController::new(),
@@ -249,6 +265,7 @@ impl ProtectionController {
             config_error: None,
             source_error: None,
             last_front: None,
+            lowering: true,
             last_inputs: None,
         }
     }
@@ -282,14 +299,14 @@ impl ProtectionController {
         }
     }
 
-    /// Central section (from the node policy) unioned with the local file; a broken part is reported and
-    /// ignored, never loosening: a broken local file keeps the central config, a broken central one keeps
-    /// the last good config.
+    /// Central section (from the node policy) unioned with the local file; a broken part (or one asking what
+    /// this OS cannot do, support.rs) is reported and ignored, never loosening: a broken local file keeps the
+    /// central config, a broken central one keeps the last good config.
     pub fn apply(&mut self, central: Option<&Value>, local: &LocalProtection) {
         let mut c: Option<ProtectionConfig> = None;
         let mut errors: Vec<String> = vec![];
         match central {
-            Some(j) => match ProtectionConfig::from_json(j, "central") {
+            Some(j) => match for_os(j, "central", self.os) {
                 Ok(cfg) => c = Some(cfg),
                 Err(e) => errors.push(format!("central: {e}")),
             },
@@ -298,7 +315,7 @@ impl ProtectionController {
         match local {
             LocalProtection::Absent => {}
             LocalProtection::Invalid(path) => errors.push(format!("local: {path} is not JSON")),
-            LocalProtection::Json(j) => match ProtectionConfig::from_json(j, "local") {
+            LocalProtection::Json(j) => match for_os(j, "local", self.os) {
                 Ok(l) => c = Some(c.as_ref().unwrap_or(&self.config).union(&l)),
                 Err(e) => errors.push(format!("local: {e}")),
             },
@@ -691,6 +708,7 @@ impl ProtectionController {
         di.protection_started = !self.evaluator.started.is_empty();
         di.probe_requested = self.probe_requested;
         di.lowering = i.lowering;
+        self.lowering = i.lowering;
         self.probe_requested = false;
         di.jobs = i
             .jobs
@@ -925,6 +943,24 @@ impl ProtectionController {
 
     /// The heartbeat's `telemetry.protection` for this tick's result.
     pub fn telemetry(&self, r: &ProtectionTickResult) -> ProtectionTelemetry {
-        ProtectionTelemetry::new(&self.config, r, self.config_error.as_deref(), self.last_front.as_ref())
+        ProtectionTelemetry {
+            mode: self.config.mode.as_str().to_string(),
+            active: r
+                .reports
+                .iter()
+                .filter(|x| x.active)
+                .map(|x| x.id.clone())
+                .collect(),
+            rules: r.reports.clone(),
+            constraint: r.constraint.clone(),
+            guard_reason: r.guard_reason.clone(),
+            config_error: self.config_error.clone(),
+            rung: r.rung,
+            budget_cores: r.budget_cores,
+            dynamic: r.dynamic_reason.clone(),
+            front: self.last_front.as_ref().map(FrontReading::describe),
+            source_error: self.source_error.clone(),
+            lowering: self.lowering,
+        }
     }
 }

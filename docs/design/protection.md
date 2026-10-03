@@ -74,6 +74,27 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   takes the minimum of every ceiling, the OR of every pause and lower, and reservations summed over distinct processes
   (a process matched twice is reserved once, at its largest reservation).
 
+## On each OS
+
+Every rule field and trigger works on macOS, Linux and Windows, except what an OS cannot have: the config refuses
+that there, with the reason, never leaving it silently inert. The coordinator checks the rules against the node's OS
+when they are written (a promotion skips the nodes that cannot run them and says why), the agent against its own
+(`support.rs`, the coordinator's `contracts.protection.refusals`, held equal by shared vectors in
+`fixtures/protection-support-vectors.json`).
+
+- Code-signing identity (`requirement`, `team_id`, `identifier`, and with it `tree = same_team`) and `bundle_id` are
+  macOS's: Linux executables carry no signature, and Windows Authenticode carries no Team ID or signing identifier.
+- `protect.metric = ipc_ratio` needs per-process instruction and cycle counters, which only macOS gives an
+  unprivileged agent.
+- `name` is the kernel's short name: 16 characters on macOS (p_comm), 15 on Linux (comm); on Windows it is the
+  whole image file name.
+
+What depends on the moment rather than the OS the agent reports, and the console and explain show it as a node
+condition while the fail-safe default applies: a front app that cannot be read (`PROTECTION_FRONT_UNKNOWN`: a
+Wayland desktop), presence that cannot be read (`PROTECTION_PRESENCE_UNKNOWN`: counts as someone present), processes
+matched only because their path or arguments were unreadable (`PROTECTION_UNREADABLE`), and a node that cannot lower
+its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused instead).
+
 ## The controller
 
 One pure decision function over signals, configuration and its own state, on the agent's two-second loop:

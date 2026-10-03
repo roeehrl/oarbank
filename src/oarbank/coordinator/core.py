@@ -1675,6 +1675,9 @@ def set_policy(db: DB, node_id: str, patch: dict, actor: str, reason: str | None
                 P.ProtectionConfig.model_validate(v)
             except ValueError as e:
                 raise ApiError(422, "bad_protection", str(e)[:500])
+            refused = P.refusals(v, node["os"]) if node["os"] else []
+            if refused:
+                raise ApiError(422, "bad_protection", f"on {node['os']}: " + "; ".join(refused)[:500])
         pol[k] = v
     if "protection" in patch:
         from . import protection

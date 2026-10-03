@@ -145,6 +145,61 @@ def test_canary_then_promote_after_a_clean_soak(db):
     assert db.get_setting(protection.CANARY_KEY) is None
 
 
+def test_shared_support_vectors_hold_for_the_python_refusals():
+    from oarbank.contracts import protection as P
+    v = json.loads(P.SUPPORT_VECTORS.read_text())
+    assert len(v["cases"]) >= 10
+    for c in v["cases"]:
+        P.ProtectionConfig.model_validate({"schema": 1, "rule": [c["rule"]]})
+        got = P.refusals({"rule": [c["rule"]]}, c["os"])
+        assert len(got) == len(c["refused"]) and all(w in g for w, g in zip(c["refused"], got)), (c["name"], got)
+
+
+def test_a_rule_a_node_s_os_cannot_run_is_refused_there_and_skipped_by_promotion(db):
+    from helpers import facts_for
+    mac = certify(db, enrolled_node(db, "desk")[1])
+    linux = certify(db, enrolled_node(db, "box", facts=facts_for("linux-amd64", os_version="7.0"))[1])
+    win = certify(db, enrolled_node(db, "pc", facts=facts_for("windows-arm64", os_version="10.0"))[1])
+    cfg = {"schema": 1, "rule": [RULE]}                              # matches on a macOS bundle id
+    with pytest.raises(core.ApiError) as e:
+        op(db, "protection.rules.update", linux["node_id"], params={"config": cfg}, dry_run=True)
+    assert e.value.code == "bad_protection" and "on linux: rule studio: match.bundle_id" in str(e.value)
+    with pytest.raises(core.ApiError) as e:                          # every route that writes the section
+        core.set_policy(db, win["node_id"], {"protection": cfg}, "test")
+    assert "on windows:" in str(e.value)
+    portable = {"schema": 1, "rule": [{"id": "trainer", "match": {"path_contains": "trainer"}, "pause_fleet": {}}]}
+    planned(db, "protection.rules.update", linux["node_id"], {"config": portable})
+    assert protection.current(db, linux["node_id"])[1] == portable
+    # a canary on the Mac promotes to every node that can run it, and says which it skipped and why
+    protection.start_canary(db, mac["node_id"], cfg, "t", "try")
+    s = db.get_setting(protection.CANARY_KEY)
+    db.set_setting(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
+    core.heartbeat(db, fresh(db, mac), {})
+    plan, r = planned(db, "protection.rules.canary", mac["node_id"], {"promote": True})
+    assert plan["impact"]["targets"] == [] and sorted(plan["impact"]["skipped"]) == sorted([linux["node_id"], win["node_id"]])
+    assert r["result"]["promoted"] == {} and "match.bundle_id" in r["result"]["skipped"][win["node_id"]]
+    assert protection.current(db, linux["node_id"])[1] == portable
+
+
+def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain(db):
+    from oarbank.console.views import node_conditions
+    node = certify(db, enrolled_node(db, "box")[1])
+    tel = {"presence": "unknown: logind has no idle time for session 5 (sshd)",
+           "protection": {"front": "unknown: session 7 is Wayland, whose compositor tells no other program which window is "
+                                   "in front", "lowering": False, "source_error": None,
+                          "rules": [{"id": "trainer", "active": True, "processes": 3, "unreadable": 2}]}}
+    codes = [c["code"] for c in protection.runtime_conditions(tel)]
+    assert codes == ["PROTECTION_FRONT_UNKNOWN", "PROTECTION_PRESENCE_UNKNOWN", "PROTECTION_UNREADABLE", "PROTECTION_NO_LOWERING"]
+    assert protection.runtime_conditions({"presence": "logind", "protection": {"front": "app 812 (x11 :0)", "lowering": True,
+                                                                               "rules": [{"id": "t", "unreadable": 0}]}}) == []
+    shown = node_conditions({"tel": tel, "cap": {}})
+    assert "Wayland" in next(c["message"] for c in shown if c["code"] == "PROTECTION_FRONT_UNKNOWN")
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (json.dumps(tel), node["node_id"]))
+    doc = explain.node_doc(db, node["node_id"])
+    rows = {r.code: r.detail for r in doc.summary}
+    assert rows["PROTECTION_UNREADABLE"] == {"rule": "trainer", "n": 2} and "PROTECTION_NO_LOWERING" in rows
+
+
 def test_a_refused_actuation_blocks_promotion(db):
     a = certify(db, enrolled_node(db, "desk")[1])
     protection.start_canary(db, a["node_id"], {"schema": 1, "rule": [RULE]}, "t", "try")

@@ -85,6 +85,11 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `L1_HOLD_UNVALIDATED` | Fleet CPU budget held at {budget}: no validated signal for {rule} | P1 | – | – | – |
 | `PROBE_HARM` | A pause probe measured harm {harm} to {rule} | P1 | – | – | – |
 | `S16_GUARD` | Refused to act on process {pid}: it is not in the spawn registry ({why}) | P3 | – | – | – |
+| `PROTECTION_FRONT_UNKNOWN` | The front app cannot be read here ({why}); frontmost rules count it as in front | P4 | – | – | – |
+| `PROTECTION_PRESENCE_UNKNOWN` | Whether someone is at the machine cannot be read ({why}); it counts as someone present | P4 | – | – | – |
+| `PROTECTION_UNREADABLE` | Rule {rule} matched {n} processes whose path or arguments could not be read (counted as matches) | P5 | – | – | – |
+| `PROTECTION_NO_LOWERING` | This node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable jobs are paused instead | P3 | – | – | – |
+| `PROTECTION_SOURCE_ERROR` | The process table cannot be read: {error} | P3 | – | – | – |
 
 ## attempt_end
 

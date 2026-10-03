@@ -36,7 +36,7 @@ id          = "xcode-builds"
 match       = { requirement = 'anchor apple and identifier "com.apple.dt.Xcode"' }
 tree        = "descendants"
 active_when = { cpu_cores_gt = 1.0, for_s = 4 }
-lower_fleet = { to = "e_cores" }
+lower_fleet = { to = "background" }
 protect     = { metric = "cpu_stall", max = 0.10, window_s = 20 }
 
 [[rule]]

@@ -1,13 +1,11 @@
 //! The heartbeat's `telemetry.protection` object (docs/protocol.md "Session"). The coordinator stores it as
 //! is; the console reads `mode`, `active`, `rules`, `constraint`, `guard_reason`, `config_error`, `rung`,
-//! `budget_cores`, `dynamic` and `front`.
+//! `budget_cores`, `dynamic`, `front`, `source_error` and `lowering` (and explain the last three, with the rules'
+//! unreadable counts, as node conditions).
 
 use serde::Serialize;
 
-use crate::config::ProtectionConfig;
-use crate::controller::ProtectionTickResult;
 use crate::evaluator::{CombinedConstraint, RuleReport};
-use crate::signals::FrontReading;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProtectionTelemetry {
@@ -23,31 +21,8 @@ pub struct ProtectionTelemetry {
     /// What was in front and where it was read ("app 812 (lsappinfo)", "nothing (…)", or why it is unknown),
     /// when a rule or the implicit protection read it.
     pub front: Option<String>,
-}
-
-impl ProtectionTelemetry {
-    pub fn new(
-        config: &ProtectionConfig,
-        r: &ProtectionTickResult,
-        config_error: Option<&str>,
-        front: Option<&FrontReading>,
-    ) -> Self {
-        Self {
-            mode: config.mode.as_str().to_string(),
-            active: r
-                .reports
-                .iter()
-                .filter(|x| x.active)
-                .map(|x| x.id.clone())
-                .collect(),
-            rules: r.reports.clone(),
-            constraint: r.constraint.clone(),
-            guard_reason: r.guard_reason.clone(),
-            config_error: config_error.map(str::to_string),
-            rung: r.rung,
-            budget_cores: r.budget_cores,
-            dynamic: r.dynamic_reason.clone(),
-            front: front.map(FrontReading::describe),
-        }
-    }
+    /// Why the process table could not be read on the last tick.
+    pub source_error: Option<String>,
+    /// Whether the agent can lower its jobs here (false: Linux without a delegated cgroup).
+    pub lowering: bool,
 }

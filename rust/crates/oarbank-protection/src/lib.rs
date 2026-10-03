@@ -30,6 +30,7 @@ pub mod procinfo;
 pub mod signals;
 pub mod sources;
 pub mod spawn_registry;
+pub mod support;
 pub mod table;
 pub mod telemetry;
 pub mod x11;

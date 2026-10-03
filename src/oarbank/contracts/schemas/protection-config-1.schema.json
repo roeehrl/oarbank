@@ -321,8 +321,9 @@
       "additionalProperties": false,
       "properties": {
         "to": {
-          "const": "e_cores",
-          "default": "e_cores",
+          "const": "background",
+          "default": "background",
+          "description": "macOS background QoS, a CPU quota on Linux, the idle priority class with EcoQoS on Windows.",
           "title": "To",
           "type": "string"
         }
@@ -379,7 +380,7 @@
         "name": {
           "anyOf": [
             {
-              "maxLength": 16,
+              "maxLength": 255,
               "type": "string"
             },
             {
@@ -387,7 +388,7 @@
             }
           ],
           "default": null,
-          "description": "p_comm (weakest; truncated at 16 characters).",
+          "description": "The kernel's short name, weakest: p_comm on macOS (16 characters), comm on Linux (15), the image file name on Windows.",
           "title": "Name"
         },
         "path_contains": {

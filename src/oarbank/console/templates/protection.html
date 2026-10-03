@@ -46,6 +46,8 @@ pause, evict); nothing here can signal a protected process. The node unions this
 </div>
 
 <h2>Rules <span class="small mut">(protection schema 1, edited as JSON; the preview updates as you type)</span></h2>
+{% if os_note %}<p class="small mut">{{ os_note }}</p>{% endif %}
+{% for c in runtime %}<p class="small"><span class="chip {{ c.tone }}">{{ c.code }}</span> {{ c.message }}</p>{% endfor %}
 <div class="grid">
 <div class="card">
   {% call m.op_form("protection.rules.update", n.node_id, "Review and apply…", cls="pri", inline=False) %}

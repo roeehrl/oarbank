@@ -9,7 +9,7 @@ import time
 
 from ..contracts import explain as X
 from ..contracts import reason_codes as RC
-from . import modstore, core, modcalls, predicates
+from . import modstore, core, modcalls, predicates, protection
 from .db import DB, jl
 
 
@@ -134,6 +134,8 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
     summary = [X.SummaryRow(code=c, detail={"pending_jobs": k}) for c, k in by_code.most_common()]
     if abs(n.get("clock_offset_s") or 0) > core.CLOCK_SKEW_S:
         summary.append(X.SummaryRow(code="CLOCK_SKEW", detail={"offset_s": n["clock_offset_s"]}))   # a condition: work goes on
+    # what host protection cannot read or do there now, and the fail-safe default it applies instead
+    summary += [X.SummaryRow(code=c["code"], detail=c["values"]) for c in protection.runtime_conditions(jl(n["telemetry_json"], {}) or {})]
     head = X.Headline(code="OK", text="Admitting work") if ff is None else \
         X.Headline(code=ff.code, text=f"Not admitting: {ff.predicate} (observed {ff.observed}, required {ff.required})")
     return X.ExplainDocument(
