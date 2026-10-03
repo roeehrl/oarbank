@@ -1,11 +1,12 @@
 //! Native backends. macOS reads the process table through libproc and sysctl, code-signing identity
 //! through the Security framework, GPU time through IOKit, and acts through signals and `setpriority`.
-//! Linux (DRM `fdinfo`) and Windows (the GPU Engine performance counters) so far only meter GPU time: they
-//! report an unsupported process table, and here an actuator that never registers a process; the agent builds
-//! its registry there with its own actuator over its process containers.
+//! Linux reads procfs, DRM `fdinfo` and systemd-logind; Windows (the GPU Engine performance counters and the
+//! sessions WTS lists) so far reports an unsupported process table. On both, here is an actuator that never
+//! registers a process: the agent builds its registry there with its own actuator over its process containers.
 
 use crate::controller::Host;
-use crate::signals::{Presence, PresenceReading};
+use crate::signals::{Meter, Presence, PresenceReading};
+use crate::table::ProcessSource;
 use crate::sources::FileOwnerSources;
 use crate::spawn_registry::Actuator;
 
@@ -19,26 +20,25 @@ pub mod windows;
 /// This platform's host interfaces.
 pub fn native_host() -> Host {
     #[cfg(target_os = "macos")]
-    {
-        Host {
-            processes: Box::new(macos::NativeProcessSource::new()),
-            meter: Box::new(macos::NativeMeter::new()),
-            sources: Box::new(FileOwnerSources::new()),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        #[cfg(target_os = "linux")]
-        let meter = Box::new(linux::NativeMeter::new());
-        #[cfg(windows)]
-        let meter = Box::new(windows::NativeMeter::new());
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let meter = Box::new(crate::signals::NullMeter);
-        Host {
-            processes: Box::new(crate::table::UnsupportedProcessSource),
-            meter,
-            sources: Box::new(FileOwnerSources::new()),
-        }
+    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) =
+        (Box::new(macos::NativeProcessSource::new()), Box::new(macos::NativeMeter::new()));
+    #[cfg(target_os = "linux")]
+    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) =
+        (Box::new(linux::NativeProcessSource::new()), Box::new(linux::NativeMeter::new()));
+    #[cfg(windows)]
+    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
+        Box::new(crate::table::UnsupportedProcessSource),
+        Box::new(windows::NativeMeter::new()),
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
+        Box::new(crate::table::UnsupportedProcessSource),
+        Box::new(crate::signals::NullMeter),
+    );
+    Host {
+        processes,
+        meter,
+        sources: Box::new(FileOwnerSources::new()),
     }
 }
 

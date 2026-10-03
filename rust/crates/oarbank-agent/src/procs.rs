@@ -27,20 +27,10 @@ pub fn unix_group_pids(pgid: i32) -> Vec<i32> {
     }
 }
 
-/// /proc/<pid>/stat after the command (which may hold spaces and parentheses): fields from `state` on.
-#[cfg(target_os = "linux")]
-fn linux_stat(pid: i32) -> Option<Vec<String>> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &s[s.rfind(')')? + 2..];
-    Some(rest.split_whitespace().map(str::to_string).collect())
-}
-
 #[cfg(target_os = "linux")]
 pub fn unix_group_pids(pgid: i32) -> Vec<i32> {
-    let Ok(rd) = std::fs::read_dir("/proc") else { return vec![] };
-    rd.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|pid| linux_stat(*pid).and_then(|f| f.get(2)?.parse::<i32>().ok()) == Some(pgid))
-        .collect()
+    let r = oarbank_protection::platform::linux::reader();
+    r.pids().unwrap_or_default().into_iter().filter(|pid| r.stat(*pid).is_some_and(|s| s.pgrp == pgid)).collect()
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
@@ -74,14 +64,12 @@ pub fn group_usage(pgid: i32) -> Usage {
     }
     #[cfg(target_os = "linux")]
     {
-        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+        let r = oarbank_protection::platform::linux::reader();
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as f64;
         for pid in group_pids(pgid) {
-            let Some(f) = linux_stat(pid) else { continue };
-            // utime and stime are fields 14 and 15 of stat (11 and 12 after the state field); rss is 24 (21)
-            let n = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-            u.cpu_s += (n(11) + n(12)) / hz;
-            u.footprint_gb += n(21) * page / 1073741824.0;
+            let Some(s) = r.stat(pid) else { continue };
+            u.cpu_s += (s.utime + s.stime) as f64 / r.clk_tck as f64;
+            u.footprint_gb += s.rss_pages as f64 * page / 1073741824.0;
             u.procs += 1;
         }
     }
@@ -119,14 +107,9 @@ pub fn signal_group(pgid: i32, sig: Sig) -> bool {
 }
 
 /// When a process started, in microseconds since the epoch (with its pid, its identity: a recycled pid has another
-/// start time). Linux: the boot time plus `starttime` (field 22 of stat, 19 after the state field) in clock ticks.
+/// start time). Linux: the boot time plus its start in clock ticks (the protection crate's procfs reader).
 #[cfg(target_os = "linux")]
-pub fn start_time_us(pid: i32) -> Option<u64> {
-    let ticks: u64 = linux_stat(pid)?.get(19)?.parse().ok()?;
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
-    let btime: u64 = std::fs::read_to_string("/proc/stat").ok()?.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()?;
-    Some(btime * 1_000_000 + ticks * 1_000_000 / hz)
-}
+pub use oarbank_protection::platform::linux::start_time_us;
 
 /// Windows: the creation time GetProcessTimes reports (100 ns units since 1601).
 #[cfg(windows)]

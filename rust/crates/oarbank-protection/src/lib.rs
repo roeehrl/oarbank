@@ -26,6 +26,7 @@ pub mod memory_guard;
 pub mod model;
 pub mod platform;
 pub mod presence;
+pub mod procinfo;
 pub mod signals;
 pub mod sources;
 pub mod spawn_registry;
