@@ -59,7 +59,8 @@ impl Conn {
     }
 
     fn open(display: &str, xauthority: Option<&std::path::Path>) -> Result<Self, String> {
-        let n = x11::display_number(display).ok_or_else(|| format!("display {display} is not local"))?;
+        let n = x11::display_number(display)
+            .ok_or_else(|| format!("display {display} is not local"))?;
         let stream = UnixStream::connect(format!("/tmp/.X11-unix/X{n}"))
             .map_err(|e| format!("cannot reach display {display}: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
@@ -89,12 +90,14 @@ impl Conn {
         let mut more = vec![0u8; len];
         c.stream.read_exact(&mut more).map_err(|e| e.to_string())?;
         if x11::setup_header(&h).is_err() {
-            return Err(format!("display {display} refused the connection (no usable Xauthority cookie)"));
+            return Err(format!(
+                "display {display} refused the connection (no usable Xauthority cookie)"
+            ));
         }
         c.root = x11::root_window(&more).ok_or("no screen")?;
-        c.active_window = c
-            .atom("_NET_ACTIVE_WINDOW")
-            .ok_or_else(|| format!("display {display} has no window manager that publishes _NET_ACTIVE_WINDOW"))?;
+        c.active_window = c.atom("_NET_ACTIVE_WINDOW").ok_or_else(|| {
+            format!("display {display} has no window manager that publishes _NET_ACTIVE_WINDOW")
+        })?;
         c.wm_pid = c
             .atom("_NET_WM_PID")
             .ok_or_else(|| format!("no window on display {display} publishes _NET_WM_PID"))?;
@@ -107,10 +110,15 @@ impl Conn {
         if w == 0 {
             return Ok(Window::None);
         }
-        Ok(match self.property(w, self.wm_pid)?.and_then(|p| i32::try_from(p).ok()) {
-            Some(pid) if pid > 0 => Window::Pid(pid),
-            _ => Window::NoPid,
-        })
+        Ok(
+            match self
+                .property(w, self.wm_pid)?
+                .and_then(|p| i32::try_from(p).ok())
+            {
+                Some(pid) if pid > 0 => Window::Pid(pid),
+                _ => Window::NoPid,
+            },
+        )
     }
 }
 
@@ -135,7 +143,9 @@ pub fn x11_front(display: &str, xauthority: Option<&std::path::Path>) -> FrontRe
 fn describe(display: &str, w: std::io::Result<Window>) -> FrontReading {
     match w {
         Ok(Window::Pid(pid)) => FrontReading::new(Front::App(pid), format!("x11 {display}")),
-        Ok(Window::None) => FrontReading::new(Front::Nothing, format!("no active window on {display}")),
+        Ok(Window::None) => {
+            FrontReading::new(Front::Nothing, format!("no active window on {display}"))
+        }
         Ok(Window::NoPid) => FrontReading::new(
             Front::Unknown,
             format!("unknown: the active window on {display} publishes no _NET_WM_PID"),
@@ -182,7 +192,9 @@ fn find_xauthority(uid: u32, display: &str) -> Option<PathBuf> {
     if gdm.exists() {
         return Some(gdm);
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".Xauthority")).filter(|p| p.exists())
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".Xauthority"))
+        .filter(|p| p.exists())
 }
 
 /// The front app, from logind's sessions and the X server of an X11 session in front.
@@ -198,7 +210,10 @@ impl FrontReader {
 
     pub fn read(&mut self, sessions: Option<&[Session]>) -> FrontReading {
         let Some(sessions) = sessions else {
-            return FrontReading::new(Front::Unknown, "unknown: systemd-logind is not running here");
+            return FrontReading::new(
+                Front::Unknown,
+                "unknown: systemd-logind is not running here",
+            );
         };
         let Some(s) = front_session(sessions) else {
             self.conn = None;

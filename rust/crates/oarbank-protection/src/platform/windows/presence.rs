@@ -75,7 +75,13 @@ pub fn sessions() -> Option<Vec<Session>> {
         let mut len = 0u32;
         // SAFETY: WTS allocates the buffer, freed below; for WTSSessionInfoEx it holds a WTSINFOEXW.
         if unsafe {
-            WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, id, WTSSessionInfoEx, &mut buf, &mut len)
+            WTSQuerySessionInformationW(
+                WTS_CURRENT_SERVER_HANDLE,
+                id,
+                WTSSessionInfoEx,
+                &mut buf,
+                &mut len,
+            )
         } != 0
         {
             if len as usize >= std::mem::size_of::<WTSINFOEXW>() {
@@ -115,8 +121,11 @@ impl Presence for NativePresence {
             return PresenceReading::new(None, "unknown: the session list (WTS) cannot be read");
         };
         let now = Instant::now();
-        self.locked_since
-            .retain(|id, _| sessions.iter().any(|s| s.id == *id && s.locked == Some(true)));
+        self.locked_since.retain(|id, _| {
+            sessions
+                .iter()
+                .any(|s| s.id == *id && s.locked == Some(true))
+        });
         for s in sessions.iter().filter(|s| s.locked == Some(true)) {
             self.locked_since.entry(s.id).or_insert(now);
         }
@@ -125,7 +134,11 @@ impl Presence for NativePresence {
         wts::presence(
             &sessions,
             |id| if id == own { own_idle } else { None },
-            |id| self.locked_since.get(&id).map(|t| now.duration_since(*t).as_secs_f64()),
+            |id| {
+                self.locked_since
+                    .get(&id)
+                    .map(|t| now.duration_since(*t).as_secs_f64())
+            },
         )
     }
 }

@@ -49,14 +49,22 @@ pub mod logind {
             let since = (self.idle_since_us > 0)
                 .then(|| now_us.saturating_sub(self.idle_since_us) as f64 / 1e6);
             if self.graphical() {
-                Some(if self.idle_hint { since.unwrap_or(0.0) } else { 0.0 })
+                Some(if self.idle_hint {
+                    since.unwrap_or(0.0)
+                } else {
+                    0.0
+                })
             } else {
                 since
             }
         }
 
         fn label(&self) -> String {
-            let via = if self.service.is_empty() { &self.kind } else { &self.service };
+            let via = if self.service.is_empty() {
+                &self.kind
+            } else {
+                &self.service
+            };
             format!("session {} ({via})", self.id)
         }
     }
@@ -130,7 +138,10 @@ pub mod logind {
         if !unknown.is_empty() {
             return PresenceReading::new(
                 None,
-                format!("unknown: logind has no idle time for {}", unknown.join(", ")),
+                format!(
+                    "unknown: logind has no idle time for {}",
+                    unknown.join(", ")
+                ),
             );
         }
         PresenceReading::new(Some(idle), "logind")
@@ -183,7 +194,8 @@ pub mod wts {
         let mut any = false;
         for s in sessions.iter().filter(|s| s.is_person()) {
             any = true;
-            let known = idle(s.id).or_else(|| (s.locked == Some(true)).then(|| locked_for(s.id)).flatten());
+            let known =
+                idle(s.id).or_else(|| (s.locked == Some(true)).then(|| locked_for(s.id)).flatten());
             match known {
                 Some(x) => least = least.min(x),
                 None => unknown.push(format!("session {} ({})", s.id, s.user)),
@@ -195,7 +207,10 @@ pub mod wts {
         if !unknown.is_empty() {
             return PresenceReading::new(
                 None,
-                format!("unknown: no idle time for {} (it is read in the user's own session)", unknown.join(", ")),
+                format!(
+                    "unknown: no idle time for {} (it is read in the user's own session)",
+                    unknown.join(", ")
+                ),
             );
         }
         PresenceReading::new(Some(least), "wts")
@@ -225,10 +240,26 @@ mod tests {
         );
         let s = parse_show(SHOW);
         assert_eq!(s.len(), 4);
-        assert_eq!((s[2].id.as_str(), s[2].uid, s[2].kind.as_str(), s[2].service.as_str()), ("5", 501, "tty", "sshd"));
+        assert_eq!(
+            (
+                s[2].id.as_str(),
+                s[2].uid,
+                s[2].kind.as_str(),
+                s[2].service.as_str()
+            ),
+            ("5", 501, "tty", "sshd")
+        );
         let g = &s[3];
         assert!(g.graphical() && g.is_person() && g.idle_hint && g.locked && g.active);
-        assert_eq!((g.seat.as_str(), g.display.as_str(), g.leader, g.idle_since_us), ("seat0", ":0", 1690, 1_790_000_000_000_000));
+        assert_eq!(
+            (
+                g.seat.as_str(),
+                g.display.as_str(),
+                g.leader,
+                g.idle_since_us
+            ),
+            ("seat0", ":0", 1690, 1_790_000_000_000_000)
+        );
         assert!(!s[0].is_person() && !s[1].is_person());
     }
 
@@ -239,10 +270,16 @@ mod tests {
         // the desktop says idle since 100 s ago
         assert_eq!(s[3].idle_s(now), Some(100.0));
         // a desktop that says active is present, whenever its hint last changed
-        let active = Session { idle_hint: false, ..s[3].clone() };
+        let active = Session {
+            idle_hint: false,
+            ..s[3].clone()
+        };
         assert_eq!(active.idle_s(now), Some(0.0));
         // a terminal's last access time counts whether or not logind calls it idle yet
-        let tty = Session { idle_since_us: now - 30_000_000, ..s[2].clone() };
+        let tty = Session {
+            idle_since_us: now - 30_000_000,
+            ..s[2].clone()
+        };
         assert_eq!(tty.idle_s(now), Some(30.0));
         // no terminal and no desktop: logind cannot tell
         assert_eq!(s[2].idle_s(now), None);
@@ -261,14 +298,23 @@ mod tests {
         let r = presence(&[s[0].clone(), s[3].clone()], now);
         assert_eq!((r.idle_s, r.source.as_str()), (Some(100.0), "logind"));
         // a typing ssh user is the least idle
-        let typing = Session { idle_since_us: now - 2_000_000, ..s[2].clone() };
+        let typing = Session {
+            idle_since_us: now - 2_000_000,
+            ..s[2].clone()
+        };
         assert_eq!(presence(&[typing, s[3].clone()], now).idle_s, Some(2.0));
         // only user managers (a service account's lingering manager): nobody is logged in
         let r = presence(&s[..2], now);
         assert_eq!(r.idle_s, Some(f64::INFINITY));
         // a session switched away from on the seat is in front of nobody
-        let away = Session { active: false, ..s[3].clone() };
-        assert_eq!(presence(std::slice::from_ref(&away), now).idle_s, Some(f64::INFINITY));
+        let away = Session {
+            active: false,
+            ..s[3].clone()
+        };
+        assert_eq!(
+            presence(std::slice::from_ref(&away), now).idle_s,
+            Some(f64::INFINITY)
+        );
         assert_eq!(front_session(&[away]), None);
         assert_eq!(front_session(&s).map(|f| f.id.as_str()), Some("7"));
     }
@@ -278,21 +324,47 @@ mod tests {
         use super::wts::{self, Session};
         // what WTS lists on a Windows 11 machine with one person at the console: session 0 (services) and the
         // console session, active and unlocked
-        let services = Session { id: 0, state: 4, user: String::new(), locked: None };
-        let console = Session { id: 1, state: wts::ACTIVE, user: "ada".into(), locked: Some(false) };
+        let services = Session {
+            id: 0,
+            state: 4,
+            user: String::new(),
+            locked: None,
+        };
+        let console = Session {
+            id: 1,
+            state: wts::ACTIVE,
+            user: "ada".into(),
+            locked: Some(false),
+        };
         let none = |_| None;
         // the system service in session 0 cannot read the console's input: unknown, counted as present
         let r = wts::presence(&[services.clone(), console.clone()], none, none);
         assert_eq!(r.idle_s, None);
         assert!(r.source.contains("session 1 (ada)"), "{}", r.source);
         // read in the user's own session
-        let r = wts::presence(&[services.clone(), console.clone()], |id| (id == 1).then_some(42.0), none);
+        let r = wts::presence(
+            &[services.clone(), console.clone()],
+            |id| (id == 1).then_some(42.0),
+            none,
+        );
         assert_eq!((r.idle_s, r.source.as_str()), (Some(42.0), "wts"));
         // locked: idle at least since the lock was seen
-        let locked = Session { locked: Some(true), ..console.clone() };
-        assert_eq!(wts::presence(&[locked], none, |_| Some(600.0)).idle_s, Some(600.0));
+        let locked = Session {
+            locked: Some(true),
+            ..console.clone()
+        };
+        assert_eq!(
+            wts::presence(&[locked], none, |_| Some(600.0)).idle_s,
+            Some(600.0)
+        );
         // disconnected (switched away, or a dropped Remote Desktop session) and nobody else: nobody is present
-        let away = Session { state: 4, ..console };
-        assert_eq!(wts::presence(&[services, away], none, none).idle_s, Some(f64::INFINITY));
+        let away = Session {
+            state: 4,
+            ..console
+        };
+        assert_eq!(
+            wts::presence(&[services, away], none, none).idle_s,
+            Some(f64::INFINITY)
+        );
     }
 }

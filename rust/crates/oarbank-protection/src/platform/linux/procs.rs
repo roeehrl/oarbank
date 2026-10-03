@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use super::logind;
-use crate::procinfo::procfs::{self, Reader};
 use crate::presence::logind::people;
+use crate::procinfo::procfs::{self, Reader};
 use crate::signals::ProcCounters;
 use crate::table::{ProcessSource, RawProcess, SigningIdentity, SourceError};
 

@@ -10,8 +10,20 @@ use crate::presence::logind::{self, Session};
 use crate::signals::{Presence, PresenceReading};
 
 const PROPERTIES: [&str; 14] = [
-    "Id", "User", "Name", "Service", "Class", "Type", "Active", "Remote", "Seat", "Display", "Leader", "IdleHint",
-    "IdleSinceHint", "LockedHint",
+    "Id",
+    "User",
+    "Name",
+    "Service",
+    "Class",
+    "Type",
+    "Active",
+    "Remote",
+    "Seat",
+    "Display",
+    "Leader",
+    "IdleHint",
+    "IdleSinceHint",
+    "LockedHint",
 ];
 
 fn loginctl(args: &[&str]) -> Option<String> {

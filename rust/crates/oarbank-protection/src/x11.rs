@@ -31,9 +31,12 @@ pub fn parse_xauthority(b: &[u8]) -> Vec<AuthEntry> {
     while i + 2 <= b.len() {
         let family = u16::from_be_bytes([b[i], b[i + 1]]);
         i += 2;
-        let (Some(address), Some(display), Some(name), Some(data)) =
-            (field(b, &mut i), field(b, &mut i), field(b, &mut i), field(b, &mut i))
-        else {
+        let (Some(address), Some(display), Some(name), Some(data)) = (
+            field(b, &mut i),
+            field(b, &mut i),
+            field(b, &mut i),
+            field(b, &mut i),
+        ) else {
             break;
         };
         out.push(AuthEntry {
@@ -54,7 +57,8 @@ pub fn cookie<'a>(entries: &'a [AuthEntry], hostname: &str, display: u32) -> Opt
         .iter()
         .find(|e| {
             e.name == MIT_MAGIC_COOKIE
-                && (e.family == FAMILY_WILD || (e.family == FAMILY_LOCAL && e.address == hostname.as_bytes()))
+                && (e.family == FAMILY_WILD
+                    || (e.family == FAMILY_LOCAL && e.address == hostname.as_bytes()))
                 && (e.display.is_empty() || e.display == display.to_string())
         })
         .map(|e| e.data.as_slice())
@@ -112,7 +116,9 @@ pub fn root_window(data: &[u8]) -> Option<u32> {
         return None;
     }
     let screen = 32 + vendor + pad4(vendor) + 8 * formats;
-    Some(u32::from_le_bytes(data.get(screen..screen + 4)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        data.get(screen..screen + 4)?.try_into().ok()?,
+    ))
 }
 
 /// InternAtom (opcode 16), only if the atom exists.
@@ -173,7 +179,13 @@ mod tests {
     fn picks_the_cookie_for_this_host_and_display() {
         let mut file = entry(FAMILY_LOCAL, b"otherhost", "0", MIT_MAGIC_COOKIE, &[1; 16]);
         file.extend(entry(FAMILY_LOCAL, b"box", "1", MIT_MAGIC_COOKIE, &[2; 16]));
-        file.extend(entry(FAMILY_LOCAL, b"box", "0", "XDM-AUTHORIZATION-1", &[3; 16]));
+        file.extend(entry(
+            FAMILY_LOCAL,
+            b"box",
+            "0",
+            "XDM-AUTHORIZATION-1",
+            &[3; 16],
+        ));
         file.extend(entry(FAMILY_LOCAL, b"box", "0", MIT_MAGIC_COOKIE, &[4; 16]));
         let e = parse_xauthority(&file);
         assert_eq!(e.len(), 4);
@@ -206,7 +218,10 @@ mod tests {
         assert_eq!(&a[..8], &[16, 1, 7, 0, 18, 0, 0, 0]);
         assert_eq!(a.len(), 28);
         let g = get_property(0x1e6, 0x150);
-        assert_eq!(g, [20, 0, 6, 0, 0xe6, 1, 0, 0, 0x50, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(
+            g,
+            [20, 0, 6, 0, 0xe6, 1, 0, 0, 0x50, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -239,8 +254,14 @@ mod tests {
         prop[4] = 1;
         prop[16] = 1;
         assert_eq!(reply_extra(&prop), Some(4));
-        assert_eq!(property_u32(&prop, &0x1400007u32.to_le_bytes()), Some(0x1400007));
-        let missing = [1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            property_u32(&prop, &0x1400007u32.to_le_bytes()),
+            Some(0x1400007)
+        );
+        let missing = [
+            1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ];
         assert_eq!(property_u32(&missing, &[]), None);
     }
 }
