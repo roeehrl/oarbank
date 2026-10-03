@@ -47,7 +47,8 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
 - **Activity:** `present`, or thresholds on CPU cores (`cpu_cores_gt`), footprint (`footprint_gb_gt`) or GPU activity
   (`gpu_active = { min_busy = 0.05 }`), or `frontmost` (true: the app in front is one of the group's processes; false:
   the group runs but is not in front), held `for_s`; any one that holds activates the rule. A front app that cannot be
-  read counts as in front either way, never looser.
+  read counts as in front either way, never looser; with nothing in front (nobody at the machine's desktop) no group
+  is in front.
 - **GPU activity** is the group's GPU busy seconds per second over the last sample interval, summed over its processes
   and the GPU's engines (so two busy engines can pass 1); `min_busy` defaults to 0.05. Each OS reads accumulated GPU
   time per process: macOS from the AGX driver's user clients in the IORegistry, Linux from the DRM `fdinfo` of every

@@ -25,6 +25,7 @@ pub mod matcher;
 pub mod memory_guard;
 pub mod model;
 pub mod platform;
+pub mod presence;
 pub mod signals;
 pub mod sources;
 pub mod spawn_registry;
@@ -56,7 +57,7 @@ pub use journal::{
 };
 pub use memory_guard::{GuardLevel, MemPressure, MemoryGuard, MemorySignals, SystemGates, Thermal};
 pub use model::{GroupSample, ProcessKey, ProcessRecord};
-pub use signals::{GroupMetrics, Meter, NullMeter, ProcCounters};
+pub use signals::{Front, GroupMetrics, Meter, NullMeter, Presence, PresenceReading, ProcCounters};
 pub use sources::{FileOwnerSources, NoOwnerSources, OwnerSources};
 pub use spawn_registry::{
     Actuator, FileRegistryStore, Member, Refusal, RegistryStore, Signal, SpawnRegistry,

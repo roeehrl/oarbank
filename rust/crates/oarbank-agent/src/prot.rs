@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub struct Protection {
     pub ctrl: P::ProtectionController,
+    presence: Box<dyn P::Presence>,
     pub registry: Arc<P::SpawnRegistry>,
     pub journal: Arc<P::DecisionJournal>,
     local: std::path::PathBuf,
@@ -39,7 +40,7 @@ impl Protection {
         let ctrl = P::ProtectionController::new(Some(journal.clone()), P::Host::native());
         // the owner's local protection file sits beside the agent's home (docs/protocol.md, "Agent config")
         let local = l.home.parent().unwrap_or(&l.home).join("protection.json");
-        Protection { ctrl, registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
+        Protection { ctrl, presence: P::platform::native_presence(), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
                      last: None, capacity: None, telemetry: json!({}),
                      service_pools: Default::default(), service_reserved_mem_gb: 0.0 }
     }
@@ -85,9 +86,9 @@ impl Protection {
         let eff = facts["cpu"]["eff_cores"].as_i64().unwrap_or(0);
         let thermal = host::thermal();
         let on_battery = host::on_battery();
-        let sharing = host::screen_sharing();
-        // someone watching over Screen Sharing is present, whatever the local keyboard says
-        let idle = if sharing { 0.0 } else { host::hid_idle_s().unwrap_or(f64::MAX) };
+        // unknown presence counts as someone present (S19); nobody logged in is idle for ever
+        let presence = self.presence.read();
+        let idle = presence.effective_idle_s();
         inputs.fleet_pids = fleet_pids.clone();
         inputs.thermal = thermal;
         inputs.on_battery = on_battery;
@@ -118,8 +119,8 @@ impl Protection {
         self.telemetry = json!({
             "mem_used_gb": round1(m.used_gb), "mem_free_pct": if m.ram_gb > 0.0 { round1(100.0 * (1.0 - m.used_gb / m.ram_gb)) } else { 0.0 },
             "mem_pressure": m.pressure, "swap_used_gb": m.swap_used_gb.map(round1), "thermal": thermal, "on_battery": on_battery,
-            "hid_idle_s": if idle == f64::MAX { Value::Null } else { json!(round1(idle)) }, "fleet_rss_gb": round1(fleet_rss),
-            "disk_free_gb": facts["disk_free_gb"].clone(), "guard": r.guard_level.as_str(), "screen_sharing": sharing,
+            "user_idle_s": if idle.is_finite() { json!(round1(idle)) } else { Value::Null }, "presence": presence.source,
+            "fleet_rss_gb": round1(fleet_rss), "disk_free_gb": facts["disk_free_gb"].clone(), "guard": r.guard_level.as_str(),
             "protection": serde_json::to_value(self.ctrl.telemetry(&r)).unwrap_or(Value::Null),
         });
         self.capacity = Some(cap);

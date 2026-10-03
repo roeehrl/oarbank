@@ -2,12 +2,15 @@
 
 mod cf;
 mod gpu;
+mod iokit;
+mod presence;
 mod procs;
 mod security;
 
 use std::process::{Command, Stdio};
 
 pub use gpu::{creator_pid, gpu_time_by_pid};
+pub use presence::{hid_idle_s, screen_sharing, NativePresence};
 pub use procs::{
     all_pids, argv, bundle_id_for_path, cpu_and_footprint, path, pids_in_group, proc_counters,
     start_time_us, NativeProcessSource,
@@ -15,7 +18,7 @@ pub use procs::{
 pub use security::{satisfies, signing};
 
 use crate::gpu::GpuTimes;
-use crate::signals::{frontmost, Meter, ProcCounters};
+use crate::signals::{frontmost, Front, Meter, ProcCounters};
 use crate::spawn_registry::{Actuator, Signal};
 
 /// rusage V6 counters, AGX GPU time and the frontmost app.
@@ -35,8 +38,8 @@ impl Meter for NativeMeter {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         gpu_time_by_pid().map(GpuTimes::known)
     }
-    fn frontmost_pid(&mut self) -> Option<i32> {
-        frontmost_pid()
+    fn front(&mut self) -> Front {
+        frontmost_pid().map_or(Front::Unknown, Front::App)
     }
 }
 

@@ -73,7 +73,7 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Hard limits (`hard_limits` policy) | none | cgroup `cpu.max` and `memory.max` | Job Object limits |
 | Process inspection | libproc, `KERN_PROCARGS2`, code-signing identity | `/proc` | not yet |
 | Meters | rusage, IORegistry GPU time, memory pressure, thermal state, battery | `/proc`, DRM `fdinfo` GPU time, PSI memory pressure, thermal zones, power supplies, hybrid core types | `GlobalMemoryStatusEx`, GPU Engine counters, efficiency classes, power status |
-| Presence | HID idle, screen sharing | not yet | last input in the user's session |
+| Presence | HID idle, screen sharing | systemd-logind's sessions (desktop idle hints, terminal access times) | the sessions WTS lists (logged on, connected, locked), the last input in the user's own session |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
 | Module sandbox | Seatbelt | Landlock and seccomp | AppContainer in a Job Object, plus an elevated helper for the egress allowlist |
 | Containers | an agent-owned Colima profile | rootless Podman, else Docker Engine | not yet |

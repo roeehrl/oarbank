@@ -2,11 +2,13 @@
 //! here), and the agent acts through its own process containers.
 
 mod pdh;
+mod presence;
 
 pub use pdh::{RawCounter, GPU_ENGINE_RUNNING_TIME};
+pub use presence::{own_idle_s, own_session, sessions, NativePresence};
 
 use crate::gpu::{self, GpuTimes};
-use crate::signals::{Meter, ProcCounters};
+use crate::signals::{Front, Meter, ProcCounters};
 
 /// GPU time from the GPU Engine performance counters; no per-process counters and no frontmost app yet (both
 /// unknown).
@@ -34,7 +36,7 @@ impl Meter for NativeMeter {
             items.iter().map(|(n, v)| (n.as_str(), *v)),
         ))
     }
-    fn frontmost_pid(&mut self) -> Option<i32> {
-        None
+    fn front(&mut self) -> Front {
+        Front::Unknown
     }
 }

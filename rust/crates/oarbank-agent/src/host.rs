@@ -1,7 +1,6 @@
-//! Host signals for capacity and protection: memory, thermal state, power source and user presence (the Meter, Presence
-//! and Power interfaces, docs/design/architecture.md, "Host interfaces"). macOS reads the kernel and IOKit; Linux reads
-//! /proc, PSI and /sys; Windows asks Win32. User presence on Linux, and on Windows from the system service (session 0),
-//! needs the per-session helper and is reported unknown.
+//! Host signals for capacity and protection: memory, thermal state and power source (the Meter and Power interfaces,
+//! docs/design/architecture.md, "Host interfaces"). macOS reads the kernel and IOKit; Linux reads /proc, PSI and /sys;
+//! Windows asks Win32. User presence is the protection crate's (`oarbank_protection::platform::native_presence`).
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Memory {
@@ -15,26 +14,18 @@ pub struct Memory {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use std::ffi::{c_char, c_void, CString};
+    use std::ffi::{c_char, c_void};
 
     type CFTypeRef = *const c_void;
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
         fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
         fn IOPSGetProvidingPowerSourceType(blob: CFTypeRef) -> CFTypeRef;
-        fn IOServiceMatching(name: *const c_char) -> *mut c_void;
-        fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
-        fn IORegistryEntryCreateCFProperty(entry: u32, key: CFTypeRef, alloc: CFTypeRef, options: u32) -> CFTypeRef;
-        fn IOObjectRelease(obj: u32) -> i32;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFRelease(cf: CFTypeRef);
         fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, size: isize, encoding: u32) -> bool;
-        fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
-        fn CFNumberGetValue(n: CFTypeRef, kind: isize, out: *mut c_void) -> bool;
-        fn CFGetTypeID(cf: CFTypeRef) -> usize;
-        fn CFNumberGetTypeID() -> usize;
     }
     const UTF8: u32 = 0x0800_0100;
 
@@ -49,29 +40,6 @@ mod mac {
             let ok = !t.is_null() && CFStringGetCString(t, buf.as_mut_ptr(), 64, UTF8);
             CFRelease(blob);
             ok && std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy() == "Battery Power"
-        }
-    }
-
-    /// Seconds since the last keyboard or mouse input (IOHIDSystem's HIDIdleTime).
-    pub fn hid_idle_s() -> Option<f64> {
-        unsafe {
-            let name = CString::new("IOHIDSystem").ok()?;
-            let svc = IOServiceGetMatchingService(0, IOServiceMatching(name.as_ptr()));
-            if svc == 0 {
-                return None;
-            }
-            let key_c = CString::new("HIDIdleTime").ok()?;
-            let key = CFStringCreateWithCString(std::ptr::null(), key_c.as_ptr(), UTF8);
-            let v = IORegistryEntryCreateCFProperty(svc, key, std::ptr::null(), 0);
-            CFRelease(key);
-            IOObjectRelease(svc);
-            if v.is_null() {
-                return None;
-            }
-            let mut ns: i64 = 0;
-            let ok = CFGetTypeID(v) == CFNumberGetTypeID() && CFNumberGetValue(v, 4 /* kCFNumberSInt64Type */, &mut ns as *mut i64 as *mut c_void);
-            CFRelease(v);
-            ok.then_some(ns as f64 / 1e9)
         }
     }
 
@@ -208,41 +176,6 @@ mod win {
         let ok = unsafe { GetSystemPowerStatus(&mut st) } != 0;
         ok && st.ACLineStatus == 0 && st.BatteryFlag != 128
     }
-
-    /// Seconds since the last input in this process's session; none in session 0 (the system service), where the
-    /// per-session helper reports presence.
-    pub fn idle_s() -> Option<f64> {
-        use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-        use windows_sys::Win32::System::SystemInformation::GetTickCount;
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-        let mut session = 0u32;
-        if unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } == 0 || session == 0 {
-            return None;
-        }
-        let mut li = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
-        (unsafe { GetLastInputInfo(&mut li) } != 0).then(|| unsafe { GetTickCount() }.wrapping_sub(li.dwTime) as f64 / 1000.0)
-    }
-}
-
-/// A Screen Sharing session is in progress (someone is using the Mac remotely): `screensharingd` runs.
-pub fn screen_sharing() -> bool {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let n = libc::proc_listpids(1 /* PROC_ALL_PIDS */, 0, std::ptr::null_mut(), 0);
-        if n <= 0 {
-            return false;
-        }
-        let mut pids = vec![0i32; n as usize / 4 + 64];
-        let got = libc::proc_listpids(1, 0, pids.as_mut_ptr() as *mut _, (pids.len() * 4) as i32);
-        pids.truncate(got.max(0) as usize / 4);
-        let mut buf = vec![0u8; 4096];
-        return pids.iter().filter(|p| **p > 0).any(|&pid| {
-            let k = libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32);
-            k > 0 && buf[..k as usize].ends_with(b"/screensharingd")
-        });
-    }
-    #[allow(unreachable_code)]
-    false
 }
 
 pub fn memory() -> Memory {
@@ -276,15 +209,6 @@ pub fn on_battery() -> bool {
     false
 }
 
-pub fn hid_idle_s() -> Option<f64> {
-    #[cfg(target_os = "macos")]
-    return mac::hid_idle_s();
-    #[cfg(windows)]
-    return win::idle_s();
-    #[allow(unreachable_code)]
-    None
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -295,7 +219,6 @@ mod tests {
         assert!([0, 1, 3].contains(&m.pressure));
         assert!((0..=3).contains(&super::thermal()));
         let _ = super::on_battery();
-        assert!(super::hid_idle_s().is_some_and(|s| s >= 0.0));
     }
 }
 

@@ -1,4 +1,5 @@
-//! The Windows GPU meter against the live GPU Engine performance counters.
+//! The Windows backend against the live system: the GPU meter (the GPU Engine performance counters) and presence
+//! from the sessions WTS lists.
 
 #![cfg(windows)]
 
@@ -57,4 +58,17 @@ fn wildcard_counters_pick_up_new_instances() {
         "pid {pid} not among {} instances",
         after.len()
     );
+}
+
+#[test]
+#[ignore = "reads the live sessions"]
+fn presence_comes_from_the_session_list() {
+    let sessions = windows::sessions().expect("WTS lists sessions");
+    assert!(sessions.iter().any(|s| s.id == 0), "session 0 (services) always exists: {sessions:?}");
+    let r = platform::native_presence().read();
+    eprintln!("own session {}; sessions {sessions:?}; presence {r:?}", windows::own_session());
+    if windows::own_session() != 0 {
+        assert!(windows::own_idle_s().is_some());
+    }
+    assert!(r.source.starts_with("wts") || r.source.starts_with("unknown: no idle time"), "{r:?}");
 }

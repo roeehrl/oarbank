@@ -66,7 +66,7 @@
       {% if n.pressure %}<span>pressure {{ n.pressure }}</span>{% endif %}
       {% if n.heat %}<span>thermal {{ n.heat }}</span>{% endif %}
       {% if n.tel.on_battery %}<span class="chip warn">battery</span>{% endif %}
-      {% if n.tel.hid_idle_s is known and n.tel.hid_idle_s < (n.policy.user_idle_s or 300) %}<span class="chip">user present</span>{% endif %}
+      {% if n.tel.user_idle_s is known and n.tel.user_idle_s < (n.policy.user_idle_s or 300) %}<span class="chip">user present</span>{% endif %}
       {% if n.tel.services_running %}<span>services {{ n.tel.services_running | join(', ') }}</span>{% endif %}
       <span>heartbeat {{ n.hb_age | secs if n.hb_age is not none else 'never' }}</span>
     </div>

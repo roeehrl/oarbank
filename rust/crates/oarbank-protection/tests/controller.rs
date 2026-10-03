@@ -429,8 +429,8 @@ impl Meter for Shared {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         self.0.lock().unwrap().gpu.clone()
     }
-    fn frontmost_pid(&mut self) -> Option<i32> {
-        self.0.lock().unwrap().front
+    fn front(&mut self) -> Front {
+        self.0.lock().unwrap().front.map_or(Front::Unknown, Front::App)
     }
 }
 

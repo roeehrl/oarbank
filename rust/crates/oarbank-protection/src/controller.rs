@@ -20,7 +20,7 @@ use crate::json::{obj, opt_num, opt_str, rounded, strings};
 use crate::matcher;
 use crate::memory_guard::{GuardLevel, MemoryGuard, MemorySignals, SystemGates, VictimCandidate};
 use crate::model::{ProcessKey, ProcessRecord};
-use crate::signals::{GroupMetrics, Meter, NullMeter, ProcCounters};
+use crate::signals::{Front, GroupMetrics, Meter, NullMeter, ProcCounters};
 use crate::sources::{NoOwnerSources, OwnerSources};
 use crate::table::{ProcessSource, ProcessSummaryRow, ProcessTable, UnsupportedProcessSource};
 use crate::telemetry::ProtectionTelemetry;
@@ -207,6 +207,8 @@ pub struct ProtectionController {
     last_dynamic: String,
     config_error: Option<String>,
     source_error: Option<String>,
+    /// What was in front on the last tick, when something needed it.
+    last_front: Option<Front>,
     last_inputs: Option<CachedInputs>,
 }
 
@@ -243,6 +245,7 @@ impl ProtectionController {
             last_dynamic: String::new(),
             config_error: None,
             source_error: None,
+            last_front: None,
             last_inputs: None,
         }
     }
@@ -259,6 +262,11 @@ impl ProtectionController {
     /// Why the process table could not be read on the last tick (unsupported platform, permissions).
     pub fn source_error(&self) -> Option<&str> {
         self.source_error.as_deref()
+    }
+
+    /// What was in front on the last tick (None: nothing needed it).
+    pub fn last_front(&self) -> Option<Front> {
+        self.last_front
     }
 
     pub fn last_reports(&self) -> &[RuleReport] {
@@ -360,16 +368,18 @@ impl ProtectionController {
             .rules
             .iter()
             .any(|r| r.active_when.frontmost.is_some());
-        let front = if implicit_front || rules_front {
-            self.meter.frontmost_pid()
+        let read_front = implicit_front || rules_front;
+        let front = if read_front {
+            self.meter.front()
         } else {
-            None
+            Front::Unknown
         };
+        self.last_front = read_front.then_some(front);
         let gpu = self.read_gpu(i.now);
         // evaluate first (it decides which rules are active), then measure the active groups
         let r =
             self.evaluate_with_metrics(i, &snap.procs, &snap.cpu_cores, front, gpu.as_ref(), None);
-        let front = front.filter(|_| implicit_front);
+        let front = front.app().filter(|_| implicit_front);
         let metrics = self.live_metrics(i.now, &snap.procs, &i.fleet_pids, front, gpu.as_ref());
         self.redo_dynamic(r, i, &metrics, front.is_some())
     }
@@ -397,33 +407,33 @@ impl ProtectionController {
         busy
     }
 
-    /// The pure part of a tick with no measured metrics yet and the frontmost app and GPU use unknown (tests
-    /// and the differential replay drive this).
+    /// The pure part of a tick with no measured metrics yet and the front app and GPU use unknown (tests and
+    /// the differential replay drive this).
     pub fn evaluate(
         &mut self,
         i: &TickInputs,
         procs: &[ProcessRecord],
         cpu_cores: &HashMap<ProcessKey, f64>,
     ) -> ProtectionTickResult {
-        self.evaluate_with_metrics(i, procs, cpu_cores, None, None, Some(&HashMap::new()))
+        self.evaluate_with_metrics(i, procs, cpu_cores, Front::Unknown, None, Some(&HashMap::new()))
     }
 
-    /// The pure part of a tick. `frontmost` is the frontmost app's pid and `gpu` each process's GPU busy
-    /// fraction (None: unknown); `metrics` supplies measured protected metrics by source ("rule:<id>",
-    /// "implicit:*"); None skips the dynamic layer (the caller runs it after measuring).
+    /// The pure part of a tick. `front` is what is in front and `gpu` each process's GPU busy fraction
+    /// (None: unknown); `metrics` supplies measured protected metrics by source ("rule:<id>", "implicit:*");
+    /// None skips the dynamic layer (the caller runs it after measuring).
     pub fn evaluate_with_metrics(
         &mut self,
         i: &TickInputs,
         procs: &[ProcessRecord],
         cpu_cores: &HashMap<ProcessKey, f64>,
-        frontmost: Option<i32>,
+        front: Front,
         gpu: Option<&GpuBusy>,
         metrics: Option<&HashMap<String, GroupMetrics>>,
     ) -> ProtectionTickResult {
         let now = i.now;
         let ev = self
             .evaluator
-            .evaluate(&self.config, procs, cpu_cores, frontmost, gpu, now);
+            .evaluate(&self.config, procs, cpu_cores, front, gpu, now);
         for e in &ev.events {
             self.journal(&e.kind, &e.reason, Some(&e.rule), signals_json(&e.signals));
         }
@@ -914,6 +924,6 @@ impl ProtectionController {
 
     /// The heartbeat's `telemetry.protection` for this tick's result.
     pub fn telemetry(&self, r: &ProtectionTickResult) -> ProtectionTelemetry {
-        ProtectionTelemetry::new(&self.config, r, self.config_error.as_deref())
+        ProtectionTelemetry::new(&self.config, r, self.config_error.as_deref(), self.last_front)
     }
 }

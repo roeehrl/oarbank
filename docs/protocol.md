@@ -111,7 +111,7 @@ their process groups, deletes their workspaces, and does not report them.
 ```json
 {"seq": 17, "clock": 1790000010.2,
  "telemetry": {"mem_used_gb": 14.1, "mem_free_pct": 31.0, "mem_pressure": 0, "swap_used_gb": 0.4,
-               "thermal": 0, "on_battery": false, "hid_idle_s": 912.0, "screen_sharing": false, "fleet_rss_gb": 6.4,
+               "thermal": 0, "on_battery": false, "user_idle_s": 912.0, "presence": "hid", "fleet_rss_gb": 6.4,
                "disk_free_gb": 350.2, "services_running": ["example/vm"], "services_reserved_gb": 8.0,
                "guard": "clear", "protection": {"mode": "moderate", "active": ["…"], "rules": [{"id": "…", "active": true,
                "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,

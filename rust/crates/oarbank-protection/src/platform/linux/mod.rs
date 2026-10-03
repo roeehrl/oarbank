@@ -2,13 +2,15 @@
 //! here), and the agent acts through its own process containers.
 
 mod gpu;
+mod logind;
 
 use std::time::Instant;
 
 pub use gpu::{gpu_times, process_gpu};
+pub use logind::{sessions, NativePresence};
 
 use crate::gpu::{drm, GpuTimes};
-use crate::signals::{Meter, ProcCounters};
+use crate::signals::{Front, Meter, ProcCounters};
 
 /// GPU time from DRM `fdinfo`; no per-process counters and no frontmost app yet (both unknown).
 #[derive(Debug, Default)]
@@ -34,7 +36,7 @@ impl Meter for NativeMeter {
         self.last = Some(now);
         Some(t)
     }
-    fn frontmost_pid(&mut self) -> Option<i32> {
-        None
+    fn front(&mut self) -> Front {
+        Front::Unknown
     }
 }

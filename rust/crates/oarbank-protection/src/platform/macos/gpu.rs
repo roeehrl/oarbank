@@ -4,52 +4,17 @@
 //! 27.0); they are found by walking the service plane.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, CStr};
-use std::ptr;
+use std::ffi::CStr;
 
-use super::cf::{self, CFTypeRef, Owned};
-
-type IoObject = u32;
-type KernReturn = i32;
+use super::cf;
+use super::iokit::{
+    property, IORegistryCreateIterator, IOIteratorNext, IOObjectConformsTo, IoObject, Object,
+};
 
 const SERVICE_PLANE: &CStr = c"IOService";
 const USER_CLIENT_CLASS: &CStr = c"AGXDeviceUserClient";
 /// kIORegistryIterateRecursively
 const ITERATE_RECURSIVELY: u32 = 1;
-
-#[link(name = "IOKit", kind = "framework")]
-extern "C" {
-    fn IORegistryCreateIterator(
-        main_port: u32,
-        plane: *const c_char,
-        options: u32,
-        it: *mut IoObject,
-    ) -> KernReturn;
-    fn IOIteratorNext(it: IoObject) -> IoObject;
-    fn IOObjectRelease(o: IoObject) -> KernReturn;
-    fn IOObjectConformsTo(o: IoObject, class: *const c_char) -> u32;
-    fn IORegistryEntryCreateCFProperty(
-        entry: IoObject,
-        key: CFTypeRef,
-        alloc: CFTypeRef,
-        options: u32,
-    ) -> CFTypeRef;
-}
-
-struct Object(IoObject);
-
-impl Drop for Object {
-    fn drop(&mut self) {
-        // SAFETY: we own this IOKit reference.
-        unsafe { IOObjectRelease(self.0) };
-    }
-}
-
-fn property(entry: IoObject, key: &str) -> Option<Owned> {
-    let k = cf::string(key)?;
-    // SAFETY: entry is a live registry entry; the result is a +1 CF object or NULL.
-    Owned::from_create(unsafe { IORegistryEntryCreateCFProperty(entry, k.get(), ptr::null(), 0) })
-}
 
 /// "pid 1234, WindowServer" -> 1234.
 pub fn creator_pid(creator: &str) -> Option<i32> {

@@ -94,6 +94,45 @@ impl GroupMetrics {
     }
 }
 
+/// What is in front of the person using the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Front {
+    /// Not readable here; a `frontmost` trigger then holds either way (never looser).
+    Unknown,
+    /// No app: nobody's desktop is on the screen (no one logged in at it, a headless machine).
+    Nothing,
+    /// The app this process belongs to is in front.
+    App(i32),
+}
+
+impl Front {
+    /// The front app's pid, when one is known.
+    pub fn app(self) -> Option<i32> {
+        match self {
+            Self::App(pid) => Some(pid),
+            _ => None,
+        }
+    }
+
+    /// Does a `frontmost = want` trigger hold for a group (`in_group`: is this pid one of its processes)?
+    pub fn holds(self, want: bool, in_group: impl Fn(i32) -> bool) -> bool {
+        match self {
+            Self::Unknown => true,
+            Self::Nothing => !want,
+            Self::App(pid) => in_group(pid) == want,
+        }
+    }
+
+    /// The telemetry form: "unknown", "nothing" or "app".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Nothing => "nothing",
+            Self::App(_) => "app",
+        }
+    }
+}
+
 /// What the controller measures on the host each tick. Every source is feature-detected: None means
 /// unknown, and the controller then degrades fail-safe (no budget growth; guards intact).
 pub trait Meter: Send {
@@ -101,8 +140,8 @@ pub trait Meter: Send {
     fn proc_counters(&mut self, pid: i32) -> Option<ProcCounters>;
     /// Every process's accumulated GPU time, or None when the source is unavailable.
     fn gpu_times(&mut self) -> Option<GpuTimes>;
-    /// The frontmost application's pid, or None when unknown.
-    fn frontmost_pid(&mut self) -> Option<i32>;
+    /// What is in front.
+    fn front(&mut self) -> Front;
 }
 
 /// A meter that knows nothing (tests, and platforms without a backend yet).
@@ -116,9 +155,38 @@ impl Meter for NullMeter {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         None
     }
-    fn frontmost_pid(&mut self) -> Option<i32> {
-        None
+    fn front(&mut self) -> Front {
+        Front::Unknown
     }
+}
+
+/// Whether someone is using the machine, and since when they have not touched it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresenceReading {
+    /// Seconds since the last input of anyone using the machine (at the keyboard, or remotely); infinite when
+    /// nobody is logged in; None when it cannot be read.
+    pub idle_s: Option<f64>,
+    /// Where it was read ("hid", "screen sharing", "logind", …), or why it could not be.
+    pub source: String,
+}
+
+impl PresenceReading {
+    pub fn new(idle_s: Option<f64>, source: impl Into<String>) -> Self {
+        Self {
+            idle_s,
+            source: source.into(),
+        }
+    }
+
+    /// The idle time capacity and the controller act on: unknown presence counts as someone present (S19).
+    pub fn effective_idle_s(&self) -> f64 {
+        self.idle_s.unwrap_or(0.0)
+    }
+}
+
+/// The host's user-presence interface.
+pub trait Presence: Send {
+    fn read(&mut self) -> PresenceReading;
 }
 
 /// Parsing for the macOS frontmost-app lookup through `lsappinfo`. `lsappinfo info -only pid front` no longer

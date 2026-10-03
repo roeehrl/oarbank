@@ -17,7 +17,7 @@ fn reserve_only_rule_enters_at_once_and_leaves_when_the_group_is_gone() {
         &cfg,
         &[proc_fp(10, "/X/Engine/bin/w", 3.5)],
         &no_cpu(),
-        None,
+        Front::Unknown,
         None,
         0.0,
     );
@@ -31,12 +31,12 @@ fn reserve_only_rule_enters_at_once_and_leaves_when_the_group_is_gone() {
         &cfg,
         &[proc_fp(10, "/X/Engine/bin/w", 1.0)],
         &no_cpu(),
-        None,
+        Front::Unknown,
         None,
         100.0,
     );
     assert_eq!(r.vectors[0].reserve_mem_gb.values().next(), Some(&5.5)); // peak over 300 s, not the current value
-    let r = ev.evaluate(&cfg, &[], &no_cpu(), None, None, 110.0);
+    let r = ev.evaluate(&cfg, &[], &no_cpu(), Front::Unknown, None, 110.0);
     assert!(r.vectors.is_empty());
     assert_eq!(
         r.events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
@@ -58,7 +58,7 @@ fn reservations_key_on_the_groups_oldest_process() {
             ..ProcessRecord::new(11, 10, 1000, "/bin/sh")
         },
     ];
-    let r = ev.evaluate(&cfg, &procs, &no_cpu(), None, None, 0.0);
+    let r = ev.evaluate(&cfg, &procs, &no_cpu(), Front::Unknown, None, 0.0);
     assert_eq!(
         r.vectors[0].reserve_mem_gb.keys().collect::<Vec<_>>(),
         ["10@900"]
@@ -80,7 +80,7 @@ fn cap_rules_use_enter_and_exit_timing() {
     let idle = HashMap::from([(p.key(), 0.1)]);
     let procs = [p];
     let mut v =
-        |c: &HashMap<ProcessKey, f64>, t: f64| ev.evaluate(&cfg, &procs, c, None, None, t).vectors;
+        |c: &HashMap<ProcessKey, f64>, t: f64| ev.evaluate(&cfg, &procs, c, Front::Unknown, None, t).vectors;
     assert!(v(&busy, 0.0).is_empty()); // enter_for 4 s
     assert!(v(&busy, 2.0).is_empty());
     assert_eq!(v(&busy, 4.0).first().and_then(|x| x.cpu_cores), Some(2.0));
@@ -102,7 +102,7 @@ fn reports_explain_inactive_rules() {
             rule(json!({"id": "ign", "match": {"name": "w"}, "ignore": true})),
         ],
     );
-    let r = ev.evaluate(&cfg, &[proc_fp(1, "/x/w", 1.0)], &no_cpu(), None, None, 0.0);
+    let r = ev.evaluate(&cfg, &[proc_fp(1, "/x/w", 1.0)], &no_cpu(), Front::Unknown, None, 0.0);
     let reasons: Vec<(&str, bool, &str)> = r
         .reports
         .iter()
@@ -130,7 +130,7 @@ fn hold_rules_resume_after_the_doubling_cooldown() {
     let hi = [proc_fp(1, "/x/w", 4.0)];
     let lo = [proc_fp(1, "/x/w", 1.0)];
     let mut active =
-        |p: &[ProcessRecord], t: f64| !ev.evaluate(&cfg, p, &no_cpu(), None, None, t).vectors.is_empty();
+        |p: &[ProcessRecord], t: f64| !ev.evaluate(&cfg, p, &no_cpu(), Front::Unknown, None, t).vectors.is_empty();
     assert!(active(&hi, 0.0)); // enters at once
     assert!(active(&lo, 10.0)); // cooling down (120 s from t=10)
     assert!(active(&lo, 129.0));
@@ -173,7 +173,7 @@ impl Yield {
         let p = [proc_fp(1, "/x/w", if app_active { 4.0 } else { 1.0 })];
         !self
             .ev
-            .evaluate(&self.cfg, &p, &no_cpu(), None, None, now)
+            .evaluate(&self.cfg, &p, &no_cpu(), Front::Unknown, None, now)
             .vectors
             .is_empty()
     }
@@ -323,7 +323,7 @@ fn rule_vectors_carry_caps_pools_and_evict() {
             ),
         ],
     );
-    let r = ev.evaluate(&cfg, &[proc_fp(1, "/x/w", 1.0)], &no_cpu(), None, None, 0.0);
+    let r = ev.evaluate(&cfg, &[proc_fp(1, "/x/w", 1.0)], &no_cpu(), Front::Unknown, None, 0.0);
     assert_eq!(r.vectors.len(), 2);
     assert_eq!(
         r.vectors[0].pool_jobs_only,
@@ -339,7 +339,7 @@ fn rule_vectors_carry_caps_pools_and_evict() {
     assert_eq!(ev.active_rules.len(), 2);
     // a removed rule's state is dropped
     let cfg2 = ProtectionConfig::new(ProtectionMode::FleetFirst, vec![]);
-    ev.evaluate(&cfg2, &[], &no_cpu(), None, None, 2.0);
+    ev.evaluate(&cfg2, &[], &no_cpu(), Front::Unknown, None, 2.0);
     assert!(ev.states.is_empty());
 }
 
@@ -371,7 +371,7 @@ fn frontmost_rules_follow_the_app_in_front() {
     let cfg = ProtectionConfig::new(ProtectionMode::FleetFirst, vec![writing]);
     let mut ev = RuleEvaluator::new();
     let mut active = |front: Option<i32>, t: f64| {
-        let r = ev.evaluate(&cfg, &procs, &no_cpu(), front, None, t);
+        let r = ev.evaluate(&cfg, &procs, &no_cpu(), front.map_or(Front::Unknown, Front::App), None, t);
         (r.reports[0].active, r.reports[0].reason.clone())
     };
     assert_eq!(active(terminal, 0.0), (false, "condition not met".into()));
@@ -384,18 +384,25 @@ fn frontmost_rules_follow_the_app_in_front() {
     // an unknown front app counts as in front (never looser)
     assert!(!active(None, 130.0).0);
     assert!(active(None, 134.0).0);
+    // nothing in front (nobody at the desktop): released after the cooldown
+    assert!(ev.evaluate(&cfg, &procs, &no_cpu(), Front::Nothing, None, 136.0).reports[0].active);
+    assert!(!ev.evaluate(&cfg, &procs, &no_cpu(), Front::Nothing, None, 400.0).reports[0].active);
 
     // frontmost = false: the group runs but is not in front
     let background = rule(json!({"id": "bg", "match": {"bundle_id": "com.apple.TextEdit"},
                                  "active_when": {"frontmost": false, "for_s": 0}, "cap_fleet": {"cpu_cores": 2}}));
     let cfg = ProtectionConfig::new(ProtectionMode::FleetFirst, vec![background]);
+    let front = |pid: Option<i32>| Front::App(pid.unwrap());
     let mut ev = RuleEvaluator::new();
-    assert!(ev.evaluate(&cfg, &procs, &no_cpu(), terminal, None, 0.0).reports[0].active);
+    assert!(ev.evaluate(&cfg, &procs, &no_cpu(), front(terminal), None, 0.0).reports[0].active);
     let mut ev = RuleEvaluator::new();
-    assert!(!ev.evaluate(&cfg, &procs, &no_cpu(), textedit, None, 0.0).reports[0].active);
+    assert!(!ev.evaluate(&cfg, &procs, &no_cpu(), front(textedit), None, 0.0).reports[0].active);
+    // nothing in front: the group runs and is not in front
+    let mut ev = RuleEvaluator::new();
+    assert!(ev.evaluate(&cfg, &procs, &no_cpu(), Front::Nothing, None, 0.0).reports[0].active);
     // not running at all: nothing to protect, whatever is in front
     let mut ev = RuleEvaluator::new();
-    assert!(!ev.evaluate(&cfg, &procs[1..], &no_cpu(), terminal, None, 0.0).reports[0].active);
+    assert!(!ev.evaluate(&cfg, &procs[1..], &no_cpu(), front(terminal), None, 0.0).reports[0].active);
 }
 
 fn busy(by_pid: &[(i32, f64)], unknown: &[i32]) -> GpuBusy {
@@ -419,7 +426,7 @@ fn gpu_active_rules_follow_the_groups_gpu_use() {
                            "cap_fleet": {"gpu_jobs": 0}, "exit_after_s": 0}));
     let cfg = ProtectionConfig::new(ProtectionMode::FleetFirst, vec![game]);
     let mut ev = RuleEvaluator::new();
-    let mut eval = |gpu: Option<&GpuBusy>, procs: &[ProcessRecord], t: f64| ev.evaluate(&cfg, procs, &no_cpu(), None, gpu, t);
+    let mut eval = |gpu: Option<&GpuBusy>, procs: &[ProcessRecord], t: f64| ev.evaluate(&cfg, procs, &no_cpu(), Front::Unknown, gpu, t);
     // another process's GPU use does not count; the group's 0.02 + 0.05 is under 0.1
     let r = eval(Some(&busy(&[(500, 0.02), (501, 0.05), (600, 0.9)], &[])), &procs, 0.0);
     assert_eq!((r.reports[0].active, r.reports[0].reason.as_str()), (false, "condition not met"));
@@ -443,8 +450,8 @@ fn gpu_active_rules_follow_the_groups_gpu_use() {
                            "cap_fleet": {"gpu_jobs": 0}}));
     let cfg = ProtectionConfig::new(ProtectionMode::FleetFirst, vec![dflt]);
     let mut ev = RuleEvaluator::new();
-    assert!(!ev.evaluate(&cfg, &procs, &no_cpu(), None, Some(&busy(&[(500, 0.049)], &[])), 0.0).reports[0].active);
-    assert!(ev.evaluate(&cfg, &procs, &no_cpu(), None, Some(&busy(&[(500, 0.05)], &[])), 2.0).reports[0].active);
+    assert!(!ev.evaluate(&cfg, &procs, &no_cpu(), Front::Unknown, Some(&busy(&[(500, 0.049)], &[])), 0.0).reports[0].active);
+    assert!(ev.evaluate(&cfg, &procs, &no_cpu(), Front::Unknown, Some(&busy(&[(500, 0.05)], &[])), 2.0).reports[0].active);
 }
 
 #[test]

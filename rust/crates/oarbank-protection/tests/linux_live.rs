@@ -1,4 +1,5 @@
-//! The Linux GPU meter against the live /proc: DRM clients from fdinfo, unknown where the files cannot be read.
+//! The Linux backend against the live system: the GPU meter (DRM clients from fdinfo, unknown where the files
+//! cannot be read) and presence from logind.
 
 #![cfg(target_os = "linux")]
 
@@ -34,4 +35,16 @@ fn gpu_time_comes_from_drm_fdinfo() {
         b.ns,
         b.unknown.len()
     );
+}
+
+#[test]
+#[ignore = "reads the live logind sessions"]
+fn presence_comes_from_logind() {
+    let sessions = linux::sessions().expect("systemd-logind runs");
+    let r = platform::native_presence().read();
+    eprintln!("{} sessions; presence {r:?}", sessions.len());
+    // whoever runs this test is logged in (ssh, a terminal or a desktop)
+    assert!(sessions.iter().any(|s| s.is_person()), "{sessions:?}");
+    assert!(r.source.starts_with("logind") || r.source.starts_with("unknown: logind has no idle time"), "{r:?}");
+    assert!(r.idle_s.is_none_or(|s| s.is_finite() && s >= 0.0));
 }

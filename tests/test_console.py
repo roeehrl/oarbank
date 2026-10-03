@@ -358,7 +358,8 @@ def test_a_guarded_node_says_why_it_takes_no_jobs(env):
     facts = {**facts_for("windows-arm64", os_version="10.0"), "cpu": {"model": None, "perf_cores": None, "eff_cores": None,
              "logical": 4}, "memory_gb": 7.6, "gpus": []}
     tel = {"mem_used_gb": 6.9, "mem_free_pct": 9.2, "mem_pressure": 1, "swap_used_gb": None, "thermal": 0, "on_battery": False,
-           "hid_idle_s": None, "fleet_rss_gb": 0.0, "disk_free_gb": None, "guard": "soft", "services_running": [],
+           "user_idle_s": 0.0, "presence": "unknown: no idle time for session 1 (ada)", "fleet_rss_gb": 0.0,
+           "disk_free_gb": None, "guard": "soft", "services_running": [],
            "services_reserved_gb": 0.0, "protection": {"guard_reason": "free memory 9.2% under 10%"}}
     cap = {"cpu_slots": 0, "auto_cpu_slots": 0, "mem_gb_free": 0.0, "pools": {}, "slots": 0, "auto_slots": 0,
            "binding_limit": "guard:memory", "admit": False, "why": "guard:memory"}

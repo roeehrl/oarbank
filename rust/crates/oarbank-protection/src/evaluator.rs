@@ -11,6 +11,7 @@ use crate::gpu::GpuBusy;
 use crate::json::{opt_int, opt_num, rounded};
 use crate::matcher::{self, Match};
 use crate::model::{GroupSample, ProcessKey, ProcessRecord};
+use crate::signals::Front;
 
 /// What one source (a rule or a guard) demands this tick. There is no PID field: the evaluator cannot
 /// express an action against a protected process (S16 made structural). Reservations are keyed by the
@@ -282,15 +283,14 @@ impl RuleEvaluator {
     }
 
     /// One tick: match every rule against the process table, update activity and history, and return the
-    /// constraint vectors of the active rules, the per-rule report and the transitions. `frontmost` is the
-    /// frontmost application's pid and `gpu` each process's GPU busy fraction since the last tick (None:
-    /// unknown).
+    /// constraint vectors of the active rules, the per-rule report and the transitions. `front` is what is in
+    /// front and `gpu` each process's GPU busy fraction since the last tick (None: unknown).
     pub fn evaluate(
         &mut self,
         config: &ProtectionConfig,
         procs: &[ProcessRecord],
         cpu_cores: &HashMap<ProcessKey, f64>,
-        frontmost: Option<i32>,
+        front: Front,
         gpu: Option<&GpuBusy>,
         now: f64,
     ) -> Evaluation {
@@ -337,10 +337,11 @@ impl RuleEvaluator {
                     cond = true;
                 }
                 // the app in front is (or is not) one of the group's processes; an unknown front app satisfies
-                // either (never looser)
-                if aw.frontmost.is_some_and(|want| {
-                    frontmost.is_none_or(|fp| group.iter().any(|p| p.pid == fp) == want)
-                }) {
+                // either (never looser), and with nothing in front no group is
+                if aw
+                    .frontmost
+                    .is_some_and(|want| front.holds(want, |fp| group.iter().any(|p| p.pid == fp)))
+                {
                     cond = true;
                 }
                 // GPU usage that cannot be read counts as busy (never looser)

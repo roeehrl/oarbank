@@ -5,6 +5,7 @@
 //! its registry there with its own actuator over its process containers.
 
 use crate::controller::Host;
+use crate::signals::{Presence, PresenceReading};
 use crate::sources::FileOwnerSources;
 use crate::spawn_registry::Actuator;
 
@@ -38,6 +39,28 @@ pub fn native_host() -> Host {
             meter,
             sources: Box::new(FileOwnerSources::new()),
         }
+    }
+}
+
+/// This platform's user-presence interface.
+pub fn native_presence() -> Box<dyn Presence> {
+    #[cfg(target_os = "macos")]
+    return Box::new(macos::NativePresence::new());
+    #[cfg(target_os = "linux")]
+    return Box::new(linux::NativePresence::new());
+    #[cfg(windows)]
+    return Box::new(windows::NativePresence::new());
+    #[allow(unreachable_code)]
+    Box::new(UnknownPresence)
+}
+
+/// Presence on a platform without a backend: unknown, which counts as someone present.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnknownPresence;
+
+impl Presence for UnknownPresence {
+    fn read(&mut self) -> PresenceReading {
+        PresenceReading::new(None, format!("unknown: no presence backend on {}", std::env::consts::OS))
     }
 }
 

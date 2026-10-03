@@ -79,7 +79,7 @@ def capacity_summary(n: dict) -> dict:
         out["held"] = limit_label(cap.get("why") or cap.get("binding_limit")) or "not admitting"
     elif slots == 0:
         policy = n.get("policy") or {}
-        idle = tel.get("hid_idle_s")
+        idle = tel.get("user_idle_s")
         out["zero_why"] = out["binding"] or (
             "heat" if (tel.get("thermal") or 0) >= 2 else
             "user present" if idle is not None and idle < (policy.get("user_idle_s") or 300) else

@@ -16,4 +16,5 @@ fancy-regex = "0.19"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Performance"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_RemoteDesktop",
+                                               "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse"] }

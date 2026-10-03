@@ -39,7 +39,7 @@
     {% if mem %}<span class="mut">memory</span><span>{{ mem | join(' · ') }}</span>{% endif %}
     {% if n.pressure or n.heat %}<span class="mut">pressure / thermal</span><span>{{ n.pressure or 'not reported' }} / {{ n.heat or 'not reported' }}</span>{% endif %}
     {% if T0.guard %}<span class="mut">memory guard</span><span>{{ T0.guard }}</span>{% endif %}
-    {% set user = ['idle ' ~ (T0.hid_idle_s | secs) if T0.hid_idle_s is known, 'screen shared' if T0.screen_sharing,
+    {% set user = ['idle ' ~ (T0.user_idle_s | secs) if T0.user_idle_s is known, T0.presence,
                    ('on battery' if T0.on_battery else 'on AC power') if T0.on_battery is known] | select | list %}
     {% if user %}<span class="mut">user / power</span><span>{{ user | join(' · ') }}</span>{% endif %}
   </div>

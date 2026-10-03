@@ -184,6 +184,14 @@ fn frontmost_detection_returns_the_front_apps_bundle_id() {
 }
 
 #[test]
+fn presence_reads_the_hid_idle_time() {
+    let r = platform::native_presence().read();
+    assert!(r.idle_s.is_some_and(|s| s >= 0.0), "{r:?}");
+    assert!(r.source == "hid" || r.source == "screen sharing", "{r:?}");
+    assert!(macos::hid_idle_s().is_some());
+}
+
+#[test]
 fn gpu_time_is_found_when_a_window_server_runs() {
     // AGX user clients are not matchable services; the registry walk must find them (WindowServer has one)
     let ws = Command::new("/usr/bin/pgrep")
