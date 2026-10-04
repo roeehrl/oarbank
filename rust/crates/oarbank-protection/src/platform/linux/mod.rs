@@ -1,5 +1,5 @@
 //! The Linux backend: the process table and per-process scheduler counters from procfs, GPU time from DRM
-//! `fdinfo`, presence and the session in front from systemd-logind, and an X11 session's front window from its
+//! `fdinfo` and NVML, presence and the session in front from systemd-logind, and an X11 session's front window from its
 //! X server. The agent acts through its own process containers (cgroup leaves).
 
 mod front;
@@ -13,22 +13,22 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use front::{x11_front, FrontReader};
-pub use gpu::{gpu_times, process_gpu};
+pub use gpu::{gpu_times, nvml, process_gpu};
 pub use logind::{sessions, NativePresence};
 pub use procs::{owner_uids, reader, start_time_us, NativeProcessSource, ProcessCounters};
 pub use session::{run_helper, serve, socket_path};
 
-use crate::gpu::{drm, GpuTimes};
+use crate::gpu::{GpuTimes, LinuxGpu};
 use crate::session::SessionHub;
 use crate::signals::{FrontReading, Meter, ProcCounters};
 
-/// Scheduler counters from procfs, GPU time from DRM `fdinfo` (another account's from its session helper), and the
-/// front app.
+/// Scheduler counters from procfs, GPU time from DRM `fdinfo` and NVML (another account's from its session helper),
+/// and the front app.
 pub struct NativeMeter {
     counters: ProcessCounters,
     front: FrontReader,
     hub: Option<Arc<SessionHub>>,
-    drm: drm::Usage,
+    gpu: LinuxGpu,
     last: Option<Instant>,
     /// GPU time accumulated from session helpers' busy fractions, for the processes whose files only their own
     /// account may read.
@@ -41,7 +41,7 @@ impl NativeMeter {
             counters: ProcessCounters::new(),
             front: FrontReader::new(hub.clone()),
             hub,
-            drm: drm::Usage::default(),
+            gpu: gpu::reader(),
             last: None,
             helped: HashMap::new(),
         }
@@ -55,7 +55,7 @@ impl Meter for NativeMeter {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         let now = Instant::now();
         let seconds = self.last.map(|t| now.duration_since(t).as_secs_f64());
-        let mut t = gpu_times(&mut self.drm, seconds)?;
+        let mut t = gpu_times(&mut self.gpu, seconds)?;
         self.last = Some(now);
         // a process whose files the agent may not read, whose helper reads them: its busy fraction, accumulated
         // over this reading's interval (the first reading has no interval, so it stays unknown)

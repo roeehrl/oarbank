@@ -4,15 +4,15 @@
 //! It tells what the system service may not read: its processes' executable paths (and arguments), their GPU
 //! use, and the front window of the person's X11 display.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use super::front::FrontReader;
-use super::gpu::process_gpu;
+use super::gpu::{self, process_gpu};
 use super::{logind, reader};
-use crate::gpu::{drm, GpuBusy};
+use crate::gpu::{drm, GpuBusy, LinuxGpu};
 use crate::platform::unix_session;
 use crate::session::{Described, FrontClaim, ProcClaim, Report, SessionHub, PROTOCOL};
 
@@ -41,8 +41,8 @@ struct Collector {
     uid: u32,
     described: Described,
     front: FrontReader,
-    drm: drm::Usage,
-    gpu: Option<(Instant, crate::gpu::GpuTimes)>,
+    gpu: LinuxGpu,
+    last_gpu: Option<(Instant, crate::gpu::GpuTimes)>,
 }
 
 impl Collector {
@@ -76,21 +76,25 @@ impl Collector {
                     .map(|_| s)
             })
             .map(|s| FrontClaim::of(&self.front.read(Some(s))));
-        // GPU use from the open files only this account may read
+        // GPU use from the open files only this account may read (and NVML, which tells every account's: only this
+        // account's processes are reported)
         let now = Instant::now();
         let held: Vec<(i32, drm::ProcessGpu)> = mine
             .iter()
             .filter_map(|e| Some((e.pid, process_gpu(e.pid)?)))
             .collect();
         let seconds = self
-            .gpu
+            .last_gpu
             .as_ref()
             .map(|(t, _)| now.duration_since(*t).as_secs_f64());
-        let cur = self.drm.fold(held, seconds);
-        let busy = self.gpu.as_ref().and_then(|(t, prev)| {
+        let mut cur = self.gpu.fold(held, seconds);
+        let own: HashSet<i32> = mine.iter().map(|e| e.pid).collect();
+        cur.ns.retain(|pid, _| own.contains(pid));
+        cur.unknown.retain(|pid| own.contains(pid));
+        let busy = self.last_gpu.as_ref().and_then(|(t, prev)| {
             GpuBusy::between(prev, &cur, now.duration_since(*t).as_secs_f64())
         });
-        self.gpu = Some((now, cur));
+        self.last_gpu = Some((now, cur));
         let (gpu_busy, gpu_unknown) = busy.map_or((HashMap::new(), vec![]), |b| {
             (b.by_pid, b.unknown.into_iter().collect())
         });
@@ -115,8 +119,8 @@ pub fn run_helper() -> ! {
         uid,
         described: Described::default(),
         front: FrontReader::new(None),
-        drm: drm::Usage::default(),
-        gpu: None,
+        gpu: gpu::reader(),
+        last_gpu: None,
     };
     unix_session::run_helper(&socket_path(), |first| c.report(first))
 }

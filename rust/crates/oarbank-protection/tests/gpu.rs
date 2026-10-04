@@ -1,9 +1,10 @@
 //! Per-process GPU time: the DRM fdinfo and PDH parsers on real-shaped samples, cycle counters becoming
-//! nanoseconds, and the busy fractions between two readings.
+//! nanoseconds, NVML's readings through a stand-in for the library, and the busy fractions between two readings.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use oarbank_protection::gpu::{drm, pdh};
+use oarbank_protection::gpu::{drm, nvml, pdh, LinuxGpu};
 use oarbank_protection::{GpuBusy, GpuTimes};
 
 /// amdgpu on a Radeon RX 7900 (kernel 6.8): memory regions, a PASID and nanoseconds per engine ring.
@@ -97,7 +98,7 @@ fn fdinfo_parses_every_drivers_engine_counters() {
 fn holds(clients: &[&str]) -> drm::ProcessGpu {
     drm::ProcessGpu {
         clients: clients.iter().map(|t| drm::parse(t).unwrap()).collect(),
-        unknown: false,
+        ..Default::default()
     }
 }
 
@@ -111,8 +112,8 @@ fn usage_sums_a_processs_distinct_clients() {
             (
                 200,
                 drm::ProcessGpu {
-                    clients: vec![],
                     unknown: true,
+                    ..Default::default()
                 },
             ),
             (300, holds(&[])),
@@ -141,6 +142,253 @@ fn xe_cycles_become_nanoseconds_between_readings() {
     u.fold(vec![(42, holds(&[]))], Some(1.0));
     let t = u.fold(vec![(42, holds(&[&xe(9_000, 40_000)]))], Some(1.0));
     assert_eq!(t.ns[&42], 0.0);
+}
+
+/// One GPU as the stand-in NVML shows it.
+#[derive(Clone, Default)]
+struct FakeGpu {
+    compute: Vec<u32>,
+    graphics: Vec<u32>,
+    samples: Vec<nvml::UtilizationSample>,
+    /// What nvmlDeviceGetProcessUtilization returns instead of samples (NOT_SUPPORTED: before Maxwell).
+    utilization_error: Option<nvml::Return>,
+}
+
+#[derive(Default)]
+struct Fake {
+    gpus: Vec<FakeGpu>,
+    count_error: Option<nvml::Return>,
+    /// The `lastSeenTimeStamp` of every utilization call, per GPU.
+    since: Vec<(usize, u64)>,
+}
+
+thread_local! {
+    static FAKE: RefCell<Fake> = RefCell::new(Fake::default());
+}
+
+const NOT_SUPPORTED: nvml::Return = 3;
+
+fn gpu_of(dev: nvml::Device) -> usize {
+    dev as usize - 1
+}
+
+/// NVML's count-then-fill contract: too small a buffer (or none) gets INSUFFICIENT_SIZE and the count.
+unsafe fn give<T: Copy>(items: &[T], n: *mut u32, out: *mut T) -> nvml::Return {
+    let room = *n as usize;
+    *n = items.len() as u32;
+    if out.is_null() || room < items.len() {
+        return if items.is_empty() {
+            nvml::SUCCESS
+        } else {
+            nvml::ERROR_INSUFFICIENT_SIZE
+        };
+    }
+    std::ptr::copy_nonoverlapping(items.as_ptr(), out, items.len());
+    nvml::SUCCESS
+}
+
+unsafe extern "C" fn count(n: *mut u32) -> nvml::Return {
+    FAKE.with_borrow(|f| match f.count_error {
+        Some(e) => e,
+        None => {
+            *n = f.gpus.len() as u32;
+            nvml::SUCCESS
+        }
+    })
+}
+
+unsafe extern "C" fn handle(i: u32, dev: *mut nvml::Device) -> nvml::Return {
+    *dev = (i as usize + 1) as nvml::Device;
+    nvml::SUCCESS
+}
+
+fn infos(pids: &[u32]) -> Vec<nvml::ProcessInfo> {
+    pids.iter()
+        .map(|&pid| nvml::ProcessInfo {
+            pid,
+            used_gpu_memory: 1 << 30,
+            ..Default::default()
+        })
+        .collect()
+}
+
+unsafe extern "C" fn compute(
+    dev: nvml::Device,
+    n: *mut u32,
+    out: *mut nvml::ProcessInfo,
+) -> nvml::Return {
+    let items = FAKE.with_borrow(|f| infos(&f.gpus[gpu_of(dev)].compute));
+    give(&items, n, out)
+}
+
+unsafe extern "C" fn graphics(
+    dev: nvml::Device,
+    n: *mut u32,
+    out: *mut nvml::ProcessInfo,
+) -> nvml::Return {
+    let items = FAKE.with_borrow(|f| infos(&f.gpus[gpu_of(dev)].graphics));
+    give(&items, n, out)
+}
+
+unsafe extern "C" fn utilization(
+    dev: nvml::Device,
+    out: *mut nvml::UtilizationSample,
+    n: *mut u32,
+    since: u64,
+) -> nvml::Return {
+    let g = gpu_of(dev);
+    let (items, error) = FAKE.with_borrow_mut(|f| {
+        f.since.push((g, since));
+        let gpu = &f.gpus[g];
+        let items: Vec<_> = gpu
+            .samples
+            .iter()
+            .filter(|s| s.time_stamp > since)
+            .copied()
+            .collect();
+        (items, gpu.utilization_error)
+    });
+    if let Some(e) = error {
+        return e;
+    }
+    if items.is_empty() {
+        return nvml::ERROR_NOT_FOUND; // no process used the GPU since then
+    }
+    give(&items, n, out)
+}
+
+fn fake_api() -> nvml::Api {
+    nvml::Api {
+        device_get_count: count,
+        device_get_handle_by_index: handle,
+        device_get_compute_running_processes: compute,
+        device_get_graphics_running_processes: graphics,
+        device_get_process_utilization: utilization,
+    }
+}
+
+fn sample(pid: u32, time_stamp: u64, sm_util: u32) -> nvml::UtilizationSample {
+    nvml::UtilizationSample {
+        pid,
+        time_stamp,
+        sm_util,
+        ..Default::default()
+    }
+}
+
+/// Every GPU's holders and samples become per-process busy fractions: a process's samples since the last reading
+/// are averaged, its GPUs summed, a holder without a sample is idle, and each GPU is asked only for what is new.
+#[test]
+fn nvml_samples_become_busy_fractions_per_process() {
+    FAKE.with_borrow_mut(|f| {
+        *f = Fake {
+            gpus: vec![
+                FakeGpu {
+                    compute: vec![100, 101],
+                    graphics: vec![200],
+                    samples: vec![
+                        sample(100, 10, 50),
+                        sample(100, 20, 70),
+                        sample(200, 15, 30),
+                    ],
+                    ..Default::default()
+                },
+                FakeGpu {
+                    compute: vec![100],
+                    samples: vec![sample(100, 12, 20)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    });
+    let mut n = nvml::Nvml::new(fake_api());
+    let r = n.read().unwrap();
+    assert_eq!(r.holders, HashSet::from([100, 101, 200]));
+    assert!(
+        (r.busy[&100] - 0.8).abs() < 1e-12,
+        "0.6 on one GPU, 0.2 on the other"
+    );
+    assert!((r.busy[&200] - 0.3).abs() < 1e-12);
+    assert!(!r.busy.contains_key(&101) && r.unknown.is_empty());
+    // the next reading asks each GPU only for samples after the last it saw; none came: everyone idle
+    let r = n.read().unwrap();
+    assert!(r.busy.is_empty() && r.holders.len() == 3);
+    // (each first asked for the size, then for the samples)
+    let since = FAKE.with_borrow(|f| f.since.clone());
+    assert_eq!(since, [(0, 0), (0, 0), (1, 0), (1, 0), (0, 20), (1, 12)]);
+}
+
+/// A GPU without per-process utilization leaves its holders unknown; NVML that cannot count its GPUs is no
+/// reading at all.
+#[test]
+fn nvml_without_utilization_or_gpus_is_unknown() {
+    FAKE.with_borrow_mut(|f| {
+        *f = Fake {
+            gpus: vec![
+                FakeGpu {
+                    compute: vec![7],
+                    utilization_error: Some(NOT_SUPPORTED),
+                    ..Default::default()
+                },
+                FakeGpu {
+                    graphics: vec![8],
+                    samples: vec![sample(8, 5, 40)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    });
+    let mut n = nvml::Nvml::new(fake_api());
+    let r = n.read().unwrap();
+    assert_eq!(
+        (r.unknown, r.busy),
+        (HashSet::from([7]), HashMap::from([(8, 0.4)]))
+    );
+    FAKE.with_borrow_mut(|f| f.count_error = Some(NOT_SUPPORTED));
+    assert_eq!(n.read(), None);
+}
+
+/// On Linux an NVIDIA device file's holder is unknown without NVML; with it, its busy fraction accumulates into GPU
+/// time beside the DRM clients' (a holder without a context is idle, and known).
+#[test]
+fn linux_gpu_time_takes_nvidia_processes_from_nvml() {
+    let nvidia = || drm::ProcessGpu {
+        nvidia: true,
+        ..Default::default()
+    };
+    let procs = || vec![(100, nvidia()), (101, nvidia()), (300, holds(&[I915]))];
+    let mut blind = LinuxGpu::new(None);
+    let t = blind.fold(procs(), None);
+    assert_eq!(t.unknown, HashSet::from([100, 101]));
+    FAKE.with_borrow_mut(|f| {
+        *f = Fake {
+            gpus: vec![FakeGpu {
+                compute: vec![100],
+                samples: vec![sample(100, 1, 50)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    });
+    let mut g = LinuxGpu::new(Some(fake_api()));
+    let t = g.fold(procs(), None);
+    assert!(t.unknown.is_empty());
+    assert_eq!(
+        (t.ns[&100], t.ns[&101]),
+        (0.0, 0.0),
+        "the first reading has no interval"
+    );
+    FAKE.with_borrow_mut(|f| f.gpus[0].samples.push(sample(100, 2, 50)));
+    let t = g.fold(procs(), Some(2.0));
+    assert!((t.ns[&100] - 1e9).abs() < 1.0, "half of two seconds");
+    assert_eq!(t.ns[&101], 0.0);
+    assert_eq!(t.ns[&300], 25_662_044_495.0);
+    // NVML stops answering: NVIDIA's processes are unknown again
+    FAKE.with_borrow_mut(|f| f.count_error = Some(NOT_SUPPORTED));
+    let t = g.fold(procs(), Some(2.0));
+    assert_eq!(t.unknown, HashSet::from([100, 101]));
 }
 
 /// Instance names as the Windows 11 test VM lists them (`Get-Counter "\GPU Engine(*)\Running Time"`).

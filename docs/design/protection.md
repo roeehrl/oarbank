@@ -81,13 +81,16 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   only a process in that session may ask for (a packaged app's frame is resolved to the app inside it).
 - **GPU activity** is the group's GPU busy seconds per second over the last sample interval, summed over its processes
   and the GPU's engines (so two busy engines can pass 1); `min_busy` defaults to 0.05. Each OS reads accumulated GPU
-  time per process: macOS from the AGX driver's user clients in the IORegistry, Linux from the DRM `fdinfo` of every
-  GPU file a process holds (`drm-engine-*` nanoseconds, or `drm-cycles-*` over `drm-total-cycles-*` on xe; amdgpu,
-  i915, xe, msm, panfrost and the other drivers that write usage stats), Windows from the raw `GPU Engine` performance
-  counters (running time in 100 ns per process, adapter and engine). Usage that cannot be read counts as busy, never
-  looser: the first reading after start (no baseline yet), a missing source, a process holding a GPU that reports no
-  per-client counters (NVIDIA's proprietary `/dev/nvidia*`, AMD's `/dev/kfd`, a kernel before 5.19) and another user's
-  process whose open files the agent cannot read.
+  time per process: macOS from the AGX driver's user clients in the IORegistry, Linux from the DRM `fdinfo` of every GPU
+  file a process holds (`drm-engine-*` nanoseconds, or `drm-cycles-*` over `drm-total-cycles-*` on xe; amdgpu, i915, xe,
+  msm, panfrost and the other drivers that write usage stats) and, for NVIDIA's proprietary driver, which writes none,
+  from NVML (`libnvidia-ml.so.1`, opened at run time: each GPU's compute and graphics processes, and their SM
+  utilization over the driver's last sample period, averaged over the samples since the previous reading and accumulated
+  over the interval), Windows from the raw `GPU Engine` performance counters (running time in 100 ns per process,
+  adapter and engine). Usage that cannot be read counts as busy, never looser: the first reading after start (no
+  baseline yet), a missing source, a process holding a GPU that reports no per-client counters (NVIDIA's `/dev/nvidia*`
+  where NVML does not load, a GPU older than Maxwell that keeps no per-process utilization, AMD's `/dev/kfd`, a kernel
+  before 5.19) and another user's process whose open files the agent cannot read.
 - **Actions** (fleet-side only): `reserve` (cores and memory, as expressions over measured peaks such as
   `peak(300s).footprint + 2`), `cap_fleet` (slots, cores, threads, staging bandwidth, GPU jobs), `lower_fleet` (fleet
   jobs to background scheduling: macOS background QoS, low priority on the efficiency cores; on Linux a CPU quota of a
