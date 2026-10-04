@@ -718,7 +718,7 @@ def cmd_job(a):
 
 def _protection_file(path: str) -> dict:
     """A protection section from a file: TOML (`.toml`, the local protection file's format) or JSON (the console's)."""
-    text = Path(path).read_text()
+    text = Path(path).read_text(encoding="utf-8")
     if path.endswith(".toml"):
         import tomllib
         return tomllib.loads(text)

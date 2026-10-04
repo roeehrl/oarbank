@@ -11,7 +11,7 @@ EXPLAIN_KINDS = ("job", "node")                               # oarbankd.explain
 
 
 def _templates() -> str:
-    return "\n".join(p.read_text() for p in (SRC / "console" / "templates").glob("*.html"))
+    return "\n".join(p.read_text(encoding="utf-8") for p in (SRC / "console" / "templates").glob("*.html"))
 
 
 def _subcommands() -> dict:
@@ -78,8 +78,8 @@ def op_rows() -> list[dict]:
 
 def explain_rows() -> list[dict]:
     t, subs = _templates(), _subcommands()
-    console = (SRC / "console" / "app.py").read_text()
-    app = (SRC / "coordinator" / "app.py").read_text()
+    console = (SRC / "console" / "app.py").read_text(encoding="utf-8")
+    app = (SRC / "coordinator" / "app.py").read_text(encoding="utf-8")
     kinds = next((a.choices for a in subs["explain"]._actions if a.dest == "kind"), ()) if "explain" in subs else ()
     return [{"kind": k, "api_ok": "/api/v1/explain/{kind}/{ident}" in app, "cli_ok": k in kinds,
              "gui_ok": "/explain/{kind}/{ident}" in console and f"/explain/{k}/" in t} for k in EXPLAIN_KINDS]
