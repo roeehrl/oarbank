@@ -304,3 +304,59 @@ pub fn report() -> Value {
         json!({"backend": null, "enforcement": {}})
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    /// The launcher's side, in a child copy of this test binary (`OARBANK_TEST_LAUNCHER`): signal after that many
+    /// milliseconds, end without signalling (`never`), or hang (`hang`).
+    #[test]
+    #[ignore = "the launcher role of a_launcher_is_waited_for_by_its_signal_not_a_timer"]
+    fn launcher_role() {
+        let Ok(mode) = std::env::var("OARBANK_TEST_LAUNCHER") else { return };
+        let l = Launcher::take().expect("the parent's signal");
+        assert!(std::env::var(CONFINED_ENV).is_err(), "taken out of the environment the module would inherit");
+        match mode.as_str() {
+            "never" => {}
+            "hang" => std::thread::sleep(Duration::from_secs(60)),
+            ms => {
+                std::thread::sleep(Duration::from_millis(ms.parse().unwrap()));
+                l.confined();
+            }
+        }
+    }
+
+    fn launch(mode: &str) -> (ConfinedSignal, std::process::Child) {
+        let s = ConfinedSignal::new().unwrap();
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["sandbox::tests::launcher_role", "--exact", "--ignored", "--quiet"]).env("OARBANK_TEST_LAUNCHER", mode)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        s.prepare(&mut cmd);
+        let child = cmd.spawn().unwrap();
+        (s, child)
+    }
+
+    #[test]
+    fn a_launcher_is_waited_for_by_its_signal_not_a_timer() {
+        // slower than the fixed window the agent used to allow (2 s), and still confined, not killed
+        let (s, mut c) = launch("3000");
+        let t = Instant::now();
+        assert_eq!(s.wait(c.id(), CONFINE_GUARD), Came::Confined);
+        assert!(t.elapsed() >= Duration::from_secs(3));
+        assert!(c.wait().unwrap().success());
+        // one that ends without confining itself is seen at once, not at the guard
+        let (s, mut c) = launch("never");
+        let t = Instant::now();
+        assert_eq!(s.wait(c.id(), CONFINE_GUARD), Came::Ended);
+        assert!(t.elapsed() < CONFINE_GUARD / 2);
+        let _ = c.wait();
+        // and one that hangs meets the guard
+        let (s, mut c) = launch("hang");
+        assert_eq!(s.wait(c.id(), Duration::from_millis(500)), Came::Hung);
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}

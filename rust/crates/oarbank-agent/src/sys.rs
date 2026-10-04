@@ -348,6 +348,18 @@ mod imp {
         Ok(())
     }
 
+    /// How many processes have ever been in the container (alive or not): its job's accounting.
+    #[cfg(test)]
+    pub fn processes_ever(pgid: i32) -> Option<u32> {
+        use windows_sys::Win32::System::JobObjects::{JobObjectBasicAccountingInformation, QueryInformationJobObject,
+                                                     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION};
+        let job = job_of(pgid)?;
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &mut info as *mut _ as *mut _,
+                                                    std::mem::size_of_val(&info) as u32, std::ptr::null_mut()) };
+        (ok != 0).then_some(info.TotalProcesses)
+    }
+
     pub fn release(pgid: i32) {
         if let Some(h) = JOBS.lock().unwrap().as_mut().and_then(|m| m.remove(&pgid)) {
             unsafe { CloseHandle(h as HANDLE) };
@@ -729,5 +741,31 @@ mod tests {
         signal_group(pid as i32, Sig::Kill);
         let _ = child.wait();
         assert_eq!(members, vec![pid as i32], "only the child itself, no console host");
+    }
+
+    /// A contained process runs no instruction before it is in its Job Object: started suspended, it has not made its
+    /// file a second later; once contained it runs, and it is in the job.
+    #[test]
+    fn a_contained_process_runs_nothing_before_its_job() {
+        let d = std::env::temp_dir().join(format!("oarbank-suspended-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mark = d.join("ran");
+        let cmd_exe = format!(r"{}\System32\cmd.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()));
+        let mut cmd = std::process::Command::new(cmd_exe);
+        // no quotes: the path has no spaces, and cmd would keep them
+        cmd.args(["/c", &format!("echo x> {}", mark.display())]).stdout(std::process::Stdio::null());
+        imp::new_group(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(!mark.exists(), "it ran before it was in a job");
+        assert!(child.try_wait().unwrap().is_none());
+        imp::contain(pid, false).unwrap();
+        assert!(group_pids(pid as i32).contains(&(pid as i32)) || !alive(pid as i32));
+        assert!(child.wait().unwrap().success());
+        assert!(mark.exists());
+        release(pid as i32);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

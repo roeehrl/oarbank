@@ -413,4 +413,78 @@ mod tests {
         assert_eq!(quote_arg(r#"a "b" c\"#), r#""a \"b\" c\\""#);
         assert_eq!(quote_arg(""), r#""""#);
     }
+
+    /// The test binary answers `sandbox-exec` itself, as the agent's main does (sandbox_linux.rs and services.rs do
+    /// the same on Linux and macOS): a C runtime initialiser, run before the test harness starts.
+    #[used]
+    #[unsafe(link_section = ".CRT$XCU")]
+    static LAUNCHER: extern "C" fn() = {
+        extern "C" fn launcher() {
+            let raw: Vec<String> = std::env::args().collect();
+            if raw.get(1).map(String::as_str) == Some("sandbox-exec") {
+                super::exec(&raw[2..]);
+            }
+        }
+        launcher
+    };
+
+    /// A runner whose first statement starts 20 processes: the runner and every one of them are in the job the agent
+    /// made for the shim, and in the AppContainer (the shim is in the job before it runs, so all it starts is born
+    /// there).
+    #[test]
+    fn a_runner_and_everything_it_starts_at_once_are_in_its_job() {
+        use crate::sandbox::{Came, ConfinedSignal, CONFINE_GUARD};
+        let py = std::env::var("OARBANK_TEST_PYTHON").map(std::path::PathBuf::from).ok()
+            .or_else(|| crate::runtime::which("python")).expect("a Python (OARBANK_TEST_PYTHON or on PATH)");
+        let real = std::fs::canonicalize(&py).unwrap().display().to_string();
+        let home = std::path::Path::new(real.strip_prefix(r"\\?\").unwrap_or(&real)).parent().unwrap().display().to_string();
+        let d = std::env::temp_dir().join(format!("oarbank-born-in-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut pol = Policy::new("dev.test.born");
+        pol.ro = vec![home];
+        pol.rw = vec![d.display().to_string()];
+        pol.exe = Some(py.display().to_string());
+        let pf = d.with_extension("policy.json");
+        std::fs::write(&pf, serde_json::to_vec(&pol).unwrap()).unwrap();
+        let pids = d.join("pids");
+        let script = "import subprocess, sys\n\
+                      ps = [subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],\n\
+                                             creationflags=subprocess.DETACHED_PROCESS) for _ in range(20)]\n\
+                      import os, time\n\
+                      open(sys.argv[1] + '.tmp', 'w').write(' '.join([str(os.getpid())] + [str(p.pid) for p in ps]))\n\
+                      os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n\
+                      time.sleep(120)";
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.arg("sandbox-exec").arg(&pf).arg("--").arg(&py).args(["-I", "-c", script]).arg(&pids)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(d.join("stderr")).unwrap());
+        let signal = ConfinedSignal::new().unwrap();
+        signal.prepare(&mut cmd);
+        let mut shim = crate::sys::spawn_contained(&mut cmd, false).unwrap();
+        let shim_pid = shim.id() as i32;
+        assert_eq!(signal.wait(shim.id(), CONFINE_GUARD), Came::Confined);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !pids.exists() && std::time::Instant::now() < deadline && shim.try_wait().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let started: Vec<i32> = std::fs::read_to_string(&pids).unwrap_or_default().split_whitespace().filter_map(|p| p.parse().ok())
+            .collect();
+        let members = crate::sys::group_pids(shim_pid);
+        let ever = crate::sys::processes_ever(shim_pid);
+        let held = crate::sandbox::holds(shim_pid);
+        crate::sys::signal_group(shim_pid, crate::sys::Sig::Kill);
+        let _ = shim.wait();
+        crate::sys::release(shim_pid);
+        let err = std::fs::read_to_string(d.join("stderr")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_file(&pf);
+        assert_eq!(started.len(), 21, "the runner and its 20 children: {started:?}\n{err}");
+        // every process ever in the job: the shim, the runner and its 20, consoleless (one that already ended still
+        // counts; a console would bring a conhost.exe each)
+        assert_eq!(ever, Some(22), "members now {members:?}, started {started:?}");
+        let outside: Vec<&i32> = started.iter().filter(|p| !members.contains(p) && crate::sys::alive(**p)).collect();
+        assert!(outside.is_empty(), "alive outside the job: {outside:?} (members {members:?})");
+        assert!(held, "a member of the job outside the AppContainer");
+    }
 }

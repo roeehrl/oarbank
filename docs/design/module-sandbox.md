@@ -64,7 +64,12 @@ hardware details. ENOENT and EPERM differ, which reveals whether a path exists. 
   - Runners, `doctor`, services and probes all start through it, with the module's approved grants from the
     release's `modules.json`.
   - The runner environment is the job's: `HOME` and `TMPDIR` inside the work dir, plus `OARBANK_MODULE_DATA`.
-  - The agent checks `sandbox_check` after spawning a runner.
+  - The launcher tells the agent when its sandbox holds, just before the module runs: one byte on a pipe it inherits
+    (an event on Windows), named in `OARBANK_CONFINED` and closed before the module starts. The agent waits for that
+    or the launcher's exit, never a fixed window, then checks the confinement (`sandbox_check` here) and kills a
+    process that is not confined. A 60 s guard catches only a hung launcher (`sandbox_hung`).
+  - On Windows every container's leader starts suspended and runs only once it is in its Job Object, so the shim,
+    the runner and all it starts are born in the job.
   - The broker and the `oarbank` Colima runtime provide the `containers` pool.
 - **Conformance.** `oarbank-sdk conform` runs the runner and `doctor` under the module's sandbox, so violations show
   up before install.
