@@ -237,7 +237,11 @@ def fx_any(db, *effs, module="toy"):
         return effects.apply(db, module, ALL | {"datasets.create"}, list(effs), actor="test")
 
 
-def test_a_module_cannot_reach_another_modules_blobs_or_datasets(db):
+def test_a_module_cannot_reach_another_modules_blobs_or_datasets(db, monkeypatch):
+    import dataclasses
+    toy = modcalls.info("toy")                               # toy declaring a dataset kind of its own
+    monkeypatch.setitem(modcalls.CATALOG, "toy", dataclasses.replace(toy, manifest=toy.manifest.model_copy(
+        update={"datasets": toy.manifest.datasets.model_copy(update={"kinds": ["practice"]})})))
     fx(db, write("secret.txt", b"relay's secret"), module="relay")
     digest = hashlib.sha256(b"relay's secret").hexdigest()
     with pytest.raises(effects.EffectError, match="unknown_blob"):

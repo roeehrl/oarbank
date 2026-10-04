@@ -177,21 +177,11 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
              (module, a.get("collection", ""), str(a.get("key", ""))))
         rec.update(collection=a.get("collection"), key=a.get("key"))
     elif kind == "datasets.create":
-        from . import modfiles
-        did = a.get("dataset_id", "")
-        files = a.get("files") or []
-        owner = db.one("SELECT module FROM datasets WHERE dataset_id=?", (did,))
-        if owner and owner["module"] != module:                 # never another module's or the operator's dataset
-            raise EffectError(409, "dataset_owned", f"{did} belongs to {owner['module'] or 'the operator'}")
-        for f in files:
-            if not db.one("SELECT 1 FROM blobs WHERE digest=?", (f.get("digest"),)) \
-                    or not modfiles.visible_blob(db, module, str(f.get("digest") or "")):
-                raise EffectError(422, "unknown_blob", f"{did}: {f.get('path')} ({f.get('digest')})")
-        plat = placement.dataset_platform(module, a.get("kind"), a.get("platform"))
-        db.x("INSERT OR REPLACE INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at,platform) VALUES(?,?,?,?,?,?,?)",
-             (did, a.get("kind"), module, json.dumps(a.get("meta") or {}), json.dumps(files), clock.now(), plat))
-        db.event("dataset_imported", actor=actor, reason=did)
-        rec["dataset_id"] = did
+        rec.update(_datasets_create(db, module, a, actor))
+    elif kind == "datasets.update":
+        rec.update(_datasets_update(db, module, a, actor))
+    elif kind == "datasets.delete":
+        rec.update(_datasets_delete(db, module, a, actor))
     elif kind in ("files.write", "files.put", "files.delete"):
         from . import modfiles
         try:
@@ -207,3 +197,80 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
     else:
         raise EffectError(501, "effect_not_implemented", str(kind))
     return rec
+
+
+# ---------------------------------------------------------------------------- datasets (module protocol "Effects")
+
+def _own_dataset(db: DB, module: str, did: str) -> dict:
+    d = db.one("SELECT * FROM datasets WHERE dataset_id=?", (did,))
+    if not d:
+        raise EffectError(404, "unknown_dataset", did)
+    if d["module"] != module:
+        raise EffectError(403, "not_owner", f"dataset {did} belongs to {d['module'] or 'the operator'}")
+    return d
+
+
+def _datasets_create(db: DB, module: str, a: dict, actor: str) -> dict:
+    """A dataset whose blobs the module can reach, of a kind it declares (short kinds: the owning module scopes them).
+    An existing id of the module's with the same kind, meta, files and platform is skipped; anything else fails."""
+    from . import modfiles
+    did, kind, files, meta = a.get("dataset_id", ""), a.get("kind"), a.get("files") or [], a.get("meta") or {}
+    kinds = modcalls.info(module).manifest.datasets.kinds
+    if kind not in kinds:
+        raise EffectError(422, "undeclared_kind", f"{did}: kind {kind!r} is not in [datasets].kinds {kinds}")
+    for f in files:
+        if not db.one("SELECT 1 FROM blobs WHERE digest=?", (f.get("digest"),)) \
+                or not modfiles.visible_blob(db, module, str(f.get("digest") or "")):
+            raise EffectError(422, "unknown_blob", f"{did}: {f.get('path')} ({f.get('digest')})")
+    plat = placement.dataset_platform(module, kind, a.get("platform"))
+    ex = db.one("SELECT * FROM datasets WHERE dataset_id=?", (did,))
+    if ex and ex["module"] != module:                   # never another module's or the operator's dataset
+        raise EffectError(409, "dataset_owned", f"{did} belongs to {ex['module'] or 'the operator'}")
+    if ex:
+        if (ex["kind"], jl(ex["meta_json"], {}), jl(ex["files_json"], []), ex["platform"]) == (kind, meta, files, plat):
+            return {"dataset_id": did, "skipped": True}  # a repeat: harmless
+        raise EffectError(409, "dataset_exists", f"{did} exists with other contents: datasets.update changes its meta, and "
+                          "new files need a new id")
+    db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at,platform) VALUES(?,?,?,?,?,?,?)",
+         (did, kind, module, json.dumps(meta), json.dumps(files), clock.now(), plat))
+    db.event("dataset_imported", actor=actor, reason=did)
+    return {"dataset_id": did}
+
+
+def _datasets_update(db: DB, module: str, a: dict, actor: str) -> dict:
+    """Merge `meta` into one of the module's datasets, key by key at the top level (None removes a key). Kind, files and
+    platform never change: nodes stage a dataset's files by id."""
+    did = a.get("dataset_id", "")
+    fixed = sorted({"kind", "files", "platform"} & set(a))
+    if fixed:
+        raise EffectError(422, "dataset_immutable", f"{did}: {', '.join(fixed)} never change; new files need a new id")
+    meta = a.get("meta")
+    if not isinstance(meta, dict) or not meta:
+        raise EffectError(422, "bad_dataset_meta", f"{did}: meta must be a non-empty object")
+    d = _own_dataset(db, module, did)
+    cur = jl(d["meta_json"], {}) or {}
+    for k, v in meta.items():
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[k] = v
+    db.x("UPDATE datasets SET meta_json=? WHERE dataset_id=?", (json.dumps(cur), did))
+    db.event("dataset_updated", actor=actor, reason=did)
+    return {"dataset_id": did, "keys": sorted(meta)}
+
+
+def _datasets_delete(db: DB, module: str, a: dict, actor: str) -> dict:
+    """Remove one of the module's datasets (an unknown id is a no-op). Refused while open work names it, and for the
+    host's artifact datasets, which stage chains and the result cache read. Blobs stay."""
+    did = a.get("dataset_id", "")
+    if not db.one("SELECT 1 FROM datasets WHERE dataset_id=?", (did,)):
+        return {"dataset_id": did, "missing": True}
+    d = _own_dataset(db, module, did)
+    if d["kind"] == "artifact":
+        raise EffectError(422, "host_dataset", f"{did} is a job's artifact dataset, which the host keeps")
+    if db.one("SELECT 1 FROM jobs WHERE state IN ('pending','leased') AND (dataset_id=? OR EXISTS "
+              "(SELECT 1 FROM json_each(jobs.datasets_json) WHERE value=?)) LIMIT 1", (did, did)):
+        raise EffectError(409, "dataset_in_use", f"{did}: pending or leased jobs name it")
+    db.x("DELETE FROM datasets WHERE dataset_id=?", (did,))
+    db.event("dataset_deleted", actor=actor, reason=did)
+    return {"dataset_id": did}
