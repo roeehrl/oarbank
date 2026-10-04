@@ -288,3 +288,19 @@ def test_certifying_stuck_names_the_pinned_datasets_the_goldens_wait_for(db):
     a = db.one("SELECT detail FROM alerts WHERE rule='certifying_stuck:depot'")
     assert a["detail"].endswith(f"its goldens wait for unregistered datasets {TOOL} ({TOOL} pinned: a job of bootstrap "
                                 "stage fetch brings them)")
+
+
+def test_depot_passes_the_conformance_kit_its_fetch_proven_against_the_pins(tmp_path):
+    """`oarbank-sdk conform` runs depot's golden on the tool and its bootstrap runner spec with the bootstrap grants (the
+    fixture settings never reach it), checking the fetched files against [[datasets.pinned]]."""
+    from oarbank_sdk.conformance import conform
+    for path, body in FILES.items():
+        (tmp_path / "tool" / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tool" / path).write_bytes(body)
+    rep = conform(DEPOT_DIR, {"datasets": {TOOL: {"kind": "tool", "attrs": {"version": "1"}, "dir": str(tmp_path / "tool")}},
+                              "settings": {"token": "secret"},
+                              "runner_specs": [{"name": "fetch", "stage": "fetch", "payload": {"fetch": TOOL},
+                                                "expect": {"artifacts": ["tool"]}}]})
+    assert rep.ok, rep.text()
+    passed = {c.name for c in rep.checks if c.status == "pass"}
+    assert {"runner spec fetch: artifacts match the pinned datasets", "golden G1 (eval): matches the golden"} <= passed
