@@ -103,8 +103,8 @@ const RW_EXEC: &str = r#"(allow file-map-executable process-exec (subpath (param
 "#;
 const GPU: &str = r#"
 ;; grant: GPU (Metal)
-(allow iokit-open-service (iokit-registry-entry-class "IOAccelerator" "AGXAccelerator"))
-(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient" "IOAccelerationUserClient" "IOSurfaceRootUserClient"))
+(allow iokit-open-service (iokit-registry-entry-class "IOAccelerator"))
+(allow iokit-open-user-client (iokit-user-client-class "IOGPUDeviceUserClient" "AppleParavirtDeviceUserClient" "IOAccelerationUserClient" "IOSurfaceRootUserClient"))
 (allow iokit-get-properties)
 (allow mach-lookup (global-name "com.apple.MTLCompilerService") (xpc-service-name "com.apple.MTLCompilerService"))
 "#;
