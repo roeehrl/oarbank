@@ -75,12 +75,12 @@ spec/platforms.md):
  "platform": {"os": "darwin", "arch": "arm64", "os_version": "27.0", "os_build": "26A123",
               "kernel": "25.0.0", "distro": null, "libc": null, "libc_version": null},
  "cpu": {"model": "Apple M5 Pro", "perf_cores": 5, "eff_cores": 10, "logical": 15}, "memory_gb": 24.0,
- "gpus": [{"vendor": "apple", "model": "Apple M5 Pro", "apis": ["metal"], "vram_gb": null, "unified": true}],
+ "gpus": [{"vendor": "apple", "model": "Apple M5 Pro", "vram_gb": null, "unified": true}],
  "sandbox": {"backend": "seatbelt", "enforcement": {"filesystem": "enforced", "ipc": "enforced", "net.none": "enforced",
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
              "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable",
              "grants.bootstrap": "enforced"}},
- "containers": {"gpu": "undetected", "gpu_apis": []},
+ "containers": {"gpu": "undetected"},
  "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
@@ -94,9 +94,8 @@ spec/platforms.md):
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
   `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
   (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`).
-- **Containers.** `gpu` is `cdi:<kind>` where containers can get the node's GPUs, else `undetected`; `gpu_apis` the GPU
-  APIs such a container can use (`cuda`, `rocm`, `levelzero`, `directml`; empty without passthrough). A Windows node
-  adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
+- **Containers.** `gpu` is how containers get the node's GPUs (`cdi:<kind>`, `virtio-gpu:venus`), else `undetected`;
+  the APIs such a container can use are the doctor report's `gpu_apis.containers` (below). A Windows node adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
   node's report"): `runtime` (`wslc`), `state` (`absent`, `starting`, `ready`, `missing`, `failed`), `session`,
   `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes.
 
@@ -538,9 +537,12 @@ A module's services, such as a VM, follow service protocol 1 (the SDK's spec/ser
 For each module the agent runs the runner's exec with `doctor --json`, sandboxed, with the job environment. The runner
 prints a `DoctorOutput`, whose `health` decides: `healthy`, `unhealthy` (it should work here but something is
 broken) or `undetected` (this node cannot run it). The agent folds in its own capability checks (the module's
-`requires`, from probes and services) and reports:
+`requires`, from probes and services, and the GPU APIs its runner names) and reports:
 ```json
 "doctor": {"at": 1790000000.0, "release_id": "r_…", "capabilities": ["java17"],
+           "gpu_apis": {"host": ["metal", "opencl"], "containers": ["vulkan"],
+                        "evidence": {"metal": "Apple M5 Pro", "cuda": "CUDA does not run on macOS", "…": "…",
+                                     "containers": "virtio-gpu:venus (krunkit)"}},
            "modules": {"example": {"health": "healthy", "checks": [...], "capabilities": ["gatk4"]},
                        "toy": {"health": "undetected", "checks": [...]}}}
 ```
@@ -548,6 +550,13 @@ broken) or `undetected` (this node cannot run it). The agent folds in its own ca
 them again when that set changes); a module's `capabilities` are its own doctor's. Together they are the node's
 capabilities for that module: a job is granted only where they hold every capability its stage requires
 (`stages[].requires.capabilities`), and a unit of work binds only to a class with such a node.
+`gpu_apis` are the GPU APIs the node provides on the host and inside its containers, each detected by asking the API's
+runtime for a GPU device (`oarbank-agent gpu-apis` prints the same object; docs/design/gpu-placement.md), with what was
+found or why not per API. The agent probes at start and whenever its doctors run, never on a timer. A job is granted
+only where every GPU API group its stage needs is met (`GPU_API_MISSING`; the runner's `gpu.apis_any` for the node's
+platform, on the host or with `in_container` in containers, and those of GPU services it reserves a pool of); a module
+whose runner needs an API the host lacks is not offered there (the agent reports it `undetected`, with a `gpu_apis`
+check) and is excluded by oarbankd. A node that has not reported provides none.
 Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `doctor_failed` and alerts;
 `undetected` is recorded as such and never alerts. Release-install refusals appear as `release_install`.
 
@@ -556,8 +565,8 @@ Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `d
 - **Per node and module.** A node is certified per (node, module), keyed by the module's content digest in
   the node's release. A new version re-certifies that module on that node and nothing else.
   Re-certification also happens after a platform or OS version change, and periodically.
-- **Goldens come from the module.** For the node's class (platform, OS version, CPU, GPUs, pools and capabilities,
-  never its identity), the module returns its goldens (`golden.list`), builds each one's spec (`spec.build`), and
+- **Goldens come from the module.** For the node's class (platform, OS version, CPU, GPUs and GPU APIs, pools and
+  capabilities, never its identity), the module returns its goldens (`golden.list`), builds each one's spec (`spec.build`), and
   judges the result (`golden.compare`, or the evaluated digest against `expected.digest`). A golden limited to other
   platforms is not run on the node, and its expected value is the one for the node's platform
   (`Golden.expected_by_platform`).

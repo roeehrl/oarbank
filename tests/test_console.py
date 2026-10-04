@@ -350,6 +350,25 @@ def test_a_node_without_telemetry_shows_only_what_it_reported(env):
     assert "15 cores · caps concurrent jobs" in page and "disk free" not in page and "user / power" not in page
 
 
+def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
+    """The doctor's GPU APIs (with each API's evidence on hover) and the containers' mechanism and APIs (gpu-placement.md)."""
+    import json as _json
+    from helpers import FACTS
+    db, n = env["db"], env["node"]
+    doc = {"modules": {}, "capabilities": [], "gpu_apis": {"host": ["metal", "opencl"], "containers": ["vulkan"],
+                                                           "evidence": {"metal": "Apple M5 Pro", "cuda": "CUDA does not run on macOS"}}}
+    db.x("UPDATE nodes SET facts_json=?, doctor_json=? WHERE node_id=?",
+         (_json.dumps({**FACTS, "containers": {"gpu": "virtio-gpu:venus"}}), _json.dumps(doc), n["node_id"]))
+    _, page = node_html(env)
+    assert_clean(page)
+    assert "GPU APIs metal, opencl" in page and "GPU in containers Venus over virtio-gpu (krunkit): vulkan" in page
+    raw = env["c"].get(f"/nodes/{n['node_id']}").text
+    assert 'title="cuda: CUDA does not run on macOS&#10;metal: Apple M5 Pro&#10;"' in raw
+    db.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (_json.dumps({**FACTS, "containers": {"gpu": "cdi:nvidia.com/gpu"}}),
+                                                           n["node_id"]))
+    assert "GPU in containers nvidia.com/gpu (CDI): vulkan" in node_html(env)[1]
+
+
 def test_a_guarded_node_says_why_it_takes_no_jobs(env):
     """A Windows node without a CPU model or core classes, held back by the memory guard, with no pools."""
     import json as _json

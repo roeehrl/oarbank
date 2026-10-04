@@ -197,7 +197,8 @@ enforcement, and the coordinator places a module with an endpoint service only o
   instant), so the agents' services never heard of it. The directives now carry `modules_disabled`; the agent disables
   every service of those modules, which stops them once no attempt uses them. This is "stopping the module" in the
   issue's acceptance.
-- `apis_any` is declared and carried, as for `runner.gpu`; neither selects nodes by GPU API yet (Open questions).
+- `apis_any` places the service and the jobs reserving its pools by the node's GPU APIs, as `runner.gpu.apis_any`
+  places the runner's ([gpu-placement.md](gpu-placement.md), D38).
 
 ## SDK
 
@@ -267,8 +268,6 @@ processes; that predates endpoints and gives nothing beyond the module's own cod
 
 ## Open questions
 
-- **GPU API placement.** `apis_any` selects nothing yet, for runners or services. Placement by the node's reported GPU
-  APIs is a separate change across both.
 - **Endpoint services surviving an agent restart.** A restart costs a reload. Keeping a channel across restarts needs a
   hand-over the launcher would broker; not worth it until reloads hurt.
 

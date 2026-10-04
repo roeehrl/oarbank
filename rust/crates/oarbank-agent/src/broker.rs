@@ -406,9 +406,10 @@ async fn verified(sh: &Arc<Shared>, set: Option<&ContainerSet>, image: &str, pla
     }
 }
 
-/// `{ok, running, images[], gpus}`: the approved images already present, and whether containers here can get the GPU.
+/// `{ok, running, images[], gpus}`: the approved images already present, and whether this job's containers may get the
+/// GPU (it reserved the `gpu` pool and the runtime passes GPUs through).
 async fn status(sh: &Arc<Shared>) -> Value {
-    let gpus = if sh.runtime.gpu_device().is_some() { "all" } else { "none" };
+    let gpus = if sh.scope.grant.gpu && sh.runtime.gpu_device().is_some() { "all" } else { "none" };
     let r = blocking(sh, |s| {
         let running = s.runtime.status().is_ok_and(|st| st.running);
         let present: Vec<(String, String)> = if running { s.runtime.images().iter().map(|i| image_key(i)).collect() } else { vec![] };
@@ -532,7 +533,7 @@ async fn run(sh: &Arc<Shared>, req: &Value) -> Result<Value, Refusal> {
     let (mut spec, set) = plan(req, &sh.scope)?;
     if spec.gpu_device.is_some() {
         spec.gpu_device = Some(sh.runtime.gpu_device().ok_or_else(|| Refusal::new("gpu_unavailable",
-            "this node's container runtime cannot pass a GPU through (no CDI device; macOS runtimes have none)"))?);
+            "this node's container runtime cannot pass a GPU through (Linux: no CDI spec; macOS: krunkit is not installed)"))?);
     }
     verified(sh, set, &spec.image, &spec.platform).await?;
     if let Some(s) = set {
@@ -1342,11 +1343,15 @@ print(json.dumps(out))
         let b = Broker::start(bind(&t, "g2.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
         let ep = b.endpoint();
         assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["error"], "gpu_unavailable");
-        rt.with(|s| s.gpu = Some("nvidia.com/gpu".into()));
+        rt.with(|s| s.gpu = Some("nvidia.com/gpu=all".into()));
         assert_eq!(ask(&ep, r#"{"op": "status"}"#).await["gpus"], "all");
         assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["ok"], true);
         let args = rt.with(|s| s.runs.last().unwrap().0.clone());
         assert!(args.windows(2).any(|w| w == ["--device", "nvidia.com/gpu=all"]), "{args:?}");
+        drop(b);
+        // a job that did not reserve the pool is told it cannot give its containers the GPU, on the same runtime
+        let b = Broker::start(bind(&t, "g3.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        assert_eq!(ask(&b.endpoint(), r#"{"op": "status"}"#).await["gpus"], "none");
     }
 
     /// Plain HTTP/1.1 to a registry on 127.0.0.1 (the live test's pushes): (status, Location header).
@@ -1407,10 +1412,11 @@ print(json.dumps(out))
         assert!(ready.is_ok(), "the session is not ready: {ready:?}");
         let report = rt.snapshot().json();
         eprintln!("{report}");
-        assert_eq!(rt.gpu_device().as_deref(), Some("microsoft.com/wslc"), "the session's VM has no GPU: {report}");
-        assert_eq!(crate::agent::tests::pools_of(rt.as_ref()).get("gpu"), Some(&1));
-        let apis = report["gpu_apis"].as_array().unwrap().clone();
-        assert!(!apis.is_empty(), "{report}");
+        assert_eq!(rt.gpu_device().as_deref(), Some("microsoft.com/wslc=gpu"), "the session's VM has no GPU: {report}");
+        assert_eq!(crate::agent::tests::pools_of(rt.clone()).get("gpu"), Some(&1));
+        let (apis, evidence) = rt.snapshot().container_apis();
+        eprintln!("GPU APIs in containers: {apis:?} ({evidence})");
+        assert!(!apis.is_empty(), "{evidence}");
         let platform = rt.status().unwrap().platforms[0].clone();
         let mut g = grant(&t.0, false);
         g.approved_images = vec![(PROBE_GPU_IMAGE.into(), platform.clone())];
@@ -1422,7 +1428,7 @@ print(json.dumps(out))
         assert_eq!((r["ok"].as_bool(), r["exit_code"].as_i64()), (Some(true), Some(0)), "{r}");
         let out = r["stdout_tail"].as_str().unwrap();
         assert!(out.contains("dxg"), "{r}");
-        if apis.contains(&json!("cuda")) {
+        if apis.iter().any(|a| a == "cuda") {
             assert!(out.contains("GPU 0:"), "CUDA is listed, so nvidia-smi must name the GPU: {r}");
         }
     }

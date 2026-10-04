@@ -459,13 +459,13 @@ def pools_of_disabled(disabled: list[str]) -> set[str]:
 
 
 def node_class(node: dict | None, name: str) -> dict:
-    """What golden.list may know about a node (NodeClass): platform, OS version, CPU, GPUs, capabilities and pools,
-    never its identity. Pools: those the node reports (its agent's own, such as `containers` from its container runtime,
+    """What golden.list may know about a node (NodeClass): platform, OS version, CPU, GPUs and the GPU APIs its doctor
+    reports, capabilities and pools, never its identity. Pools: those the node reports (its agent's own, such as `containers` from its container runtime,
     and running services') and those its services provide, which count as available although an on-demand service may
     not run yet, unless the owner disabled every service that provides it here. Capabilities: those its doctor report
     names for the module (services and healthy probes, such as a tool probe) and its enabled services'."""
     import json as _json
-    from .predicates import node_capabilities
+    from .predicates import node_capabilities, node_gpu_apis
     disabled = (_json.loads((node or {}).get("policy_json") or "{}") or {}).get("disabled_services") or [] if node else []
     facts = _json.loads((node or {}).get("facts_json") or "{}") or {} if node else {}
     reported = (_json.loads((node or {}).get("capacity_json") or "{}") or {}).get("pools") or {} if node else {}
@@ -480,6 +480,7 @@ def node_class(node: dict | None, name: str) -> dict:
                 caps.update(s.provides.capabilities)
     return {"platform": (node or {}).get("platform"), "os_version": (node or {}).get("os_version"),
             "cpu": dict(facts.get("cpu") or {}), "gpus": list(facts.get("gpus") or []),
+            "gpu_apis": node_gpu_apis(node) if node else {"host": [], "containers": []},
             "capabilities": sorted(caps), "pools": pools}
 
 
@@ -564,6 +565,17 @@ def stage_capabilities(name: str, stage: str | None) -> list[str]:
     i = CATALOG.get(name)
     st = next((s for s in i.manifest.stages if s.name == (stage or i.single_stage)), None) if i else None
     return sorted(st.requires.capabilities) if st else []
+
+
+def stage_gpu_apis(name: str, stage: str | None) -> dict:
+    """The GPU APIs a job's stage needs, per platform the module runs on: {token: [{apis, where, source}]}, each group
+    met when the node's doctor names one of its APIs on the host or in containers (oarbank_sdk Manifest.gpu_needs: the
+    runner's gpu with its variant for the platform, and the GPU services providing a pool the stage reserves)."""
+    i = CATALOG.get(name)
+    if i is None:
+        return {}
+    st = stage or i.single_stage
+    return {p: i.manifest.gpu_needs(st, p) for p in i.manifest.requires.platforms}
 
 
 def stage_retry(name: str, stage: str | None) -> dict:

@@ -49,6 +49,16 @@ def hardware(facts: dict) -> dict:
             "gpus": [g.get("model") or g.get("vendor") for g in facts.get("gpus") or [] if g.get("model") or g.get("vendor")]}
 
 
+def gpu_view(facts: dict, doctor: dict | None) -> dict:
+    """The GPU APIs the node's doctor reports (docs/protocol.md "Doctor") and how its containers get the GPU (the facts'
+    `containers.gpu`): `cdi:<kind>` on Linux, `virtio-gpu:venus` on macOS with krunkit, else none."""
+    g = (doctor or {}).get("gpu_apis")
+    how = ((facts or {}).get("containers") or {}).get("gpu") or ""
+    mechanism = f"{how[4:]} (CDI)" if how.startswith("cdi:") else "Venus over virtio-gpu (krunkit)" if how == "virtio-gpu:venus" else None
+    return {"reported": g is not None, "host": list((g or {}).get("host") or []), "containers": list((g or {}).get("containers") or []),
+            "evidence": dict((g or {}).get("evidence") or {}), "mechanism": mechanism}
+
+
 def limit_label(b: str | None) -> str | None:
     """A capacity binding or not-admitting cause as a reader says it; None when nothing but the hardware binds."""
     if not b or b == "auto":
@@ -102,6 +112,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
          "hb_age": now - hb if hb else None, "live": live, "done1h": done1h,
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
+    v["gpu"] = gpu_view(facts, v["doctor"])
     return v
 
 

@@ -348,7 +348,6 @@ impl Report {
         let mut j = json!({
             "runtime": "wslc", "state": self.state.as_str(), "session": self.session, "platforms": self.platforms,
             "gpu": if self.gpu() { format!("cdi:{CDI_KIND}") } else { "undetected".into() },
-            "gpu_apis": if self.gpu() { self.probe.gpu_apis() } else { vec![] },
             "missing": self.missing.iter().map(Missing::json).collect::<Vec<_>>(),
         });
         if let Some(d) = &self.detail {
@@ -356,11 +355,50 @@ impl Report {
         }
         j
     }
+
+    /// The GPU APIs a `gpus = "all"` container gets, and why (the doctor report's `gpu_apis.containers` and its evidence).
+    pub fn container_apis(&self) -> (Vec<String>, String) {
+        if self.gpu() {
+            let libs: Vec<&str> = self.probe.libs.iter().map(String::as_str).filter(|l| l.contains(".so")).collect();
+            return (self.probe.gpu_apis(), format!("cdi:{CDI_KIND} (WSL containers session {}: {})", self.session, libs.join(", ")));
+        }
+        let why = match self.state {
+            State::Ready => "the WSL containers session's VM has no GPU".to_string(),
+            _ => format!("the WSL containers session is {}", self.state.as_str()),
+        };
+        (vec![], format!("no GPU in containers: {why}"))
+    }
+
+    /// What the runtime writes for the facts and the GPU probe (which runs in a child process): the facts' `containers`
+    /// and the GPU APIs in containers with their evidence.
+    pub fn state_json(&self) -> Value {
+        let (apis, evidence) = self.container_apis();
+        json!({"containers": self.json(), "gpu_apis": apis, "evidence": evidence})
+    }
 }
 
 /// The facts' `containers` before any session state was written (no release wants containers yet).
 pub fn absent_report() -> Value {
-    json!({"runtime": "wslc", "state": "absent", "platforms": [], "gpu": "undetected", "gpu_apis": [], "missing": []})
+    json!({"runtime": "wslc", "state": "absent", "platforms": [], "gpu": "undetected", "missing": []})
+}
+
+/// The runtime's last state as written (`state_json`), or the absent one.
+fn last_state(home: &Path) -> Value {
+    std::fs::read(report_file(home)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .filter(|v| v["containers"].is_object())
+        .unwrap_or_else(|| json!({"containers": absent_report(), "gpu_apis": [], "evidence": "no GPU in containers: no WSL containers session yet"}))
+}
+
+/// The facts' `containers` on Windows.
+pub fn facts(home: &Path) -> Value {
+    last_state(home)["containers"].clone()
+}
+
+/// The GPU APIs in containers and their evidence, for gpuapi.rs.
+pub fn container_apis(home: &Path) -> (Vec<String>, String) {
+    let v = last_state(home);
+    let apis = v["gpu_apis"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    (apis, v["evidence"].as_str().unwrap_or("").to_string())
 }
 
 /// Where the runtime keeps its last report (facts read it; `oarbank-agent containers doctor` prints it).
@@ -670,7 +708,7 @@ mod imp {
         }
 
         fn gpu_device(&self) -> Option<String> {
-            self.snapshot().gpu().then(|| CDI_KIND.to_string())
+            self.snapshot().gpu().then(|| format!("{CDI_KIND}=gpu"))
         }
 
         fn report(&self) -> Option<Value> {
@@ -706,7 +744,7 @@ mod imp {
 
     impl Host {
         fn set(&self, r: Report) {
-            let _ = crate::fsutil::write_private(&report_file(&self.home), &serde_json::to_vec_pretty(&r.json()).unwrap_or_default());
+            let _ = crate::fsutil::write_private(&report_file(&self.home), &serde_json::to_vec_pretty(&r.state_json()).unwrap_or_default());
             *self.shared.report.lock().unwrap() = r;
             self.shared.changed.notify_all();
         }
@@ -1061,7 +1099,7 @@ mod tests {
             "-v", r"C:\ProgramData\Oarbank\agent\work\7\inputs:/in:ro", "-v", r"C:\ProgramData\Oarbank\agent\modules-data\toy\cache:/cache",
             "--workdir", "/in", "--entrypoint", "/bin/tool", "-e", "A=1", image, "--privileged", "-v", "/:/host",
         ]);
-        let gpu = RunSpec { gpu_device: Some(CDI_KIND.into()), network: true, ..spec() };
+        let gpu = RunSpec { gpu_device: Some(format!("{CDI_KIND}=gpu")), network: true, ..spec() };
         let a = run_args("s", &gpu, image);
         assert!(a.windows(2).any(|w| w == ["--gpus", "all"]) && a.windows(2).any(|w| w == ["--network", "bridge"]), "{a:?}");
         let image_at = a.iter().position(|x| x == image).unwrap();
@@ -1186,12 +1224,25 @@ mod tests {
         let ready = Report { state: State::Ready, session: "oarbank-x".into(), platforms: vec!["linux/amd64".into()], probe: probe.clone(),
                              ..Default::default() };
         assert_eq!(ready.json(), json!({"runtime": "wslc", "state": "ready", "session": "oarbank-x", "platforms": ["linux/amd64"],
-                                        "gpu": "cdi:microsoft.com/wslc", "gpu_apis": ["cuda", "directml"], "missing": []}));
+                                        "gpu": "cdi:microsoft.com/wslc", "missing": []}));
+        let st = ready.state_json();
+        assert_eq!((st["containers"].clone(), st["gpu_apis"].clone()), (ready.json(), json!(["cuda", "directml"])));
+        assert_eq!(st["evidence"], "cdi:microsoft.com/wslc (WSL containers session oarbank-x: libcuda.so.1, libd3d12.so, libdxcore.so)");
         let missing = Report { state: State::Missing, probe, missing: vec![Missing::new("host_loopback", "not set")], ..Default::default() };
         let j = missing.json();
-        assert_eq!((j["state"].as_str(), j["gpu"].as_str(), j["gpu_apis"].as_array().unwrap().len()), (Some("missing"), Some("undetected"), 0));
+        assert_eq!((j["state"].as_str(), j["gpu"].as_str()), (Some("missing"), Some("undetected")));
+        assert_eq!(missing.container_apis(), (vec![], "no GPU in containers: the WSL containers session is missing".to_string()));
         assert_eq!(j["missing"][0]["what"], "host_loopback");
         assert!(j["missing"][0]["fix"].as_str().unwrap().contains("hostLoopback: none"));
         assert_eq!(absent_report()["state"], "absent");
+        // what the facts and the GPU probe read back
+        let home = std::env::temp_dir().join(format!("oarbank-wslc-state-{}", std::process::id()));
+        assert_eq!(facts(&home), absent_report());
+        assert_eq!(container_apis(&home).0, Vec::<String>::new());
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        std::fs::write(report_file(&home), serde_json::to_vec(&st).unwrap()).unwrap();
+        assert_eq!(facts(&home), ready.json());
+        assert_eq!(container_apis(&home), (vec!["cuda".to_string(), "directml".to_string()], st["evidence"].as_str().unwrap().to_string()));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

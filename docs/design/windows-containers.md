@@ -17,8 +17,9 @@ under the agent's home, its own VM size, its own settings.
 - **The broker endpoint on Windows is a named pipe**, `OARBANK_BROKER=npipe://./pipe/<name>`, which spec/sandbox.md
   already allowed and the SDK's `broker` client already speaks (it now waits for a free pipe instance instead of
   failing on `ERROR_PIPE_BUSY`).
-- **Facts gain `containers.gpu_apis`** on every platform, and on Windows `containers.runtime`, `containers.state`,
-  `containers.platforms` and `containers.missing` (below). Facts are format 2 and open: a coordinator that does not know
+- **Facts gain, on Windows, `containers.runtime`, `containers.state`, `containers.session`, `containers.platforms`
+  and `containers.missing`** (below). The APIs a Windows GPU container gets go into D38's doctor report
+  (`gpu_apis.containers`, [gpu-placement.md](gpu-placement.md)), like every other platform's. Facts are format 2 and open: a coordinator that does not know
   a key ignores it. `CORE_VERSION` stays 2.5.0, the SDK stays 1.5.0 (both unreleased).
 
 ## Decision: an agent-owned WSL containers session
@@ -109,16 +110,17 @@ under the agent's home, its own VM size, its own settings.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Runtime | the agent's Colima profile `oarbank` | rootless Podman, else Docker Engine | the agent's WSLc session |
+| Runtime | the agent's Colima profiles (`oarbank`; `oarbank-gpu` on krunkit for GPU jobs, D38) | rootless Podman, else Docker Engine | the agent's WSLc session |
 | Broker endpoint | unix socket | unix socket | named pipe, DACL: the agent's account and the module's AppContainer |
 | Platforms | arm64, amd64 (Rosetta) | the host's, plus binfmt handlers | the host's |
 | Limits | `--cpus`/`--memory` in the VM | cgroups | `--cpus`/`--memory` in the session VM (cgroups) |
 | Egress | `none` or bridge | `none` or bridge | `none` or bridge; the host's loopback is unreachable (`hostLoopback: none`) |
-| GPU | none (`undetected`) | CDI spec on the host (`cdi:<kind>`) | GPU-PV through the guest's CDI spec (`cdi:microsoft.com/wslc`) |
-| `containers.gpu_apis` | `[]` | from the CDI kind: `nvidia.com/gpu` → `cuda`, `amd.com/gpu` → `rocm`, `intel.com/gpu` → `levelzero` | `directml` with any hardware GPU (D3D12 and DXCore come with WSL), plus `cuda` where the host's NVIDIA driver installed its WSL library (`libcuda.so.1` in `System32\lxss\lib`) |
+| GPU | Vulkan in a krunkit VM where krunkit is installed (`virtio-gpu:venus`, D38) | CDI spec on the host (`cdi:<kind>`) | GPU-PV through the guest's CDI spec (`cdi:microsoft.com/wslc`) |
+| `gpu_apis.containers` (D38) | `vulkan` with krunkit | from the CDI spec ([gpu-placement.md](gpu-placement.md)) | `directml` with any hardware GPU (D3D12 and DXCore come with WSL; the image brings `libdirectml.so`), plus `cuda` where the host's NVIDIA driver provides its WSL library (`libcuda.so.1` under `/usr/lib/wsl/lib` in the session VM) |
 
 ROCm on WSL (Radeon RX 7000 and later) and Intel's Level Zero on WSL work through `/dev/dxg` too, but their user-space
-runtimes come in the image, not from the host, so the node cannot attest them: they are not listed. Vulkan through
+runtimes come in the image, not from the host, so the node cannot attest them: they are not listed (Level Zero is not
+an API any core detects; D38's `KNOWN_APIS` stays as it is). Vulkan through
 Mesa's `dzn` and OpenCL through `clon12` are the same (image side).
 
 ## The node's report (doctor)
@@ -127,8 +129,7 @@ Facts `containers` (every hello; `oarbank-agent facts`; the console's node page)
 
 ```json
 "containers": {"runtime": "wslc", "state": "ready", "session": "oarbank-3f2a9c0b71de",
-               "platforms": ["linux/amd64"], "gpu": "cdi:microsoft.com/wslc", "gpu_apis": ["cuda", "directml"],
-               "missing": []}
+               "platforms": ["linux/amd64"], "gpu": "cdi:microsoft.com/wslc", "missing": []}
 ```
 
 - `state`: `ready` (offers the `containers` pool), `starting`, `missing` (something below is missing), `failed` (the
@@ -139,9 +140,9 @@ Facts `containers` (every hello; `oarbank-agent facts`; the console's node page)
   start: firmware virtualization off, or a VM without nested virtualization), `account` (the session cannot be created
   for this account).
 - `gpu`: `cdi:microsoft.com/wslc` only when the runtime is ready and the session has the GPU; otherwise `undetected`.
-- **`gpu_apis`** is the field the GPU-API placement work (D38) reads for containers: the GPU APIs a container started
-  with `gpus = "all"` can use on this node, tokens from the manifest's open set (`^[a-z][a-z0-9]*$`: `cuda`, `rocm`,
-  `directml`, `levelzero`, `vulkan`). Empty whenever `gpu` is `undetected`.
+- **The GPU APIs** a container started with `gpus = "all"` can use are the doctor report's `gpu_apis.containers`
+  (D38's field; gpuapi.rs reads the session's last state, `state/containers.json`, with the evidence: the session and
+  the driver libraries its VM shares). Empty whenever `gpu` is `undetected`.
 
 `oarbank-agent containers doctor` prints the same report from a fresh check of the prerequisites and the running
 agent's last state (exit 0 when ready, 3 when something is missing); `--probe` also runs a container (and with
@@ -202,9 +203,9 @@ Each is one command; the output to attach when it fails is named.
 | Hardware | Command | Success | Attach on failure |
 |---|---|---|---|
 | Windows 11 or Server 2025, x64 or arm64, virtualization on, from a checkout (Rust, uv) | `scripts\verify-windows-containers.ps1 -InstallWsl` (administrator for `-InstallWsl`; without it WSL 2.9.3+ must be installed) | ends with `OK: the Windows container runtime works here`; the probe's checks all `"ok": true` | `dist\verify-windows-containers.log` |
-| The same with an NVIDIA, AMD or Intel GPU (a WDDM driver with WSL support) | `scripts\verify-windows-containers.ps1 -Gpu` | `OK: ... GPU included`; the report's `gpu` is `cdi:microsoft.com/wslc`, `gpu_apis` has `cuda` on NVIDIA, `directml` on any | the same log |
+| The same with an NVIDIA, AMD or Intel GPU (a WDDM driver with WSL support) | `scripts\verify-windows-containers.ps1 -Gpu` | `OK: ... GPU included`; the report's `gpu` is `cdi:microsoft.com/wslc`, the doctor report's `gpu_apis.containers` has `cuda` on NVIDIA, `directml` on any | the same log |
 | An installed Windows agent (MSI with `CONTAINERS=1`), its service running | `"C:\Program Files\Oarbank\oarbank-agent.exe" --home C:\ProgramData\Oarbank\agent containers doctor --probe --gpu` (administrator: it runs in the service's session, which an administrator may open) | exit 0, every check `"ok": true` | its output, and `C:\ProgramData\Oarbank\agent\state\containers.json` |
-| Linux with an NVIDIA, AMD or Intel GPU and a CDI spec (`nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`), Podman or Docker | `oarbank-agent containers doctor --probe --gpu` | exit 0; `gpu` is `cdi:<kind>`, `gpu_apis` names the vendor's API | its output and `ls /etc/cdi /var/run/cdi` |
+| Linux with an NVIDIA, AMD or Intel GPU and a CDI spec (`nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`), Podman or Docker | `oarbank-agent containers doctor --probe --gpu` | exit 0; `gpu` is `cdi:<kind>`; `oarbank-agent gpu-apis` lists the vendor's API under `containers` | its output and `ls /etc/cdi /var/run/cdi` |
 
 ## Acceptance tests
 
@@ -215,8 +216,8 @@ Each is one command; the output to attach when it fails is named.
 3. `wslc` runs get exactly the documented arguments; mounts are Windows paths without `\\?\`; `--platform` never appears.
 4. The doctor report names each missing prerequisite from the SDK's flags and from recorded `wslc` errors; the
    `containers` pool appears only in `state = ready`, the `gpu` pool only with the GPU feature.
-5. `gpu_apis`: `cuda` exactly when the driver library listing has `libcuda.so.1`; `directml` with any hardware GPU;
-   Linux CDI kinds map as documented; macOS reports `[]`.
+5. `gpu_apis.containers` on Windows: `cuda` exactly when the session VM's driver library listing has `libcuda.so.1`;
+   `directml` with any hardware GPU; nothing from a session that is not ready or whose VM has no GPU.
 6. The settings merge sets `hostLoopback: none` and keeps the rest of the file; a personal-scope agent never writes it.
 7. Live (gated): the agent provisions its session unattended, a signed digest-pinned image runs with the broker's
    semantics (egress none and bridge, limits visible in the container's cgroup, the two mounts, cleanup by label,
@@ -231,13 +232,13 @@ design:
   only; the CLI driver; the report, the settings merge and the parsers, tested on every OS), the broker on a named pipe
   (`broker.rs`: exclusive first instance, the DACL from `oarbank-core`'s `broker_pipe_sddl`, the output directory held
   open on Windows), `container_runtime::probe` and `oarbank-agent containers doctor|install|remove`, pools only from a
-  ready runtime (`container_pools`), the facts' `containers` with `gpu_apis` on every OS and the Windows report, a new
-  hello when the runtime's report changes. The Windows stub broker is gone: `container_runtime`, `imageset` and the
+  ready runtime (`container_pools`), the Windows runtime's report in the facts' `containers` (a new hello and a new
+  doctor run when it changes), the session's container GPU APIs in D38's `gpu_apis.containers`. The Windows stub broker is gone: `container_runtime`, `imageset` and the
   broker compile on every OS.
 - **Launcher.** `remove` ends the session and deletes its storage on Windows.
 - **Packaging.** `scripts/package-windows.ps1` pins and installs `wslcsdk.dll`; the MSI's `CONTAINERS=1`;
   `scripts/verify-windows-containers.ps1` for CI and contributors; the CI job `windows-containers` (windows-2025).
-- **SDK.** spec/sandbox.md (the Windows runtime, platforms, the GPU row, `containers.gpu_apis`), the Windows backend
+- **SDK.** spec/sandbox.md (the Windows runtime, platforms, the GPU row with its container APIs), the Windows backend
   page (the broker pipe, containers enforcement), the `broker` client waits for a busy pipe instance, the portability
   lint flags a Windows platform without container images of its architecture, the docs site's requirements page and the
   GPU how-to.

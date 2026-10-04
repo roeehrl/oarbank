@@ -91,7 +91,8 @@ def node_exclusions(db: DB, node: dict, offered: set) -> dict:
     """{module: reason code} for the modules this node must not get work for (spec/sandbox.md "Placement",
     spec/platforms.md): every module when its agent has no sandbox backend; a module whose version for the node does
     not support the node's platform or OS version, needs host tools the registry lacks for the node's OS, needs sandbox
-    capabilities the node's backend does not enforce, or needs a newer agent (`requires.agent`)."""
+    capabilities the node's backend does not enforce, needs a newer agent (`requires.agent`), or whose runner needs a
+    GPU API the node's host does not provide (its doctor's `gpu_apis`)."""
     from . import modcalls, modstore, platforms
     facts = json.loads(node.get("facts_json") or "{}")
     if REQUIRE_SANDBOXED_AGENTS and not (facts.get("sandbox") or {}).get("backend"):
@@ -109,9 +110,22 @@ def node_exclusions(db: DB, node: dict, offered: set) -> dict:
             why = "CAPABILITY_NOT_ENFORCED"
         if not why and man.requires.agent and (not have or not modstore.in_range(have, man.requires.agent)):
             why = "AGENT_TOO_OLD"
+        if not why and runner_gpu_unmet(man, node):
+            why = "GPU_API_MISSING"
         if why:
             out[name] = why
     return out
+
+
+def runner_gpu_unmet(manifest, node: dict) -> dict | None:
+    """The runner's GPU API group on the node's platform when the node's host provides none of its APIs (every stage
+    needs it, so the module cannot run there at all), else None."""
+    from oarbank_sdk import gpu
+    from . import predicates
+    need = manifest.runner_gpu_need(node["platform"]) if node.get("platform") else None
+    if need is None or need["where"] != "host":
+        return None
+    return need if gpu.unmet([need], predicates.node_gpu_apis(node)) else None
 
 
 BOOTSTRAP_GRANTS = "grants.bootstrap"    # spec/sandbox.md, "Bootstrap jobs": the agent narrows a bootstrap job's grants
@@ -127,10 +141,10 @@ def bootstrap_enforced(node: dict) -> bool:
 
 
 def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
-    """{module: the module's own reason} for the PLATFORM_UNSUPPORTED exclusions it explains
-    (requires.unsupported.runner, by the node's platform, then its OS)."""
-    from oarbank_sdk import platform as pf
-    from . import modcalls, modstore, platforms
+    """{module: words for the exclusion}: the module's own reason for PLATFORM_UNSUPPORTED (requires.unsupported.runner,
+    by the node's platform, then its OS), and for GPU_API_MISSING what its runner needs and what the node provides."""
+    from oarbank_sdk import gpu, platform as pf
+    from . import modcalls, modstore, platforms, predicates
     plat, out = platforms.node_platform(node), {}
     for name, code in excluded.items():
         try:
@@ -138,6 +152,10 @@ def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
         except KeyError:
             continue
         why = pf.resolve(man.requires.unsupported.runner, plat) if code == "PLATFORM_UNSUPPORTED" and plat else None
+        need = runner_gpu_unmet(man, node) if code == "GPU_API_MISSING" else None
+        if need:
+            have = predicates.node_gpu_apis(node)["host"]
+            why = f"its runner needs {gpu.describe(need)}; this node provides {', '.join(have) or 'no GPU API'}"
         if why:
             out[name] = why
     return out

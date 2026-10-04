@@ -10,6 +10,7 @@ property test (tests/test_explain.py) asserts that explain's verdict equals clai
 import json
 from dataclasses import dataclass, field
 
+from oarbank_sdk import gpu as gpuapi
 from oarbank_sdk import platform as pf
 
 from ..contracts.explain import PredicateResult
@@ -45,6 +46,7 @@ class NodeView:
     excluded: dict = field(default_factory=dict)   # {module: reason}: platform, OS version, sandbox, agent (modsandbox)
     excluded_why: dict = field(default_factory=dict)   # {module: the module's own words}: requires.unsupported.runner
     capabilities: dict = field(default_factory=dict)   # {module: node_capabilities(node, module)} for the offered modules
+    gpu_apis: dict = field(default_factory=lambda: {"host": [], "containers": []})   # node_gpu_apis(node)
     bootstrap_grants: bool = False    # the agent runs bootstrap jobs with the bootstrap grants (modsandbox.bootstrap_enforced)
     secrets_unset: dict = field(default_factory=dict)  # {module: declared secrets with no readable value for this node}
 
@@ -66,6 +68,24 @@ def node_capabilities(node: dict, module: str) -> set:
     offered services and healthy probes provide, and the ones the module's own doctor reported."""
     doc = json.loads(node.get("doctor_json") or "null") or {}
     return set(doc.get("capabilities") or []) | set(((doc.get("modules") or {}).get(module) or {}).get("capabilities") or [])
+
+
+def node_gpu_apis(node: dict) -> dict:
+    """The GPU APIs a node provides, {host, containers}, from its latest doctor report (docs/protocol.md "Doctor"); a
+    node that has not reported provides none."""
+    doc = json.loads(node.get("doctor_json") or "null") or {}
+    g = doc.get("gpu_apis") or {}
+    return {"host": sorted(g.get("host") or []), "containers": sorted(g.get("containers") or [])}
+
+
+def gpu_unmet(job: dict, platform: str | None, have: dict) -> list[dict]:
+    """The GPU API groups of the job's stage (modcalls.stage_gpu_apis, for the node's platform) that a node with `have`
+    (node_gpu_apis) does not meet; empty: it may run the job here."""
+    return gpuapi.unmet(job["gpu_apis"].get(platform, []) if platform else [], have)
+
+
+def gpu_apis_fit(job: dict, platform: str | None, have: dict) -> bool:
+    return not gpu_unmet(job, platform, have)
 
 
 def module_serves(job: dict, state: str | None, bootstrap_grants: bool) -> bool:
@@ -197,6 +217,8 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
                   nv.bootstrap_grants if boot else None, True if boot else None),
         lambda: (lambda have: R("stage capabilities", "STAGE_CAPABILITY_MISSING", capabilities_fit(job, have),
                                 sorted(have & set(stage_caps)), stage_caps))(nv.capabilities.get(mod, set())),
+        lambda: (lambda miss: R("gpu apis", "GPU_API_MISSING", not miss, nv.gpu_apis,
+                                [f"{gpuapi.describe(g)} ({g['source']})" for g in miss] or None))(gpu_unmet(job, plat, nv.gpu_apis)),
         lambda: (lambda miss: R("secrets set for this node", "SECRETS_NOT_SET", not miss, miss, job["secrets"]))(
             sorted(set(job["secrets"]) & nv.secrets_unset.get(mod, set()))),
         lambda: R("job platforms", "STAGE_PLATFORM_UNSUPPORTED", bool(plat) and pf.matches(plat, pl["platforms"]) if pl["platforms"]

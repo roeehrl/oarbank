@@ -165,9 +165,10 @@ pub fn collect(home: &std::path::Path) -> Value {
     let plat = platform_token();
     let (os, arch) = plat.split_once('-').unwrap_or(("unknown", "unknown"));
     let SysInfo { os_version, os_build, kernel, model, perf, eff, logical, mem, distro, libc, libc_version } = sysinfo();
+    // the GPU inventory; which APIs the node provides is the doctor's report (gpuapi.rs)
     let apple = cfg!(target_os = "macos") && arch == "arm64";
     let gpus = if apple {
-        json!([{"vendor": "apple", "model": model.clone().unwrap_or_default(), "apis": ["metal"], "vram_gb": null, "unified": true}])
+        json!([{"vendor": "apple", "model": model.clone().unwrap_or_default(), "vram_gb": null, "unified": true}])
     } else {
         json!([])
     };
@@ -185,29 +186,19 @@ pub fn collect(home: &std::path::Path) -> Value {
     })
 }
 
-/// The node's container report (docs/design/windows-containers.md, "The node's report"): `gpu` is `cdi:<kind>` where
-/// containers can get the node's GPUs, else `undetected`, and `gpu_apis` the GPU APIs such a container can use. Linux:
-/// a container engine and a CDI spec with an `all` device; macOS: container runtimes have no Metal passthrough;
-/// Windows: the agent's WSL containers session's last report (wslc.rs writes it on every change of state).
+/// The node's container report: `gpu` is how containers get the node's GPUs (container_runtime::gpu_passthrough):
+/// `cdi:<kind>` on Linux with a container engine and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with
+/// krunkit, `cdi:microsoft.com/wslc` on Windows from a ready WSL containers session whose VM has a GPU, else
+/// `undetected`. Windows adds its session's state (wslc.rs writes it on every change; docs/design/windows-containers.md,
+/// "The node's report"). The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs).
 fn containers(home: &std::path::Path) -> Value {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = home;
-        let engine = ["/usr/bin", "/usr/local/bin", "/bin"].iter()
-            .any(|d| ["podman", "docker"].iter().any(|n| std::path::Path::new(d).join(n).is_file()));
-        let dirs = crate::container_runtime::CDI_DIRS.map(std::path::Path::new);
-        if let (true, Some(kind)) = (engine, crate::container_runtime::cdi_kind(&dirs)) {
-            return json!({"gpu": format!("cdi:{kind}"), "gpu_apis": crate::container_runtime::cdi_apis(&kind)});
-        }
-    }
     #[cfg(windows)]
     {
-        return std::fs::read(crate::wslc::report_file(home)).ok().and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(crate::wslc::absent_report);
+        crate::wslc::facts(home)
     }
-    #[allow(unreachable_code)]
+    #[cfg(unix)]
     {
         let _ = home;
-        json!({"gpu": "undetected", "gpu_apis": []})
+        json!({"gpu": crate::container_runtime::gpu_passthrough().map(|p| p.kind).unwrap_or_else(|| "undetected".into())})
     }
 }
