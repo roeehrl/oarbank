@@ -838,7 +838,7 @@ pub mod tests {
         fn manager(&self) -> ServiceManager {
             let l = Layout::new(self.root.join("home"));
             l.ensure().unwrap();
-            let rt = Runtime { python: self.python.clone(), uv: None, site_dirs: vec![], roots: self.roots.clone() };
+            let rt = Runtime { python: self.python.clone(), uv: None, site_dirs: vec![], roots: self.roots.clone(), host_provided: None };
             let mut m = ServiceManager::new(l, rt, None, true);
             m.configure(&self.release, &json!({"module_settings": {"modelserver": {"load_s": 0.3, "generate_s": 0.3}}}), Some("node-1"));
             m
