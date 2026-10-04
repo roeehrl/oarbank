@@ -208,3 +208,27 @@ def venv_interpreter(venv) -> Path | None:
 def running_interpreter() -> Path:
     """This process's interpreter as venv_interpreter names it: the base interpreter of a virtual environment."""
     return Path(sys.executable if POSIX else getattr(sys, "_base_executable", sys.executable)).resolve()
+
+
+def remove_tree(p, within: float = 5.0):
+    """Delete a directory tree that must be gone before the next step (a module environment rebuilt in its place).
+    Windows refuses to delete an executable an antivirus scanner is reading, for some tens of milliseconds after it was
+    written or run, and offers nothing to wait on; each refused entry is retried until `within` seconds have passed,
+    then the error is raised. POSIX has no such hold."""
+    import shutil
+    import time
+    if not os.path.lexists(p):
+        return
+    if POSIX:
+        return shutil.rmtree(p)
+    end = time.monotonic() + within
+
+    def again(fn, path, exc):
+        while isinstance(exc, PermissionError) and time.monotonic() < end:
+            time.sleep(0.05)
+            try:
+                return fn(path)
+            except PermissionError as e:
+                exc = e
+        raise exc
+    shutil.rmtree(p, onexc=again)

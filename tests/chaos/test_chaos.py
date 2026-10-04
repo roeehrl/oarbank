@@ -225,8 +225,10 @@ def test_ntfy_down_queues_nothing_and_breaks_nothing(fleet):
     db.set_setting("ntfy", {"url": "http://127.0.0.1:9/unreachable"})
     from oarbank.coordinator import core
     core._alert(db, "invariant:S0", "fleet", "chaos: ntfy is down", priority="max")
-    time.sleep(1.5)
     assert db.one("SELECT state FROM alerts WHERE rule='invariant:S0'")["state"] == "open"        # the inbox has it
+    deadline = time.monotonic() + 15        # a refused connection takes Windows about 2 s (it retries the SYN twice)
+    while not db.one("SELECT 1 FROM events WHERE kind='notify_failed'") and time.monotonic() < deadline:
+        time.sleep(0.2)
     assert db.one("SELECT 1 FROM events WHERE kind='notify_failed'")
     r = fleet.call("POST", "/v1/agent/heartbeat", {"attempts": [], "telemetry": {}, "capacity": {}})
     assert r.status_code == 200
@@ -235,10 +237,20 @@ def test_ntfy_down_queues_nothing_and_breaks_nothing(fleet):
 def test_a_hand_edited_audit_row_fails_verification_and_raises_p5(fleet):
     fleet.op("nodes.run_doctor", target=fleet.node_id)
     fleet.stop()
-    c = sqlite3.connect(fleet.db_path)
-    c.execute("UPDATE audit SET reason='edited by hand' WHERE event_id=(SELECT MAX(event_id) FROM audit)")
-    c.commit()
-    c.close()
+    # Windows releases a terminated process's file locks a little later ("the time it takes depends upon available
+    # system resources", LockFileEx): until then SQLite's recovery of the WAL reports a disk I/O error
+    for attempt in range(50):
+        c = sqlite3.connect(fleet.db_path)
+        try:
+            c.execute("UPDATE audit SET reason='edited by hand' WHERE event_id=(SELECT MAX(event_id) FROM audit)")
+            c.commit()
+            c.close()
+            break
+        except sqlite3.OperationalError:
+            c.close()
+            if attempt == 49 or os.name == "posix":
+                raise
+            time.sleep(0.2)
     from oarbank.coordinator import app as coord_app
     db = fleet.db()
     coord_app._audit_hourly(db)

@@ -231,7 +231,10 @@ Arm runs under emulation, which is Microsoft's code path, not ours.
 6. The installer installs from a build, the services run, an agent enrolls and a module's jobs run, the coordinator
    survives a restart and an upgrade (manual on the VM; the installer's dry run is checked in CI).
 7. A move from macOS or Linux to Windows and back (manual across the Mac and the VM; the move protocol itself is
-   covered by `test_coordinator_move` and `tests/rust/test_agent_move` on every OS).
+   covered by `test_coordinator_move`, `tests/rust/test_agent_move` and `test_agent_coordinator_install`, which carries
+   a module across, on every OS).
+8. The coordinator reports its platform, its services' state and on Windows the helper's (`test_coordinator_host`,
+   with the service control manager's answer for a real service on Windows).
 
 ## Open questions
 
@@ -241,4 +244,65 @@ Arm runs under emulation, which is Microsoft's code path, not ours.
 
 ## Implementation status
 
-In progress.
+Built as designed, with these additions found on the way:
+
+- **Role containers** (decision 4): the first build ran the coordinator's module processes in the node's
+  `Oarbank.<module id>` container; on the VM, once the coordinator service had run a module, the agent beside it could
+  no longer start that module (Access denied in session 0). The agent's `sandbox-exec` now names the container by role.
+- **The build's own launcher**: a Windows build keeps `python.exe` in `python\`, not `python\bin\`; `sandboxexec.launcher`
+  looks beside `python\` too (it found none and refused every module process of a standby's verification).
+- **Launchers, not `python -m`**: Nuitka's compiled package has no code objects for `runpy`, so a build's programs run
+  through two-line launchers (`bin\oarbankd.py`), as the POSIX builds run a shell script.
+- **The machine's architecture**: x64 PowerShell under emulation reports AMD64 in `PROCESSOR_ARCHITECTURE` and .NET;
+  the build script and the installer read the system's environment instead, and the SDK's `host_platform` asks
+  `IsWow64Process2`.
+- **A managed Python's real prefix**: uv names its interpreters through junctions, and copying a junction left a "copy"
+  whose installs landed in the shared interpreter; the build copies `realpath(sys.base_prefix)` and refuses a link.
+- **Releases and moves** were made OS-independent (decision 13); the move's database install uses the backup API
+  (decision 14). A module environment rebuilt in place is deleted with `files.remove_tree`, which retries for a few
+  seconds an executable Windows will not delete while an antivirus scanner reads it (tens of milliseconds after it
+  was written, with nothing to wait on); before, the rebuild found half an environment and failed.
+- **The sandbox's environment** keeps the host account's `LOCALAPPDATA` (decision 5): with the module's own, uv found
+  no temporary directory inside an AppContainer.
+- **Tests and the suite**: module hosts a test file opened end with it (their processes held files open on Windows);
+  the simulator closes its module host before deleting its home; the e2e tests give their nodes no memory reserves
+  (an 8 GB VM with an unknown presence reserved more than it had), build the agent versions they need in one target
+  directory, stop a launcher's whole process tree, and read `current` links as pointer files on Windows; liveness
+  checks never call `os.kill(pid, 0)`, which ends the process on Windows. The chaos test and the swarm harness that read a database
+  right after terminating its coordinator wait for Windows to release that process's file locks (LockFileEx: "the
+  time it takes depends upon available system resources"). CI splits the suite with pytest-xdist.
+
+**Verified.**
+- Windows 11 arm64 VM (x64 CPython under emulation): the core suite 633 passed, 8 skipped (below); `-m chaos` 6 passed;
+  `tests/rust` 22 passed, 5 skipped (below); the coordinator build (`scripts\build-coordinator.ps1`, 59 MB) built,
+  installed with `install-oarbankd.ps1` as two services under their virtual accounts with the home's DACL, enrolled a
+  Windows agent and a macOS agent, ran toy campaigns on each and on both, survived a service restart and two upgrades
+  (2.5.0 to 2.5.1 to 2.5.2, side by side, `current` moved), and reported its services from the service account
+  (`oarbank coordinator status`). A move from a macOS coordinator to the Windows service (installed with `-Pair`) and
+  back to macOS committed at epochs 2 and 3, both agents following each time, with the campaigns' history intact.
+  The signed move installed the real compiled Windows build through the agent's process host.
+- macOS: the core suite 631 passed, 10 skipped; chaos 6 passed; `tests/rust` 25 passed, 2 skipped.
+- Linux (Lima, arm64): the core suite 629 passed, 12 skipped; chaos 6 passed; clippy and the agent's and launcher's
+  tests.
+
+**Skipped on Windows, and why.**
+- `test_packaging`: three tests of `install-oarbankd.sh` (Windows has `install-oarbankd.ps1`, tested by its own test)
+  and the POSIX shebang relocation (the Windows launcher relocation runs in every Windows build).
+- `test_sandboxexec`: Seatbelt (macOS's backend).
+- `tests/rust/test_launcher_service`: launchd (two), systemd, and the launcher's POSIX signal handling.
+- `tests/rust/test_agent_files`, the checkpoint moved by a protection pause: the agent counts every process in session
+  0 (services, where ssh and CI runners start the suite) as no person's, so a rule never matches a process the test
+  starts there; it runs in a person's session.
+- Environment-dependent everywhere: accessibility with axe (`OARBANK_A11Y_NODE_MODULES`), a node.js test, a real
+  coordinator build's inspection (`OARBANK_COORDINATOR_BUILD`).
+
+**Not verified.** The GitHub Actions jobs themselves (`windows-2025` and `windows-11-arm`; the workflow passes
+actionlint), x64 Windows (CI only), and Windows Server. An agent installed from the MSI beside the coordinator service
+was not combined on the VM; the role containers cover it by construction, and the VM's test agent beside the service
+showed the failure and the fix.
+
+**Found on the way, outside this gap.** The elevated helper keeps a job's loopback filters when the shim that asked
+for them is killed; `scripts/build-node-runtime.ps1` copies uv's Python through its junction and, with
+`package-windows.ps1`, reads the architecture from `PROCESSOR_ARCHITECTURE`; the agent's own runner environment
+sets `LOCALAPPDATA` inside the work directory, so tools that ask Windows for a temporary directory find none inside the
+AppContainer.

@@ -145,7 +145,8 @@ def _state(name: str) -> dict:
 
 
 @windows
-@pytest.mark.skipif(not _elevated(), reason="creating a service needs an elevated account (CI runners and the VM's ssh are)")
+@pytest.mark.skipif(sys.platform == "win32" and not _elevated(),
+                    reason="creating a service needs an elevated account (CI runners and the VM's ssh are)")
 @pytest.mark.parametrize("mode", ["stop", "exit75"])
 def test_the_service_host_reports_running_stops_and_reports_exit_codes(tmp_path, mode):
     """A real service of the service control manager runs the host: it reports running, a stop control ends main and

@@ -256,7 +256,6 @@ def runtimes_ok(db: DB) -> list[str]:
     running one (built by an earlier coordinator build: an in-place update leaves that build beside the new one, and
     the module sandbox grants only the running interpreter, so the module could not even start). Runs at every start.
     Returns the modules rebuilt; one that cannot be rebuilt is reported and left for its module host to fault."""
-    import shutil
     from ..platform import files
     mine = files.running_interpreter()
     done = []
@@ -266,10 +265,10 @@ def runtimes_ok(db: DB) -> list[str]:
             continue
         if files.venv_interpreter(p / ".venv") == mine:
             continue
-        shutil.rmtree(p / ".venv", ignore_errors=True)
         try:
+            files.remove_tree(p / ".venv")
             modstore._build_runtime(p)
-        except modstore.InstallError as e:
+        except (OSError, modstore.InstallError) as e:
             db.event("module_runtime_failed", reason=f"{r['name']}@{r['version']}: {e}"[:500])
             continue
         db.event("module_runtime_rebuilt", reason=f"{r['name']}@{r['version']}")

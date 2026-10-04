@@ -163,8 +163,26 @@ class Coordinator:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(5)
+            if os.name == "nt" and self.db_path.exists():
+                self._locks_released()
         if getattr(self, "log", None):
             self.log.close()
+
+    def _locks_released(self, within=10.0):
+        """Windows terminates a process outright and releases its file locks a little later ("the time it takes depends
+        upon available system resources", LockFileEx); until then reading the database reports a disk I/O error."""
+        end = time.monotonic() + within
+        while True:
+            c = sqlite3.connect(self.db_path, timeout=30)
+            try:
+                c.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+                return
+            except sqlite3.OperationalError:
+                if time.monotonic() > end:
+                    raise
+                time.sleep(0.2)
+            finally:
+                c.close()
 
     def __enter__(self):
         return self.start()
