@@ -322,15 +322,15 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).env_clear().envs(env).current_dir(ws).stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?).stderr(log).kill_on_drop(true);
-    crate::sys::new_group(&mut cmd);
     control.prepare(cmd.as_std_mut());
-    let mut child = cmd.spawn().context("starting the runner")?;
+    let signal = crate::sandbox::available().then(crate::sandbox::ConfinedSignal::new).transpose()
+        .context("the sandbox launcher's confinement signal")?;
+    if let Some(s) = &signal {
+        s.prepare(cmd.as_std_mut());
+    }
+    let mut child = crate::sys::spawn_contained_async(&mut cmd, false).context("starting the runner")?;
     let pid = child.id().unwrap_or(0) as i32;
     control.started(pid);
-    if let Err(e) = crate::sys::adopt(pid as u32) {
-        let _ = child.start_kill();
-        bail!("putting the runner in its process container: {e}");
-    }
     // the node's policy may turn the job's reservation into hard limits where the OS has them (spec/sandbox.md,
     // "Resources"): exceeding the memory limit is then the job's fault (oom)
     if ctx.policy["hard_limits"].as_bool() == Some(true) {
@@ -347,22 +347,22 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
             j.phase = "running".into();
         }
     }
-    // the launcher applies the profile before it execs the module: a process that is still unconfined after that
-    // window is killed, never left running
-    if crate::sandbox::available() {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if crate::sandbox::is_confined(pid) {
-                break;
-            }
-            if let Ok(Some(_)) = child.try_wait() {
-                break;
-            }
-            if Instant::now() > deadline {
-                procs::signal_group(pid, procs::Sig::Kill);
-                bail!("the runner did not come up sandboxed");
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    // the launcher says when its sandbox holds, just before the module runs: a runner that does not come up confined
+    // is killed, never left running
+    if let Some(s) = signal {
+        use crate::sandbox::Came;
+        let came = tokio::task::spawn_blocking(move || s.wait(pid as u32, crate::sandbox::CONFINE_GUARD)).await
+            .unwrap_or(Came::Hung);
+        let fault = match came {
+            Came::Confined if crate::sandbox::holds(pid) || matches!(child.try_wait(), Ok(Some(_))) => None,
+            Came::Confined => Some("sandbox_missing: the launcher said it was confined, but the runner is not"),
+            Came::Ended => None,                               // it could not confine itself: its exit says why
+            Came::Hung => Some("sandbox_hung: the launcher did not confine itself within the guard"),
+        };
+        if let Some(f) = fault {
+            warn!(attempt = aid, "{f}; killed");
+            procs::signal_group(pid, procs::Sig::Kill);
+            bail!("the runner did not come up sandboxed");
         }
     }
     let grace = runner["stop_grace_s"].as_f64().unwrap_or(20.0);
@@ -578,9 +578,8 @@ mod tests {
             signal.signal(signal.SIGUSR1, lambda *_: (d / 'seen').write_text((d / 'control.json').read_text()))\n\
             (d / 'ready').write_text('1')\n\
             while True: time.sleep(0.05)\n"]).arg(&ws);
-        crate::sys::new_group_std(&mut cmd);
         control.prepare(&mut cmd);
-        let mut child = cmd.spawn().unwrap();
+        let mut child = crate::sys::spawn_contained(&mut cmd, false).unwrap();
         control.started(child.id() as i32);
         let wait = |f: &str| (0..600).find_map(|_| std::fs::read_to_string(ws.join(f)).ok().filter(|s| !s.is_empty())
             .or_else(|| { std::thread::sleep(Duration::from_millis(50)); None }));

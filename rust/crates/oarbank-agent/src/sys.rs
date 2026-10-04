@@ -57,19 +57,8 @@ mod imp {
         }
     }
 
-    /// The child leads a new session and process group.
-    pub fn new_group(cmd: &mut tokio::process::Command) {
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-
-    pub fn new_group_std(cmd: &mut std::process::Command) {
+    /// The child leads a new session and process group, from its first instruction.
+    pub(super) fn new_group(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
@@ -81,17 +70,12 @@ mod imp {
         }
     }
 
-    /// After spawning: the process group exists from the child's first instruction; on Linux with a delegated
-    /// cgroup the child also gets a leaf of its own (cgroup.rs).
-    pub fn adopt(pid: u32) -> io::Result<()> {
+    /// Just after the spawn: on Linux with a delegated cgroup the leader gets a container of its own (cgroup.rs).
+    pub(super) fn contain(pid: u32, _lasting: bool) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         crate::cgroup::adopt(pid as i32)?;
         let _ = pid;
         Ok(())
-    }
-
-    pub fn adopt_lasting(pid: u32) -> io::Result<()> {
-        adopt(pid)
     }
 
     /// Hard limits on the container (Linux cgroups; nothing on macOS, where admission control is the limit).
@@ -215,7 +199,7 @@ mod imp {
     use std::io;
     use std::path::Path;
     use std::sync::Mutex;
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, STILL_ACTIVE};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE};
     use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
                                                  QueryInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
     use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -283,25 +267,54 @@ mod imp {
     /// runner would never come up confined (sandbox_windows.rs `is_confined`).
     const CHILD_FLAGS: u32 = 0x0000_0200 /* CREATE_NEW_PROCESS_GROUP */ | 0x0000_0008 /* DETACHED_PROCESS */;
 
-    pub fn new_group(cmd: &mut tokio::process::Command) {
-        cmd.creation_flags(CHILD_FLAGS);
-    }
-
-    pub fn new_group_std(cmd: &mut std::process::Command) {
+    /// The child starts suspended: no instruction of it runs before `contain` has put it in its Job Object.
+    pub(super) fn new_group(cmd: &mut std::process::Command) {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CHILD_FLAGS);
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        cmd.creation_flags(CHILD_FLAGS | CREATE_SUSPENDED);
     }
 
-    /// Put a just-started process in a Job Object of its own; its children join it as they start. (A child started
-    /// in the instant before the assignment escapes the job: the services' and jobs' sweeps by leader catch it.) The
-    /// job dies with the agent, as attempts do not survive an agent restart.
-    pub fn adopt(pid: u32) -> io::Result<()> {
-        adopt_job(pid, true)
+    /// Put the suspended leader in a Job Object of its own, then let it run: every process it starts is born in the
+    /// job (no breakaway is allowed), so the chain agent -> sandbox-exec shim -> runner -> its children never runs a
+    /// line outside it. `lasting`: the job outlives the agent (a module service, adopted again after a restart);
+    /// otherwise it dies with the agent, as attempts do not survive an agent restart.
+    pub(super) fn contain(pid: u32, lasting: bool) -> io::Result<()> {
+        adopt_job(pid, !lasting)?;
+        resume(pid)
     }
 
-    /// A container that outlives the agent (a module service, adopted again after a restart).
-    pub fn adopt_lasting(pid: u32) -> io::Result<()> {
-        adopt_job(pid, false)
+    /// Resume the threads of a process started suspended (it has one, its first).
+    fn resume(pid: u32) -> io::Result<()> {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                                                                THREADENTRY32};
+        use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let mut e: THREADENTRY32 = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut more = Thread32First(snap, &mut e) != 0;
+            while more {
+                if e.th32OwnerProcessID == pid {
+                    let t = OpenThread(THREAD_SUSPEND_RESUME, 0, e.th32ThreadID);
+                    if !t.is_null() {
+                        if ResumeThread(t) != u32::MAX {
+                            resumed += 1;
+                        }
+                        CloseHandle(t);
+                    }
+                }
+                more = Thread32Next(snap, &mut e) != 0;
+            }
+            CloseHandle(snap);
+            if resumed == 0 {
+                return Err(io::Error::other(format!("no thread of process {pid} to resume")));
+            }
+        }
+        Ok(())
     }
 
     fn adopt_job(pid: u32, kill_on_close: bool) -> io::Result<()> {
@@ -541,6 +554,32 @@ mod imp {
 
 pub use imp::*;
 
+/// Start `cmd` as the leader of a process container of its own: a process group from its first instruction (and on
+/// Linux a cgroup when delegated); on Windows a Job Object it is in before it runs a line (started suspended, put in
+/// the job, resumed), so nothing it starts is ever outside. When the container cannot be made the child is killed.
+/// `lasting`: the container outlives the agent (a module service).
+pub fn spawn_contained(cmd: &mut std::process::Command, lasting: bool) -> std::io::Result<std::process::Child> {
+    imp::new_group(cmd);
+    let mut child = cmd.spawn()?;
+    if let Err(e) = imp::contain(child.id(), lasting) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other(format!("process container: {e}")));
+    }
+    Ok(child)
+}
+
+/// `spawn_contained` for a tokio command.
+pub fn spawn_contained_async(cmd: &mut tokio::process::Command, lasting: bool) -> std::io::Result<tokio::process::Child> {
+    imp::new_group(cmd.as_std_mut());
+    let mut child = cmd.spawn()?;
+    if let Err(e) = imp::contain(child.id().unwrap_or(0), lasting) {
+        let _ = child.start_kill();
+        return Err(std::io::Error::other(format!("process container: {e}")));
+    }
+    Ok(child)
+}
+
 /// The pids in a container: the members of a Job Object on Windows; on Unix, the cgroup leaf (Linux, when
 /// delegated) or the process group.
 #[cfg(unix)]
@@ -597,10 +636,9 @@ mod tests {
     fn python(dir: &Path, script: &str) -> (std::process::Child, Nudge) {
         let mut cmd = std::process::Command::new("python3");
         cmd.args(["-I", "-c", script]).arg(dir);
-        new_group_std(&mut cmd);
         let nudge = Nudge::new().unwrap();
         nudge.prepare(&mut cmd);
-        (cmd.spawn().unwrap(), nudge)
+        (spawn_contained(&mut cmd, false).unwrap(), nudge)
     }
 
     /// The nudge reaches the runner only: its children did not ask for it, and SIGUSR1's default action (an exec
@@ -684,10 +722,8 @@ mod tests {
         let ping = format!(r"{}\System32\PING.EXE", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()));
         let mut cmd = std::process::Command::new(ping);
         cmd.args(["-n", "4", "127.0.0.1"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        new_group_std(&mut cmd);
-        let mut child = cmd.spawn().unwrap();
+        let mut child = spawn_contained(&mut cmd, false).unwrap();
         let pid = child.id();
-        adopt(pid).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1000));
         let members = group_pids(pid as i32);
         signal_group(pid as i32, Sig::Kill);

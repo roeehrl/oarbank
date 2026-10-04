@@ -204,10 +204,8 @@ pub fn exec(argv: &[String], env: &[(String, String)], timeout: Duration, out: O
     let mut cmd = Command::new(prog);
     cmd.args(rest).env_clear().envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null())
         .stdout(stdio(&out).map_err(|e| e.to_string())?).stderr(stdio(&err).map_err(|e| e.to_string())?);
-    crate::sys::new_group_std(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| format!("{prog}: {e}"))?;
+    let mut child = crate::sys::spawn_contained(&mut cmd, false).map_err(|e| format!("{prog}: {e}"))?;
     let pid = child.id() as i32;
-    crate::sys::adopt(pid as u32).map_err(|e| format!("{prog}: process container: {e}"))?;
     let (ro, re) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
     let mut r = Exec::default();

@@ -116,6 +116,12 @@ pub fn is_confined(pid: i32) -> bool {
     !others.is_empty() && others.iter().all(|p| is_app_container(*p as u32))
 }
 
+/// No member of the shim's job besides the shim is outside an AppContainer (after the shim said its runner started:
+/// the runner may have ended since).
+pub fn holds(pid: i32) -> bool {
+    crate::sys::group_pids(pid).into_iter().filter(|p| *p != pid).all(|p| is_app_container(p as u32))
+}
+
 /// The AppContainer name for a module: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most).
 pub fn container_name(module: &str) -> String {
     let clean: String = module.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' }).collect();
@@ -289,6 +295,8 @@ pub fn exec(args: &[String]) -> ! {
                                                 DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
                                                 PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
                                                 STARTF_USESTDHANDLES, STARTUPINFOEXW};
+    // taken first, so the runner's environment does not name it
+    let launcher = crate::sandbox::Launcher::take();
     let Some(sep) = args.iter().position(|a| a == "--") else { die(64, "usage: sandbox-exec POLICY.json -- argv") };
     if sep != 1 || args.len() <= sep + 1 {
         die(64, "needs a policy file and argv");
@@ -375,6 +383,11 @@ pub fn exec(args: &[String]) -> ! {
         DeleteProcThreadAttributeList(list);
         if ok == 0 {
             die(71, &format!("start {}: {}", args[sep + 1], std::io::Error::last_os_error()));
+        }
+        // the runner exists, in the AppContainer and in this shim's job (born there: the agent put the shim in it
+        // before it ran)
+        if let Some(l) = launcher {
+            l.confined();
         }
         CloseHandle(pi.hThread);
         WaitForSingleObject(pi.hProcess, INFINITE);

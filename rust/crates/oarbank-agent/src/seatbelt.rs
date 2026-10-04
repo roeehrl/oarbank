@@ -30,6 +30,7 @@ pub fn exec(args: &[String]) -> ! {
     if sep < 1 || args.len() <= sep + 1 || !args[sep + 1].starts_with('/') {
         die(64, "needs a profile and an absolute argv[0]");
     }
+    let launcher = crate::sandbox::Launcher::take();
     let profile = match std::fs::read_to_string(&args[0]) {
         Ok(p) => p,
         Err(e) => die(70, &format!("profile {}: {e}", args[0])),
@@ -48,6 +49,9 @@ pub fn exec(args: &[String]) -> ! {
     if rc != 0 {
         let m = if err.is_null() { "?".to_string() } else { unsafe { CStr::from_ptr(err) }.to_string_lossy().to_string() };
         die(70, &format!("sandbox_init failed: {m}"));
+    }
+    if let Some(l) = launcher {
+        l.confined();
     }
     let argv: Vec<CString> = args[sep + 1..].iter().map(|a| CString::new(a.as_str()).unwrap_or_default()).collect();
     let mut aptr: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();

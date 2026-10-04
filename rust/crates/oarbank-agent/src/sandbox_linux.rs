@@ -212,6 +212,7 @@ pub fn exec(args: &[String]) -> ! {
     if sep != 1 || args.len() <= sep + 1 || !args[sep + 1].starts_with('/') {
         die(64, "needs a policy file and an absolute argv[0]");
     }
+    let launcher = crate::sandbox::Launcher::take();
     let pol: Policy = match std::fs::read(&args[0]).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
         Ok(p) => p,
         Err(e) => die(70, &format!("policy {}: {e}", args[0])),
@@ -235,6 +236,9 @@ pub fn exec(args: &[String]) -> ! {
             }
         }
         Err(e) => die(70, &format!("seccomp: {e}")),
+    }
+    if let Some(l) = launcher {
+        l.confined();
     }
     let argv: Vec<std::ffi::CString> = args[sep + 1..].iter().map(|a| std::ffi::CString::new(a.as_str()).unwrap_or_default()).collect();
     let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();

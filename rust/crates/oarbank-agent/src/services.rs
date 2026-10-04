@@ -28,8 +28,6 @@ const FINGERPRINT_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const DESTROY_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long a launched op may take to show up sandboxed before it is killed.
-const SANDBOX_WAIT: Duration = Duration::from_secs(2);
 /// Between `ready` polls while a service comes up.
 const READY_POLL: Duration = Duration::from_secs(1);
 /// SIGTERM to SIGKILL for a process group the agent ends.
@@ -385,17 +383,18 @@ impl Exec {
         let mut cmd = std::process::Command::new(&argv[0]);
         cmd.args(&argv[1..]).env_clear().envs(env).current_dir(&c.bundle).stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-        crate::sys::new_group_std(&mut cmd);
-        let mut child = match cmd.spawn() {
+        let signal = match sandboxed.then(crate::sandbox::ConfinedSignal::new).transpose() {
+            Ok(s) => s,
+            Err(e) => return OpOut::failed(format!("confinement signal: {e}")),
+        };
+        if let Some(s) = &signal {
+            s.prepare(&mut cmd);
+        }
+        let mut child = match crate::sys::spawn_contained(&mut cmd, keep_group) {
             Ok(ch) => ch,
             Err(e) => return OpOut::failed(format!("spawn: {e}")),
         };
         let pid = child.id() as i32;
-        let contained = if keep_group { crate::sys::adopt_lasting(pid as u32) } else { crate::sys::adopt(pid as u32) };
-        if let Err(e) = contained {
-            let _ = child.kill();
-            return OpOut::failed(format!("process container: {e}"));
-        }
         if let Some(r) = &self.registry {
             r.register(pid, None, Some(&self.label()));          // only registered groups may ever be signalled (S16)
         }
@@ -415,22 +414,22 @@ impl Exec {
                 set_nonblocking(s);
             }
         }
-        // the launcher applies the profile before it execs the module: a process still unconfined after that window
-        // is killed, never left running
-        if sandboxed {
-            let deadline = Instant::now() + SANDBOX_WAIT;
-            loop {
-                if crate::sandbox::is_confined(pid) || matches!(child.try_wait(), Ok(Some(_))) {
-                    break;
-                }
-                if Instant::now() > deadline {
-                    procs::signal_group(pid, procs::Sig::Kill);
-                    let _ = child.wait();
-                    unregister(pid);
-                    warn!(service = %self.label(), "sandbox_missing: a service process was not sandboxed; killed");
-                    return OpOut::failed("the process did not come up sandboxed".into());
-                }
-                std::thread::sleep(Duration::from_millis(10));
+        // the launcher says when its sandbox holds, just before the module runs: a process that does not come up
+        // confined is killed, never left running
+        if let Some(s) = signal {
+            use crate::sandbox::Came;
+            let fault = match s.wait(pid as u32, crate::sandbox::CONFINE_GUARD) {
+                Came::Confined if crate::sandbox::holds(pid) || matches!(child.try_wait(), Ok(Some(_))) => None,
+                Came::Confined => Some("sandbox_missing: the launcher said it was confined, but the process is not"),
+                Came::Ended => None,                           // it could not confine itself: its exit says why
+                Came::Hung => Some("sandbox_hung: the launcher did not confine itself within the guard"),
+            };
+            if let Some(f) = fault {
+                procs::signal_group(pid, procs::Sig::Kill);
+                let _ = child.wait();
+                unregister(pid);
+                warn!(service = %self.label(), "{f}; killed");
+                return OpOut::failed("the process did not come up sandboxed".into());
             }
         }
         let (mut out, mut err) = (Vec::new(), Vec::new());

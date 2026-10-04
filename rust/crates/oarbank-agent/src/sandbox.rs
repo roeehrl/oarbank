@@ -1,12 +1,13 @@
 //! The module sandbox, per OS (spec/sandbox.md; docs/design/architecture.md, "The module sandbox"): one policy
 //! (oarbank-core's `Policy`), three backends. Every module process starts through `oarbank-agent sandbox-exec`, which
 //! confines itself (macOS Seatbelt, Linux Landlock + seccomp) and then execs the module, or (Windows) starts it inside
-//! an AppContainer and waits for it. The parent verifies the confinement after the spawn and kills a process that is
-//! not confined.
+//! an AppContainer and waits for it. The launcher says when its sandbox holds (`ConfinedSignal`); the parent then
+//! verifies the confinement and kills a process that is not confined.
 
 use oarbank_core::sandbox::Policy;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::time::Duration;
 
 /// Whether this node can confine module processes at all (else it reports no backend and gets no module work).
 pub fn available() -> bool {
@@ -60,6 +61,214 @@ pub fn is_confined(pid: i32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+/// After the launcher said it is confined: nothing it started runs unconfined. On macOS and Linux the launcher has
+/// become the module process, which must be confined; on Windows every member of the shim's job besides the shim
+/// must be in an AppContainer (the runner may already have ended).
+pub fn holds(pid: i32) -> bool {
+    #[cfg(windows)]
+    return crate::sandbox_windows::holds(pid);
+    #[allow(unreachable_code)]
+    is_confined(pid)
+}
+
+/// Names the launcher's confinement signal in its environment: a pipe's write end on POSIX (an fd), an event on
+/// Windows (a handle value), inherited from the agent.
+pub const CONFINED_ENV: &str = "OARBANK_CONFINED";
+
+/// Only a guard against a launcher that hangs before it confines itself: confining is a few system calls, so a
+/// healthy launcher on a loaded host signals long before, and reaching it is logged as a fault.
+pub const CONFINE_GUARD: Duration = Duration::from_secs(60);
+
+/// How the wait for a launcher's confinement ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Came {
+    /// It signalled: its sandbox holds and the module is about to run (the parent still verifies, with `holds`).
+    Confined,
+    /// It ended without signalling: it could not confine itself (exit 70) or start the module (71, 64).
+    Ended,
+    /// Neither within the guard.
+    Hung,
+}
+
+/// The parent's side of the launcher's word that it is confined, instead of a timer: made before the spawn, given to
+/// the launcher with `prepare`, waited on with `wait`. The launcher signals once its sandbox holds, just before the
+/// module runs (POSIX: before the exec; Windows: once the AppContainer child exists), and closes its end so the module
+/// never holds it (`Launcher`).
+pub struct ConfinedSignal(sig::Parent);
+
+impl ConfinedSignal {
+    pub fn new() -> std::io::Result<ConfinedSignal> {
+        sig::Parent::new().map(ConfinedSignal)
+    }
+
+    pub fn prepare(&self, cmd: &mut std::process::Command) {
+        self.0.prepare(cmd)
+    }
+
+    /// Wait for the launcher `pid` started with `prepare` to signal, or to end, for at most `limit`.
+    pub fn wait(self, pid: u32, limit: Duration) -> Came {
+        self.0.wait(pid, limit)
+    }
+}
+
+/// The launcher's side: taken from the environment when it starts (so the module does not see it), signalled once
+/// the sandbox holds. None when the parent passed none (the coordinator, a test).
+pub struct Launcher(sig::Child);
+
+impl Launcher {
+    pub fn take() -> Option<Launcher> {
+        let v = std::env::var(CONFINED_ENV).ok()?;
+        std::env::remove_var(CONFINED_ENV);
+        sig::Child::parse(&v).map(Launcher)
+    }
+
+    pub fn confined(self) {
+        self.0.signal()
+    }
+}
+
+#[cfg(unix)]
+mod sig {
+    use super::Came;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::time::{Duration, Instant};
+
+    pub struct Parent {
+        read: OwnedFd,
+        write: OwnedFd,
+    }
+
+    impl Parent {
+        pub fn new() -> std::io::Result<Parent> {
+            let mut fds = [0 as RawFd; 2];
+            #[cfg(target_os = "linux")]
+            let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+            #[cfg(not(target_os = "linux"))]
+            let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            if rc != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(not(target_os = "linux"))]
+            for fd in fds {
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            }
+            Ok(unsafe { Parent { read: OwnedFd::from_raw_fd(fds[0]), write: OwnedFd::from_raw_fd(fds[1]) } })
+        }
+
+        /// The launcher inherits the write end (only it: the end is close-on-exec everywhere else).
+        pub fn prepare(&self, cmd: &mut std::process::Command) {
+            use std::os::unix::process::CommandExt;
+            let fd = self.write.as_raw_fd();
+            cmd.env(super::CONFINED_ENV, fd.to_string());
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        /// A byte: confined; end of file: the launcher closed its end without one (it ended).
+        pub fn wait(self, _pid: u32, limit: Duration) -> Came {
+            let Parent { read, write } = self;
+            drop(write);
+            let deadline = Instant::now() + limit;
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now()).as_millis().min(i32::MAX as u128) as i32;
+                let mut p = libc::pollfd { fd: read.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                match unsafe { libc::poll(&mut p, 1, left) } {
+                    0 => return Came::Hung,
+                    n if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+                    n if n < 0 => return Came::Ended,
+                    _ => {}
+                }
+                let mut b = [0u8; 1];
+                return if unsafe { libc::read(read.as_raw_fd(), b.as_mut_ptr() as *mut _, 1) } == 1 { Came::Confined } else { Came::Ended };
+            }
+        }
+    }
+
+    pub struct Child(RawFd);
+
+    impl Child {
+        pub fn parse(v: &str) -> Option<Child> {
+            v.parse().ok().filter(|fd: &RawFd| *fd > 2).map(Child)
+        }
+
+        pub fn signal(self) {
+            unsafe {
+                libc::write(self.0, b"1".as_ptr() as *const _, 1);
+                libc::close(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod sig {
+    use super::Came;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Threading::{CreateEventW, OpenProcess, SetEvent, WaitForMultipleObjects, PROCESS_SYNCHRONIZE};
+
+    /// An inheritable manual-reset event, as a handle value (handles are not Send).
+    pub struct Parent(usize);
+
+    impl Parent {
+        pub fn new() -> std::io::Result<Parent> {
+            let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                                           lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 1 };
+            let h = unsafe { CreateEventW(&sa, 1, 0, std::ptr::null()) };
+            if h.is_null() { Err(std::io::Error::last_os_error()) } else { Ok(Parent(h as usize)) }
+        }
+
+        pub fn prepare(&self, cmd: &mut std::process::Command) {
+            cmd.env(super::CONFINED_ENV, self.0.to_string());
+        }
+
+        /// The event: confined; the shim's process handle: it ended (the event wins when both are set).
+        pub fn wait(self, pid: u32, limit: Duration) -> Came {
+            let p = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            let handles = [self.0 as HANDLE, p];
+            let n = if p.is_null() { 1 } else { 2 };
+            let ms = limit.as_millis().min(u32::MAX as u128 - 1) as u32;
+            let r = unsafe { WaitForMultipleObjects(n, handles.as_ptr(), 0, ms) };
+            if !p.is_null() {
+                unsafe { CloseHandle(p) };
+            }
+            match r {
+                WAIT_OBJECT_0 => Came::Confined,
+                WAIT_TIMEOUT => Came::Hung,
+                _ => Came::Ended,
+            }
+        }
+    }
+
+    impl Drop for Parent {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0 as HANDLE) };
+        }
+    }
+
+    pub struct Child(usize);
+
+    impl Child {
+        pub fn parse(v: &str) -> Option<Child> {
+            v.parse().ok().filter(|h: &usize| *h != 0).map(Child)
+        }
+
+        pub fn signal(self) {
+            unsafe {
+                SetEvent(self.0 as HANDLE);
+                CloseHandle(self.0 as HANDLE);
+            }
+        }
     }
 }
 
