@@ -23,7 +23,13 @@ How the build differs from the plan below:
   unit), so a campaign's units are found by prefix. Datasets carry a `platform` column. A soft capacity binding that no
   attempt ran under yet follows the classes the work it gets allows. An unbound unit binds only to a class where, for
   every stage still ahead of the job, a ready certified node runs that stage and holds its pools (the "eligible
-  certified nodes" part of the feasible set, resolved in the job's facts at claim and explain). A pinned unit (by the module or the operator) is
+  certified nodes" part of the feasible set, resolved in the job's facts at claim and explain). The capacity choice
+  and the stranded check use the same per-stage test (`placement.classes_running`: for every stage still ahead, a
+  node that can serve the module runs it and holds its pools), so a unit never binds by capacity to a class where a
+  later stage can never run, and a unit whose class loses what its work needs is stranded: a soft capacity binding is
+  released and rebound elsewhere, or raises `placement_stranded` when no class can run all its stages. A stricter mix
+  (`campaigns.set_placement`) moves the generation of the campaign's pending jobs, so a late result from an attempt
+  that already ended never lands outside the new class. A pinned unit (by the module or the operator) is
   never moved automatically: when stranded it raises the alert, whatever `rebind` says.
 - **Rebinding** re-queues the unit's finished jobs as `jobs.retry` does: their own results stop being canonical, and
   jobs in other campaigns that reused those results through the cache run again too. Keeping those results canonical

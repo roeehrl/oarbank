@@ -172,28 +172,44 @@ def _ahead(j: dict) -> list[str]:
     return [j["stage"] or mi.single_stage]
 
 
-def _servable(db: DB, j: dict, mix: str, cache: dict | None) -> set:
-    """The classes under `mix` where, for every stage ahead of the job, a ready node certified (or certifying) for its
-    module runs that stage and holds its pools: an unbound unit binds only there, so a head never binds where its tail
-    cannot run (the feasible set's "eligible certified nodes", per-platform-modules.md 3.1)."""
+def classes_running(db: DB, module: str, stages, mix: str, online: bool = False, cache: dict | None = None) -> set:
+    """The classes under `mix` where, for every one of `stages`, a ready node that can serve the module (certified, or
+    certifying recently: core._can_serve) runs that stage (its platforms) and holds its pools. `online`: only active
+    nodes that heartbeat recently (a unit's class able to take its work now). Binding, the capacity choice and the
+    stranded check all use this one test, so a unit never binds where a stage of its work can never run."""
     from . import core
-    key = ("servable", j["module"], mix, tuple(_ahead(j)))
+    stages = tuple(sorted(set(stages)))
+    key = ("running", module, mix, stages, online)
     if cache is not None and key in cache:
         return cache[key]
-    mi = modcalls.info(j["module"])
-    nodes = [n for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json FROM nodes "
-                             "WHERE lifecycle='ready' AND platform IS NOT NULL")
-             if core._can_serve((jl(n["modules_json"], {}) or {}).get(j["module"], {}))]
+    mi = modcalls.info(module)
+    sql = "SELECT node_id, platform, modules_json, capacity_json, policy_json FROM nodes WHERE lifecycle='ready' AND platform IS NOT NULL"
+    args: tuple = ()
+    if online:
+        sql += " AND desired_state='active' AND last_heartbeat_at>?"
+        args = (clock.now() - C.OFFLINE_AFTER,)
+    nodes = [n for n in db.q(sql, args) if core._can_serve((jl(n["modules_json"], {}) or {}).get(module, {}))]
     out = None
-    for st in _ahead(j):
-        res, plats = mi.stage_resources(st), modcalls.stage_platforms(j["module"], st)
-        here = {pf.class_key(n["platform"], mix) for n in nodes
-                if (not plats or n["platform"] in plats) and core._pools_fit(n, res)}
+    for st in stages:
+        res, plats = mi.stage_resources(st), modcalls.stage_platforms(module, st)
+        here = {pf.class_key(n["platform"], mix) for n in nodes if (not plats or n["platform"] in plats) and core._pools_fit(n, res)}
         out = here if out is None else out & here
     out = out or set()
     if cache is not None:
         cache[key] = out
     return out
+
+
+def _servable(db: DB, j: dict, mix: str, cache: dict | None) -> set:
+    """The classes where every stage ahead of the job has a node to run it: an unbound unit binds only there, so a head
+    never binds where its tail cannot run (the feasible set's "eligible certified nodes", per-platform-modules.md 3.1)."""
+    return classes_running(db, j["module"], _ahead(j), mix, cache=cache)
+
+
+def unit_stages(db: DB, b: dict) -> list[str]:
+    """The stages still ahead of a unit's pending work (none pending: the stages its finished jobs ran)."""
+    jobs = unit_jobs(db, b["unit"], ("pending",)) or unit_jobs(db, b["unit"], ("leased", "done"))
+    return sorted({st for j in jobs for st in _ahead(j)})
 
 
 def facts(db: DB, j: dict, cache: dict | None = None) -> dict:
@@ -223,7 +239,7 @@ def _policy_of(db: DB, campaign_id: str) -> dict | None:
 
 
 def _join(db: DB, unit: str, *, module: str, campaign_id: str, parent: str | None, pol: dict, feasible: list[str],
-          bound_platform: str | None = None) -> dict:
+          stages: list[str], bound_platform: str | None = None) -> dict:
     """Create the unit's binding row or narrow its feasible classes by one more job's. A pinned campaign's units are
     created pinned; a unit whose datasets live on one platform is pinned there (source `dataset`)."""
     t = clock.now()
@@ -252,7 +268,7 @@ def _join(db: DB, unit: str, *, module: str, campaign_id: str, parent: str | Non
     if b["class"] is not None and b["class"] not in b["feasible"]:
         raise PlacementError(422, "placement_infeasible", f"{unit} is bound to {b['class']}, where this job cannot run")
     if b["state"] == "unbound" and b["bind"] == "capacity":
-        cls = capacity_class(db, module, b["mix"], b["feasible"])
+        cls = capacity_class(db, module, b["mix"], b["feasible"], stages)
         if cls:
             _bind(db, b, cls, "soft", "capacity")
     return binding(db, unit)
@@ -264,7 +280,7 @@ def open_campaign_unit(db: DB, module: str, campaign_id: str, pol: dict) -> dict
     mi = modcalls.info(module)
     stages = list(mi.chain) if modcalls.split_enabled(db, module) else [mi.single_stage or mi.stages[0]]
     return _join(db, f"c:{campaign_id}", module=module, campaign_id=campaign_id, parent=None, pol=pol,
-                 feasible=classes(mi.manifest, stages, [], [], pol["mix"]))
+                 feasible=classes(mi.manifest, stages, [], [], pol["mix"]), stages=stages)
 
 
 def assign(db: DB, job_id: int) -> str | None:
@@ -283,7 +299,7 @@ def assign(db: DB, job_id: int) -> str | None:
     if pol:
         leaf = {"campaign": f"c:{cid}", "group": f"c:{cid}/g:{j['group_key'] or ''}",
                 "dataset": f"c:{cid}/d:{j['dataset_id'] or ''}", "pipeline": f"c:{cid}/p:{job_id}"}[pol["unit"]]
-        _join(db, leaf, parent=None, pol=pol, feasible=classes(mi.manifest, stages, jp, dps, pol["mix"]), **common)
+        _join(db, leaf, parent=None, pol=pol, feasible=classes(mi.manifest, stages, jp, dps, pol["mix"]), stages=stages, **common)
         leaf_mix = pol["mix"]
     tail = next((s for s in mi.manifest.stages if split and s.name == mi.chain[1]), None)
     if tail is not None and tail.placement is not None and pf.stricter(tail.placement.mix, leaf_mix) != leaf_mix:
@@ -293,7 +309,7 @@ def assign(db: DB, job_id: int) -> str | None:
         sub = f"{leaf}/s" if pol and pol["unit"] == "pipeline" else f"c:{cid}/p:{job_id}"
         _join(db, sub, parent=leaf, pol={"mix": mix, "bind": "first-claim", "rebind": (pol or {}).get("rebind") or defaults.rebind,
                                          "stranded_after_s": (pol or {}).get("stranded_after_s") or defaults.stranded_after_s},
-              feasible=classes(mi.manifest, stages, jp, dps, mix), **common)
+              feasible=classes(mi.manifest, stages, jp, dps, mix), stages=stages, **common)
         leaf = sub
     db.x("UPDATE jobs SET placement_unit=? WHERE job_id=? OR (job_id=? AND kind='call')", (leaf, job_id, j["depends_on"]))
     return leaf
@@ -353,8 +369,10 @@ def cache_hit(db: DB, j: dict) -> int | None:
     return None
 
 
-def capacity_class(db: DB, module: str, mix: str, feasible: list[str], exclude: str | None = None) -> str | None:
-    """The feasible class with the most free CPU on ready, active nodes certified for the module (None: no such node)."""
+def capacity_class(db: DB, module: str, mix: str, feasible: list[str], stages, exclude: str | None = None) -> str | None:
+    """Among the feasible classes where every one of `stages` has a node to run it (classes_running), the one with the
+    most free CPU on ready, active nodes certified for the module (None: no such class)."""
+    runs = classes_running(db, module, stages, mix)
     free: dict = {}
     live = {r["node_id"]: r["cpu"] or 0 for r in db.q(
         "SELECT a.node_id, SUM(COALESCE(json_extract(j.resources_json,'$.cpu'),1)) cpu FROM attempts a "
@@ -362,7 +380,8 @@ def capacity_class(db: DB, module: str, mix: str, feasible: list[str], exclude: 
     for n in db.q("SELECT node_id, platform, modules_json, capacity_json FROM nodes WHERE lifecycle='ready' "
                   "AND desired_state='active' AND platform IS NOT NULL"):
         cls = pf.class_key(n["platform"], mix)
-        if cls not in feasible or cls == exclude or (jl(n["modules_json"], {}) or {}).get(module, {}).get("state") != "certified":
+        if cls not in feasible or cls not in runs or cls == exclude \
+                or (jl(n["modules_json"], {}) or {}).get(module, {}).get("state") != "certified":
             continue
         slots = float((jl(n["capacity_json"], {}) or {}).get("cpu_slots") or 0)
         free[cls] = free.get(cls, 0.0) + max(0.0, slots - float(live.get(n["node_id"], 0)))
@@ -426,18 +445,9 @@ def _release(db: DB, b: dict):
 
 
 def class_has_node(db: DB, b: dict) -> bool:
-    """Is a node of the unit's class able to take its pending work now: ready, active, online, certified (or certifying)
-    for the module, and on a platform where each pending job's stage runs."""
-    from . import core
-    stages = {j["stage"] for j in unit_jobs(db, b["unit"], ("pending",))}
-    t = clock.now()
-    for n in db.q("SELECT platform, modules_json FROM nodes WHERE lifecycle='ready' AND desired_state='active' "
-                  "AND platform IS NOT NULL AND last_heartbeat_at>?", (t - C.OFFLINE_AFTER,)):
-        if pf.class_key(n["platform"], b["mix"]) == b["class"] \
-                and core._can_serve((jl(n["modules_json"], {}) or {}).get(b["module"], {})) \
-                and all(pf.matches(n["platform"], modcalls.stage_platforms(b["module"], s)) for s in stages):
-            return True
-    return False
+    """Can the unit's class take its pending work now: for every stage still ahead of it, an online, active node of the
+    class that can serve the module runs the stage and holds its pools (classes_running)."""
+    return b["class"] in classes_running(db, b["module"], unit_stages(db, b), b["mix"], online=True)
 
 
 def reap(db: DB) -> list[tuple]:
@@ -464,13 +474,22 @@ def reap(db: DB) -> list[tuple]:
             continue
         if t - b["stranded_since"] < (b["stranded_after_s"] or 1800):
             continue
+        stages = unit_stages(db, b)
         if b["state"] == "soft":
             if not unit_jobs(db, b["unit"], ("leased", "done")):
+                old = b["class"]
                 _release(db, b)
-                if b["bind"] == "capacity" and (cls := capacity_class(db, b["module"], b["mix"], b["feasible"])):
+                cls = capacity_class(db, b["module"], b["mix"], b["feasible"], stages) if b["bind"] == "capacity" else None
+                if cls:
                     _bind(db, b, cls, "soft", "capacity")
+                    alerts.append((False, rule, subject, None))
+                elif b["bind"] == "capacity":
+                    alerts.append((True, rule, subject,
+                                   f"{b['unit']} ({b['module']}) was bound to {old} (soft), where no node has been able to run "
+                                   f"its stages {stages} for {int((t - b['stranded_since']) // 60)} min, and no other class "
+                                   "can run them all: bring back a node with what they need (pools, platforms)"))
             continue
-        cls = capacity_class(db, b["module"], b["mix"], b["feasible"], exclude=b["class"]) \
+        cls = capacity_class(db, b["module"], b["mix"], b["feasible"], stages, exclude=b["class"]) \
             if b["rebind"] == "if-stranded" and b["state"] == "hard" else None
         if cls is None:
             alerts.append((True, rule, subject,
@@ -539,6 +558,9 @@ def set_mix(db: DB, campaign_id: str, mix: str) -> dict:
            "pin": None}
     db.x("UPDATE campaigns SET placement_json=? WHERE campaign_id=?", (json.dumps(pol), campaign_id))
     db.x("UPDATE jobs SET placement_unit=NULL WHERE campaign_id=?", (campaign_id,))
+    # pending jobs' generations move: a late result from an attempt that ended before (expired, released) must not land
+    # in a unit the new mix binds elsewhere (as _release does)
+    db.x("UPDATE jobs SET generation=generation+1 WHERE campaign_id=? AND state='pending'", (campaign_id,))
     db.x("DELETE FROM placement_bindings WHERE campaign_id=?", (campaign_id,))
     if unit == "campaign":
         open_campaign_unit(db, c["module"], campaign_id, pol)

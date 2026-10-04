@@ -376,3 +376,60 @@ def test_a_pipeline_unit_binds_only_where_a_node_can_run_its_tail(db, fleet, mon
     assert [g for g in grants(db, fleet["arm"]) if g["job_id"] == head["job_id"]]       # arm64, the scorer's arch
     assert unit(db, head["placement_unit"])["class"] == "arm64"
     assert ok(db)
+
+
+def pools(db, node, scorer, slots):
+    core.heartbeat(db, fresh(db, node), {"capacity": {"pools": {"scorer": scorer}, "cpu_slots": slots}, "attempts": [],
+                                         "ready_datasets": READY})
+
+
+def test_capacity_binds_a_unit_only_where_every_stage_has_a_node(db, fleet):
+    """box (linux-amd64) has the most free CPU but no scorer pool, which the split pipeline's score stage reserves:
+    the campaign binds by capacity to arm (linux-arm64), the only class whose nodes can run both stages."""
+    db.set_setting("pipeline:relay", "split")
+    pools(db, fleet["box"], 0, 64)
+    pools(db, fleet["mini"], 0, 32)
+    pools(db, fleet["arm"], 4, 8)
+    sid = study(db, SCENES[:1], placement={"mix": "same-platform", "bind": "capacity"})
+    b = unit(db, f"c:{sid}")
+    assert (b["class"], b["state"], b["source"]) == ("linux-arm64", "soft", "capacity")
+    assert ok(db)
+
+
+def test_a_unit_whose_classes_lose_a_pool_its_work_needs_is_reported_stranded(db, fleet):
+    """Bound by capacity to arm, the only scorer node; then arm loses the pool too. Before the fix the unit was never
+    stranded (class_has_node ignored pools) and hung silently."""
+    db.set_setting("pipeline:relay", "split")
+    pools(db, fleet["box"], 0, 64)
+    pools(db, fleet["mini"], 0, 32)
+    pools(db, fleet["arm"], 4, 8)
+    sid = study(db, SCENES[:1], placement={"mix": "same-platform", "bind": "capacity"})
+    assert unit(db, f"c:{sid}")["class"] == "linux-arm64"
+    pools(db, fleet["arm"], 0, 8)                                   # the pool is gone
+    core.reap(db)
+    assert unit(db, f"c:{sid}")["stranded_since"] is not None
+    clock.advance(1801)
+    for name, slots in (("box", 64), ("mini", 32), ("arm", 8)):
+        pools(db, fleet[name], 0, slots)
+    core.reap(db)
+    a = db.one("SELECT * FROM alerts WHERE rule=? AND state='open'", (f"placement_stranded:c:{sid}",))
+    assert a and "no other class can run them all" in a["detail"] and unit(db, f"c:{sid}")["state"] == "unbound"
+    pools(db, fleet["mini"], 2, 32)                                 # a scorer comes back on mini
+    core.reap(db)
+    assert unit(db, f"c:{sid}")["state"] == "unbound"               # rebinds when work is claimed, where it can run
+    assert ok(db)
+
+
+def test_a_stricter_mix_fences_a_late_result_from_an_attempt_that_already_ended(db, fleet):
+    """Found by the Hypothesis machine: box's attempt expires, campaigns.set_placement binds the campaign to darwin by
+    capacity, then box delivers late; its generation is fenced, so no result lands outside the unit's class (S20)."""
+    sid = study(db, SCENES[:1])
+    g = grants(db, fleet["box"], free=1)[0]
+    db.x("UPDATE attempts SET expires_at=? WHERE attempt_id=?", (clock.now() - 1, g["attempt_id"]))
+    core.reap(db)
+    pools(db, fleet["mini"], 4, 64)                                 # darwin has the most free CPU now
+    run_op(db, "campaigns.set_placement", sid, params={"mix": "same-os"})
+    assert unit(db, f"c:{sid}")["class"] == "darwin"
+    r = core.complete(db, fresh(db, fleet["box"]), g["attempt_id"], RIGHT)
+    assert (r["canonical"], r["reason"]) == (False, "stale_generation")
+    assert ok(db)
