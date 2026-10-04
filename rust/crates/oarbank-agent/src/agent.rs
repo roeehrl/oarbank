@@ -405,9 +405,12 @@ impl Agent {
 
     /// A module whose `requires` (capabilities its stages all need) nothing on this node provides is not healthy:
     /// its own doctor's capabilities and those of the node's services and probes count.
+    /// The node's capabilities (what its offered services and healthy probes provide) go into the report, where the
+    /// coordinator checks stages' `requires.capabilities`; a module whose `requires` nothing provides is unhealthy.
     fn fold_requires(&self, rep: &mut Value) {
-        let (Some(rel), Some(mods)) = (self.release.as_ref(), rep["modules"].as_object_mut()) else { return };
         let node: Vec<String> = self.services.as_ref().map(|s| s.lock().unwrap().capabilities()).unwrap_or_default();
+        rep["capabilities"] = json!(node);
+        let (Some(rel), Some(mods)) = (self.release.as_ref(), rep["modules"].as_object_mut()) else { return };
         for m in &rel.modules {
             let Some(r) = m["name"].as_str().and_then(|n| mods.get_mut(n)) else { continue };
             let own: Vec<String> = r["capabilities"].as_array().cloned().unwrap_or_default().iter()
@@ -869,6 +872,19 @@ mod tests {
     use ed25519_dalek::Signer;
 
     /// The owner key set a directive carries pins its rescue locations; a rescue move published there is recorded as
+    /// The doctor report always names the node's capabilities, even before a release: the coordinator grants stages
+    /// whose `requires.capabilities` only on nodes that report them.
+    #[test]
+    fn the_doctor_report_names_the_nodes_capabilities() {
+        let home = std::env::temp_dir().join(format!("oarbank-agent-caps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let agent = Agent::open(Layout::new(home.clone()), Some("https://127.0.0.1:9")).unwrap();
+        let mut rep = json!({"modules": {}});
+        agent.fold_requires(&mut rep);
+        assert_eq!(rep["capabilities"], json!([]));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// the pending move (and survives a restart in agent.json).
     #[tokio::test]
     async fn a_rescue_move_at_a_pinned_rescue_location_becomes_the_pending_move() {
