@@ -5,6 +5,9 @@
 //!            OARBANK_SESSION_SOCKET=/tmp/s.sock session_live service --ignored       (as another account)
 //!   Windows: OARBANK_SESSION_PIPE=\\.\pipe\t session_live helper --ignored           (in the person's session)
 //!            OARBANK_SESSION_PIPE=\\.\pipe\t session_live service --ignored          (in session 0)
+//!
+//! On macOS the agent's own test runs both sides (`cargo test -p oarbank-agent -- --ignored
+//! a_system_agent_sees_a_person_s_work_through_their_session_helper`: the service as `nobody`, through sudo).
 
 #![cfg(any(target_os = "linux", windows))]
 
@@ -63,24 +66,26 @@ fn service() {
             !theirs.is_empty(),
             "their executable links are unreadable to this account"
         );
-        let mut resolved = 0;
+        // each of them is listed once the helper has described it (one started since its last report waits), with
+        // the path the helper read; a path the helper cannot read either (a process in another user namespace, such
+        // as rootless containers' helpers) stays unreadable
+        let (mut listed, mut resolved) = (0, 0);
         for e in &theirs {
-            let row = rows
-                .iter()
-                .find(|x| x.pid == e.pid)
-                .expect("their processes are the owner's");
-            if row.path.is_some() {
-                resolved += 1;
-            }
+            let claim = hub.identity(e.pid, e.start_us);
+            let Some(row) = rows.iter().find(|x| x.pid == e.pid) else {
+                assert!(claim.is_none(), "{} was described but not listed", e.pid);
+                continue;
+            };
+            let claim = claim.expect("listed only once described");
+            assert_eq!(row.path, claim.path, "{}", e.pid);
+            listed += 1;
+            resolved += usize::from(row.path.is_some());
         }
         eprintln!(
-            "{resolved} of {} unreadable paths resolved by the helper",
+            "{listed} of {} unreadable processes described by the helper, {resolved} with their paths",
             theirs.len()
         );
-        assert!(
-            resolved * 10 >= theirs.len() * 9,
-            "the helper describes (nearly) all of them"
-        );
+        assert!(resolved > 0, "the helper reads its own processes' paths");
         // GPU: every process of theirs is known to the helper (busy or not), never unknown for want of access
         let unknown = theirs
             .iter()
