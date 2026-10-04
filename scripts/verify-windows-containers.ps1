@@ -59,6 +59,7 @@ try {
     target\debug\oarbank-agent.exe @probe
     if ($LASTEXITCODE) { throw "containers doctor --probe failed ($LASTEXITCODE)" }
     target\debug\oarbank-agent.exe containers remove
+    if ($LASTEXITCODE) { throw "containers remove failed ($LASTEXITCODE)" }
   } finally {
     Pop-Location
   }

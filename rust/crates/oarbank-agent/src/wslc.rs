@@ -1012,10 +1012,16 @@ mod imp {
         }
         let dir = home.join("containers");
         let _ = std::fs::remove_file(report_file(home));
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("{}: {e}", dir.display())),
+        // the session's VM lets go of its disk when it has shut down, which takes seconds after the session ends (WSL
+        // gives a VM 30 s): until then the disk is in use (ERROR_SHARING_VIOLATION)
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) if e.raw_os_error() == Some(32) && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_secs(1)),
+                Err(e) => return Err(format!("{}: {e}", dir.display())),
+            }
         }
     }
 
