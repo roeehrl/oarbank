@@ -98,8 +98,9 @@ bootstrap node's output.
 ## Coordinator
 
 **Claim and explain** (one predicate set, D16). A bootstrap job's module check passes where the module is
-`certifying` or `certified` on the node: its doctor is healthy and its release current (`doctor_failed`, `undetected`,
-`golden_failed` and `revoked` keep `MODULE_NOT_READY`). Everything else is checked as for any job: sandbox, platforms,
+`certifying` or `certified` on the node: its doctor is healthy and its release current (`doctor_failed`, `undetected`
+and `golden_failed` are `MODULE_NOT_READY`; `revoked` stays `MODULE_NOT_CERTIFIED` until the node's next doctor report
+starts its certification again). Everything else is checked as for any job: sandbox, platforms,
 OS version, tools, agent range, stage platforms, capabilities, pools, placement, datasets, retries, failure
 anti-affinity. A new predicate "bootstrap grants enforced" (`CAPABILITY_NOT_ENFORCED`) applies to bootstrap jobs.
 Explain names the module check `module_ready_for_bootstrap(<module>)` for them and adds a system action saying the job
