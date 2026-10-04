@@ -4,6 +4,23 @@ Status: design for the six open issues on the public SDK repository (oarbank-sdk
 SDK's invented `render` example; a real module, minos-gatk, works around every one of them today. One release
 resolves them all: **oarbank-sdk 1.3.0** and **core 2.3.0**.
 
+**Implementation status.** Built as designed (SDK 1.3.0, core 2.3.0). Where the build adds to the design:
+- S21 judges each row by the module version that produced the result involved (golden results, a replica's original,
+  the disputed results, the cached result), so a later version changing a stage's determinism raises no false alarm.
+  The Hypothesis machine runs ingestion jobs on the relay fixture's `sync` stage beside its studies.
+- `host.datasets.query` already scoped kinds by owning module; only the manifest text was wrong.
+- The conformance kit also fails a golden run that the egress proxy refused a connection for.
+- Released with the same version: the conformance stop check is timed to the runner's own acknowledgement
+  (`failure.json` with `fault = "transient"`, `Control.acknowledge_stop`, sent once the runner wrote its first
+  `phase`) within 2 s and to its exit within `stop_grace_s`, instead of process exit within 0.5 s (it flaked on loaded
+  CI runners); the kit has one owner of a runner's wait; `Control` ignores nudges again at exit, so a nudge during
+  interpreter teardown never kills a finished runner; `sandbox.interpreter_roots` never grants a shared prefix.
+- Core, found on the way: capacity binding and the stranded check use the claim path's per-stage test (a unit no longer
+  binds where a later stage's pool is missing, and is stranded when its class loses it), and `campaigns.set_placement`
+  fences pending jobs' late results.
+- The coordinator tracks no per-node stage capabilities (probes and services report them to the agent), so neither
+  the claim path nor capacity binding checks `stages[].requires.capabilities`, as before.
+
 ## Versioning, for all six
 
 - **Manifest 1 and module protocol 1 stay.** Everything below is additive: new optional keys, new optional protocol
