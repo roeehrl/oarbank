@@ -328,6 +328,8 @@ mod tests {
         assert!(becomes_paused(pid, false), "never resumed");
         let lowered = reg.set_background(pid, true, "lower_fleet");
         eprintln!("lowering available here: {}; lowered: {lowered:?}", can_lower());
+        #[cfg(target_os = "linux")]
+        assert!(can_lower() || !crate::cgroup::required_in_tests(), "no cpu controller, and OARBANK_TEST_CGROUPS=required");
         assert_eq!(lowered.is_ok(), can_lower(), "{lowered:?}");
         assert_eq!(background(pid), lowered.is_ok());
         assert_eq!(reg.set_background(pid, false, "restore").is_ok(), can_lower());

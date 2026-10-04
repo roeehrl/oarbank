@@ -17,6 +17,13 @@ pub fn root() -> Option<&'static Path> {
     ROOT.get_or_init(setup).as_deref()
 }
 
+/// Tests that need a delegated cgroup skip without one, unless `OARBANK_TEST_CGROUPS=required` makes that a failure
+/// (CI runs the tests in a delegated user service).
+#[cfg(test)]
+pub fn required_in_tests() -> bool {
+    std::env::var("OARBANK_TEST_CGROUPS").as_deref() == Ok("required")
+}
+
 fn setup() -> Option<PathBuf> {
     if std::env::var("OARBANK_CGROUPS").as_deref() == Ok("off") {
         return None;
@@ -219,12 +226,13 @@ mod tests {
 
     /// A leader whose first statement forks 20 children, each started directly and through the sandbox launcher (the
     /// test binary answers `sandbox-exec`): the leader and all 20 are in its container's leaf, by the leaf's
-    /// cgroup.procs and by each process's own /proc/<pid>/cgroup. Needs a delegated cgroup (systemd-run --user --scope
-    /// -p Delegate=yes).
+    /// cgroup.procs and by each process's own /proc/<pid>/cgroup. Needs a delegated cgroup: run the tests as CI's Linux
+    /// step does (.github/workflows/ci.yml: a transient user service with Delegate=yes).
     #[test]
     fn a_leader_and_what_it_forks_at_once_are_born_in_its_cgroup() {
         let Some(r) = root() else {
-            eprintln!("no delegated cgroup here (run under systemd-run --user --scope -p Delegate=yes): skipped");
+            assert!(!required_in_tests(), "no delegated cgroup, and OARBANK_TEST_CGROUPS=required");
+            eprintln!("no delegated cgroup here (run as CI's Linux step does: .github/workflows/ci.yml): skipped");
             return;
         };
         let script = "import os, sys, time\n\

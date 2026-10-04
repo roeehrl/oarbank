@@ -66,7 +66,26 @@ jobs:
         with:
           workspaces: rust
       - run: cargo test --locked --workspace --exclude oarbank-core-py
+        if: runner.os == 'Windows'
         working-directory: rust
+      - name: cargo test in a delegated cgroup (Linux)
+        # the agent's job containers are cgroup leaves where systemd delegated the agent's cgroup: the tests run as a
+        # transient service of the runner account's user manager (lingering, so it runs without a login) with
+        # Delegate=yes, and OARBANK_TEST_CGROUPS=required fails the container tests instead of skipping them
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          sudo loginctl enable-linger "$USER"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 0.1; done
+          cargo test --locked --workspace --exclude oarbank-core-py --no-run
+          # cargo stands where the launcher stands in a unit: the agent moves it out of the delegated cgroup with
+          # itself (OARBANK_LAUNCHER_PID), so the cgroup holds no process and can give its leaves controllers
+          # shellcheck disable=SC2016 # $$ is the inner shell's, which exec makes cargo's
+          OARBANK_TEST_CGROUPS=required systemd-run --user --wait --pipe --collect --quiet --same-dir --expand-environment=no \
+            -E PATH -E HOME -E CARGO_HOME -E RUSTUP_HOME -E OARBANK_TEST_CGROUPS -p Delegate=yes -- \
+            sh -c 'OARBANK_LAUNCHER_PID=$$ exec "$(rustup which cargo)" test --locked --workspace --exclude oarbank-core-py'
       - run: cargo build --locked --release -p oarbank-agent -p oarbank-launcher
         working-directory: rust
 
