@@ -594,8 +594,30 @@ pub fn for_node(layout: &crate::paths::Layout) -> Option<std::sync::Arc<dyn Cont
 mod tests {
     use super::*;
 
-    /// Linux with an engine installed (Podman or Docker): pull and run a real container through the native runtime,
-    /// with the broker's argument shape, a mount and a label, then remove it by its attempt label.
+    /// A root filesystem of this host's `sh` and `cat` with the libraries they load (`ldd`), as a tar to import: an
+    /// image that needs no registry.
+    #[cfg(target_os = "linux")]
+    fn host_rootfs(tar: &Path) {
+        let mut files: Vec<(String, PathBuf)> = vec![];
+        for (name, bin) in [("bin/sh", "/bin/sh"), ("bin/cat", "/bin/cat")] {
+            files.push((name.into(), PathBuf::from(bin)));
+            let out = std::process::Command::new("ldd").arg(bin).output().unwrap();
+            for lib in String::from_utf8_lossy(&out.stdout).split_whitespace().filter(|w| w.starts_with('/')) {
+                files.push((lib.trim_start_matches('/').into(), PathBuf::from(lib)));
+            }
+        }
+        let mut b = tar::Builder::new(std::fs::File::create(tar).unwrap());
+        b.follow_symlinks(true);
+        files.sort();
+        files.dedup();
+        for (name, path) in files {
+            b.append_path_with_name(&path, &name).unwrap();
+        }
+        b.finish().unwrap();
+    }
+
+    /// Linux with an engine installed (Podman or Docker): import an image of the host's own shell (no registry) and run
+    /// a real container of it through the native runtime, with the broker's argument shape, a mount and a label.
     #[test]
     #[cfg(target_os = "linux")]
     fn the_native_runtime_runs_a_real_container() {
@@ -609,21 +631,24 @@ mod tests {
             eprintln!("the engine is not running: skipped");
             return;
         }
-        let plat = NativeRuntime::platforms()[0].clone();
-        rt.pull("docker.io/library/alpine:3.20", &plat).unwrap();
+        let image = format!("localhost/oarbank-crt-test:{}", std::process::id());
+        let tar = home.join("rootfs.tar");
+        host_rootfs(&tar);
+        let imported = rt.cli(&["import", &tar.to_string_lossy(), &image], 120).unwrap();
+        assert!(imported.ok(), "{}", imported.stderr_tail(500));
         let work = home.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let out = home.join("out.txt");
-        let spec = RunSpec { image: "docker.io/library/alpine:3.20".into(), platform: plat, args: vec!["sh".into(), "-c".into(),
+        let spec = RunSpec { image: image.clone(), platform: NativeRuntime::platforms()[0].clone(), args: vec!["sh".into(), "-c".into(),
             "echo hello > /w/hi.txt && cat /w/hi.txt".into()], entrypoint: None,
             mounts: vec![Mount { host: work.clone(), dst: "/w".into(), ro: false }], env: vec![], workdir: None, network: false,
             cpus: 1.0, mem_gb: 0.5, attempt_id: 424242, module: "test".into(), timeout_s: 120.0,
             stdout: Some(std::fs::File::create(&out).unwrap()), stderr: None };
-        let r = rt.run(&spec, &AtomicBool::new(false)).unwrap();
-        assert_eq!(r.exit_code, 0);
+        let r = rt.run(&spec, &AtomicBool::new(false));
+        let _ = rt.cli(&["rmi", "-f", &image], 60);
+        assert_eq!(r.unwrap().exit_code, 0);
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "hello");
         assert_eq!(std::fs::read_to_string(work.join("hi.txt")).unwrap().trim(), "hello");
-        assert!(rt.images().iter().any(|i| i.contains("alpine")));
         assert!(rt.pool_tokens() > 0);
         let _ = std::fs::remove_dir_all(&home);
     }
