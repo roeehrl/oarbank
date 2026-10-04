@@ -107,6 +107,10 @@ def runtime_conditions(tel: dict) -> list[dict]:
             out.append({"code": "PROTECTION_UNREADABLE", "tone": "acc", "values": {"rule": r["id"], "n": r["unreadable"]},
                         "message": f"rule {r['id']} matched {r['unreadable']} processes whose path or arguments could not be "
                                    "read (counted as matches)"})
+    for rule in prot.get("no_instruction_counters") or []:
+        out.append({"code": "PROTECTION_NO_IPC_COUNTERS", "tone": "warn", "values": {"rule": rule},
+                    "message": f"rule {rule} protects ipc_ratio, but this node's processes have no instruction or cycle "
+                               "counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow"})
     if prot.get("lowering") is False:
         out.append({"code": "PROTECTION_NO_LOWERING", "tone": "warn", "values": {},
                     "message": "this node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable "

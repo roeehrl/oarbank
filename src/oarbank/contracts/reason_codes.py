@@ -128,6 +128,9 @@ CODES: list[ReasonCode] = [
       "(counted as matches)", "P5"),
     C("PROTECTION_NO_LOWERING", "protection", "This node cannot lower fleet jobs (no delegated cgroup with the cpu "
       "controller): pausable jobs are paused instead", "P3"),
+    C("PROTECTION_NO_IPC_COUNTERS", "protection", "Rule {rule} protects ipc_ratio, but this node's processes have no "
+      "instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow",
+      "P4"),
     C("PROTECTION_SOURCE_ERROR", "protection", "The process table cannot be read: {error}", "P3"),
 
     # ---------------------------------------------------------------- how an attempt ended

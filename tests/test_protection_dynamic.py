@@ -187,9 +187,11 @@ def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain
     tel = {"presence": "unknown: logind has no idle time for session 5 (sshd)",
            "protection": {"front": "unknown: session 7 is Wayland, whose compositor tells no other program which window is "
                                    "in front", "lowering": False, "source_error": None,
-                          "rules": [{"id": "trainer", "active": True, "processes": 3, "unreadable": 2}]}}
+                          "rules": [{"id": "trainer", "active": True, "processes": 3, "unreadable": 2}],
+                          "no_instruction_counters": ["build"]}}
     codes = [c["code"] for c in protection.runtime_conditions(tel)]
-    assert codes == ["PROTECTION_FRONT_UNKNOWN", "PROTECTION_PRESENCE_UNKNOWN", "PROTECTION_UNREADABLE", "PROTECTION_NO_LOWERING"]
+    assert codes == ["PROTECTION_FRONT_UNKNOWN", "PROTECTION_PRESENCE_UNKNOWN", "PROTECTION_UNREADABLE",
+                     "PROTECTION_NO_IPC_COUNTERS", "PROTECTION_NO_LOWERING"]
     assert protection.runtime_conditions({"presence": "logind", "protection": {"front": "app 812 (x11 :0)", "lowering": True,
                                                                                "rules": [{"id": "t", "unreadable": 0}]}}) == []
     shown = node_conditions({"tel": tel, "cap": {}})
@@ -198,6 +200,7 @@ def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain
     doc = explain.node_doc(db, node["node_id"])
     rows = {r.code: r.detail for r in doc.summary}
     assert rows["PROTECTION_UNREADABLE"] == {"rule": "trainer", "n": 2} and "PROTECTION_NO_LOWERING" in rows
+    assert rows["PROTECTION_NO_IPC_COUNTERS"] == {"rule": "build"}
 
 
 def test_a_refused_actuation_blocks_promotion(db):
