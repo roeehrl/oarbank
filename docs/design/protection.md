@@ -165,6 +165,8 @@ One pure decision function over signals, configuration and its own state, on the
   is reverted.
 - **The ladder:** stop admitting (with an exponential cooldown), cap, lower, pause, evict. Memory pressure skips to
   eviction (a paused job still holds its memory); GPU harm skips lowering (background QoS does not throttle the GPU).
+  Evicting a job whose runner keeps portable checkpoints asks it for a checkpoint first (`{stop, checkpoint}` in its
+  control document, within `runner.checkpoint_grace_s`), so the job resumes on any node instead of starting over.
 - **Measured harm:** while a `protect` rule is active in `moderate`, a pause probe stops the pausable fleet jobs for a
   few seconds every ten minutes and compares the protected metric paused and running; windows with no fleet job running
   are kept as free baselines.
@@ -202,7 +204,7 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | L1 interval and step | 60 s; +1 core, ×0.5 on a violation |
 | Violation lockout; revert lockout | 5 min; 30 s |
 | L2 restore | after 30 s clean |
-| Longest pause before eviction | 10 min |
+| Longest pause before eviction | 10 min; `[node] max_pause_s` sets less (10 to 600 s) |
 | Pause probe | 6 s every 10 min, only while a `protect` rule is active |
 | `strict_yield` admission | after 15 min idle, one slot a minute |
 | Memory floors | soft 12 % free or swap +256 MB/min; hard 8 % free or swap +1 GB/min; reclaim 2 GB |
@@ -210,7 +212,7 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | Implicit signal smoothing | weight 0.1 a sample (about 20 s) |
 | `protect` window | 20 s |
 | GPU fleet jobs | `when_no_gpu_protected` |
-| Eviction grace | the runner's `stop_grace_s` |
+| Eviction grace | the runner's `stop_grace_s`; `checkpoint_grace_s` when it checkpoints first |
 | Flapping alert (coordinator) | more than 12 lower or pause escalations per node-hour |
 | Probe-harm alert (coordinator) | a probe showing the protected process losing over 25 % |
 

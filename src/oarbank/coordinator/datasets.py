@@ -1,8 +1,9 @@
 """Dataset registry (generic): a dataset is a list of content-addressed files {path, digest, size, origins}.
 
-Agents download origin-first and fall back to oarbankd's blob server, which serves the coordinator's local
-copy by digest. What a dataset contains and where it comes from is its module's business: module importers
-(module CLIs, run on the coordinator) hash their files and call the `datasets.register` operation.
+Agents download origin-first and fall back to oarbankd's blob server, which serves the coordinator's copy by digest,
+or fetches it from the origins once when it has none (blobstore.origin_stream). What a dataset contains and where it
+comes from is its module's business: `oarbank dataset upload` (and the console) upload a folder's files and call the
+`datasets.register` operation, and a module's importer operation derives its own datasets from them.
 """
 import json
 import re
@@ -22,43 +23,78 @@ def register_blob(db: DB, digest: str, path: str, size: int):
 
 
 def register(db: DB, p: dict) -> dict:
-    """Upsert a dataset. Files that carry `local_path` (a file on the coordinator) register their blob; the
-    file must exist with the stated size (digests are the importer's, and agents verify them on download).
-    Every other file's blob must already be known. Raises ValueError for bad input."""
-    did, kind = p.get("dataset_id") or "", p.get("kind") or ""
+    """Upsert a dataset. Every file names its digest and size; files that carry `local_path` (a file on the coordinator)
+    register their blob (the file must exist with the stated size; agents verify digests on download); files with
+    `origins` may name a blob the coordinator does not hold (the URL rule and the operator's origin host policy apply);
+    every other file's blob must be held at that size. With `module`, the dataset is that module's (its kind one of the
+    module's `[datasets].kinds`); without, the operator's, which every module sees. Raises ValueError for bad input."""
+    from oarbank_sdk.origins import file_problem
+    from . import blobstore, modcalls
+    did, kind, module = p.get("dataset_id") or "", p.get("kind") or "", p.get("module") or None
     if not DATASET_ID.match(did):
         raise ValueError(f"bad dataset id {did!r}")
     if not kind or not re.match(r"^[a-z][a-z0-9_-]{0,40}$", kind):
         raise ValueError(f"bad kind {kind!r}")
+    if module:
+        try:
+            kinds = modcalls.info(module).manifest.datasets.kinds
+        except KeyError:
+            raise ValueError(f"module {module!r} is not installed") from None
+        if kind not in kinds:
+            raise ValueError(f"kind {kind!r} is not one of {module}'s [datasets].kinds {kinds}")
     files, blobs = [], []
     for i, f in enumerate(p.get("files") or []):
-        dig, size, path = f.get("digest") or "", f.get("size"), f.get("path") or ""
-        if not DIGEST.match(dig) or not path or ".." in Path(path).parts or path.startswith("/"):
-            raise ValueError(f"files[{i}]: needs a relative path and a sha256 digest")
+        f = {k: v for k, v in f.items() if k != "local_path" or v} if isinstance(f, dict) else f
+        why = file_problem({k: v for k, v in f.items() if k != "local_path"}) if isinstance(f, dict) else "not an object"
+        if why:
+            raise ValueError(f"files[{i}]: {why}")
+        dig, size = f["digest"], int(f["size"])
         if f.get("local_path"):
             lp = Path(f["local_path"])
-            if not lp.is_file() or (size is not None and lp.stat().st_size != int(size)):
+            if not lp.is_file() or lp.stat().st_size != size:
                 raise ValueError(f"files[{i}]: {lp} missing or not {size} bytes")
-            blobs.append((dig, str(lp), lp.stat().st_size))
-        elif not db.one("SELECT 1 FROM blobs WHERE digest=?", (dig,)):
-            raise ValueError(f"files[{i}]: unknown blob {dig} (send local_path)")
-        files.append({"path": path, "digest": dig, "size": size, "origins": list(f.get("origins") or [])})
+            blobs.append((dig, str(lp), size))
+        else:
+            h = db.one("SELECT size FROM blobs WHERE digest=?", (dig,))
+            if h and h["size"] is not None and h["size"] != size:
+                raise ValueError(f"files[{i}]: the coordinator holds {dig[:12]} at {h['size']} bytes, not {size}")
+            if not h and not f.get("origins"):
+                raise ValueError(f"files[{i}]: unknown blob {dig} (upload it, send local_path, or name origins)")
+        files.append({"path": f["path"], "digest": dig, "size": size, "origins": list(f.get("origins") or [])})
+    why = blobstore.check_origins(db, files)
+    if why:
+        raise ValueError(f"origin refused: {why}")
     with db.tx():
         for b in blobs:
             register_blob(db, *b)
         db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at) VALUES(?,?,?,?,?,?) "
              "ON CONFLICT(dataset_id) DO UPDATE SET kind=excluded.kind, module=excluded.module, "
              "meta_json=excluded.meta_json, files_json=excluded.files_json",
-             (did, kind, p.get("module"), json.dumps(p.get("meta") or {}), json.dumps(files), clock.now()))
+             (did, kind, module, json.dumps(p.get("meta") or {}), json.dumps(files), clock.now()))
         db.event("dataset_imported", reason=did, n_files=len(files))
-    return {"dataset_id": did, "files": len(files), "blobs": len(blobs)}
+    return {"dataset_id": did, "files": len(files), "blobs": len(blobs), "module": module}
 
 
 def manifest(db: DB, dataset_id: str) -> dict | None:
+    """What an agent stages: the files with the origins the URL rule and the operator's current policy admit."""
+    from . import blobstore
     d = db.one("SELECT * FROM datasets WHERE dataset_id=?", (dataset_id,))
     if not d:
         return None
-    return {"dataset_id": dataset_id, "kind": d["kind"], "files": jl(d["files_json"], [])}
+    return {"dataset_id": dataset_id, "kind": d["kind"], "files": blobstore.served_files(db, jl(d["files_json"], []))}
+
+
+def detail(db: DB, dataset_id: str) -> dict | None:
+    """A dataset for people (the admin API, `oarbank dataset download`): its kind, owner, meta, platform and files,
+    each with whether the coordinator holds its blob."""
+    from . import blobstore
+    d = db.one("SELECT * FROM datasets WHERE dataset_id=?", (dataset_id,))
+    if not d:
+        return None
+    files = [{**f, "held": blobstore.path(db, f.get("digest") or "") is not None} for f in jl(d["files_json"], [])]
+    return {"dataset_id": dataset_id, "kind": d["kind"], "module": d["module"], "meta": jl(d["meta_json"], {}),
+            "platform": d["platform"], "created_at": d["created_at"], "files": files,
+            "size": sum(int(f.get("size") or 0) for f in files)}
 
 
 def list_by(db: DB, kind: str | None = None) -> list[dict]:

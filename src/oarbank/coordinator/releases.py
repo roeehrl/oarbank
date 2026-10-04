@@ -81,18 +81,25 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
     m = mf.load(path / "oarbank-module.toml")
     run = m.runner.for_platform(platform)
     on = lambda xs: [x for x in xs if not x.platforms or platform in x.platforms]
-    # bootstrap: the agent runs the stage's jobs with the bootstrap grants (only when set, so other entries keep their bytes)
+    # bootstrap: the agent runs the stage's jobs with the bootstrap grants; checkpoint: the stage's checkpoint limits
+    # (both only when set, so other entries keep their bytes)
     stages = [{"name": st.name, "capabilities": list(st.requires.capabilities),
                "pools": sorted(set(st.requires.pools) | set(st.requires.needs_pools)),
-               "platforms": list(st.requires.platforms), **({"bootstrap": True} if st.bootstrap else {})} for st in m.stages]
+               "platforms": list(st.requires.platforms), **({"bootstrap": True} if st.bootstrap else {}),
+               **({"checkpoint": {"max_mb": st.checkpoint.max_mb, "min_interval_s": st.checkpoint.min_interval_s}}
+                  if st.checkpoint else {})} for st in m.stages]
     every = set.intersection(*(set(s["capabilities"]) for s in stages)) if stages else set()
     sb = m.sandbox
+    keeps = any(st.checkpoint for st in m.stages)
     return {"name": name, "module_id": m.module.id, "version": version, "digest": digest, "bundle": f"modules/{name}",
             "requires": sorted(every), "stages": stages,
+            # a job of the default stage names none: the agent finds its checkpoint limits by this name
+            **({"default_stage": m.default_stage()} if keeps and m.default_stage() else {}),
             "requirements": _runner_requirements(path, list(run.exec), m, platform),
             # env: [runner].env with the platform's variant merged (only when declared, so other entries keep their bytes)
             "runner": {"exec": list(run.exec), "runtime": run.runtime.kind, "capabilities": list(run.capabilities),
                        "stop_grace_s": run.stop_grace_s, "gpu": run.gpu.model_dump(),
+                       **({"checkpoint_grace_s": run.checkpoint_grace_s} if "checkpoint" in run.capabilities else {}),
                        **({"bandwidth_class": run.bandwidth_class} if run.bandwidth_class else {}),
                        **({"env": dict(run.env)} if run.env else {})},
             "services": [{"name": sv.name, "exec": list(sv.exec), "lifecycle": sv.lifecycle,
@@ -112,7 +119,9 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                         "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
                         "containers": [{"image": c.image, "platform": c.platform} for c in sb.containers],
                         # image sets with their keys (only when declared, so other entries keep their bytes)
-                        **({"container_sets": modimages.release_sets(m, path)} if sb.container_sets else {})}}
+                        **({"container_sets": modimages.release_sets(m, path)} if sb.container_sets else {}),
+                        # folders: ids only; where they are on each node is the node's signed folder statement
+                        **({"folders": [{"id": f.id, "access": f.access} for f in sb.folders]} if sb.folders else {})}}
 
 
 def build(db: DB, make_current: bool = True, comp: dict | None = None, platform: str = platforms.DEFAULT_PLATFORM) -> dict:

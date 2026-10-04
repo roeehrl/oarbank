@@ -34,6 +34,8 @@ Safety (must hold after every committed transaction):
       shares a canonical result through the cache (reads the catalogue's manifests)
   S22 a bootstrap job's canonical result is exactly pinned datasets of the module version that produced it: an empty
       payload, and artifacts that each hold one pin's files (reads the catalogue's manifests)
+  S23 an attempt that resumed from a checkpoint resumed from one recorded by an earlier attempt of the same job under the
+      same job generation
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -356,13 +358,28 @@ def s22_bootstrap_results_are_pinned(db: DB):
     return out
 
 
+def s23_resume_from_own_checkpoint(db: DB):
+    """S23: an attempt that resumed from a checkpoint (resume_json) resumed from one an earlier attempt of the same job
+    wrote, under the same job generation, on the node it names."""
+    out = []
+    for a in db.q("SELECT a.attempt_id, a.job_id, a.generation, a.resume_json, w.attempt_id w_id, w.job_id w_job, "
+                  "w.generation w_gen, w.node_id w_node FROM attempts a LEFT JOIN attempts w ON "
+                  "w.attempt_id=json_extract(a.resume_json, '$.from_attempt') WHERE a.resume_json IS NOT NULL"):
+        r = json.loads(a["resume_json"])
+        if a["w_id"] is None or a["w_job"] != a["job_id"] or a["w_gen"] != a["generation"] or a["w_id"] >= a["attempt_id"] \
+                or a["w_node"] != r.get("node_id"):
+            out.append(f"S23 attempt {a['attempt_id']} of job {a['job_id']} (generation {a['generation']}) resumed from attempt "
+                       f"{r.get('from_attempt')}, which is not an earlier attempt of that job and generation on {r.get('node_id')}")
+    return out
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
-          s22_bootstrap_results_are_pinned]
+          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint]
 
 
 def check_all(db: DB) -> list[str]:

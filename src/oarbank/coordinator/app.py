@@ -11,16 +11,49 @@ import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import config as C
 from . import clock
 from . import modcalls
-from . import agentbuilds, audit, campaigns, coordmove, core, datasets, identity, modstore, movepull, ops, releases
+from . import agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, ops, releases
 from ..contracts import operations as registry
 from .db import DB, DBBusy, jl
 
+
+
+# a download is never rendered: attachment, nosniff, and a sandbox if a browser opens it anyway
+DOWNLOAD_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox; default-src 'none'"}
+
+
+def _range_start(header: str | None) -> int:
+    """The start of a `Range: bytes=<start>-` request (0 for none): what an agent resuming a download sends."""
+    if header and header.startswith("bytes=") and header.endswith("-") and header[6:-1].isdigit():
+        return int(header[6:-1])
+    return 0
+
+
+def _blob_call(fn, *a):
+    from . import blobstore
+    try:
+        return fn(*a)
+    except blobstore.BlobError as e:
+        raise core.ApiError(e.status, e.code, e.detail, headers={"Upload-Offset": str(e.offset)} if e.offset is not None else None)
+
+
+async def _append(db, uploader: str, digest: str, request):
+    """PATCH an upload (after tus 1.0): the body is appended at `Upload-Offset`; answers 204 with the new offset, and
+    `Upload-Complete: 1` once the blob is held."""
+    from . import blobstore
+    raw = request.headers.get("upload-offset") or ""
+    if not raw.isdigit():
+        raise core.ApiError(400, "bad_offset", "send Upload-Offset: <bytes already sent>")
+    try:
+        r = await blobstore.append(db, uploader, digest, int(raw), request.stream())
+    except blobstore.BlobError as e:
+        raise core.ApiError(e.status, e.code, e.detail, headers={"Upload-Offset": str(e.offset)} if e.offset is not None else None)
+    return Response(status_code=204, headers={"Upload-Offset": str(r["offset"]), **({"Upload-Complete": "1"} if r["complete"] else {})})
 
 
 def _err(e: core.ApiError):
@@ -222,6 +255,16 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     async def fail(aid: int, request: Request, node=Depends(node_dep)):
         return await run_in_threadpool(core.fail, db, node, aid, await request.json())
 
+    @app.post("/v1/attempts/{aid}/checkpoint")
+    async def checkpoint(aid: int, request: Request, node=Depends(node_dep)):
+        """Record a checkpoint the agent uploaded for a live attempt (checkpoints.py)."""
+        from . import checkpoints
+        body = await request.json()
+        try:
+            return await run_in_threadpool(checkpoints.record, db, node, aid, body)
+        except checkpoints.CheckpointError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+
     @app.post("/v1/attempts/{aid}/log")
     async def log(aid: int, request: Request, node=Depends(node_dep)):
         await run_in_threadpool(core.append_log, aid, node, db, await request.body())
@@ -235,48 +278,44 @@ def agent_app(db: DB, puller=None) -> FastAPI:
         return m
 
     @app.get("/v1/blobs/{digest}")
-    def blob(digest: str, node=Depends(node_dep)):
-        b = db.one("SELECT path FROM blobs WHERE digest=?", (digest,))
-        if not b or not b["path"] or not db.abs(b["path"]).exists():
+    async def blob(digest: str, request: Request, node=Depends(node_dep)):
+        """A blob by digest (ranges). One only a dataset's origins have is fetched from them, once, for a node whose every
+        origin failed (blobstore.origin_stream): the bytes stream to the node as they arrive."""
+        p = await run_in_threadpool(blobstore.path, db, digest)
+        if p is not None:
+            return FileResponse(p, media_type="application/octet-stream")
+        start = _range_start(request.headers.get("range"))
+        stream = await blobstore.origin_stream(db, digest, start)
+        if stream is None:
             raise core.ApiError(404, "not_found", digest)
-        return FileResponse(db.abs(b["path"]), media_type="application/octet-stream")
+        it = stream.__aiter__()
+        try:
+            first = await it.__anext__()                    # an origin that never answers is a clean 502
+        except StopAsyncIteration:
+            first = b""
+        except blobstore.OriginError as e:
+            raise core.ApiError(502, "origin_failed", str(e)[:500])
+        size, _ = blobstore.origins_of(db, digest)
 
-    @app.head("/v1/artifacts/{digest}")
-    def artifact_exists(digest: str, node=Depends(node_dep)):
-        if not db.one("SELECT 1 FROM blobs WHERE digest=?", (digest,)):
-            raise core.ApiError(404, "not_found", digest)
-        return Response(status_code=200)
+        async def body():
+            yield first
+            try:
+                async for b in it:
+                    yield b
+            except blobstore.OriginError:
+                return                                      # cut short: the node's own digest check refuses what it got
+        return StreamingResponse(body(), status_code=206 if start else 200, media_type="application/octet-stream",
+                                 headers={"Content-Range": f"bytes {start}-{size - 1}/{size}"} if start else None)
 
-    @app.put("/v1/artifacts/{digest}")
-    async def artifact_put(digest: str, request: Request, node=Depends(node_dep)):
-        """A stage's output file (e.g. a call stage's output), stored content-addressed like any blob and
-        served back through /v1/blobs/{digest} to the stage that consumes it."""
-        import hashlib, re as _re
-        if not _re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise core.ApiError(400, "bad_digest", digest)
-        if db.one("SELECT 1 FROM blobs WHERE digest=?", (digest,)):
-            return {"ok": True, "existing": True}
-        d = C.HOME / "artifacts" / digest[:2]
-        d.mkdir(parents=True, exist_ok=True)
-        tmp = d / f".{digest}.{os.getpid()}.part"
-        h, n = hashlib.sha256(), 0
-        with open(tmp, "wb") as f:
-            async for chunk in request.stream():
-                n += len(chunk)
-                if n > C.ARTIFACT_MAX_BYTES:
-                    f.close(); tmp.unlink(missing_ok=True)
-                    raise core.ApiError(413, "too_large", f"> {C.ARTIFACT_MAX_BYTES} bytes")
-                h.update(chunk)
-                f.write(chunk)
-        if h.hexdigest() != digest:
-            tmp.unlink(missing_ok=True)
-            raise core.ApiError(400, "digest_mismatch", f"got {h.hexdigest()}")
-        final = d / digest
-        os.replace(tmp, final)
-        os.chmod(final, 0o444)
-        db.x("INSERT OR IGNORE INTO blobs(digest,path,size) VALUES(?,?,?)", (digest, db.rel(final), n))
-        db.event("artifact_stored", node_id=node["node_id"], reason=digest[:12], size=n)
-        return {"ok": True, "size": n}
+    @app.post("/v1/uploads/{digest}")
+    async def upload_begin(digest: str, request: Request, node=Depends(node_dep)):
+        """Create or resume an upload of a blob (an artifact, a checkpoint file): {offset, complete}."""
+        body = await request.json()
+        return await run_in_threadpool(_blob_call, blobstore.begin, db, f"node:{node['node_id']}", digest, body.get("size"))
+
+    @app.patch("/v1/uploads/{digest}")
+    async def upload_append(digest: str, request: Request, node=Depends(node_dep)):
+        return await _append(db, f"node:{node['node_id']}", digest, request)
 
     @app.get("/v1/releases/{name}")
     def release_bundle(name: str, node=Depends(node_dep)):
@@ -678,6 +717,52 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         db.event("module_bundle_staged", actor=actor, reason=sha[:12], size=len(data))
         return {"sha256": sha, "size": len(data), "next": "POST /api/v1/ops/modules.install {params: {sha256}}"}
 
+    def need_operator(request: Request):
+        """Blob uploads: an operator or an admin, with a full token (a module CLI's scoped token stages no bytes)."""
+        if ops.ROLE_RANK.get(getattr(request.state, "role", None), -1) < ops.ROLE_RANK["operator"] or getattr(request.state, "scope", None):
+            raise core.ApiError(403, "forbidden_role", "uploads need the operator role and an unscoped token")
+
+    @app.post("/api/v1/uploads/{digest}")
+    async def api_upload_begin(digest: str, request: Request, actor=Depends(who), _=Depends(need_operator)):
+        """Create or resume a blob upload ({offset, complete}); datasets.register then names the blobs (the audited
+        operation). After tus 1.0, with the digest as the upload's id (docs/design/datasets-media-checkpoints.md)."""
+        body = await request.json()
+        return await run_in_threadpool(_blob_call, blobstore.begin, db, f"account:{actor}", digest, body.get("size"))
+
+    @app.patch("/api/v1/uploads/{digest}")
+    async def api_upload_append(digest: str, request: Request, actor=Depends(who), _=Depends(need_operator)):
+        return await _append(db, f"account:{actor}", digest, request)
+
+    @app.get("/api/v1/blobs/{digest}")
+    def api_blob(digest: str, actor=Depends(who)):
+        """A dataset file or a result artifact, as a download (attachment, ranges); never rendered."""
+        p = blobstore.path(db, digest)
+        if p is None or not (db.one("SELECT 1 FROM datasets WHERE instr(files_json, ?) > 0 LIMIT 1", (digest,))
+                             or db.one("SELECT 1 FROM results WHERE canonical=1 AND instr(result_json, ?) > 0 LIMIT 1", (digest,))):
+            raise core.ApiError(404, "not_found", f"no dataset file or result artifact {digest}")
+        return FileResponse(p, media_type="application/octet-stream", filename=digest, headers=DOWNLOAD_HEADERS)
+
+    @app.get("/api/v1/datasets/{did:path}")
+    def api_dataset(did: str, actor=Depends(who)):
+        d = datasets.detail(db, did)
+        if not d:
+            raise core.ApiError(404, "not_found", f"dataset {did}")
+        return d
+
+    @app.get("/api/v1/folders")
+    def api_folders(actor=Depends(who)):
+        """The folder registry, each node's statement (and whether it is signed) and what each node reports."""
+        from . import folders
+        return {"registry": folders.registry(db), "statements": folders.statements(db), "signing": C.RELEASE_SIGNING,
+                "nodes": {n["node_id"]: {"hostname": n["hostname"], "folders": folders.report(n)}
+                          for n in db.q("SELECT node_id, hostname, folders_json FROM nodes WHERE lifecycle!='retired'")}}
+
+    @app.get("/api/v1/campaigns/{cid}/artifacts")
+    def api_campaign_artifacts(cid: str, actor=Depends(who)):
+        if not db.one("SELECT 1 FROM campaigns WHERE campaign_id=?", (cid,)):
+            raise core.ApiError(404, "not_found", f"campaign {cid}")
+        return campaigns.artifacts(db, cid)
+
     @app.post("/api/v1/coordinator/builds")
     async def api_coordinator_build_upload(request: Request, actor=Depends(who), _=Depends(need_admin)):
         """Stage a coordinator build archive for coordinator.builds.upload (registering is the audited operation)."""
@@ -963,7 +1048,7 @@ def background(db: DB, stop: threading.Event):
                     for old in sorted((C.HOME / "backups").glob("fleet-*.sqlite3"))[:-7]:
                         old.unlink()
                     db.event("backup", reason=str(dest))
-                    db.event("pruned", **db.prune())
+                    db.event("pruned", **db.prune(), upload_partials=blobstore.sweep_partials(db))
         except Exception as e:
             db.event("background_error", reason=repr(e)[:300])
         stop.wait(C.REAPER_EVERY)

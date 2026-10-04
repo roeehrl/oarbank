@@ -68,6 +68,8 @@ CODES: list[ReasonCode] = [
     C("OS_VERSION_UNSUPPORTED", "job_pending", "Module {module} needs another OS version than {os_version} (requires.os)"),
     C("TOOL_UNAVAILABLE", "job_pending", "Module {module} needs host tools the tool registry has no {os} paths for",
       remedies=["settings.tools.update"]),
+    C("FOLDER_UNAVAILABLE", "job_pending", "Module {module} needs folders this node does not provide (unmapped, another "
+      "access, refused by the node, or awaiting the owner's signature)", remedies=["settings.folders.update"]),
     C("SANDBOX_BACKEND_MISSING", "job_pending", "The agent on this node cannot sandbox module processes"),
     C("CAPABILITY_NOT_ENFORCED", "job_pending", "The node's sandbox cannot enforce {capability}, which module {module} needs"),
     C("AGENT_TOO_OLD", "job_pending", "Module {module} needs agent {need}; the node runs {have}", remedies=["agent.promote"]),

@@ -226,18 +226,32 @@ def _own_dataset(db: DB, module: str, did: str) -> dict:
 
 
 def _datasets_create(db: DB, module: str, a: dict, actor: str) -> dict:
-    """A dataset whose blobs the module can reach, of a kind it declares (short kinds: the owning module scopes them); a
-    pinned id only with its pinned contents. An existing id of the module's with the same kind, meta, files and platform
-    is skipped; anything else fails."""
-    from . import modfiles
-    did, kind, files, meta = a.get("dataset_id", ""), a.get("kind"), a.get("files") or [], a.get("meta") or {}
+    """A dataset of a kind the module declares (short kinds: the owning module scopes them), every file with its digest
+    and size: a blob the module can reach, or one its `origins` give (the coordinator need not hold it: nodes fetch it,
+    and the coordinator only when every origin failed for a node). A pinned id only with its pinned contents. An existing
+    id of the module's with the same kind, meta, files and platform is skipped; anything else fails."""
+    from oarbank_sdk.origins import file_problem
+    from . import blobstore, modfiles
+    did, kind, meta = a.get("dataset_id", ""), a.get("kind"), a.get("meta") or {}
     kinds = modcalls.info(module).manifest.datasets.kinds
     if kind not in kinds:
         raise EffectError(422, "undeclared_kind", f"{did}: kind {kind!r} is not in [datasets].kinds {kinds}")
+    files = []
+    for f in a.get("files") or []:
+        why = file_problem(f)
+        if why:
+            raise EffectError(422, "bad_dataset_file", f"{did}: {why}")
+        files.append({"path": f["path"], "digest": f["digest"], "size": f["size"], **({"origins": list(f["origins"])} if f.get("origins") else {})})
     for f in files:
-        if not db.one("SELECT 1 FROM blobs WHERE digest=?", (f.get("digest"),)) \
-                or not modfiles.visible_blob(db, module, str(f.get("digest") or "")):
-            raise EffectError(422, "unknown_blob", f"{did}: {f.get('path')} ({f.get('digest')})")
+        b = db.one("SELECT size FROM blobs WHERE digest=?", (f["digest"],))
+        if b and b["size"] is not None and b["size"] != f["size"]:
+            raise EffectError(422, "size_mismatch", f"{did}: {f['path']} is {b['size']} bytes, not {f['size']}")
+        if not f.get("origins") and (not b or not modfiles.visible_blob(db, module, f["digest"])):
+            raise EffectError(422, "unknown_blob", f"{did}: {f['path']} ({f['digest']}): name origins for a blob the "
+                              "coordinator does not hold")
+    why = blobstore.check_origins(db, files)
+    if why:
+        raise EffectError(422, "origin_refused", f"{did}: {why}")
     plat = placement.dataset_platform(module, kind, a.get("platform"))
     pin = modcalls.info(module).manifest.datasets.pin(did)
     if pin is not None:                                 # a pinned id: only its pinned contents (bootstrap-stages.md)

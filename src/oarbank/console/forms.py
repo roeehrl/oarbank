@@ -76,6 +76,10 @@ MAPPERS = {
     "settings.tools.update": lambda f, ctx: {"trust": f.get("trust") or "read",
                                               "paths": {os_: [x.strip() for x in (f.get(f"paths_{os_}") or "").splitlines() if x.strip()]
                                                         for os_ in ("darwin", "linux", "windows")}},
+    # a folder's path per node, one "<node>=<path>" per line; a node with an empty path is removed
+    "settings.folders.update": lambda f, ctx: {"access": f.get("access") or "read", "nodes": {
+        k.strip(): v.strip() or None for k, _, v in (x.partition("=") for x in (f.get("nodes") or "").splitlines()) if k.strip()}},
+    "settings.origins.update": lambda f, ctx: {"hosts": [x.strip() for x in (f.get("hosts") or "").splitlines() if x.strip()]},
     # secrets and labels stay strings (generic coercion would turn a numeric password into a number)
     "access.accounts.create": lambda f, ctx: {"role": f.get("p.role") or "viewer",
                                               **({"password": f.get("p.password")} if f.get("p.password") else {})},

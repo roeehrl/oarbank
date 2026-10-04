@@ -5,6 +5,7 @@ these with a pooled read connection. Nothing here writes; module views are mater
 console never runs module code.
 """
 import json
+from pathlib import Path
 import time
 
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
@@ -325,8 +326,13 @@ def job_page(r, jid: int, attempt_log_dir) -> dict | None:
             logs[a["attempt_id"]] = p.read_bytes()[-20000:].decode(errors="replace")
     events = r.q("SELECT * FROM events WHERE job_id=? ORDER BY event_id", (jid,))
     history = r.q("SELECT * FROM audit WHERE target_type='job' AND target_id=? ORDER BY event_id DESC LIMIT 30", (str(jid),))
+    for a in atts:
+        a["resume"] = jl(a.get("resume_json"))
+    ckpt = r.one("SELECT * FROM checkpoints WHERE job_id=? AND generation=?", (jid, j["generation"]))
+    if ckpt:
+        ckpt["files"] = jl(ckpt["files_json"], [])
     return {"j": j, "spec": jl(j["spec_json"], {}), "attempts": atts, "results": res, "logs": logs, "events": events,
-            "history": history, "waterfall": waterfall(r, j, atts)}
+            "history": history, "waterfall": waterfall(r, j, atts), "checkpoint": ckpt}
 
 
 SEGMENT_CLASS = {"queued": "seg-q", "staging": "seg-s", "finalizing": "seg-f", "evaluating": "seg-e"}
@@ -390,7 +396,12 @@ def audit_page(r, op: str, target: str, before: int | None) -> dict:
 
 
 def settings_page(r) -> dict:
-    s = {k: r.get_setting(k) for k in ("ntfy", "console_hosts", "dataset_groups", "tool_registry")}
+    s = {k: r.get_setting(k) for k in ("ntfy", "console_hosts", "dataset_groups", "tool_registry", "folder_registry",
+                                       "folder_statements", "dataset_origins")}
+    s["nodes"] = {n["node_id"]: n for n in r.q("SELECT node_id, hostname, platform, folders_json FROM nodes WHERE lifecycle!='retired' "
+                                                "ORDER BY hostname")}
+    for n in s["nodes"].values():
+        n["folders"] = jl(n.pop("folders_json"), {}) or {}
     return {"s": s, "releases": r.q("SELECT release_id, platform, created_at, status, sha256 FROM releases ORDER BY created_at DESC LIMIT 10"),
             "dscount": r.q("SELECT kind, COUNT(*) n FROM datasets GROUP BY kind")}
 
@@ -614,4 +625,67 @@ def coordinator_banner(r) -> dict | None:
     to = (jl(mv["statement"], {}) or {}).get("to", {}).get("url") if mv else None
     return {"state": mv["state"] if mv else role, "to": to, "not_before": mv["not_before"] if mv else None, "role": role,
             "phase": st.get("move_phase") or "idle"}
+
+
+
+# ------------------------------------------------------------------ datasets (docs/design/datasets-media-checkpoints.md)
+
+def datasets_page(r, kind: str = "", module: str = "") -> dict:
+    rows = r.q("SELECT dataset_id, kind, module, files_json, created_at, platform FROM datasets WHERE kind!='artifact' "
+               "AND (?='' OR kind=?) AND (?='' OR COALESCE(module,'')=?) ORDER BY created_at DESC LIMIT 500",
+               (kind, kind, module, module))
+    for d in rows:
+        files = jl(d.pop("files_json"), []) or []
+        d["n_files"], d["size"] = len(files), sum(int(f.get("size") or 0) for f in files)
+        d["origins"] = sum(1 for f in files if f.get("origins"))
+    return {"datasets": rows, "kinds": [x["kind"] for x in r.q("SELECT DISTINCT kind FROM datasets WHERE kind!='artifact' ORDER BY kind")],
+            "kind": kind, "module": module}
+
+
+def dataset_page(r, did: str) -> dict | None:
+    d = r.one("SELECT * FROM datasets WHERE dataset_id=?", (did,))
+    if not d:
+        return None
+    files = jl(d["files_json"], []) or []
+    held = {x["digest"] for x in r.q("SELECT digest FROM blobs WHERE digest IN (%s)" % ",".join("?" * len(files)),
+                                       tuple(f["digest"] for f in files))} if files else set()
+    for f in files:
+        f["held"] = f["digest"] in held
+    return {"d": {**d, "meta": jl(d["meta_json"], {}) or {}}, "files": files, "size": sum(int(f.get("size") or 0) for f in files),
+            "jobs": r.q("SELECT job_id, state, module FROM jobs WHERE dataset_id=? OR EXISTS (SELECT 1 FROM json_each(jobs.datasets_json) "
+                        "WHERE value=?) ORDER BY job_id DESC LIMIT 20", (did, did))}
+
+
+def blob_file(r, home: Path, digest: str) -> Path | None:
+    """A held blob's file (paths in `blobs` are relative to the coordinator's home)."""
+    row = r.one("SELECT path FROM blobs WHERE digest=?", (digest,))
+    if not row or not row["path"]:
+        return None
+    p = Path(row["path"])
+    p = p if p.is_absolute() else home / p
+    return p if p.is_file() else None
+
+
+def dataset_files(r, home: Path, did: str) -> list[tuple[str, Path]] | None:
+    """(path in the dataset, blob file) for each held file of a dataset, or None when it does not exist."""
+    d = r.one("SELECT files_json FROM datasets WHERE dataset_id=?", (did,))
+    if not d:
+        return None
+    return [(f["path"], p) for f in jl(d["files_json"], []) or [] if (p := blob_file(r, home, f.get("digest") or ""))]
+
+
+def campaign_files(r, home: Path, cid: str) -> list[tuple[str, Path]]:
+    """(`<job id>[-<name>]/<artifact>/<path>`, blob file) for every artifact file of a campaign's done jobs' canonical
+    results: the layout `oarbank campaign download` writes."""
+    out = []
+    for row in r.q("SELECT j.job_id, j.name, rs.result_json FROM jobs j JOIN results rs ON rs.result_id=j.canonical_result_id "
+                   "WHERE j.campaign_id=? AND j.state='done' AND j.kind!='call' ORDER BY j.job_id", (cid,)):
+        from ..coordinator.campaigns import artifact_dir
+        top = artifact_dir(row["job_id"], row["name"])
+        for a in (jl(row["result_json"], {}) or {}).get("artifacts") or []:
+            for f in a.get("files") or []:
+                p = blob_file(r, home, f.get("digest") or "")
+                if p:
+                    out.append((f"{top}/{a.get('name')}/{f.get('path')}", p))
+    return out
 

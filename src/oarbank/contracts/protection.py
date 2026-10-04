@@ -76,6 +76,8 @@ class NodeSection(_M):
     memory: MemoryGuard = Field(default_factory=MemoryGuard)
     implicit: Implicit = Field(default_factory=Implicit, description="moderate/strict_yield only.")
     defaults: Timing = Field(default_factory=Timing)
+    max_pause_s: Annotated[float, Field(ge=10, le=600)] = Field(600, description=(
+        "The longest a fleet job stays paused before it is released (a checkpointing runner checkpoints first)."))
 
 
 # ------------------------------------------------------------------------------------------ rules

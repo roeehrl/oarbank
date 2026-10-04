@@ -60,6 +60,23 @@ def _remedies(codes, params) -> list[X.Remedy]:
     return out
 
 
+def _checkpoint_actions(db: DB, j: dict) -> list[str]:
+    """A job's portable checkpoint (checkpoints.py): what its next attempt resumes from, and what a running one did."""
+    from . import checkpoints
+    out = []
+    c = checkpoints.for_job(db, j) if j["state"] in ("pending", "leased") else None
+    if c:
+        out.append(f"Keeps a checkpoint from attempt {c['attempt_id']} on {c['node_id']} ({c['size']:,} bytes, recorded at "
+                   f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(c['at']))}): its next attempt resumes from it on any node")
+    a = db.one("SELECT attempt_id, resume_json FROM attempts WHERE job_id=? AND state='live' ORDER BY attempt_id DESC LIMIT 1",
+               (j["job_id"],))
+    r = jl(a["resume_json"]) if a else None
+    if r:
+        out.append(f"Attempt {a['attempt_id']} resumed from attempt {r['from_attempt']}'s checkpoint (written on {r['node_id']}); "
+                   "a result that resumed from another node's checkpoint is always replicated on a third node")
+    return out
+
+
 def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None = None) -> X.ExplainDocument | None:
     now = now or time.time()
     j = db.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
@@ -73,6 +90,7 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
     actions = [f"Runs as a bootstrap job (stage {j['stage']}): on nodes where {j['module']}'s doctor is healthy, before its "
                "goldens pass, with only the module's egress allowlist; its result must be exactly the module's pinned datasets, "
                "which the coordinator then registers, and it never counts toward certification"] if boot else []
+    actions += _checkpoint_actions(db, j)
     if j["state"] != "pending":
         a = db.one("SELECT a.*, n.hostname FROM attempts a LEFT JOIN nodes n ON n.node_id=a.node_id WHERE a.job_id=? "
                    "ORDER BY a.attempt_id DESC LIMIT 1", (job_id,))

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ d.dataset_id }} · Oarbank{% endblock %}
+{% block body %}
+<h1 class="mono">{{ d.dataset_id }}</h1>
+<div class="kv small">
+  <span class="mut">kind</span><span>{{ d.kind }}</span>
+  <span class="mut">owner</span><span>{{ d.module or 'the operator (every module sees it)' }}</span>
+  <span class="mut">platform</span><span>{{ d.platform or 'any' }}</span>
+  <span class="mut">size</span><span>{{ files | length }} files, {{ (size / 1048576) | num(1) }} MB</span>
+  {% if d.meta %}<span class="mut">meta</span><span class="mono">{{ d.meta | tojson }}</span>{% endif %}
+</div>
+<h2>Files <a class="small" href="/datasets/{{ d.dataset_id }}/download.zip" download>download all (zip)</a></h2>
+<p class="small mut">Files the coordinator does not hold come from their origins on each node; it fetches one itself only when every
+origin fails for a node. <span class="mono">oarbank dataset download {{ d.dataset_id }}</span> fetches them all, resumable.</p>
+<table class="small"><tr><th>path</th><th class="num">size</th><th>sha256</th><th>origins</th><th><span class="sr-only">download</span></th></tr>
+{% for f in files %}<tr><td class="mono">{{ f.path }}</td><td class="num">{{ (f.size or 0) | num(0) }}</td><td class="mono">{{ f.digest[:12] }}…</td>
+<td class="small">{% for o in f.origins or [] %}<span class="mono">{{ o }}</span><br>{% endfor %}</td>
+<td>{% if f.held %}<a href="/datasets/{{ d.dataset_id }}/files/{{ f.path }}" download>download</a>{% else %}<span class="mut">by origin only</span>{% endif %}</td></tr>{% endfor %}</table>
+{% if jobs %}<h2>Jobs</h2><p class="small">{% for j in jobs %}<a href="/jobs/{{ j.job_id }}">{{ j.job_id }}</a> <span class="mut">{{ j.state }}</span> {% endfor %}</p>{% endif %}
+{% endblock %}

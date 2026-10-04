@@ -21,7 +21,7 @@
 <div id="stale-banner" role="status">Data may be out of date; last update <span id="stale-age"></span>. Reconnecting…</div>
 <header>
   <b>Oarbank</b>
-  <a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}
+  <a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/datasets">Datasets</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}
   {% if not meta.coordinator_ok %}<span class="chip bad">coordinator unreachable{% if meta.coordinator_down_since %} since {{ meta.coordinator_down_since | hm }}{% endif %}</span>{% endif %}
   <span class="who">as of {{ meta.built_at | hm }} · <a href="/account">{{ actor }}</a></span>
   <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Sign out</button></form>

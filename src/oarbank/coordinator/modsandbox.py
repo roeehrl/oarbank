@@ -6,7 +6,7 @@ the SDK read-only; `<home>/modules/data/<name>` and `<home>/tmp/modules/<name>` 
 paths, no GPU (verbs are pure and reach state only through host callbacks). The module host refuses a process that
 is not confined after its handshake.
 
-Node-side grants (`[sandbox]`: network, host tools, GPU, written-file execution, containers) are approved per module version by an operator.
+Node-side grants (`[sandbox]`: network, host tools, GPU, written-file execution, containers, folders) are approved per module version by an operator.
 A version that requests anything cannot be enabled, canaried, pinned or promoted until its exact requests (by digest)
 are approved. Releases then carry the approved grants to agents, which enforce them.
 """
@@ -165,6 +165,8 @@ def requests(manifest, bundle) -> dict:
         out["container_sets"] = modimages.set_requests(manifest, bundle)
     if any("gpu" in s.requires.pools for s in manifest.stages):
         out["container_gpu"] = True
+    if sb.folders:
+        out["folders"] = sorted(({"id": f.id, "access": f.access} for f in sb.folders), key=lambda f: f["id"])
     return out
 
 
@@ -237,4 +239,7 @@ def describe(req: dict) -> str:
                    f"SHA256:{s['key_sha256'][:16]}" + (f", listed in index {s['index']}" if s.get("index") else ""))
     if req.get("container_gpu"):
         out.append("GPU passthrough to containers")
+    for f in req.get("folders") or []:
+        out.append(f"reads folder {f['id']} (on Windows its files are executable)" if f["access"] == "read" else
+                   f"writes into folder {f['id']} (files it creates may replace files there)")
     return "; ".join(out)

@@ -1,8 +1,7 @@
 # Datasets in and out, media and portable checkpoints (SDK 1.5, core 2.5)
 
-Status: built as designed (see Implementation status), for three issues on the public SDK repository, in one release
-with the other 1.5 work:
-**oarbank-sdk 1.5.0** and **core 2.5.0**.
+Status: built as designed (PLAN D37; see Implementation status), for three issues on the public SDK repository, in one
+release with the other 1.5 work: **oarbank-sdk 1.5.0** and **core 2.5.0**.
 
 - #10 Datasets: get user files and downloads in, and results out (origins, upload, download, folder grants).
 - #11 UI contract: media components (`media`, `gallery`, `compare`) with bytes served safely.

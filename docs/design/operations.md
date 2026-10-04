@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-84 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+87 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -57,7 +57,8 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `datasets.register` — Register a dataset whose files are on the coordinator (module importers call it) | T1 | prompted | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=datasets.register)<br>`POST /do/{op}` (op=datasets.register) | oarbank dataset register <file.json><br>module CLIs (importers) |
+| `datasets.register` — Register a dataset from uploaded blobs, files on the coordinator or origin URLs | T1 | prompted | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=datasets.register)<br>`POST /api/v1/uploads/{digest}`<br>`PATCH /api/v1/uploads/{digest}`<br>`POST /do/{op}` (op=datasets.register)<br>`POST /datasets/uploads/{digest}`<br>`PATCH /datasets/uploads/{digest}` | oarbank dataset upload <dir> --kind <kind><br>oarbank dataset register <file.json> |
+| `settings.origins.update` — Restrict the hosts dataset origins may name (empty: any public https host) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.origins.update)<br>`POST /do/{op}` (op=settings.origins.update) | oarbank op settings.origins.update -p hosts=... |
 
 ## modules
 
@@ -137,6 +138,8 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 |---|---|---|---|---|---|---|---|---|
 | `settings.notifications.update` — Edit ntfy and notification settings | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.notifications.update)<br>`POST /do/{op}` (op=settings.notifications.update) | – |
 | `settings.tools.update` — Map a host tool id to its paths per OS in the tool registry (modules request tools by id) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.tools.update)<br>`POST /do/{op}` (op=settings.tools.update) | – |
+| `settings.folders.update` — Map a folder id to a path on each node in the folder registry (modules request folders by id) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.folders.update)<br>`POST /do/{op}` (op=settings.folders.update) | oarbank folders map <id> --access read|write --node <node>=<path> |
+| `folders.sign` — Attach the owner's signature to a node's folder statement (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=folders.sign)<br>`POST /do/{op}` (op=folders.sign) | oarbank folders sign <node> |
 | `settings.update` — Write a raw setting (goldens, dataset groups) | T2 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=settings.update)<br>`POST /do/{op}` (op=settings.update) | oarbank op settings.update <key><br>module CLIs (golden:<module>, dataset_groups) |
 
 ## access
@@ -167,7 +170,7 @@ Machine-to-machine, authenticated by the node's client certificate and fenced by
 - `POST /v1/agent/enroll`
 - `POST /v1/agent/heartbeat`
 - `POST /v1/agent/hello`
-- `PUT /v1/artifacts/{digest}`
+- `POST /v1/attempts/{aid}/checkpoint`
 - `POST /v1/attempts/{aid}/complete`
 - `POST /v1/attempts/{aid}/fail`
 - `POST /v1/attempts/{aid}/log`
@@ -178,3 +181,5 @@ Machine-to-machine, authenticated by the node's client certificate and fenced by
 - `POST /v1/move/ready`
 - `POST /v1/move/sign-statement`
 - `POST /v1/move/snapshot`
+- `PATCH /v1/uploads/{digest}`
+- `POST /v1/uploads/{digest}`

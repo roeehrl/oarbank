@@ -1439,6 +1439,81 @@ def _tools(db, req):
     return {"tool": req.target, "entry": reg.get(req.target)}
 
 
+def _folders_impact(db, r):
+    from . import folders
+    try:
+        new = folders.check_entry(db, r.target or "", r.params)
+    except folders.FolderError as e:
+        return {"refused": str(e)}
+    users = sorted({f"{m['name']} {m['version']}" for m in db.q("SELECT name, version, requests_json FROM module_grants")
+                    if any(f.get("id") == r.target for f in (json.loads(m["requests_json"]).get("folders") or []))})
+    return {"folder": r.target, "before": folders.registry(db).get(r.target), "after": new,
+            "approved_module_versions": users,
+            "then": "each changed node gets a new folder statement" + (" for the owner to sign (oarbank folders sign <node>)"
+                                                                       if _signing() else "")}
+
+
+@handler("settings.folders.update", target_type="setting", impact=_folders_impact,
+         snapshot=lambda db, r: {"folder_registry": db.get_setting("folder_registry")}, versions=lambda db, r: ["setting:folder_registry"])
+def _folders(db, req):
+    """The folder registry (oarbank-sdk spec/sandbox.md, "Folders"): a folder id mapped to a path on each node, with its
+    access. `nodes` entries set to null remove the node; an entry with no nodes left removes the id. Every node whose
+    mapping changed gets a new folder statement (signed by the owner in signing mode before nodes apply it)."""
+    from . import folders
+    try:
+        entry = folders.check_entry(db, req.target or "", req.params)
+    except folders.FolderError as e:
+        raise core.ApiError(400, "bad_folder", str(e))
+    reg = dict(folders.registry(db))
+    before = set((reg.get(req.target) or {}).get("nodes") or {})
+    if entry["nodes"]:
+        reg[req.target] = entry
+    else:
+        reg.pop(req.target, None)
+    db.set_setting(folders.REGISTRY, reg)
+    changed = folders.refresh(db, sorted(before | set(entry["nodes"])))
+    db.event("settings_changed", actor=req.actor, reason=f"folder_registry {req.target}: {entry['access']} on "
+             f"{len(entry['nodes'])} nodes; new statements for {', '.join(changed) or 'none'}")
+    return {"folder": req.target, "entry": reg.get(req.target), "statements": changed}
+
+
+@handler("folders.sign", target_type="node", atomic=False)
+def _folders_sign(db, req):
+    from . import folders
+    try:
+        return folders.sign(db, req.target or "", req.params.get("statement") or "", req.params.get("signature") or "")
+    except folders.FolderError as e:
+        raise core.ApiError(422, "bad_folder_signature", str(e))
+
+
+def _origins_impact(db, r):
+    from oarbank_sdk import origins as O
+    from . import blobstore
+    hosts = [h.strip().lower() for h in r.params.get("hosts") or [] if h.strip()]
+    bad = [h for h in hosts if not re.fullmatch(r"(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]{1,5})?", h)]
+    if bad:
+        return {"refused": f"not host patterns: {bad}"}
+    refused = sorted({d["dataset_id"] for d in db.q("SELECT dataset_id, files_json FROM datasets")
+                      for f in json.loads(d["files_json"] or "[]") for o in f.get("origins") or [] if not O.allowed(o, hosts)})
+    return {"before": blobstore.origin_policy(db), "after": hosts, "datasets_losing_origins": refused[:50],
+            "then": "agents get only the admitted origins of each dataset; files left without one come from the coordinator"}
+
+
+@handler("settings.origins.update", target_type="setting", impact=_origins_impact,
+         snapshot=lambda db, r: {"dataset_origins": db.get_setting("dataset_origins")}, versions=lambda db, r: ["setting:dataset_origins"])
+def _origins(db, req):
+    """The origin host policy (docs/design/datasets-media-checkpoints.md): host patterns dataset origins must match
+    (`example.org`, `*.example.org`, with an optional `:port`); none admits every public https host. It applies when a
+    dataset is registered and whenever its files are served or fetched, so tightening it takes effect at once."""
+    from . import blobstore
+    imp = _origins_impact(db, req)
+    if imp.get("refused"):
+        raise core.ApiError(400, "bad_origin_policy", imp["refused"])
+    db.set_setting(blobstore.ORIGIN_SETTING, {"hosts": imp["after"]})
+    db.event("settings_changed", actor=req.actor, reason=f"dataset_origins: {', '.join(imp['after']) or 'any host'}")
+    return {"hosts": imp["after"]}
+
+
 # ------------------------------------------------------------------ access (accounts, tokens, sign-in links)
 
 def _access(fn):

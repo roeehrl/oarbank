@@ -278,8 +278,10 @@ def host_callbacks(db) -> dict:
         for r in rows:
             meta = json.loads(r["meta_json"] or "{}")
             if all(meta.get(k) == v for k, v in (p.get("attrs") or {}).items()):
-                out.append({"id": r["dataset_id"], "kind": r["kind"], "attrs": meta,
-                            "files": json.loads(r["files_json"] or "[]") if p.get("with_files") else []})
+                files = [{"path": f["path"], "digest": f["digest"], "size": f.get("size"),
+                          **({"origins": f["origins"]} if f.get("origins") else {})}      # origins only when it has any
+                         for f in json.loads(r["files_json"] or "[]")] if p.get("with_files") else []
+                out.append({"id": r["dataset_id"], "kind": r["kind"], "attrs": meta, "files": files})
         return {"datasets": out if ids else out[:lim]}
 
     def blobs_stat(module, p):

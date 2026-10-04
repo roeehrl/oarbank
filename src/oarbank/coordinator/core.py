@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, coordmove, identity, modcalls, modstore, owner, placement, platforms, predicates, releases
+from . import agentbuilds, checkpoints, coordmove, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -251,6 +251,7 @@ def _node_directives(db: DB, node: dict) -> dict:
             "coordinator": {"fleet_id": identity.fleet_id(db), "cik": identity.key(Path(db.path).parent).public_b64,
                             "epoch": identity.epoch(db)},
             "install_coordinator": jl(node.get("install_coordinator_json")),
+            "folders": folders.directive(db, node["node_id"]),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
             # the kill switch: a disabled module's services stop on every node (its attempts are revoked)
             "modules_disabled": sorted(modstore.disabled_names(db)),
@@ -356,7 +357,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             if not row or row["state"] != "live" or row["node_id"] != nid:
                 continue
             progressed = (a.get("cpu_s", 0) > (row["cpu_s"] or 0) + 0.01 or
-                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused")
+                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing")
                           or row["cpu_s"] is None)
             if a.get("phase") and a.get("phase") != row["phase"]:
                 db.x("INSERT OR IGNORE INTO attempt_phases VALUES(?,?,?)", (row["attempt_id"], a["phase"], t))
@@ -373,6 +374,8 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
         if body.get("doctor") is not None:
             db.x("UPDATE nodes SET doctor_json=?, doctor_at=?, want_doctor=0 WHERE node_id=?",
                  (json.dumps(body["doctor"]), t, nid))
+        if isinstance(body.get("folders"), dict):           # the folders of the statement the agent applied (folders.py)
+            db.x("UPDATE nodes SET folders_json=? WHERE node_id=?", (json.dumps(body["folders"])[:100_000], nid))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
@@ -947,10 +950,17 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             # the runner gets a SpecEnvelope: the module's payload plus what the stage reserves and its inputs
             spec = envelope(db, j, ver, res, arts_box.get("arts") if j["depends_on"] else None, platform=node.get("platform"))
             gen = nv.states.get(j["module"], {}).get("generation", 0)
+            # the job's latest checkpoint of this generation: the attempt resumes from it, on whichever node it runs
+            ckpt = checkpoints.for_job(db, j) if checkpoints.limits(j["module"], j["stage"], ver) else None
+            if ckpt:
+                spec["resume"] = checkpoints.resume_of(ckpt)
             aid = db.x("INSERT INTO attempts(job_id,node_id,generation,release_id,cert_generation,state,granted_at,"
-                       "expires_at,hard_deadline,phase,last_progress_at,module_version) VALUES(?,?,?,?,?,'live',?,?,?,'staging',?,?)",
+                       "expires_at,hard_deadline,phase,last_progress_at,module_version,resume_json) "
+                       "VALUES(?,?,?,?,?,'live',?,?,?,'staging',?,?,?)",
                        (j["job_id"], nid, j["generation"], node["release_id"], gen, t,
-                        t + C.LEASE_TTL, t + max(600, spec.get("timeout_s") or 1800), t, ver))
+                        t + C.LEASE_TTL, t + max(600, spec.get("timeout_s") or 1800), t, ver,
+                        json.dumps({"from_attempt": ckpt["attempt_id"], "node_id": ckpt["node_id"], "digest": ckpt["digest"]})
+                        if ckpt else None))
             db.x("UPDATE jobs SET state='leased' WHERE job_id=?", (j["job_id"],))
             db.x("INSERT OR IGNORE INTO attempt_phases VALUES(?, 'granted', ?)", (aid, t))
             nv.free_cpu -= need_cpu
@@ -970,6 +980,8 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             images = jl(j.get("images_json"), [])
             if images:
                 grant["images"] = images
+            if ckpt:                        # the job resumes from its checkpoint: the agent stages these files
+                grant["checkpoint"] = {"files": jl(ckpt["files_json"], [])}
             grants.append(grant)
     for g in grants:
         db.event("granted", node_id=nid, job_id=g["job_id"], attempt_id=g["attempt_id"], reason=g["module"])
@@ -1189,7 +1201,7 @@ def _comparable(a: dict, b: dict) -> bool:
 
 
 def _register_artifacts(db: DB, res: dict, module: str | None = None) -> str | None:
-    """Artifacts a call stage uploaded (PUT /v1/artifacts/<sha256>) become content-addressed datasets
+    """Artifacts a stage uploaded (POST/PATCH /v1/uploads/<sha256>) become content-addressed datasets
     `art:<digest>` owned by the job's module; the result records each dataset id for the score stage. None, or a
     rejection reason."""
     for a in res["artifacts"]:
@@ -1207,18 +1219,21 @@ def _register_artifacts(db: DB, res: dict, module: str | None = None) -> str | N
     return None
 
 
-def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: str | None):
+def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: str | None, force: bool = False,
+                     exclude: list | None = None):
     """Adaptive replication: re-run a deterministic sample of completed jobs on a different node,
     so a silently wrong node is caught statistically (a mismatch opens a quorum dispute). Never a job of a stage that
-    does not compare (determinism none): two honest runs of it may differ."""
+    does not compare (determinism none): two honest runs of it may differ. `force`: always (a result that resumed from
+    another node's checkpoint, whose writer `exclude` names: the replica runs on a third node)."""
     if not modcalls.compares(j["module"], j["stage"], version):
         return
     rate = float(db.get_setting("replica_rate", 0.03))
-    if rate <= 0 or int(j["job_key"][:8], 16) / 0xFFFFFFFF >= rate:
+    if not force and (rate <= 0 or int(j["job_key"][:8], 16) / 0xFFFFFFFF >= rate):
         return
     if db.one("SELECT 1 FROM jobs WHERE kind='replica' AND job_key=?", (j["job_key"] + ":replica",)):
         return
-    if not _eligible_nodes(db, j, {node_id}, cmp or {}):
+    parties = [node_id, *(exclude or [])]
+    if not _eligible_nodes(db, j, set(parties), cmp or {}):
         return                # nobody else could run it: it would sit pending forever (TLA+ finding F3)
     # a replica stays in its original's unit of work (D33) and compares within the original's class
     db.x("INSERT INTO jobs(job_key,dataset_id,kind,priority,state,spec_json,datasets_json,created_at,module,resources_json,"
@@ -1226,7 +1241,7 @@ def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: s
          "VALUES(?,?,'replica',?,'pending',?,?,?,?,?,?,?,?,?,?,?,?)",
          (j["job_key"] + ":replica", j["dataset_id"], (j["priority"] or 0) - 1, j["spec_json"],
           j["datasets_json"], now(), j["module"], j["resources_json"],
-          json.dumps({"nodes": [node_id], "replica_of": j["job_id"], **(cmp or {})}),
+          json.dumps({"nodes": parties, "replica_of": j["job_id"], **(cmp or {})}),
           f"replica of {j['job_id']}", j["stage"], j["spec_version"], j["placement_unit"], j["platforms_json"], j["group_key"]))
     db.event("replica_queued", job_id=j["job_id"], node_id=node_id)
 
@@ -1258,9 +1273,11 @@ def _check_replica(db: DB, rj: dict, rid: int, node_id: str, digest, value, post
 
 
 def invalidate_node_results(db: DB, node_id: str, reason: str):
-    """A node convicted of nondeterminism: every canonical result it produced is recomputed elsewhere."""
+    """A node convicted of nondeterminism: every canonical result it produced is recomputed elsewhere, and so is every one
+    that resumed from a checkpoint it wrote (whose checkpoints are dropped)."""
     rows = db.q("SELECT j.job_id FROM jobs j JOIN results r ON r.result_id=j.canonical_result_id "
                 "WHERE j.state='done' AND j.kind IN ('eval','call') AND r.node_id=?", (node_id,))
+    rows += [{"job_id": jid} for jid in checkpoints.invalidate(db, node_id) if jid not in {r_["job_id"] for r_ in rows}]
     for r_ in rows:
         db.x("UPDATE jobs SET state='pending', generation=generation+1, canonical_result_id=NULL, done_at=NULL, "
              "exec_failures=0, not_before=0 WHERE job_id=?", (r_["job_id"],))
@@ -1595,8 +1612,12 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
                 _push(db, o["node_id"], "revoke", o["attempt_id"])
             db.x("UPDATE nodes SET breaker_failures=0 WHERE node_id=?", (node["node_id"],))
             placement.harden(db, j["placement_unit"], mine["platform"])        # the unit's first result fixes its class (D33)
+            checkpoints.drop(db, [j["job_id"]], "the job is done")
             if j["kind"] == "call" or (j["kind"] == "eval" and not j["depends_on"]):
-                _maybe_replicate(db, j, node["node_id"], _cmp(mine), mine["module_version"])
+                # a result resumed from another node's checkpoint stands on that node too: always checked by a replica
+                other = checkpoints.resumed_from_another_node(a)
+                _maybe_replicate(db, j, node["node_id"], _cmp(mine), mine["module_version"], force=bool(other),
+                                 exclude=[other] if other else [])
             elif j["kind"] == "replica":
                 _check_replica(db, j, rid, node["node_id"], ev.digest, value, post)
         elif a["state"] == "live":
@@ -1685,6 +1706,7 @@ def reap(db: DB):
                        "WHERE j.state='pending' AND d.state IN ('cancelled','quarantined')"):
             db.x("UPDATE jobs SET state=?, generation=generation+1 WHERE job_id=? AND state='pending'", (dj["dstate"], dj["job_id"]))
             db.event("job_" + dj["dstate"], job_id=dj["job_id"], campaign_id=dj["campaign_id"], reason=f"its call job was {dj['dstate']}")
+        checkpoints.reap(db)
         stranded = _stranded_disputes(db)
         for j in stranded:
             db.x("UPDATE jobs SET state='quarantined' WHERE job_id=? AND state='pending'", (j["job_id"],))
