@@ -50,8 +50,9 @@ A node's services are every service its modules declare for its platform, plus a
 report the state comes from the heartbeat's telemetry: running, or stopped because host protection holds it down (with
 the release reason), the node's policy disables it, or it starts when a job needs it. With the agent's per-service
 report (`nodes.services_json`, `{"services": [{service, running, ready, health, held, disabled, withdrawn,
-gpu_api_missing, error, lifecycle, users, endpoint}]}`, added by the module GUI work) the row takes ready or starting,
-health, the error, the jobs using it and a missing GPU API from it.
+gpu_api_missing, error, lifecycle, users, endpoint}]}`, added by the module GUI work, D41) the row takes ready or
+starting, health, the error, the jobs using it and why it is down from it: held by host protection, its module disabled
+by the kill switch, withdrawn after failures, or a GPU API it needs missing.
 
 ## Per OS
 

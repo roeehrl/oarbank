@@ -44,8 +44,8 @@ def services(n: dict, tel: dict, mods: list[str], manifest_for: Callable) -> lis
     """One row per service on the node: every service its modules declare for its platform, and any the node reports.
     `state` is ready, starting or stopped from the agent's per-service report, else running or stopped from its
     telemetry (`services_running`, `services_held`); a stopped service says why: host protection holds it down (with the
-    release reason its jobs got), the node's policy disables it, it was withdrawn, a GPU API it needs is missing, or it
-    starts when a job needs it."""
+    release reason its jobs got), its module is disabled, the node's policy disables it, it was withdrawn after failures,
+    a GPU API it needs is missing, or it starts when a job needs it."""
     plat = platforms.node_platform(n)
     declared = {}
     for m in mods:
@@ -63,8 +63,9 @@ def services(n: dict, tel: dict, mods: list[str], manifest_for: Callable) -> lis
         state = (("ready" if rep.get("ready") else "starting") if rep else "running") if up else "stopped"
         hold = rep.get("held") or held.get(name)
         why = None if up else (f"host protection holds it down ({hold})" if hold else
-                               "the node's policy disables it" if rep.get("disabled") or name in disabled else
-                               "withdrawn" if rep.get("withdrawn") else
+                               "its module is disabled (the kill switch)" if rep.get("disabled") else
+                               "the node's policy disables it" if name in disabled else
+                               "withdrawn after failures" if rep.get("withdrawn") else
                                f"GPU API missing: {rep['gpu_api_missing']}" if rep.get("gpu_api_missing") else
                                {"on_demand": "starts when a job needs it", "manual": "started by hand"}.get(s.lifecycle) if s else None)
         out.append({"name": name, "state": state, "reason": why, "health": rep.get("health"), "error": rep.get("error"),

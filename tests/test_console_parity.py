@@ -353,3 +353,27 @@ def test_module_health_shows_each_pinned_dataset_registered_waiting_or_in_confli
             db.x("UPDATE datasets SET module='depot', files_json=? WHERE dataset_id='tool:depot-1'",
                  (json.dumps(man.datasets.pinned[0].dataset_files()),))
             assert "registered since" in text(c.get("/modules/depot/health").text)
+
+
+def test_services_take_the_agents_per_service_report_when_there_is_one():
+    """With the heartbeat's service report (`nodes.services_json`) a row says ready or starting, health, the error, the jobs
+    using it and why it is down; without one, telemetry says running or held (test_the_node_page_shows_...)."""
+    from oarbank_sdk import manifest as mf
+    from helpers import RELAY_DIR
+    relay = mf.load(RELAY_DIR / "oarbank-module.toml")
+    n = {"node_id": "n_1", "hostname": "mini", "platform": "darwin-arm64",
+         "policy_json": json.dumps({"disabled_services": ["relay/scorer"]}),
+         "services_json": json.dumps({"services": [
+             {"service": "relay/scorer", "running": True, "ready": False, "health": "healthy", "users": 2, "lifecycle": "on_demand"},
+             {"service": "vlm/model", "running": False, "health": "unhealthy", "gpu_api_missing": "cuda", "error": "no device"},
+             {"service": "vlm/index", "running": False, "disabled": True}, {"service": "vlm/ocr", "running": False, "withdrawn": True},
+             {"service": "vlm/vm", "running": False, "held": "preempt_memory"}]})}
+    rows = {r["name"]: r for r in detail.services(n, {}, ["relay"], {"relay": relay}.get)}
+    assert {k: (r["state"], r["reason"]) for k, r in rows.items()} == {
+        "relay/scorer": ("starting", None), "vlm/model": ("stopped", "GPU API missing: cuda"),
+        "vlm/index": ("stopped", "its module is disabled (the kill switch)"), "vlm/ocr": ("stopped", "withdrawn after failures"),
+        "vlm/vm": ("stopped", "host protection holds it down (preempt_memory)")}
+    assert (rows["relay/scorer"]["health"], rows["relay/scorer"]["users"]) == ("healthy", 2)
+    assert (rows["vlm/model"]["health"], rows["vlm/model"]["error"]) == ("unhealthy", "no device")
+    del n["services_json"]
+    assert detail.services(n, {}, ["relay"], {"relay": relay}.get)[0]["reason"] == "the node's policy disables it"
