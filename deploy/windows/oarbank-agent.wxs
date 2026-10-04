@@ -6,7 +6,9 @@
     msiexec /i oarbank-agent.msi /qn JOINCODEFILE=C:\path\join-code.txt      (preferred: never on a command line)
     msiexec /i oarbank-agent.msi /qn JOINCODE=OB1-...
     msiexec /i oarbank-agent.msi /qn COORDINATOR=https://coordinator:7443     (the owner then approves the node)
-  Without one, it installs the programs only. Uninstalling removes the service; the node's home in ProgramData stays.
+  Without one, it installs the programs only. CONTAINERS=1 also installs what the agent's container runtime needs (the
+  Virtual Machine Platform and WSL, docs/design/windows-containers.md; Windows may need a restart). Uninstalling removes
+  the service and the agent's WSL containers session with its storage; the node's home in ProgramData stays.
   Built by scripts/package-windows.ps1 with WiX 5 (wix build -d Version=... -d BinDir=...).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -21,6 +23,10 @@
       <Directory Id="INSTALLFOLDER" Name="Oarbank">
         <Component Id="Binaries">
           <File Id="Agent" Source="$(var.BinDir)\oarbank-agent.exe" KeyPath="yes" />
+        </Component>
+        <!-- the WSL containers SDK (Microsoft.WSL.Containers, MIT): the agent loads it from this directory only -->
+        <Component Id="WslcSdk">
+          <File Id="WslcSdk" Source="$(var.BinDir)\wslcsdk.dll" KeyPath="yes" />
         </Component>
         <!-- the launcher, and the elevated helper it runs as a LocalSystem service (enforced egress allowlists:
              helper_windows.rs); the agent's own service is set up by `oarbank-launcher setup` below -->
@@ -42,6 +48,7 @@
     </StandardDirectory>
     <Feature Id="Main">
       <ComponentRef Id="Binaries" />
+      <ComponentRef Id="WslcSdk" />
       <ComponentRef Id="Launcher" />
       <Files Directory="RUNTIMEFOLDER" Include="$(var.RuntimeDir)\**" />
     </Feature>
@@ -49,6 +56,7 @@
     <Property Id="JOINCODE" Secure="yes" Hidden="yes" />
     <Property Id="JOINCODEFILE" Secure="yes" />
     <Property Id="COORDINATOR" Secure="yes" />
+    <Property Id="CONTAINERS" Secure="yes" />
 
     <SetProperty Id="SetupWithFile" Before="SetupWithFile" Sequence="execute" Condition="JOINCODEFILE"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --join-code-file &quot;[JOINCODEFILE]&quot;" />
@@ -56,6 +64,8 @@
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --join-code [JOINCODE]" />
     <SetProperty Id="SetupWithUrl" Before="SetupWithUrl" Sequence="execute" Condition="COORDINATOR"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --coordinator [COORDINATOR]" />
+    <SetProperty Id="InstallContainers" Before="InstallContainers" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-agent.exe&quot; containers install" />
     <SetProperty Id="ConfigureHelper" Before="ConfigureHelper" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-config" />
     <SetProperty Id="RemoveNode" Before="RemoveNode" Sequence="execute"
@@ -63,11 +73,14 @@
     <CustomAction Id="SetupWithFile" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="SetupWithCode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
     <CustomAction Id="SetupWithUrl" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
+    <!-- 3010 (restart needed) is not a failure, and a machine that cannot run VMs still gets the agent -->
+    <CustomAction Id="InstallContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
     <CustomAction Id="ConfigureHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="RemoveNode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
 
     <InstallExecuteSequence>
       <Custom Action="ConfigureHelper" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="InstallContainers" After="SetupWithUrl" Condition="CONTAINERS=&quot;1&quot; AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="SetupWithFile" After="InstallFiles" Condition="NOT Installed AND JOINCODEFILE" />
       <Custom Action="SetupWithCode" After="SetupWithFile" Condition="NOT Installed AND JOINCODE AND NOT JOINCODEFILE" />
       <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />

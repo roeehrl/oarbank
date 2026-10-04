@@ -80,6 +80,7 @@ spec/platforms.md):
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
              "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable",
              "grants.bootstrap": "enforced"}},
+ "containers": {"gpu": "undetected", "gpu_apis": []},
  "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
@@ -93,6 +94,11 @@ spec/platforms.md):
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
   `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
   (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`).
+- **Containers.** `gpu` is `cdi:<kind>` where containers can get the node's GPUs, else `undetected`; `gpu_apis` the GPU
+  APIs such a container can use (`cuda`, `rocm`, `levelzero`, `directml`; empty without passthrough). A Windows node
+  adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
+  node's report"): `runtime` (`wslc`), `state` (`absent`, `starting`, `ready`, `missing`, `failed`), `session`,
+  `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes.
 
 `hostname` is the name the node reports: the machine's host name, or `OARBANK_NODE_NAME` in the agent's
 environment when the owner names it. The coordinator names the node after it, unless the node enrolled with a
@@ -623,9 +629,10 @@ The agent computes `capacity` every tick and sends it in the heartbeat:
  "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_mem_gb": 6.1}
 ```
 `cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide, plus the
-agent's own `containers` pool (its container runtime) and `gpu` pool (one token where containers can get the node's
-GPUs through CDI; never on macOS) (a node that reports none is offered no pool work). The facts' `containers.gpu` says
-which: `cdi:<kind>` or `undetected`. They are computed after:
+agent's own `containers` pool (its container runtime, while it can run containers: a Windows node whose session is not
+ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI; never on macOS) (a
+node that reports none is offered no pool work). The facts' `containers.gpu` says which: `cdi:<kind>` or
+`undetected`. They are computed after:
 
 - user caps, thermal state, battery and user presence;
 - running jobs and the memory services hold;

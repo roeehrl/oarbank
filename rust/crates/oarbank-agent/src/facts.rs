@@ -180,23 +180,34 @@ pub fn collect(home: &std::path::Path) -> Value {
         "memory_gb": mem.map(|b| (b as f64 / 1073741824.0 * 10.0).round() / 10.0),
         "gpus": gpus,
         "sandbox": sandbox_report(),
-        "containers": {"gpu": container_gpu()},
+        "containers": containers(home),
         "disk_free_gb": disk_free_gb(home),
     })
 }
 
-/// GPU passthrough to containers: `cdi:<kind>` on Linux when a container engine and a CDI spec with an `all` device
-/// exist; `undetected` elsewhere (macOS container runtimes have no Metal passthrough; Windows has no agent container
-/// runtime yet).
-fn container_gpu() -> String {
+/// The node's container report (docs/design/windows-containers.md, "The node's report"): `gpu` is `cdi:<kind>` where
+/// containers can get the node's GPUs, else `undetected`, and `gpu_apis` the GPU APIs such a container can use. Linux:
+/// a container engine and a CDI spec with an `all` device; macOS: container runtimes have no Metal passthrough;
+/// Windows: the agent's WSL containers session's last report (wslc.rs writes it on every change of state).
+fn containers(home: &std::path::Path) -> Value {
     #[cfg(target_os = "linux")]
     {
+        let _ = home;
         let engine = ["/usr/bin", "/usr/local/bin", "/bin"].iter()
             .any(|d| ["podman", "docker"].iter().any(|n| std::path::Path::new(d).join(n).is_file()));
         let dirs = crate::container_runtime::CDI_DIRS.map(std::path::Path::new);
         if let (true, Some(kind)) = (engine, crate::container_runtime::cdi_kind(&dirs)) {
-            return format!("cdi:{kind}");
+            return json!({"gpu": format!("cdi:{kind}"), "gpu_apis": crate::container_runtime::cdi_apis(&kind)});
         }
     }
-    "undetected".into()
+    #[cfg(windows)]
+    {
+        return std::fs::read(crate::wslc::report_file(home)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_else(crate::wslc::absent_report);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = home;
+        json!({"gpu": "undetected", "gpu_apis": []})
+    }
 }

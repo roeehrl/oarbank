@@ -300,7 +300,7 @@ and no new approval**; changing the key, the prefix or the index is a new versio
 | Platform | Mechanism | What the node reports |
 |---|---|---|
 | Linux | CDI: the agent finds a CDI spec (`/etc/cdi`, `/var/run/cdi`, JSON or YAML) declaring a device kind with an `all` device (`nvidia.com/gpu=all` from `nvidia-ctk cdi generate`, AMD's likewise) and runs `--device <kind>=all` (Podman 4.1+, Docker 25+ with CDI, the default from Docker 28.2) | facts `containers.gpu = "cdi:<kind>"`, the `gpu` pool |
-| Windows | the WSL2 GPU-PV path: inside the agent's WSL2 distribution `nvidia-ctk cdi generate --mode=wsl` maps `/dev/dxg` and `/usr/lib/wsl`, then the same CDI flag | `containers.gpu = "undetected"`: Windows has no agent container runtime yet ([architecture.md](architecture.md), "Not built yet"); the mapping is specified for when it does |
+| Windows | GPU-PV in the agent's WSL containers session: its guest writes the CDI spec `microsoft.com/wslc=gpu` (`/dev/dxg`, the host driver's libraries under `/usr/lib/wsl`) and runs get `--gpus all` ([windows-containers.md](windows-containers.md)) | `containers.gpu = "cdi:microsoft.com/wslc"` and the `gpu` pool when the session's VM has a GPU |
 | macOS | none: Colima and Apple's `container` VMs have no Metal passthrough | `containers.gpu = "undetected"`, no `gpu` pool |
 
 The node's report is the agent's facts (`containers.gpu`), which placement reads through the `gpu` pool and the

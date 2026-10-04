@@ -74,7 +74,8 @@ hardware details. ENOENT and EPERM differ, which reveals whether a path exists. 
     besides the shim outside the AppContainer kills it (`sandbox_escape`). None is allowed: children inherit the
     AppContainer, breakaway is refused, and the console host Windows starts for a console client runs in the
     client's AppContainer. The runner gets a console without a window, which its console children share.
-  - The broker and the `oarbank` Colima runtime provide the `containers` pool.
+  - The broker and the agent's container runtime (the `oarbank` Colima profile, the host's Podman or Docker, the
+    agent's WSL containers session on Windows) provide the `containers` pool.
 - **Conformance.** `oarbank-sdk conform` runs the runner and `doctor` under the module's sandbox, so violations show
   up before install.
 

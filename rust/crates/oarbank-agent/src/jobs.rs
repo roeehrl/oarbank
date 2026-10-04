@@ -102,10 +102,8 @@ pub struct Ctx {
     pub table: Table,
     pub registry: Option<Arc<oarbank_protection::SpawnRegistry>>,
     /// The agent's container runtime, for modules approved for containers.
-    #[cfg(unix)]
     pub containers: Option<Arc<dyn crate::container_runtime::ContainerRuntime>>,
     /// Verifies container set images (shared by every attempt of the agent).
-    #[cfg(unix)]
     pub images: Arc<crate::imageset::Verifier>,
     /// The module services, for the readiness gate before a runner that needs their pools starts.
     pub services: Option<Arc<Mutex<crate::services::ServiceManager>>>,
@@ -371,17 +369,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     // a broker only for a job whose stage runs containers (it reserves the agent's containers pool); a module's other
     // stages, its goldens among them, need no container runtime on the node
     let runs_containers = (!images.is_empty() || !sets.is_empty()) && needs.iter().any(|p| p == "containers");
-    #[cfg(windows)]
-    let broker: Option<crate::broker::Broker> = match runs_containers {
-        false => None,
-        true => bail!("the module runs containers but this node has no container runtime"),
-    };
-    #[cfg(unix)]
     let broker = if !runs_containers {
         None
     } else {
         let rt = ctx.containers.clone().context("the module runs containers but this node has no container runtime")?;
-        let sock = crate::paths::socket_path(&ctx.layout.home, &format!("broker-{aid}.sock"))?;
+        let bind = crate::broker::bind_for(&ctx.layout.home, aid)?;
         let res = &spec["resources"];
         let sets = sets.iter().map(oarbank_core::images::ContainerSet::from_json).collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("the release's container sets: {e}"))?;
@@ -390,8 +382,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         let grant = crate::broker::BrokerGrant { attempt_id: aid, module: module.to_string(), approved_images: images, sets,
             job_images, gpu: res["pools"]["gpu"].as_i64().unwrap_or(0) > 0,
             workdir: ws.to_path_buf(), module_data: data.clone(), network_granted: net != "none",
+            #[cfg(windows)]
+            sandbox_id: entry["module_id"].as_str().unwrap_or(module).to_string(),
             cpus: res["cpu"].as_f64().unwrap_or(1.0), mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0) };
-        Some(crate::broker::Broker::start(sock, grant, rt, ctx.images.clone()).await?)
+        Some(crate::broker::Broker::start(bind, grant, rt, ctx.images.clone()).await?)
     };
     let runner = &entry["runner"];
     let mut argv = resolve_exec(runner["exec"].as_array().map(Vec::as_slice).unwrap_or(&[]), &bundle, &python);
@@ -636,11 +630,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     crate::sys::release(pid);
     drop(proxy);
-    #[cfg(unix)]
     if let Some(b) = &broker {
         *ran_images.lock().unwrap() = b.ran_images();
     }
-    #[cfg(unix)]
     drop(broker);                                              // stops serving and removes this attempt's containers
     drop(connectors);                                          // closes them and tells each service the attempt ended
     if let Some(e) = escaped {

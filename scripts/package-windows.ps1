@@ -22,7 +22,20 @@ $built = $LASTEXITCODE
 Pop-Location
 if ($built) { throw "cargo build failed" }        # never package the binaries an earlier build left behind
 $Bin = "$Repo\rust\target\release"
-# a clean Windows machine has no Visual C++ runtime: the binaries must not import it (static CRT, rust/.cargo/config.toml)
+# the WSL containers SDK library the agent loads at run time for its Windows container runtime (Microsoft.WSL.Containers,
+# MIT, docs/design/windows-containers.md); pinned by the library's own SHA-256 per architecture
+$WslcVersion = "3.0.1"
+$WslcSha256 = @{ x64 = "f3528a5b69b777d2bf606edc1629d13ca549f1b87c9f57380dd2f2c611b30b4f"; arm64 = "7afecfc4fc5d3133172e8c0fba763ff8266473d4f78b4cfb20386eb2865b1ab4" }
+$Wslc = "$env:TEMP\oarbank-wslc-$WslcVersion"
+New-Item -ItemType Directory -Force $Wslc | Out-Null
+Invoke-WebRequest -UseBasicParsing "https://api.nuget.org/v3-flatcontainer/microsoft.wsl.containers/$WslcVersion/microsoft.wsl.containers.$WslcVersion.nupkg" -OutFile "$Wslc\sdk.nupkg"
+tar -xf "$Wslc\sdk.nupkg" -C $Wslc "runtimes/win-$Arch/native/wslcsdk.dll"
+if ($LASTEXITCODE) { throw "the WSL containers SDK package has no win-$Arch library" }
+$WslcDll = "$Wslc\runtimes\win-$Arch\native\wslcsdk.dll"
+if ((Get-FileHash -Algorithm SHA256 $WslcDll).Hash.ToLower() -ne $WslcSha256[$Arch]) { throw "wslcsdk.dll does not match its pin" }
+Copy-Item $WslcDll "$Bin\wslcsdk.dll"
+# a clean Windows machine has no Visual C++ runtime: the binaries must not import it (static CRT, rust/.cargo/config.toml);
+# wslcsdk.dll is loaded at run time, never imported
 uv run --no-project --python 3.12 python "$Repo\scripts\check-pe-imports.py" "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
 if ($LASTEXITCODE) { throw "the binaries import a DLL a clean Windows install does not have" }
 $Out = "$Repo\dist"

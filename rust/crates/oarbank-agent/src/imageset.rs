@@ -368,7 +368,7 @@ pub mod tests {
         }
 
         /// A one-layer image whose layer is a tar of a root filesystem, runnable on `arch`; its manifest digest.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         pub fn rootfs_image(&mut self, path: &str, tar: &[u8], arch: &str) -> String {
             let diff = I::digest_of(tar);
             let cfg = self.put(&serde_json::to_vec(&json!({"architecture": arch, "os": "linux",
