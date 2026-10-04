@@ -390,7 +390,7 @@ def test_a_guarded_node_says_why_it_takes_no_jobs(env):
     assert "mem 6.9 / 7.6 GB" in card and "pressure warning" in card and "thermal nominal" in card
     assert "4 cores" in page and "Windows 10.0 · arm64" in page and "no new jobs: memory guard" in page
     assert "6.9 GB used · 9% free · fleet jobs 0.0 GB" in page and "swap" not in page and "on AC power" in page
-    assert "its modules declare no services here" in page and "binding" not in page.split("Controls")[0]   # relay's scorer: not on Windows
+    assert "services running none" in page and "binding" not in page.split("Controls")[0]
 
 
 def test_services_host_protection_stopped_are_shown_with_why(env):
@@ -401,7 +401,7 @@ def test_services_host_protection_stopped_are_shown_with_why(env):
     card, page = node_html(env)
     assert_clean(card, page)
     assert "service stopped: modelserver/model" in card
-    assert "modelserver/model stopped host protection holds it down (preempt_memory)" in page
+    assert "services stopped by protection modelserver/model (preempt_memory)" in page
 
 
 def test_slots_show_the_automatic_count_and_what_binds(env):

@@ -1,7 +1,7 @@
-"""The operator's side in parity (docs/design/console-parity.md, PLAN D42): every console view an operator acts from has
-an `oarbank` command that reads the same detail document through the admin API, every command the registry names
-exists, explain's remedies are runnable from both, and the console says what the CLI says (per-service state, GPU API
-evidence, per-capability enforcement, folders, pinned datasets, container image first runs, a plan's impact)."""
+"""The operator's side in parity (docs/design/console-parity.md, PLAN D42): what operators do from the console's job and
+protection pages has `oarbank` commands reading the same documents through the admin API, every command the registry
+names exists, explain's remedies are runnable from both, and the console shows what it left unshown (GPU API evidence,
+per-capability enforcement, folders, pinned datasets, container image first runs, a plan's impact)."""
 import json
 import re
 import sys
@@ -14,7 +14,7 @@ from oarbank.cli import main as cli
 from oarbank.console.app import console_app
 from oarbank.console.state import ConsoleState
 from oarbank.contracts import impact, operations, parity
-from oarbank.coordinator import access, app as coord_app, core, detail, modcalls, protection
+from oarbank.coordinator import access, app as coord_app, core, modcalls, protection
 
 from helpers import FACTS, PARAMS, SEATBELT, certify, create_study, enrolled_node, fresh, make_db, run_op, sign_in
 from test_console import SECRET, Server
@@ -60,7 +60,7 @@ def oarbank(capsys, *args) -> tuple[int, str]:
 
 
 def dress(db, nid):
-    """Give the node everything the node page and `oarbank node show` report."""
+    """Give the node everything the node page's sections report."""
     facts = {**FACTS, "containers": CONTAINERS,
              "sandbox": {"backend": "seatbelt", "enforcement": {**SEATBELT, "ipc": "cooperative"}}}
     tel = {"services_running": [], "services_held": {"relay/scorer": "preempt_memory"}, "services_reserved_gb": 0.0,
@@ -95,33 +95,7 @@ def test_explain_kinds_are_checked_against_the_cli_parser(monkeypatch):
     assert "explain campaign: no CLI path" in parity.gaps()
 
 
-# ------------------------------------------------------------------ oarbank node show | mode
-
-def test_node_show_prints_what_the_node_page_shows(fleet, capsys):
-    db, nid = fleet["db"], fleet["nid"]
-    dress(db, nid)
-    code, out = oarbank(capsys, "node", "show", nid)
-    assert code == 0, out
-    lines = [re.sub(r"\s+", " ", x).strip() for x in out.splitlines()]
-    assert lines[0].startswith(f"mini {nid} darwin-arm64 ready/active online")
-    assert "doctor (" in out and "capabilities java17" in out
-    assert "toy undetected 1 checks" in lines and "✗ gpu_apis: needs cuda" in lines
-    assert "GPU APIs: host metal, opencl; containers vulkan" in lines        # the facts' containers.gpu says undetected
-    assert "cuda CUDA does not run on macOS" in lines and "metal Apple M5 Pro" in lines
-    assert "containers: wslc missing · GPU undetected" in lines
-    assert "MISSING virtual_machine_platform: the Virtual Machine Platform feature is off" in lines
-    assert "fix: oarbank-agent containers install" in lines
-    assert "relay/scorer stopped (host protection holds it down (preempt_memory))" in lines
-    assert "inputs read /Users/shared/in ok (statement 1, unsigned)" in lines
-    assert "sandbox (seatbelt):" in lines and "ipc cooperative keeps out relay, toy" in lines
-    assert "filesystem enforced needed by relay, toy" in lines and "no_link_local unavailable" in lines
-    assert oarbank(capsys, "node", "show", "mini")[1] == out                         # by hostname too
-    doc = json.loads(oarbank(capsys, "node", "show", nid, "--json")[1])
-    same = detail.node(db, nid, time.time(), lambda m: modcalls.info(m).manifest)       # what the console renders
-    for k in ("doctor", "gpu", "containers", "services", "folders", "sandbox"):
-        assert doc[k] == json.loads(json.dumps(same[k])), k
-    assert oarbank(capsys, "node", "show", "nope")[0] == 1
-
+# ------------------------------------------------------------------ oarbank node mode
 
 def test_node_mode_sets_the_protection_mode(fleet, capsys):
     db, nid = fleet["db"], fleet["nid"]
@@ -265,11 +239,10 @@ def text(page: str) -> str:
     return html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page)))
 
 
-def test_the_node_page_shows_services_gpu_evidence_enforcement_and_folders(console):
+def test_the_node_page_shows_gpu_evidence_enforcement_and_folders(console):
     db, nid, c = console["db"], console["nid"], console["c"]
     dress(db, nid)
     page = text(c.get(f"/nodes/{nid}").text)
-    assert "relay/scorer stopped host protection holds it down (preempt_memory)" in page
     assert "cuda no no CUDA does not run on macOS" in page and "metal yes no Apple M5 Pro" in page
     assert "Containers: virtio-gpu:venus (krunkit)" in page
     assert "ipc cooperative relay, toy relay, toy CAPABILITY_NOT_ENFORCED" in page
@@ -354,26 +327,3 @@ def test_module_health_shows_each_pinned_dataset_registered_waiting_or_in_confli
                  (json.dumps(man.datasets.pinned[0].dataset_files()),))
             assert "registered since" in text(c.get("/modules/depot/health").text)
 
-
-def test_services_take_the_agents_per_service_report_when_there_is_one():
-    """With the heartbeat's service report (`nodes.services_json`) a row says ready or starting, health, the error, the jobs
-    using it and why it is down; without one, telemetry says running or held (test_the_node_page_shows_...)."""
-    from oarbank_sdk import manifest as mf
-    from helpers import RELAY_DIR
-    relay = mf.load(RELAY_DIR / "oarbank-module.toml")
-    n = {"node_id": "n_1", "hostname": "mini", "platform": "darwin-arm64",
-         "policy_json": json.dumps({"disabled_services": ["relay/scorer"]}),
-         "services_json": json.dumps({"services": [
-             {"service": "relay/scorer", "running": True, "ready": False, "health": "healthy", "users": 2, "lifecycle": "on_demand"},
-             {"service": "vlm/model", "running": False, "health": "unhealthy", "gpu_api_missing": "cuda", "error": "no device"},
-             {"service": "vlm/index", "running": False, "disabled": True}, {"service": "vlm/ocr", "running": False, "withdrawn": True},
-             {"service": "vlm/vm", "running": False, "held": "preempt_memory"}]})}
-    rows = {r["name"]: r for r in detail.services(n, {}, ["relay"], {"relay": relay}.get)}
-    assert {k: (r["state"], r["reason"]) for k, r in rows.items()} == {
-        "relay/scorer": ("starting", None), "vlm/model": ("stopped", "GPU API missing: cuda"),
-        "vlm/index": ("stopped", "its module is disabled (the kill switch)"), "vlm/ocr": ("stopped", "withdrawn after failures"),
-        "vlm/vm": ("stopped", "host protection holds it down (preempt_memory)")}
-    assert (rows["relay/scorer"]["health"], rows["relay/scorer"]["users"]) == ("healthy", 2)
-    assert (rows["vlm/model"]["health"], rows["vlm/model"]["error"]) == ("unhealthy", "no device")
-    del n["services_json"]
-    assert detail.services(n, {}, ["relay"], {"relay": relay}.get)[0]["reason"] == "the node's policy disables it"

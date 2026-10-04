@@ -419,7 +419,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     @app.get("/nodes/{nid}", response_class=HTMLResponse)
     async def node(nid: str, request: Request):
         actor = who(request)
-        await refresh_catalog(actor)                      # the node's modules' manifests: services and sandbox needs
+        await refresh_catalog(actor)                      # the node's modules' manifests: their sandbox needs
         d = await drill(views.node_page, nid, time.time(), catalog.manifest)
         if d is None:
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)

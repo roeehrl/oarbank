@@ -22,6 +22,7 @@
     {% if hw.os %}<span class="mut">system</span><span>{{ hw.os }}{% if hw.arch %} · {{ hw.arch }}{% endif %}</span>{% endif %}
     {% if T0.disk_free_gb is known %}<span class="mut">disk free</span><span>{{ T0.disk_free_gb | num(0) }} GB</span>{% endif %}
     {% if n.ts_ip %}<span class="mut">address</span><span class="mono">{{ n.ts_ip }}</span>{% endif %}
+    {% if T0.services_running is known %}<span class="mut">services running</span><span>{{ T0.services_running | join(', ') or 'none' }}</span>{% endif %}
   </div>
 </div>
 <div class="card">
@@ -35,6 +36,7 @@
     {% if n.cap.pools %}<span class="mut">pools</span><span>{% for p, k in n.cap.pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
     {% if n.facts.containers %}<span class="mut">GPU in containers</span><span>{% if n.gpu.mechanism %}{{ n.gpu.mechanism }}{% if n.gpu.containers %}: {{ n.gpu.containers | join(', ') }}{% endif %}{% else %}undetected{% if n.platform and n.platform.startswith('darwin') %}: krunkit is not installed{% elif n.platform and n.platform.startswith('windows') %}: no container runtime on Windows yet{% endif %}{% endif %}</span>{% endif %}
     {% if T0.services_reserved_gb %}<span class="mut">services hold</span><span>{{ T0.services_reserved_gb | num(1) }} GB</span>{% endif %}
+    {% if T0.services_held %}<span class="mut">services stopped by protection</span><span>{% for k, why in T0.services_held | dictsort %}{{ k }} ({{ why }}){% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
     {% set mem = [(T0.mem_used_gb | num(1)) ~ ' GB used' if T0.mem_used_gb is known, (T0.mem_free_pct | num(0)) ~ '% free' if T0.mem_free_pct is known,
                   'fleet jobs ' ~ (T0.fleet_rss_gb | num(1)) ~ ' GB' if T0.fleet_rss_gb is known, 'swap ' ~ (T0.swap_used_gb | num(1)) ~ ' GB' if T0.swap_used_gb is known] | select | list %}
     {% if mem %}<span class="mut">memory</span><span>{{ mem | join(' · ') }}</span>{% endif %}
@@ -64,17 +66,7 @@
 </div>
 </div>
 
-{# the detail document `oarbank node show` prints (coordinator/detail.py) #}
-<h2>Services{% if d.services_reserved_gb %} <span class="small mut">({{ d.services_reserved_gb | num(1) }} GB held)</span>{% endif %}</h2>
-<table class="small"><tr><th>service</th><th>state</th><th>why</th><th>health</th><th class="num">jobs using it</th><th>error</th><th>lifecycle</th><th>GPU</th></tr>
-{% for sv in d.services %}<tr><td class="mono">{{ sv.name }}{% if sv.endpoint %} <span class="chip">endpoint</span>{% endif %}</td>
-  <td><span class="chip {{ 'ok' if sv.state in ('ready', 'running') else ('acc' if sv.state == 'starting' else ('warn' if sv.reason and sv.reason.startswith('host protection') else '')) }}">{{ sv.state }}</span></td>
-  <td>{{ sv.reason or '' }}</td>
-  <td>{% if sv.health %}<span class="chip {{ 'ok' if sv.health == 'healthy' else ('bad' if sv.health == 'unhealthy' else '') }}">{{ sv.health }}</span>{% endif %}</td>
-  <td class="num">{{ sv.users if sv.users is not none else '' }}</td><td class="mono">{{ sv.error or '' }}</td>
-  <td class="mut">{{ sv.lifecycle or '' }}</td><td>{{ sv.gpu or '' }}</td></tr>
-{% else %}<tr><td colspan="8" class="mut">its modules declare no services here</td></tr>{% endfor %}</table>
-
+{# coordinator/detail.py: GPU APIs, per-capability enforcement, folders #}
 <h2 id="gpu-apis">GPU APIs</h2>
 {% if not d.gpu.reported %}<p class="small mut">not reported yet: the agent reports them with its next doctor run</p>
 {% else %}<table class="small"><tr><th>API</th><th>on the host</th><th>in containers</th><th>evidence</th></tr>

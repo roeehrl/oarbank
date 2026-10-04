@@ -149,8 +149,8 @@ def fleet_data(r, now: float | None = None) -> dict:
 
 
 def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
-    """The node page: its card (node_view), the detail document `oarbank node show` prints (doctor, GPU APIs with
-    their evidence, containers, services, folders, per-capability enforcement), history, protection and secrets."""
+    """The node page: its card (node_view), its GPU APIs with their evidence, per-capability enforcement and folders
+    (detail.node), history, protection and secrets."""
     n = r.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
     if not n:
         return None
@@ -176,7 +176,7 @@ def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
     # module secrets with a value of this node's own (names, fingerprints: never a value)
     secrets = r.q("SELECT module, name, fingerprint, set_at FROM secrets WHERE node_id=? AND module!='' ORDER BY module, name",
                   (nid,))
-    return {"n": nv, "d": detail.node(r, nid, now, manifest_for), "attempts": atts, "fails": fails, "events": events,
+    return {"n": nv, "d": detail.node(r, nid, manifest_for), "attempts": atts, "fails": fails, "events": events,
             "history": history, "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions,
             "conditions": node_conditions(nv), "node_secrets": secrets}
 

@@ -45,8 +45,8 @@ can do nothing the API cannot; the generated [operations.md](operations.md) list
   by the effects they declare; the host draws their preview, confirmation and audit (D23).
 - **Parity** is a test: every operation is reachable from the API, the CLI and a console form, every explain kind from
   all three, every `oarbank` command the registry names exists in the CLI's parser, and every reason code's remedies
-  are operations ([parity.md](parity.md), generated). What an operator reads on a node or job page, `oarbank node show`
-  and `oarbank job show` print from the same detail document (D42, [console-parity.md](console-parity.md)).
+  are operations ([parity.md](parity.md), generated). What an operator reads on a job page, `oarbank job show` prints from
+  the same detail document (D42, [console-parity.md](console-parity.md)).
 
 ## The audit log is hash-chained
 

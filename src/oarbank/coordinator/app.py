@@ -871,25 +871,8 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(404, "not_found", f"campaign {cid}")
         return c
 
-    # ---------------- one node, one job, one node's protection: what `oarbank node|job|protection show` print
-    # (detail.py; the console renders the same documents from its own read connection; docs/design/console-parity.md)
-    def manifest_on(node_id: str):
-        def get(name: str):
-            try:
-                return modcalls.info_for(name, modstore.version_for_node(db, name, node_id)).manifest
-            except KeyError:
-                return None
-        return get
-
-    @app.get("/api/v1/nodes/{nid}")
-    def api_node(nid: str, actor=Depends(who)):
-        from . import detail
-        n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
-        d = detail.node(db, nid, clock.now(), manifest_on(n["node_id"])) if n else None
-        if d is None:
-            raise core.ApiError(404, "not_found", f"node {nid}")
-        return d
-
+    # ---------------- one job, one node's protection: what `oarbank job|protection show` print (detail.py,
+    # protection.status; the console renders the same documents from its own read connection; docs/design/console-parity.md)
     @app.get("/api/v1/nodes/{nid}/protection")
     def api_node_protection(nid: str, actor=Depends(who)):
         from . import protection
