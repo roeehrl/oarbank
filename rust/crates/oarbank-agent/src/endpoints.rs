@@ -818,6 +818,8 @@ pub mod tests {
 
     impl Fx {
         fn new(tag: &str) -> Fx {
+            // the service manager's own account of what it did (an op that failed, a sandbox escape) shows with a failure
+            let _ = tracing_subscriber::fmt().with_test_writer().with_env_filter("oarbank_agent=info").try_init();
             let root = std::env::temp_dir().join(format!("oarbank-ep-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
