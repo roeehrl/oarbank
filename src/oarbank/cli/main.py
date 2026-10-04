@@ -671,6 +671,9 @@ def cmd_campaign(a):
                                if p else "any (no unit of work is kept on one platform)"))
         print(json.dumps(c, indent=1, default=str))
         return
+    if a.action == "download":
+        from . import transfer
+        sys.exit(1 if transfer.download_campaign(a.id, Path(a.value or f"{a.id}-artifacts")) else 0)
     if a.action == "rebind" and not a.platform or a.action == "placement" and not a.mix:
         sys.exit(f"oarbank campaign {a.action} <id> " + ("--platform <token>" if a.action == "rebind" else "--mix <mix>"))
     op = {"pause": "campaigns.pause", "resume": "campaigns.resume", "cancel": "campaigns.cancel",
@@ -679,6 +682,57 @@ def cmd_campaign(a):
     params = {"weight": float(a.value)} if a.action == "weight" else {"priority": int(a.value)} if a.action == "priority" else \
         {"platform": a.platform} if a.action == "rebind" else {"mix": a.mix} if a.action == "placement" else {}
     print(json.dumps(run_op(op, a.id, params, a.reason, a.yes, a.confirm), indent=1, default=str))
+
+
+def cmd_dataset(a):
+    """oarbank dataset <upload|download|list|show|register>: files in and out (cli/transfer.py)."""
+    from . import transfer
+    if a.action == "upload":
+        if not a.what or not a.kind:
+            sys.exit("oarbank dataset upload <dir> --kind <kind> [--id ID] [--module NAME] [--meta k=v]")
+        if not Path(a.what).is_dir():
+            sys.exit(f"{a.what} is not a directory")
+        print(json.dumps(transfer.upload(Path(a.what), a.kind, a.id, a.module, _kv(a.meta)), indent=1, default=str))
+    elif a.action == "download":
+        if not a.what:
+            sys.exit("oarbank dataset download <dataset id> [dir]")
+        sys.exit(1 if transfer.download_dataset(a.what, Path(a.dest or a.what.replace(":", "_"))) else 0)
+    elif a.action == "show":
+        print(json.dumps(api("GET", f"/api/v1/datasets/{a.what}"), indent=1, default=str))
+    elif a.action == "register":
+        print(json.dumps(run_op("datasets.register", None, json.loads(Path(a.what).read_text()), yes=True), indent=1, default=str))
+    else:
+        print(json.dumps(api("GET", "/api/v1/datasets" + (f"?kind={a.kind}" if a.kind else "")), indent=1, default=str))
+
+
+def cmd_folders(a):
+    """oarbank folders <list|map|sign>: the folder registry (modules ask for folders by id; the operator maps each to a
+    path per node) and, in signing mode, the owner's signature on each node's folder statement."""
+    if a.action == "list":
+        v = api("GET", "/api/v1/folders")
+        for fid, e in sorted(v["registry"].items()):
+            for nid, path in e["nodes"].items():
+                n = v["nodes"].get(nid, {})
+                st = (n.get("folders") or {}).get(fid) or {}
+                stmt = v["statements"].get(nid) or {}
+                print(f"{fid:<16} {e['access']:<6} {n.get('hostname', nid):<20} {path}  "
+                      f"{st.get('status', 'not applied yet')}{'  (statement unsigned)' if v['signing'] and not stmt.get('signature') else ''}")
+        return
+    if a.action == "map":
+        if not a.what or a.access not in ("read", "write"):
+            sys.exit("oarbank folders map <id> --access read|write --node <node>=<path> [--node ...]")
+        nodes = {k: v or None for k, _, v in (x.partition("=") for x in a.node or [])}
+        res = run_op("settings.folders.update", a.what, {"access": a.access, "nodes": nodes}, a.reason, a.yes)
+    else:
+        if not a.what:
+            sys.exit("oarbank folders sign <node> [--key PATH]")
+        from .. import signing
+        stmt = (api("GET", "/api/v1/folders")["statements"].get(a.what) or {}).get("statement")
+        if not stmt:
+            sys.exit(f"{a.what} has no folder statement")
+        sig = signing.sign(stmt, Path(a.key) if a.key else signing.DEFAULT_KEY)
+        res = run_op("folders.sign", a.what, {"statement": stmt, "signature": sig}, a.reason, True)
+    print(json.dumps(res, indent=1, default=str))
 
 
 def cmd_mod(a):
@@ -763,11 +817,11 @@ def main():
     r.add_argument("--reason")
     r.add_argument("--yes", action="store_true")
     r.set_defaults(fn=cmd_release)
-    cp = sub.add_parser("campaign", help="campaigns: every module's grouped work (list, show, pause, resume, cancel, ...)")
+    cp = sub.add_parser("campaign", help="campaigns: every module's grouped work (list, show, pause, resume, cancel, download, ...)")
     cp.add_argument("action", choices=["list", "show", "pause", "resume", "cancel", "retry-failed", "weight", "priority",
-                                       "rebind", "placement"])
+                                       "rebind", "placement", "download"])
     cp.add_argument("id", nargs="?")
-    cp.add_argument("value", nargs="?")
+    cp.add_argument("value", nargs="?", help="weight/priority: the value; download: the directory (default <id>-artifacts)")
     cp.add_argument("--module")
     cp.add_argument("--platform", help="rebind: the platform token whose class the campaign's work moves to")
     cp.add_argument("--mix", help="placement: same-os, same-arch or same-platform (stricter only, before the first result)")
@@ -775,6 +829,15 @@ def main():
     cp.add_argument("--yes", "-y", action="store_true")
     cp.add_argument("--confirm")
     cp.set_defaults(fn=cmd_campaign)
+    fo = sub.add_parser("folders", help="folders modules may read or write on nodes: list, map, sign (signing mode)")
+    fo.add_argument("action", choices=["list", "map", "sign"])
+    fo.add_argument("what", nargs="?", help="map: a folder id; sign: a node id")
+    fo.add_argument("--access", choices=["read", "write"])
+    fo.add_argument("--node", action="append", help="map: <node>=<path> (an empty path removes the node)")
+    fo.add_argument("--key", help="sign: the owner's release key (default: the configured one)")
+    fo.add_argument("--reason")
+    fo.add_argument("--yes", "-y", action="store_true")
+    fo.set_defaults(fn=cmd_folders)
     jc = sub.add_parser("join-code", help="a one-time join code for a new machine (it is approved when it enrolls)")
     jc.add_argument("--label", help="the new node's name; it keeps it whatever host name its agent reports "
                                     "(default: the name the agent reports)")
@@ -797,13 +860,15 @@ def main():
     md.add_argument("--confirm")
     md.add_argument("--dry-run", action="store_true")
     md.set_defaults(fn=cmd_mod)
-    ds = sub.add_parser("dataset", help="register a dataset from a JSON file (module importers do this for you)")
-    ds.add_argument("action", choices=["register", "list"])
-    ds.add_argument("file", nargs="?")
+    ds = sub.add_parser("dataset", help="datasets: upload a folder, download one, list, show, or register from a JSON file")
+    ds.add_argument("action", choices=["upload", "download", "list", "show", "register"])
+    ds.add_argument("what", nargs="?", help="upload: a folder; download and show: a dataset id; register: a JSON file")
+    ds.add_argument("dest", nargs="?", help="download: the directory to write into (default: the dataset id)")
     ds.add_argument("--kind")
-    ds.set_defaults(fn=lambda a: print(json.dumps(
-        run_op("datasets.register", None, json.loads(Path(a.file).read_text()), yes=True) if a.action == "register"
-        else api("GET", "/api/v1/datasets" + (f"?kind={a.kind}" if a.kind else "")), indent=1, default=str)))
+    ds.add_argument("--id", help="upload: the dataset id (default: <kind>:<folder>-<digest>)")
+    ds.add_argument("--module", help="upload: the module the dataset belongs to (its kinds; default: the operator's)")
+    ds.add_argument("--meta", action="append", help="upload: key=value (JSON values allowed)")
+    ds.set_defaults(fn=cmd_dataset)
     al = sub.add_parser("alerts", help="alerts: list, ack/snooze/resolve (with a useful/noise verdict), precision review")
     al.add_argument("action", choices=["list", "ack", "snooze", "resolve", "precision"])
     al.add_argument("id", nargs="?")

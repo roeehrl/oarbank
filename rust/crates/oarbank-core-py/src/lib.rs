@@ -52,7 +52,7 @@ fn content_digest(files_json: &str) -> PyResult<String> {
 
 /// The Seatbelt profile text for a policy shape.
 #[pyfunction]
-#[pyo3(signature = (kind, n_ro, n_rw, n_links, net, broker, gpu, proxy_port=None, exec_rw=false))]
+#[pyo3(signature = (kind, n_ro, n_rw, n_links, net, broker, gpu, proxy_port=None, exec_rw=false, n_rd=0, n_wo=0))]
 #[allow(clippy::too_many_arguments)]
 fn render_sandbox_text(
     kind: &str,
@@ -64,12 +64,14 @@ fn render_sandbox_text(
     gpu: bool,
     proxy_port: Option<i64>,
     exec_rw: bool,
+    n_rd: usize,
+    n_wo: usize,
 ) -> PyResult<String> {
     let port = match proxy_port {
         None => None,
         Some(p) => Some(u16::try_from(p).map_err(|_| value_error(format!("proxy port {p} is not a TCP port")))?),
     };
-    sandbox::render_text(kind, n_ro, n_rw, n_links, net, broker, gpu, port, exec_rw).map_err(value_error)
+    sandbox::render_text(kind, n_ro, n_rw, n_links, net, broker, gpu, port, exec_rw, n_rd, n_wo).map_err(value_error)
 }
 
 /// Whether the allow list lets `host:port` through (a malformed entry raises, as in the SDK).

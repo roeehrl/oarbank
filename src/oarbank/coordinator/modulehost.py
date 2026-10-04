@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from oarbank_sdk import MODULE_PROTOCOL
 from oarbank_sdk import module_protocol as mp
+from oarbank_sdk.ui import UI_CONTRACT
 from oarbank_sdk.rpc import ConnectionClosed, Peer, Request, RpcError
 
 log = logging.getLogger("oarbank.modulehost")
@@ -102,8 +103,9 @@ class Health:
                 "latency_p50_ms": p(0.5), "latency_p99_ms": p(0.99)}
 
 
-# what this host implements of the optional host features (module_protocol.HOST_CAPABILITIES)
-HOST_CAPABILITIES = (mp.HOST_PLACEMENT, mp.HOST_COORDINATOR_VARIANTS, mp.HOST_NODES_PLATFORM, mp.HOST_GOLDENS_BY_PLATFORM)
+# what this host implements of the optional host features (module_protocol.HOST_CAPABILITIES), and the UI contract it renders
+HOST_CAPABILITIES = (mp.HOST_PLACEMENT, mp.HOST_COORDINATOR_VARIANTS, mp.HOST_NODES_PLATFORM, mp.HOST_GOLDENS_BY_PLATFORM,
+                     mp.HOST_JOBS_STAGE, mp.HOST_DATASETS_ORIGINS, f"ui_contract:{UI_CONTRACT}")
 
 
 def host_info() -> dict:

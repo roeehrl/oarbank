@@ -24,7 +24,8 @@ import anyio
 import httpx
 import jinja2
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -33,12 +34,54 @@ from . import forms, views
 from .state import ConsoleState
 
 HERE = Path(__file__).parent
+# a download is never rendered in the console origin: an attachment, nosniff, and a sandbox if a browser opens it anyway
+DOWNLOAD_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox; default-src 'none'"}
+
+
+class _ZipSink:
+    """A write-only file object for zipfile (no seek: zipfile then writes data descriptors), drained by zip_chunks."""
+
+    def __init__(self):
+        self.buf = bytearray()
+
+    def write(self, b) -> int:
+        self.buf += b
+        return len(b)
+
+    def flush(self):
+        pass
+
+    def take(self) -> bytes:
+        out = bytes(self.buf)
+        self.buf.clear()
+        return out
+
+
+def zip_chunks(files: list[tuple[str, Path]]):
+    """A stored (uncompressed) ZIP64 archive of `files` ((name in the archive, file)), produced as it streams."""
+    import zipfile
+    sink = _ZipSink()
+    with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for name, path in files:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            with open(path, "rb") as src, zf.open(info, "w", force_zip64=True) as dst:
+                while b := src.read(1 << 20):
+                    dst.write(b)
+                    if len(sink.buf) >= 1 << 20:
+                        yield sink.take()
+            yield sink.take()
+    yield sink.take()
+
+
+def zip_response(files, filename: str):
+    return StreamingResponse(zip_chunks(files), media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"', **DOWNLOAD_HEADERS})
 SSE_PING_S, SSE_HEARTBEAT_S, SSE_MAX_CLIENTS = 15, 5, 16
 def csp(module_origin: str) -> str:
-    """Strict CSP; frames only from the module origin (sandboxed module views, D23)."""
-    return ("default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; "
-            f"connect-src 'self'; frame-src {module_origin}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
-            "object-src 'none'")
+    """Strict CSP; frames and module media only from the module origin (sandboxed module views, D23; media, UI contract 1.1)."""
+    return ("default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
+            f"img-src 'self' data: {module_origin}; media-src {module_origin}; connect-src 'self'; frame-src {module_origin}; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 
 
 CSP = csp("http://127.0.0.1:7402")
@@ -99,6 +142,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     from . import modpages
     http = httpx.AsyncClient(base_url=state.coordinator_url, timeout=3600)
     catalog = modpages.ModuleCatalog()
+    from .media import Tokens
+    tokens = Tokens()
     caches = {"ops": ({}, 0.0), "mods": 0.0}
     policy = csp(module_origin)
     @contextlib.asynccontextmanager
@@ -114,7 +159,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         r = httpx.get(state.coordinator_url + "/api/v1/modules", headers=state.coordinator_headers("console"), timeout=5)
         if r.status_code == 200:
             catalog.update(r.json())
-    app.state.catalog, app.state.refresh_catalog_sync = catalog, refresh_catalog_sync
+    app.state.catalog, app.state.refresh_catalog_sync, app.state.media_tokens = catalog, refresh_catalog_sync, tokens
 
     @app.get("/static-ui/ui.css")
     async def ui_css():
@@ -246,10 +291,10 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             state.renders += 1
         return html
 
-    async def coordinator_json(method, path, actor, **kw):
+    async def coordinator_json(method, path, actor, headers_extra=None, **kw):
         """A call to oarbankd's admin API; a coordinator that is down answers 503 instead of raising."""
         try:
-            return await http.request(method, path, headers=state.coordinator_headers(actor), **kw)
+            return await http.request(method, path, headers={**state.coordinator_headers(actor), **(headers_extra or {})}, **kw)
         except httpx.HTTPError as e:
             return httpx.Response(503, json={"error": "coordinator_unreachable", "detail": type(e).__name__})
 
@@ -452,6 +497,70 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                                    {"job": {"id": jid, "job_id": jid, "module": d["j"]["module"], "state": d["j"]["state"]}})
         return render(request, "job.html", {**d, "actor": actor})
 
+    # ------------------------------------------------------------------ datasets: browse, download, upload
+    home = Path(state.db_path).parent
+
+    @app.get("/datasets", response_class=HTMLResponse)
+    async def datasets_list(request: Request, kind: str = "", module: str = ""):
+        actor = who(request)
+        return render(request, "datasets.html", {**(await drill(views.datasets_page, kind, module) or {"datasets": []}),
+                                                 "actor": actor})
+
+    @app.get("/datasets/upload", response_class=HTMLResponse)
+    async def dataset_upload_page(request: Request):
+        actor = who(request)
+        await refresh_catalog(actor)
+        kinds = {n: list(catalog.manifest(n).datasets.kinds) for n in catalog.rows if catalog.manifest(n)}
+        return render(request, "dataset_upload.html", {"module_kinds": {n: k for n, k in kinds.items() if k}, "actor": actor})
+
+    @app.get("/datasets/{did:path}/files/{path:path}")
+    async def dataset_file(did: str, path: str, request: Request):
+        who(request)
+        files = await drill(views.dataset_files, home, did)
+        hit = next((f for name, f in files or [] if name == path), None)
+        if hit is None:
+            return render(request, "error.html", {"message": f"{did} has no file {path} on the coordinator"}, 404)
+        return FileResponse(hit, media_type="application/octet-stream", filename=Path(path).name, headers=DOWNLOAD_HEADERS)
+
+    @app.get("/datasets/{did:path}/download.zip")
+    async def dataset_zip(did: str, request: Request):
+        who(request)
+        files = await drill(views.dataset_files, home, did)
+        if files is None:
+            return render(request, "error.html", {"message": f"dataset {did} not found"}, 404)
+        return zip_response(files, did.replace(":", "_").replace("/", "_") + ".zip")
+
+    @app.get("/datasets/{did:path}", response_class=HTMLResponse)
+    async def dataset_detail(did: str, request: Request):
+        actor = who(request)
+        d = await drill(views.dataset_page, did)
+        if d is None:
+            return render(request, "error.html", {"message": f"dataset {did} not found", "actor": actor}, 404)
+        return render(request, "dataset.html", {**d, "actor": actor})
+
+    @app.get("/campaigns/{cid}/artifacts.zip")
+    async def campaign_zip(cid: str, request: Request):
+        who(request)
+        return zip_response(await drill(views.campaign_files, home, cid) or [], f"{cid}-artifacts.zip")
+
+    @app.post("/datasets/uploads/{digest}")
+    async def stage_begin(digest: str, request: Request):
+        """A browser upload's blob staging (static/upload.js): forwarded to oarbankd with the account's identity."""
+        actor = who(request)
+        r = await coordinator_json("POST", f"/api/v1/uploads/{digest}", actor, content=await request.body(),
+                                   headers_extra={"content-type": "application/json"})
+        return Response(r.content, status_code=r.status_code, media_type="application/json",
+                        headers={k: v for k, v in r.headers.items() if k.lower().startswith("upload-")})
+
+    @app.patch("/datasets/uploads/{digest}")
+    async def stage_append(digest: str, request: Request):
+        actor = who(request)
+        r = await coordinator_json("PATCH", f"/api/v1/uploads/{digest}", actor, content=request.stream(),
+                                   headers_extra={"upload-offset": request.headers.get("upload-offset") or "",
+                                                  "content-type": "application/offset+octet-stream"})
+        return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"),
+                        headers={k: v for k, v in r.headers.items() if k.lower().startswith("upload-")})
+
     @app.get("/events", response_class=HTMLResponse)
     async def events(request: Request, kind: str = "", before: int | None = None):
         actor = who(request)
@@ -516,8 +625,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         def run(r):
             page = catalog.page(name, decl)
             host = modpages.build_host(state, catalog, name, {**context, "return_to": str(request.url.path)},
-                                       ops.get,
-                                       module_origin, r)
+                                       ops.get, module_origin, r, tokens)
             return render_page(page, host)
         try:
             return await drill(run) or '<p class="mut">module page unavailable (database busy)</p>'
@@ -800,21 +908,25 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         return _result(op, r, return_to, request)
 
     # ------------------------------------------------------------------ /api/* passthrough (oarbank via tailscale serve)
-    @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def api_proxy(path: str, request: Request):
         """The remote CLI's path to oarbankd (OARBANKD_URL = the console's https address): it carries its own personal
-        access token, which oarbankd checks; the console adds no identity of its own."""
+        access token, which oarbankd checks; the console adds no identity of its own. Bodies stream both ways (uploads,
+        downloads of large blobs)."""
         if not (request.headers.get("authorization") or "").lower().startswith("bearer "):
             return JSONResponse({"error": "unauthenticated", "detail": "send a personal access token (OARBANK_TOKEN)"},
                                 status_code=401)
         headers = {"authorization": request.headers["authorization"]}
-        for h in ("if-match", "idempotency-key", "x-request-id", "content-type"):
+        for h in ("if-match", "idempotency-key", "x-request-id", "content-type", "range", "upload-offset"):
             if request.headers.get(h):
                 headers[h] = request.headers[h]
         headers["x-oarbank-source"] = request.headers.get("x-oarbank-source", "cli")
-        r = await http.request(request.method, f"/api/{path}", params=request.query_params, content=await request.body(),
-                               headers=headers)
-        return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"),
-                        headers={k: v for k, v in r.headers.items() if k.lower() in ("retry-after", "etag")})
+        req = http.build_request(request.method, f"/api/{path}", params=request.query_params, content=request.stream(),
+                                 headers=headers)
+        r = await http.send(req, stream=True)
+        keep = ("retry-after", "etag", "content-length", "content-range", "accept-ranges", "content-disposition",
+                "x-content-type-options", "content-security-policy", "upload-offset", "upload-complete")
+        return StreamingResponse(r.aiter_raw(), status_code=r.status_code, media_type=r.headers.get("content-type"),
+                                 headers={k: v for k, v in r.headers.items() if k.lower() in keep}, background=BackgroundTask(r.aclose))
 
     return app

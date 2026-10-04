@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   agent_build TEXT, agent_update_json TEXT,         -- agent self-update: the binary the agent runs, and its update state
   cik_pinned TEXT, cik_confirmed TEXT, cik_confirmed_by TEXT, cik_confirmed_at REAL,   -- the coordinator key the agent pinned
   install_coordinator_json TEXT, coordinator_move_json TEXT,
+  folders_json TEXT,              -- the folders of the statement the agent applied: {id: {access, status}} (folders.py)
   clock_offset_s REAL);           -- the node's wall clock minus oarbankd's, at its last hello or heartbeat (protocol.md, "Clocks")
 
 CREATE TABLE IF NOT EXISTS node_samples (
@@ -103,7 +104,8 @@ CREATE TABLE IF NOT EXISTS attempts (
   attempt_id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INT, node_id TEXT, generation INT,
   release_id TEXT, cert_generation INT, state TEXT,  -- live|completed|released|expired|failed|revoked|killed
   granted_at REAL, expires_at REAL, hard_deadline REAL, phase TEXT, cpu_s REAL DEFAULT 0,
-  log_bytes INT DEFAULT 0, rss_gb REAL, end_reason TEXT, ended_at REAL, last_progress_at REAL, module_version TEXT);
+  log_bytes INT DEFAULT 0, rss_gb REAL, end_reason TEXT, ended_at REAL, last_progress_at REAL, module_version TEXT,
+  resume_json TEXT);              -- the checkpoint the attempt resumed from: {from_attempt, node_id, digest}
 CREATE INDEX IF NOT EXISTS attempts_live ON attempts(state, node_id);
 CREATE INDEX IF NOT EXISTS attempts_job ON attempts(job_id);
 
@@ -115,6 +117,12 @@ CREATE TABLE IF NOT EXISTS results (
   platform TEXT);                 -- the producing node's platform when the result was recorded (D33)
 CREATE INDEX IF NOT EXISTS results_key ON results(job_key, canonical);
 CREATE INDEX IF NOT EXISTS results_job ON results(job_id);
+
+-- a job's latest portable checkpoint (docs/design/datasets-media-checkpoints.md): valid for one generation of an open job
+CREATE TABLE IF NOT EXISTS checkpoints (
+  job_id INTEGER PRIMARY KEY, generation INT NOT NULL, attempt_id INT NOT NULL, node_id TEXT NOT NULL, seq INT NOT NULL,
+  digest TEXT NOT NULL, files_json TEXT NOT NULL, data_json TEXT, size INT NOT NULL, at REAL);
+CREATE INDEX IF NOT EXISTS checkpoints_node ON checkpoints(node_id);
 
 CREATE TABLE IF NOT EXISTS events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, actor TEXT, node_id TEXT,

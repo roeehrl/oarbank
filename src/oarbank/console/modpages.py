@@ -143,7 +143,8 @@ def resolve(r, module: str, man: mf.Manifest, src: U.Source) -> dict:
     return {"rows": _shape(_rows_for(r, module, man, src), src)}
 
 
-def build_host(state, catalog: ModuleCatalog, module: str, context: dict, ops_meta, module_origin: str, reader) -> Host:
+def build_host(state, catalog: ModuleCatalog, module: str, context: dict, ops_meta, module_origin: str, reader,
+               tokens=None) -> Host:
     man = catalog.manifest(module)
 
     def link_url(l: U.Link) -> str:
@@ -163,7 +164,11 @@ def build_host(state, catalog: ModuleCatalog, module: str, context: dict, ops_me
             return {}
         return json.loads(f.read_text())
 
-    return Host(resolve=lambda src, ctx: resolve(reader, module, man, src), operation=ops_meta,
+    from . import media
+
+    def media_urls(ref, kind):
+        return media.urls(reader, tokens, module, module_origin, ref, kind) if tokens is not None else None
+    return Host(resolve=lambda src, ctx: resolve(reader, module, man, src), operation=ops_meta, media=media_urls,
                 op_url=lambda op: f"/do/{op}", link_url=link_url,
                 frame_url=lambda view: f"{module_origin}/f/{module}/{view}/", schema=schema, module=module,
                 context={**context, "bridge_base": f"/m/{module}/_bridge"}, return_to=context.get("return_to", ""))

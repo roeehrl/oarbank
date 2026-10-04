@@ -504,6 +504,14 @@
           "$ref": "#/$defs/Implicit",
           "description": "moderate/strict_yield only."
         },
+        "max_pause_s": {
+          "default": 600,
+          "description": "The longest a fleet job stays paused before it is released (a checkpointing runner checkpoints first).",
+          "maximum": 600,
+          "minimum": 10,
+          "title": "Max Pause S",
+          "type": "number"
+        },
         "memory": {
           "$ref": "#/$defs/MemoryGuard"
         },

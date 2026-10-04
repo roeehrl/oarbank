@@ -3,7 +3,8 @@
 A node reports its facts (format 2) in its hello: `platform {os, arch, os_version, os_build, kernel, distro, libc}`, `cpu`, `memory`,
 `gpus`, `addresses`. The platform token is `<os>-<arch>`. A module version runs on a node only when its manifest lists
 that platform (`requires.platforms`), the node's OS version is in `requires.os`, and every host tool it was approved
-for is in the operator's tool registry for that OS. Anything else is refused with a reason code the explainer shows.
+for is in the operator's tool registry for that OS, and the node provides every folder it asks for. Anything else is
+refused with a reason code the explainer shows.
 """
 import json
 import re
@@ -118,6 +119,7 @@ def sandbox_gaps(manifest, facts: dict) -> list[str]:
         need.append(f"gpu.{sb.devices.gpu}")
     if any(s.endpoint for s in manifest.services):
         need.append("endpoints")
+    need += sorted({f"folders.{f.access}" for f in sb.folders})
     return [c for c in need if enf.get(c) != "enforced"]
 
 
@@ -142,6 +144,9 @@ def unsupported(db: DB, manifest, node: dict) -> str | None:
     _, missing = tool_paths(db, [t.id for t in manifest.sandbox.tools], os_)
     if missing:
         return "TOOL_UNAVAILABLE"
+    from . import folders
+    if folders.missing(manifest, node):
+        return "FOLDER_UNAVAILABLE"
     return None
 
 

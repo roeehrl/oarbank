@@ -54,6 +54,8 @@ pub struct Agent {
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
     #[cfg(unix)]
     images: Option<Arc<crate::imageset::Verifier>>,
+    /// The folder statement this node applies, and what it found for each folder (folders.rs).
+    pub folders: crate::folders::Folders,
     /// Module services and probes (service protocol 1), created with the first release.
     pub services: Option<Arc<std::sync::Mutex<crate::services::ServiceManager>>>,
     /// What the services were last configured with: release id, policy, limits.
@@ -92,7 +94,7 @@ impl Agent {
         cfg.save(&layout.config())?;
         let release = release::current(&layout);
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
-        Ok(Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
+        let a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: Value::Null, hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
                    last_release_error: None, need_hello: false, table: Table::default(), healthy: vec![],
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
@@ -102,8 +104,13 @@ impl Agent {
                    #[cfg(unix)]
                    images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![],
+                   folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
-            services_halted: false, coord_install: Default::default(), layout })
+            services_halted: false, coord_install: Default::default(), layout };
+        // folder entries a statement or a release no longer grants are removed when the agent starts, too
+        #[cfg(windows)]
+        crate::sandbox_windows::reconcile_folder_grants(&a.layout, a.release.as_ref(), &a.folders);
+        Ok(a)
     }
 
     /// Open with a join code: the first of its addresses whose coordinator proves its identity with the pinned CA.
@@ -269,7 +276,7 @@ impl Agent {
         };
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
-                              "ready_datasets": staging::ready(&self.layout),
+                              "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
@@ -301,6 +308,9 @@ impl Agent {
         }
         if d["release"].is_object() {
             self.install_release(&d["release"].clone()).await;
+        }
+        if d["folders"].is_object() {
+            self.observe_folders(&d["folders"].clone());
         }
         for (key, stop) in [("cancel", Stop::Cancel), ("revoke", Stop::Revoke), ("kill", Stop::Revoke)] {
             for aid in d[key].as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_i64) {
@@ -413,6 +423,8 @@ impl Agent {
                 self.release = Some(rel);
                 self.last_release_error = None;
                 self.need_hello = true;
+                #[cfg(windows)]
+                crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
                 self.sync_services();
                 let policy = self.directives["policy"].clone();
                 self.run_doctors(&policy).await;
@@ -473,6 +485,31 @@ impl Agent {
             .and_then(|k| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, k).ok())
             .map(|raw| hex::encode(sha2::Sha256::digest(raw)));
         json!({"cik_pinned": fp, "coordinator_move_state": self.move_state})
+    }
+
+    /// A folder statement in a directive (folders.rs): verified against the pinned release key, checked folder by folder
+    /// and applied; on Windows the folder entries no applied statement or current release grants any more are removed.
+    fn observe_folders(&mut self, d: &Value) {
+        // Oarbank's data: the agent's home, and the Oarbank directory it sits in by default (beside a coordinator's)
+        let home = &self.layout.home;
+        let data_root = match home.parent() {
+            Some(p) if p.file_name().is_some_and(|n| n == "Oarbank") => p.to_path_buf(),
+            _ => home.clone(),
+        };
+        match crate::folders::apply(&self.folders, d, self.node_id.as_deref().unwrap_or(""),
+                                    self.cfg.coordinator_trust.fleet_id.as_deref(), self.signing.pinned_key.as_deref(), &data_root) {
+            Ok(Some(f)) => {
+                info!(seq = f.seq, folders = %f.report(), "folder statement applied");
+                if let Err(e) = f.save(&self.layout.state().join("folders.json")) {
+                    warn!(error = %e, "cannot keep the folder statement");
+                }
+                self.folders = f;
+                #[cfg(windows)]
+                crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
+            }
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "folder statement refused (the last applied one stays)"),
+        }
     }
 
     /// Owner key sets and move statements in a directive (or a 410's body): verify, then pin or record.
@@ -780,7 +817,7 @@ impl Agent {
                                        containers: self.container_runtime(),
                                        #[cfg(unix)]
                                        images: self.image_verifier().map_err(io_err)?,
-                                       services: self.services.clone() });
+                                       services: self.services.clone(), folders: self.folders.clone() });
         for g in &grants {
             let aid = g["attempt_id"].as_i64().unwrap_or(0);
             let res = &g["spec"]["resources"];

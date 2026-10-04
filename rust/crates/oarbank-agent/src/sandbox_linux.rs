@@ -3,9 +3,10 @@
 //!
 //! 1. no_new_privs;
 //! 2. Landlock for the detected ABI: read and execute the policy's read-only roots and the base system, everything
-//!    in the read-write roots (execute only with `exec_writable`), the null/zero/random devices and, with the GPU
-//!    grant, the render nodes; with ABI 4+ TCP connect only to the egress proxy's port and no bind; with ABI 6+ no
-//!    abstract unix sockets or signals outside the sandbox;
+//!    in the read-write roots (execute only with `exec_writable`), a runner's input folders read-only (no execute) and
+//!    its outboxes create-and-write only (no read, list, removal, links or renames), the null/zero/random devices and,
+//!    with the GPU grant, the render nodes; with ABI 4+ TCP connect only to the egress proxy's port and no bind; with
+//!    ABI 6+ no abstract unix sockets or signals outside the sandbox;
 //! 3. seccomp: no UDP, raw, netlink or other socket families, no IPv4/IPv6 at all without a network grant, no unix
 //!    sockets without the broker (socketpair stays: event loops need it), never listen, no ptrace, mounts,
 //!    namespaces, keyrings, BPF or kernel modules (clone3 answers ENOSYS so libc falls back to a filterable clone).
@@ -54,7 +55,9 @@ pub fn report() -> Value {
         "no_loopback": e(abi >= 4),
         "no_link_local": e(abi >= 4),
         "gpu.compute": "enforced",
-        "exec_writable_deny": "enforced"}})
+        "exec_writable_deny": "enforced",
+        // read-only input folders and write-only outboxes (Landlock ABI 3 rights, the backend's floor)
+        "folders.read": "enforced", "folders.write": "enforced"}})
 }
 
 pub fn is_confined(pid: i32) -> bool {
@@ -101,6 +104,14 @@ fn landlock(pol: &Policy, abi_n: i32) -> Result<(), String> {
     }
     for p in &pol.rw {
         push(&mut rules, p, rw, true, abi)?;
+    }
+    // folders: an input folder read-only; an outbox may take new files and directories and their writes, never a read,
+    // a listing, a removal, a symlink or a link or rename across its boundary (Refer)
+    for p in &pol.rd {
+        push(&mut rules, p, AccessFs::ReadFile | AccessFs::ReadDir, true, abi)?;
+    }
+    for p in &pol.wo {
+        push(&mut rules, p, AccessFs::MakeReg | AccessFs::MakeDir | AccessFs::WriteFile | AccessFs::Truncate, true, abi)?;
     }
     for p in DEVICES_RW {
         push(&mut rules, p, dev, false, abi)?;

@@ -9,6 +9,7 @@ parameter search, a benchmark sweep or a backfill are all the owning module's bu
 Module faults leave the campaign as it is (it is ticked again later) and are never charged to anyone.
 """
 import json
+import re
 import time
 
 from oarbank_sdk import module_protocol as mp
@@ -131,6 +132,27 @@ def _finish_if_drained(db: DB, c: dict) -> int:
         db.x("UPDATE campaigns SET state='done', finished_at=? WHERE campaign_id=? AND state='running'", (clock.now(), c["campaign_id"]))
         db.event("campaign_done", campaign_id=c["campaign_id"], reason=f"{c['name']}: all {r['n']} jobs settled")
     return 1
+
+
+def artifact_dir(job_id: int, name: str | None) -> str:
+    """A job's directory in a campaign download (`oarbank campaign download`, the console's zip): its id, then its name made
+    a safe path segment."""
+    safe = re.sub(r"[^A-Za-z0-9._+-]+", "-", name or "").strip("-.")[:60]
+    return f"{job_id}-{safe}" if safe else str(job_id)
+
+
+def artifacts(db: DB, campaign_id: str) -> list[dict]:
+    """A campaign's results as files: each done job's canonical result's artifacts (`oarbank campaign download`, the
+    console's download), as {job_id, name, dir, artifacts: [{name, files: [{path, digest, size}]}]}."""
+    rows = db.q("SELECT j.job_id, j.name, r.result_json FROM jobs j JOIN results r ON r.result_id=j.canonical_result_id "
+                "WHERE j.campaign_id=? AND j.state='done' AND j.kind!='call' ORDER BY j.job_id", (campaign_id,))
+    out = []
+    for r in rows:
+        arts = [{"name": a.get("name"), "files": [{k: f.get(k) for k in ("path", "digest", "size")} for f in a.get("files") or []]}
+                for a in (jl(r["result_json"], {}) or {}).get("artifacts") or []]
+        if arts:
+            out.append({"job_id": r["job_id"], "name": r["name"], "dir": artifact_dir(r["job_id"], r["name"]), "artifacts": arts})
+    return out
 
 
 def summary(db: DB, campaign_id: str) -> dict | None:

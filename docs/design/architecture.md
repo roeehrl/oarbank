@@ -14,7 +14,7 @@ This page describes how the pieces fit and how each works on each operating syst
 | **oarbank-agent** (`rust/crates/oarbank-agent`) | The node agent (D26): enrollment, sessions, staging, jobs in the module sandbox, services and probes (with the endpoints jobs reach a warm service through, [service-endpoints.md](service-endpoints.md)), host protection (`oarbank-protection`, [protection.md](protection.md)), self-update requests, coordinator moves and rescue moves. |
 | **oarbank-launcher** (`rust/crates/oarbank-launcher`) | Keeps the agent running under the OS service manager and owns which agent version runs. |
 | **oarbank-core** (`rust/crates/oarbank-core`) | The contracts that must match byte for byte: canonical JSON, portable paths, bundle digests and release verification, sandbox policies and profiles, the protection matcher. The SDK's Python code is held to it by parity tests through `oarbank-core-py`. |
-| **oarbank-sdk** (`vendor/oarbank-sdk`, Apache-2.0) | The open module contract: manifest, module, runner and service protocols, bundles, the sandbox contract, the conformance kit and the reference `toy` module. The core consumes it, never the other way round. |
+| **oarbank-sdk** (`vendor/oarbank-sdk`, Apache-2.0) | The open module contract: manifest, module, runner and service protocols, bundles, the sandbox contract, the conformance kit and the reference modules `toy` and `reel`. The core consumes it, never the other way round. |
 | **Modules** | Bundles built on the SDK, installed into the coordinator's store, approved per version by digest. |
 
 ## Platforms and the node model
@@ -124,6 +124,10 @@ confinement and fails closed. Grants are whole directories or files, approved pe
   refuses IP literals and names resolving to non-public addresses; every other route is blocked) and a separately
   approved full-trust `egress-any`. Loopback and link-local are never reachable.
 - **Tools** are ids in the operator's tool registry, mapped to absolute paths per OS (`settings.tools.update`).
+- **Folders** ([datasets-media-checkpoints.md](datasets-media-checkpoints.md)) are ids too: read-only input folders and
+  write-only outboxes, for runners only, mapped to a path per node in the folder registry and delivered to each node in
+  a folder statement the owner signs in signing mode; the agent checks each path on the node and grants its canonical
+  path (Seatbelt rules, Landlock rules, or entries for a capability SID only the module's runner tokens carry).
 - **GPU** is one coarse `compute` device class per backend.
 - **Every node reports enforcement per capability** (enforced, cooperative, unavailable) with its backend and ABI; work
   is placed only where every capability it needs is enforced.
@@ -150,7 +154,9 @@ ignored, on POSIX; on Windows an inheritable auto-reset event, `OARBANK_CONTROL_
 on with the standard handles and nothing else), and runners re-read it only when nudged. Stop writes `stop` and nudges
 (plus SIGTERM on POSIX), then kills the container after the runner's `stop_grace_s`. Protection freezes `freeze_ok`
 runners through the containers (SIGSTOP of the process group on macOS, `cgroup.freeze` on Linux, suspending the Job
-Object on Windows), pauses `cooperative_pause` runners through `control.json`, and lowers jobs through them too
+Object on Windows), pauses `cooperative_pause` runners through `control.json` (at most 10 minutes, or the node's
+`max_pause_s`; then the job is released, after a portable checkpoint when its runner keeps them, so it resumes on any
+node: [datasets-media-checkpoints.md](datasets-media-checkpoints.md)), and lowers jobs through them too
 (background QoS on macOS; on Linux the background CPU quota of the container's `run` leaf, below the container that
 holds the hard limits; the Job Object's idle priority class and EcoQoS on Windows). Exit codes 2, 3 and 75 count only with a `failure.json`, whose
 `fault` (`job`, `host`, `transient`) decides who is charged. A failure spends one of the job's attempts when its end

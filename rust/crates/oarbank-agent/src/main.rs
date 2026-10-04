@@ -6,6 +6,7 @@ mod api;
 mod broker;
 #[cfg(target_os = "linux")]
 mod cgroup;
+mod checkpoints;
 mod clock;
 mod config;
 #[cfg(unix)]
@@ -15,6 +16,7 @@ mod discover;
 mod doctor;
 mod endpoints;
 mod facts;
+mod folders;
 mod fsutil;
 mod host;
 mod identity;

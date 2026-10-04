@@ -2,12 +2,13 @@
 import argparse
 import asyncio
 import os
+from pathlib import Path
 
 import uvicorn
 
 from .app import console_app
 from .frames import frames_app
-from .state import ConsoleState, wait_for_schema
+from .state import ConsoleState, Reader, wait_for_schema
 
 
 def main():
@@ -31,7 +32,8 @@ def main():
     module_origin = a.module_origin or f"http://127.0.0.1:{a.frames_port}"
     console_origin = a.console_origin or f"http://127.0.0.1:{a.port}"
     app = console_app(state, home / "attempt-logs", module_origin=module_origin)
-    frames = frames_app(app.state.catalog, console_origin, refresh=app.state.refresh_catalog_sync)
+    frames = frames_app(app.state.catalog, console_origin, refresh=app.state.refresh_catalog_sync, tokens=app.state.media_tokens,
+                        reader=Reader(a.db), home=Path(a.db).parent)
 
     async def serve():
         await asyncio.gather(

@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 84 operations, 2 explain kinds, 120 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 87 operations, 2 explain kinds, 121 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -36,7 +36,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `campaigns.set_priority` | T0 | yes | `oarbank campaign priority <id> <p>` | yes |
 | `campaigns.set_placement` | T2 | yes | `oarbank campaign placement <id> --mix <mix>` | yes |
 | `campaigns.rebind_platform` | T2 | yes | `oarbank campaign rebind <id> --platform <token>` | yes |
-| `datasets.register` | T1 | yes | `oarbank dataset register <file.json>`<br>`module CLIs (importers)` | yes |
+| `datasets.register` | T1 | yes | `oarbank dataset upload <dir> --kind <kind>`<br>`oarbank dataset register <file.json>` | yes |
+| `settings.origins.update` | T2 | yes | `oarbank op settings.origins.update -p hosts=...` | yes |
 | `modules.set_pipeline` | T2 | yes | `oarbank pipeline <module> single|split` | yes |
 | `modules.install` | T2 | yes | `oarbank module install <bundle.mfb>` | yes |
 | `modules.uninstall` | T2 | yes | `oarbank module uninstall <name>@<version>` | yes |
@@ -79,6 +80,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
 | `settings.notifications.update` | T2 | yes | `oarbank op settings.notifications.update` | yes |
 | `settings.tools.update` | T2 | yes | `oarbank op settings.tools.update` | yes |
+| `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
+| `folders.sign` | T1 | yes | `oarbank folders sign <node>` | yes |
 | `access.accounts.create` | T2 | yes | `oarbank account create <name>` | yes |
 | `access.accounts.update` | T2 | yes | `oarbank op access.accounts.update` | yes |
 | `access.accounts.reset_totp` | T2 | yes | `oarbank op access.accounts.reset_totp` | yes |
@@ -119,6 +122,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `SECRETS_NOT_SET` | `secrets.set` |
 | `DATASET_PLATFORM_MISMATCH` | `jobs.cancel` |
 | `TOOL_UNAVAILABLE` | `settings.tools.update` |
+| `FOLDER_UNAVAILABLE` | `settings.folders.update` |
 | `AGENT_TOO_OLD` | `agent.promote` |
 | `RETRIES_EXHAUSTED` | `jobs.cancel` |
 | `NODE_PAUSED_BY_ADMIN` | `nodes.resume` |

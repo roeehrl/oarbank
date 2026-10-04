@@ -34,7 +34,7 @@ def operations_md() -> str:
     lines += ["## Agent protocol routes (not operations)", "",
               "Machine-to-machine, authenticated by the node's client certificate and fenced by generation; audited as events "
               "under `node:<id>`.", ""]
-    lines += [f"- `{m} {p}`" for m, p in sorted(ops.AGENT_ROUTES, key=lambda x: x[1])]
+    lines += [f"- `{m} {p}`" for m, p in sorted(ops.AGENT_ROUTES, key=lambda x: (x[1], x[0]))]
     return "\n".join(lines) + "\n"
 
 

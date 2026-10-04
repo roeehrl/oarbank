@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-pub const PROFILE_VERSION: u32 = 3;
+pub const PROFILE_VERSION: u32 = 4;
 pub const BACKEND: &str = "seatbelt";
 pub const NET_MODES: [&str; 3] = ["none", "egress-allowlist", "egress-any"];
 
@@ -65,6 +65,14 @@ const RO: &str = r#"(allow file-read* file-map-executable process-exec (subpath 
 const RW: &str = r#"(allow file-read* file-write* (subpath (param "RW_{i}")))
 (allow file-read-metadata (path-ancestors (param "RW_{i}")))
 "#;
+const RD: &str = r#"(allow file-read* (subpath (param "RD_{i}")))
+(allow file-read-metadata (path-ancestors (param "RD_{i}")))
+"#;
+// an outbox: create regular files and directories (never links) and write them; no reading, listing, unlink or rename
+const WO: &str = r#"(allow file-read-metadata (subpath (param "WO_{i}")) (path-ancestors (param "WO_{i}")))
+(allow file-write-create (require-all (subpath (param "WO_{i}")) (vnode-type REGULAR-FILE DIRECTORY)))
+(allow file-write-data (subpath (param "WO_{i}")))
+"#;
 const LINK: &str = r#"(allow file-read-metadata (literal (param "LINK_{i}")) (path-ancestors (param "LINK_{i}")))
 "#;
 const EGRESS_ANY: &str = r#"
@@ -110,7 +118,8 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SandboxError> {
 }
 
 /// What one module process may touch. `ro`: read, map and exec (bundle, interpreter, approved host paths); `rw`: read
-/// and write (data dir, job work dir, tmp). The kind only labels the profile.
+/// and write (data dir, job work dir, tmp); `rd`: read only, never execute (a runner's read folders); `wo`: create and
+/// write, never read, list, unlink or rename (a runner's outboxes). The kind only labels the profile.
 /// A module process's policy; also the JSON the Linux and Windows launchers read (`#[serde(default)]`: the SDK's
 /// Python `Policy` serialises the same fields).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -129,6 +138,8 @@ pub struct Policy {
     pub kind: String,
     /// argv[0]: its symlink hops need metadata rules too
     pub exe: Option<String>,
+    pub rd: Vec<String>,
+    pub wo: Vec<String>,
 }
 
 impl Default for Policy {
@@ -150,6 +161,8 @@ impl Policy {
             exec_rw: false,
             kind: "runner".into(),
             exe: None,
+            rd: Vec::new(),
+            wo: Vec::new(),
         }
     }
 }
@@ -166,6 +179,8 @@ pub fn render_text(
     gpu: bool,
     proxy_port: Option<u16>,
     exec_rw: bool,
+    n_rd: usize,
+    n_wo: usize,
 ) -> Result<String, SandboxError> {
     if !NET_MODES.contains(&net) {
         return fail(format!("network mode {} is not enforceable by the {BACKEND} backend", crate::py::repr(net)));
@@ -185,6 +200,12 @@ pub fn render_text(
         if exec_rw {
             s.push_str(&idx(RW_EXEC, i));
         }
+    }
+    for i in 0..n_rd {
+        s.push_str(&idx(RD, i));
+    }
+    for i in 0..n_wo {
+        s.push_str(&idx(WO, i));
     }
     for i in 0..n_links {
         s.push_str(&idx(LINK, i));
@@ -212,14 +233,18 @@ pub fn render_text(
 pub fn render(policy: &Policy) -> Result<(String, Vec<(String, String)>), SandboxError> {
     let ro = unique(policy.ro.iter().map(|p| real(p)).collect::<Result<Vec<_>, _>>()?);
     let rw = unique(policy.rw.iter().map(|p| real(p)).collect::<Result<Vec<_>, _>>()?);
+    let rd = unique(policy.rd.iter().map(|p| real(p)).collect::<Result<Vec<_>, _>>()?);
+    let wo = unique(policy.wo.iter().map(|p| real(p)).collect::<Result<Vec<_>, _>>()?);
     let mut all_links = Vec::new();
-    for p in policy.ro.iter().chain(policy.rw.iter()).chain(policy.exe.iter()) {
+    for p in policy.ro.iter().chain(policy.rw.iter()).chain(policy.rd.iter()).chain(policy.wo.iter()).chain(policy.exe.iter()) {
         all_links.extend(links_of(p)?);
     }
     let links = unique(all_links);
     let mut params = vec![("MODULE_ID".to_string(), policy.module.clone())];
     params.extend(ro.iter().enumerate().map(|(i, p)| (format!("RO_{i}"), p.clone())));
     params.extend(rw.iter().enumerate().map(|(i, p)| (format!("RW_{i}"), p.clone())));
+    params.extend(rd.iter().enumerate().map(|(i, p)| (format!("RD_{i}"), p.clone())));
+    params.extend(wo.iter().enumerate().map(|(i, p)| (format!("WO_{i}"), p.clone())));
     params.extend(links.iter().enumerate().map(|(i, p)| (format!("LINK_{i}"), p.clone())));
     let broker = policy.broker_socket.as_deref().filter(|b| !b.is_empty());
     if let Some(b) = broker {
@@ -227,7 +252,7 @@ pub fn render(policy: &Policy) -> Result<(String, Vec<(String, String)>), Sandbo
         params.push(("BROKER_SOCKET".into(), format!("{}/{name}", real(&parent)?)));
     }
     let text = render_text(&policy.kind, ro.len(), rw.len(), links.len(), &policy.net, broker.is_some(), policy.gpu,
-                           policy.proxy_port, policy.exec_rw)?;
+                           policy.proxy_port, policy.exec_rw, rd.len(), wo.len())?;
     Ok((text, params))
 }
 
@@ -430,16 +455,16 @@ mod tests {
 
     #[test]
     fn text_depends_only_on_shape() {
-        let t = render_text("runner", 1, 1, 0, "none", false, false, None, false).unwrap();
-        assert!(t.starts_with("(version 1)\n;; oarbank module sandbox, profile 3 (runner)\n"));
+        let t = render_text("runner", 1, 1, 0, "none", false, false, None, false, 0, 0).unwrap();
+        assert!(t.starts_with("(version 1)\n;; oarbank module sandbox, profile 4 (runner)\n"));
         assert!(t.contains("(subpath (param \"RO_0\"))") && !t.contains("RO_1") && !t.contains("network-outbound"));
-        let a = render_text("runner", 1, 1, 0, "egress-allowlist", false, false, Some(47001), false).unwrap();
+        let a = render_text("runner", 1, 1, 0, "egress-allowlist", false, false, Some(47001), false, 0, 0).unwrap();
         assert!(a.contains("(remote ip \"localhost:47001\")"));
-        assert!(render_text("runner", 1, 1, 0, "egress-allowlist", false, false, None, false).is_err());
-        assert!(render_text("runner", 1, 1, 0, "egress-allowlist", false, false, Some(0), false).is_err());
-        let e = render_text("runner", 1, 1, 0, "open", false, false, None, false).unwrap_err();
+        assert!(render_text("runner", 1, 1, 0, "egress-allowlist", false, false, None, false, 0, 0).is_err());
+        assert!(render_text("runner", 1, 1, 0, "egress-allowlist", false, false, Some(0), false, 0, 0).is_err());
+        let e = render_text("runner", 1, 1, 0, "open", false, false, None, false, 0, 0).unwrap_err();
         assert_eq!(e.0, "network mode 'open' is not enforceable by the seatbelt backend");
-        let any = render_text("runner", 0, 0, 0, "egress-any", false, true, None, false).unwrap();
+        let any = render_text("runner", 0, 0, 0, "egress-any", false, true, None, false, 0, 0).unwrap();
         let (harden, lo, gpu) = (any.find(";; hardening").unwrap(), any.find("(deny network-outbound (remote ip \"localhost:*\"))").unwrap(), any.find(";; grant: GPU").unwrap());
         assert!(harden < lo && lo < gpu);
     }

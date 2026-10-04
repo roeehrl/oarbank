@@ -1,7 +1,7 @@
-//! Running a grant (docs/protocol.md, "Work": Running a job; runner protocol 1): stage its datasets into a fresh work
-//! directory, write spec.json and control.json, start the runner in its own process group under the module sandbox
-//! with exactly the protocol's environment, watch it (deadline, stop, pause, usage), then upload its artifacts and
-//! complete, or fail with the runner's own fault attribution.
+//! Running a grant (docs/protocol.md, "Work": Running a job; runner protocol 1): stage its datasets (and the checkpoint it
+//! resumes from) into a fresh work directory, write spec.json and control.json, start the runner in its own process
+//! group under the module sandbox with exactly the protocol's environment, watch it (deadline, stop, pause, usage, its
+//! portable checkpoints), then upload its artifacts and complete, or fail with the runner's own fault attribution.
 
 use crate::api::Api;
 use crate::doctor::{base_env, grant_files, module_env, resolve_exec};
@@ -109,6 +109,8 @@ pub struct Ctx {
     pub images: Arc<crate::imageset::Verifier>,
     /// The module services, for the readiness gate before a runner that needs their pools starts.
     pub services: Option<Arc<Mutex<crate::services::ServiceManager>>>,
+    /// The folder statement this node applies (folders.rs): which folders runners may get, and where.
+    pub folders: crate::folders::Folders,
 }
 
 /// How long a job waits for the services providing its pools to become ready.
@@ -289,6 +291,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     crate::fsutil::private_dir(&ws.join("tmp"))?;
     set_phase(&ctx.table, aid, "staging");
     stage_workspace(ctx, spec, ws).await?;
+    crate::checkpoints::stage_resume(&ctx.api, &ctx.layout, grant, ws).await?;
     if let Some(s) = stop_of(&ctx.table, aid) {
         return Ok(Outcome::Stopped(s));
     }
@@ -339,11 +342,21 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     if settings.is_null() || bootstrap {
         settings = json!({});                            // operators keep credentials in settings: never a bootstrap job's
     }
+    // folders: runners only, never a bootstrap job; exactly what this node's applied statement provides for the
+    // module's approved requests
+    let folders = if bootstrap { serde_json::Map::new() } else { ctx.folders.granted(&entry["sandbox"]["folders"]) };
     let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings)?;
     // the secrets this job's stage lists (only such a grant carries any): an owner-only file inside the work directory,
     // deleted with it; never in spec.json, the environment or a log
     let secrets = secrets_of(grant);
     let secrets_file = if bootstrap { None } else { secrets_file(&grants_dir, &secrets)? };
+    let folders_file = grants_dir.join("folders.json");
+    std::fs::write(&folders_file, serde_json::to_vec(&folders)?)?;
+    let runner_caps: Vec<String> = entry["runner"]["capabilities"].as_array().cloned().unwrap_or_default().iter()
+        .filter_map(|c| c.as_str().map(str::to_string)).collect();
+    // portable checkpoints: never for a bootstrap job, nor a golden (certification runs a golden whole)
+    let ckpt_limits = (!bootstrap && grant["kind"].as_str() != Some("golden") && runner_caps.iter().any(|c| c == "checkpoint"))
+        .then(|| crate::checkpoints::limits(&entry, spec["stage"].as_str())).flatten();
     let net = entry["sandbox"]["net"]["mode"].as_str().unwrap_or("none").to_string();
     let proxy = if net == "egress-allowlist" {
         let allow: Vec<String> = entry["sandbox"]["net"]["allow"].as_array().cloned().unwrap_or_default().iter()
@@ -388,13 +401,14 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     argv.extend(["run", "--spec"].map(String::from));
     argv.push(ws.join("spec.json").display().to_string());
     argv.extend(["--workdir".to_string(), ws.display().to_string(), "--out".to_string(), ws.join("result.json").display().to_string()]);
-    if runner["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x == "progress_events")) {
+    if runner_caps.iter().any(|c| c == "progress_events" || c == "checkpoint") {
         argv.extend(["--events".to_string(), ws.join("events.ndjson").display().to_string()]);
     }
     let mut env = base_env(module, ws, &ws.join("tmp"));
     env.extend([("OARBANK_WORKDIR".into(), ws.display().to_string()), ("OARBANK_TMP".into(), ws.join("tmp").display().to_string()),
                 ("OARBANK_ATTEMPT_ID".into(), aid.to_string()), ("OARBANK_TOOLS_FILE".into(), tools_file.display().to_string()),
-                ("OARBANK_SETTINGS_FILE".into(), settings_file.display().to_string())]);
+                ("OARBANK_SETTINGS_FILE".into(), settings_file.display().to_string()),
+                ("OARBANK_FOLDERS_FILE".into(), folders_file.display().to_string())]);
     if !bootstrap {
         env.push(("OARBANK_MODULE_DATA".into(), data.display().to_string()));   // a bootstrap job keeps nothing on the node
     }
@@ -434,6 +448,15 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         pol.exec_rw = entry["sandbox"]["exec_writable"].as_bool() == Some(true);
         pol.kind = "runner".into();
         pol.exe = Some(python.display().to_string());
+        for (id, f) in &folders {
+            let path = f["path"].as_str().unwrap_or("").to_string();
+            if let Some(g) = pol.ro.iter().chain(pol.rw.iter()).find(|g| crate::folders::overlaps(Path::new(&path), Path::new(g))) {
+                bail!("folder {id} ({path}) overlaps the sandbox grant {g}");
+            }
+            if f["access"] == "read" { pol.rd.push(path) } else { pol.wo.push(path) }
+        }
+        #[cfg(windows)]
+        crate::sandbox_windows::record_folder_grants(&ctx.layout, &pol)?;
         argv = crate::sandbox::wrap(&pol, &grants_dir.join("runner.sb"), &argv).map_err(|e| anyhow::anyhow!(e))?;
     }
     let log = std::fs::File::create(ws.join(".runner.log"))?;
@@ -493,8 +516,13 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         }
     }
     let grace = runner["stop_grace_s"].as_f64().unwrap_or(20.0);
+    let ckpt_grace = runner["checkpoint_grace_s"].as_f64().unwrap_or(120.0);
+    let mut ck = ckpt_limits.map(|l| crate::checkpoints::Checkpointer::new(&ctx.layout, aid, ws, l));
+    let mut uploads = Uploads::default();
+    let mut asked_checkpoint = false;
     let wake = ctx.table.lock().unwrap().get(&aid).map(|j| j.wake.clone()).unwrap_or_default();
-    let mut stopping: Option<(Stop, Instant)> = None;
+    // why the agent stops the runner, since when, and the grace before the kill
+    let mut stopping: Option<(Stop, Instant, f64)> = None;
     let mut paused = false;
     let mut threads: Option<i64> = None;
     let mut log_sent = 0u64;
@@ -554,18 +582,29 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
             paused = want_pause;
             threads = want_threads;
         }
+        if let Some(c) = ck.as_mut() {
+            uploads.step(ctx, aid, c, false, ws);
+        }
         if stopping.is_none() {
             let timed_out = hard_deadline.is_some_and(|d| Instant::now() > d);
             if let Some(s) = stop.or(if timed_out { Some(Stop::Release("timeout".into())) } else { None }) {
-                control.write(json!({"stop": true}))?;
-                // POSIX also asks the container with SIGTERM; Windows has no such request (Term terminates the Job
-                // Object), so there the nudged document is the request and the kill waits for the grace period
-                #[cfg(unix)]
-                procs::signal_group(pid, procs::Sig::Term);
-                stopping = Some((s, Instant::now()));
+                if ck.is_some() && matches!(s, Stop::Release(_)) {
+                    // the job must leave the node (protection, a cap, a drain, its deadline): a checkpointing runner is
+                    // asked to checkpoint first, with its own grace and no SIGTERM, so the next attempt resumes
+                    control.write(json!({"stop": true, "checkpoint": true}))?;
+                    asked_checkpoint = true;
+                    stopping = Some((s, Instant::now(), ckpt_grace));
+                } else {
+                    control.write(json!({"stop": true}))?;
+                    // POSIX also asks the container with SIGTERM; Windows has no such request (Term terminates the Job
+                    // Object), so there the nudged document is the request and the kill waits for the grace period
+                    #[cfg(unix)]
+                    procs::signal_group(pid, procs::Sig::Term);
+                    stopping = Some((s, Instant::now(), grace));
+                }
             }
-        } else if let Some((_, at)) = &stopping {
-            if at.elapsed() > Duration::from_secs_f64(grace) {
+        } else if let Some((_, at, g)) = &stopping {
+            if at.elapsed() > Duration::from_secs_f64(*g) {
                 procs::signal_group(pid, procs::Sig::Kill);
             }
         }
@@ -578,6 +617,20 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     };
     let oom = crate::sys::oom(pid);
     procs::signal_group(pid, procs::Sig::Kill);                     // nothing outlives its attempt
+    // the runner is gone: the last checkpoint it wrote (always taken when it answers the request) is uploaded before
+    // the attempt ends, so the job's next attempt finds it; a finished job needs none
+    if let Some(c) = ck.as_mut() {
+        if status.code() == Some(0) && ws.join("result.json").exists() {
+            uploads.abort();
+        } else {
+            uploads.step(ctx, aid, c, asked_checkpoint, ws);
+            if uploads.busy() {
+                set_phase(&ctx.table, aid, "checkpointing");
+                uploads.finish(ctx, aid, c, ws).await;
+            }
+        }
+        c.clean();
+    }
     if let Some(r) = &ctx.registry {
         r.unregister(pid);
     }
@@ -594,7 +647,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         return Ok(Outcome::Failed { reason: "sandbox_escape".into(), exit_code: status.code(), fault: Some("job".into()),
                                     stderr_tail: format!("{e}\n{}", tail(&ws.join(".runner.log"), 2000)) });
     }
-    if let Some((s, _)) = stopping {
+    if let Some((s, _, _)) = stopping {
         if s == Stop::Release("timeout".into()) {
             return Ok(Outcome::Failed { reason: "timeout".into(), exit_code: status.code(), stderr_tail: tail(&ws.join(".runner.log"), 2000), fault: None });
         }
@@ -623,30 +676,112 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     Ok(Outcome::Failed { reason, exit_code: code, stderr_tail: detail + &tail(&ws.join(".runner.log"), 2000), fault })
 }
 
-/// Upload artifacts named by the result (`files[].local`, relative to the work directory) and replace each `local`
-/// with its `digest` and `size`.
+/// Upload artifacts named by the result (`files[].local`, relative to the work directory, and each file's
+/// `thumbnail.local`) through the coordinator's resumable upload, and replace each `local` with its `digest` and `size`.
 async fn upload_artifacts(ctx: &Ctx, ws: &Path, result: &mut Value) -> Result<()> {
     let Some(arts) = result["artifacts"].as_array_mut() else { return Ok(()) };
     for a in arts.iter_mut() {
         for f in a["files"].as_array_mut().into_iter().flatten() {
-            let Some(local) = f["local"].as_str().map(str::to_string) else { continue };
-            oarbank_core::portable::check_portable_path(&local, true).map_err(|e| anyhow::anyhow!("artifact {local:?}: {}", e.0))?;
-            let p: PathBuf = ws.join(&local);
-            let meta = std::fs::symlink_metadata(&p).with_context(|| format!("artifact {local} missing"))?;
-            if !meta.is_file() {
-                bail!("artifact {local} is not a regular file");
+            upload_local(ctx, ws, f).await?;
+            if f["thumbnail"].is_object() {
+                upload_local(ctx, ws, &mut f["thumbnail"]).await?;
             }
-            let digest = crate::fsutil::sha256_file(&p)?;
-            if !ctx.api.head_ok(&format!("/v1/artifacts/{digest}")).await.unwrap_or(false) {
-                ctx.api.put_file(&format!("/v1/artifacts/{digest}"), &p).await?;
-            }
-            let o = f.as_object_mut().unwrap();
-            o.remove("local");
-            o.insert("digest".into(), json!(digest));
-            o.insert("size".into(), json!(meta.len()));
         }
     }
     Ok(())
+}
+
+async fn upload_local(ctx: &Ctx, ws: &Path, f: &mut Value) -> Result<()> {
+    let Some(local) = f["local"].as_str().map(str::to_string) else { return Ok(()) };
+    oarbank_core::portable::check_portable_path(&local, true).map_err(|e| anyhow::anyhow!("artifact {local:?}: {}", e.0))?;
+    let p: PathBuf = ws.join(&local);
+    let meta = std::fs::symlink_metadata(&p).with_context(|| format!("artifact {local} missing"))?;
+    if !meta.is_file() {
+        bail!("artifact {local} is not a regular file");
+    }
+    let digest = crate::fsutil::sha256_file(&p)?;
+    ctx.api.upload(&digest, &p, meta.len()).await?;
+    let o = f.as_object_mut().unwrap();
+    o.remove("local");
+    o.insert("digest".into(), json!(digest));
+    o.insert("size".into(), json!(meta.len()));
+    Ok(())
+}
+
+/// A line in the attempt's log (the coordinator gets it with the runner's output).
+fn note(ws: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(ws.join(".runner.log")) {
+        let _ = writeln!(f, "[agent] {line}");
+    }
+}
+
+/// A job's checkpoint uploads: one at a time, and the newest waiting one replaces an older one that waits.
+#[derive(Default)]
+struct Uploads {
+    running: Option<tokio::task::JoinHandle<Result<Value>>>,
+    queued: Option<crate::checkpoints::Taken>,
+}
+
+impl Uploads {
+    /// Take the runner's newest checkpoint, if it announced one, and keep an upload going.
+    fn step(&mut self, ctx: &Ctx, aid: i64, ck: &mut crate::checkpoints::Checkpointer, requested: bool, ws: &Path) {
+        use futures_util::FutureExt;
+        if let Some(ev) = ck.latest_event() {
+            match ck.take(&ev, requested) {
+                Ok(Some(t)) => {
+                    if let Some(old) = self.queued.replace(t) {
+                        let _ = std::fs::remove_dir_all(old.dir);
+                    }
+                }
+                Ok(None) => note(ws, "checkpoint skipped: sooner than the stage's min_interval_s after the last upload"),
+                Err(e) => note(ws, &format!("checkpoint refused: {e:#}")),
+            }
+        }
+        if let Some(done) = self.running.as_mut().and_then(|h| h.now_or_never()) {
+            self.running = None;
+            report_upload(aid, ws, done);
+        }
+        if self.running.is_none() {
+            if let Some(t) = self.queued.take() {
+                ck.uploaded();
+                let (api, layout) = (ctx.api.clone(), Layout::new(ctx.layout.home.clone()));
+                self.running = Some(tokio::spawn(async move { crate::checkpoints::upload(&api, &layout, aid, &t).await }));
+            }
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.running.is_some() || self.queued.is_some()
+    }
+
+    /// Wait for the running upload, then upload what waits.
+    async fn finish(&mut self, ctx: &Ctx, aid: i64, ck: &mut crate::checkpoints::Checkpointer, ws: &Path) {
+        while self.busy() {
+            if let Some(h) = self.running.take() {
+                report_upload(aid, ws, h.await);
+            }
+            self.step(ctx, aid, ck, true, ws);
+        }
+    }
+
+    fn abort(&mut self) {
+        if let Some(h) = self.running.take() {
+            h.abort();
+        }
+        self.queued = None;
+    }
+}
+
+fn report_upload(aid: i64, ws: &Path, done: std::result::Result<Result<Value>, tokio::task::JoinError>) {
+    match done {
+        Ok(Ok(r)) => info!(attempt = aid, digest = r["digest"].as_str().unwrap_or(""), recorded = r["recorded"].as_bool(), "checkpoint uploaded"),
+        Ok(Err(e)) => {
+            warn!(attempt = aid, error = %e, "checkpoint upload failed");
+            note(ws, &format!("checkpoint upload failed: {e:#}"));
+        }
+        Err(e) => warn!(attempt = aid, error = %e, "checkpoint upload task"),
+    }
 }
 
 /// Report how the attempt ended and log it with how long it ran (from the grant, staging included).

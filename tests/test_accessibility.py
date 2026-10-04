@@ -92,7 +92,7 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
     db.x("UPDATE nodes SET cik_pinned='ab'||substr(hex(randomblob(31)),1,62) WHERE node_id=?", (nid,))
     pages = ["/", "/agent", "/coordinator", f"/nodes/{nid}", f"/nodes/{nid}/protection", "/campaigns", f"/campaigns/{cid}", "/jobs", f"/jobs/{job}",
              "/events", "/audit", "/settings", "/verify", "/modules", "/modules/relay", "/modules/toy", "/m/relay/scores",
-             f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health"]
+             f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health", "/datasets", "/datasets/upload"]
     files = []
     with Server(coord_app.admin_app(db, console_secret=SECRET)) as oarbankd:
         state = ConsoleState(str(db.path), f"http://127.0.0.1:{oarbankd.port}", secret=SECRET)

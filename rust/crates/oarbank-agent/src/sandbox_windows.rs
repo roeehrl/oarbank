@@ -6,6 +6,11 @@
 //! - **Files.** One AppContainer profile per module (`Oarbank.<module>`); its SID is granted read and execute on the
 //!   policy's read-only roots and full access to its read-write roots. Anything else is reachable only where
 //!   Windows grants every AppContainer (`ALL APPLICATION PACKAGES`: the system directories).
+//! - **Folders** (a runner's `[sandbox].folders`). Entries for a capability SID derived for the module's runners
+//!   (`oarbank.runner.<module>`), which only a runner's token carries (doctor, services and probes run without it):
+//!   read for an input folder, create-and-write for an outbox (no listing, reading, deleting or ACL rights). The agent
+//!   records what it grants (`state/folder-acl.json`) and removes entries that no applied folder statement or current
+//!   release grants any more.
 //! - **Network.** None without a capability. `egress-any` adds `internetClient`; AppContainer loopback isolation
 //!   keeps it off loopback. The egress allowlist goes through the agent's proxy on loopback: the elevated helper (a
 //!   LocalSystem service, oarbank-launcher's helper_windows.rs) exempts the container from loopback isolation for
@@ -84,7 +89,9 @@ pub fn report() -> Value {
     json!({"backend": "appcontainer", "helper": helper_present(), "enforcement": {
         "filesystem": "enforced", "ipc": "enforced", "net.none": "enforced",
         "net.egress-allowlist": allowlist, "net.egress-any": "enforced", "no_loopback": "enforced",
-        "no_link_local": "unavailable", "gpu.compute": "enforced", "exec_writable_deny": "unavailable"}})
+        "no_link_local": "unavailable", "gpu.compute": "enforced", "exec_writable_deny": "unavailable",
+        // a runner-only capability SID's entries on the folder (a read folder's binaries are executable, as for tools)
+        "folders.read": "enforced", "folders.write": "enforced"}})
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -318,15 +325,20 @@ mod ffi {
     pub struct AclLock(HANDLE);
 
     impl AclLock {
+        /// The shim's: a lock it cannot take ends the launch.
         pub fn take() -> AclLock {
+            Self::try_take().unwrap_or_else(|e| die(70, &format!("the ACL lock: {e}")))
+        }
+
+        pub fn try_take() -> std::io::Result<AclLock> {
             use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
             let name = wide("Local\\oarbank-sandbox-acl");
             let m = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
             if m.is_null() {
-                die(70, &format!("the ACL lock: {}", std::io::Error::last_os_error()));
+                return Err(std::io::Error::last_os_error());
             }
             unsafe { WaitForSingleObject(m, INFINITE) };
-            AclLock(m)
+            Ok(AclLock(m))
         }
     }
 
@@ -362,6 +374,73 @@ mod ffi {
             }
         }
         false
+    }
+
+    /// The capability SID only a module's runners carry (DeriveCapabilitySidsFromName), copied into owned memory.
+    pub fn capability_sid(name: &str) -> Result<Vec<u8>, String> {
+        use windows_sys::Win32::Security::{CopySid, DeriveCapabilitySidsFromName, GetLengthSid};
+        let n = wide(name);
+        let (mut groups, mut ngroups, mut caps, mut ncaps): (*mut PSID, u32, *mut PSID, u32) =
+            (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+        unsafe {
+            if DeriveCapabilitySidsFromName(n.as_ptr(), &mut groups, &mut ngroups, &mut caps, &mut ncaps) == 0 || ncaps == 0 {
+                return Err(format!("capability {name}: {}", std::io::Error::last_os_error()));
+            }
+            let first = *caps;
+            let len = GetLengthSid(first);
+            let mut out = vec![0u8; len as usize];
+            let ok = CopySid(len, out.as_mut_ptr() as PSID, first);
+            for i in 0..ngroups as usize {
+                LocalFree(*groups.add(i) as _);
+            }
+            for i in 0..ncaps as usize {
+                LocalFree(*caps.add(i) as _);
+            }
+            LocalFree(groups as _);
+            LocalFree(caps as _);
+            if ok == 0 {
+                return Err(format!("capability {name}: copying its SID failed"));
+            }
+            Ok(out)
+        }
+    }
+
+    /// Remove every allow entry for `sid` from `path`'s DACL (a folder grant that no statement or release grants any
+    /// more); a path that no longer exists has nothing to remove.
+    pub fn revoke(path: &str, sid: PSID) -> Result<(), String> {
+        use windows_sys::Win32::Security::Authorization::REVOKE_ACCESS;
+        use windows_sys::Win32::Security::NO_INHERITANCE;
+        let p = wide(path);
+        unsafe {
+            let mut old: *mut ACL = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let e = GetNamedSecurityInfoW(p.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(),
+                                          &mut old, std::ptr::null_mut(), &mut sd);
+            if e == 2 || e == 3 {
+                return Ok(());                    // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+            }
+            if e != 0 {
+                return Err(format!("{path}: reading its ACL failed ({e})"));
+            }
+            let ea = EXPLICIT_ACCESS_W {
+                grfAccessPermissions: 0, grfAccessMode: REVOKE_ACCESS, grfInheritance: NO_INHERITANCE,
+                Trustee: TRUSTEE_W { pMultipleTrustee: std::ptr::null_mut(), MultipleTrusteeOperation: 0, TrusteeForm: TRUSTEE_IS_SID,
+                                     TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP, ptstrName: sid as *mut u16 },
+            };
+            let mut new: *mut ACL = std::ptr::null_mut();
+            let e = SetEntriesInAclW(1, &ea, old, &mut new);
+            LocalFree(sd as _);
+            if e != 0 {
+                return Err(format!("{path}: building its ACL failed ({e})"));
+            }
+            let e = SetNamedSecurityInfoW(p.as_ptr() as *mut u16, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(),
+                                          std::ptr::null_mut(), new, std::ptr::null());
+            LocalFree(new as _);
+            if e != 0 {
+                return Err(format!("{path}: setting its ACL failed ({e})"));
+            }
+        }
+        Ok(())
     }
 
     /// Add an inheritable allow entry for `sid` to `path`'s DACL, unless it has one already (writing it again would
@@ -401,6 +480,78 @@ mod ffi {
         }
         Ok(())
     }
+}
+
+/// Folder rights for a runner's capability SID: an input folder's files and listings; an outbox's new files and
+/// directories (FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY, which are write data and append data on the files created)
+/// with their attributes, never FILE_LIST_DIRECTORY/FILE_READ_DATA, DELETE, FILE_DELETE_CHILD, READ_CONTROL or WRITE_DAC.
+const FOLDER_READ: u32 = windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+const FOLDER_WRITE: u32 = 0x0002 | 0x0004 | 0x0010 | 0x0100 | 0x0010_0000;
+
+/// The capability name whose SID only a module's runners carry.
+pub fn runner_capability(module: &str) -> String {
+    format!("oarbank.runner.{module}")
+}
+
+/// What the agent granted folders to (module id, path, access): removed when nothing grants it any more.
+fn acl_state(layout: &crate::paths::Layout) -> std::path::PathBuf {
+    layout.state().join("folder-acl.json")
+}
+
+fn load_grants(layout: &crate::paths::Layout) -> Vec<(String, String, String)> {
+    std::fs::read(acl_state(layout)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Record the folders a runner's shim is about to grant (jobs.rs, before the spawn).
+pub fn record_folder_grants(layout: &crate::paths::Layout, pol: &Policy) -> std::io::Result<()> {
+    let mut have = load_grants(layout);
+    let mut changed = false;
+    for (paths, access) in [(&pol.rd, "read"), (&pol.wo, "write")] {
+        for p in paths {
+            let g = (pol.module.clone(), p.clone(), access.to_string());
+            if !have.contains(&g) {
+                have.push(g);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        crate::fsutil::write_private(&acl_state(layout), &serde_json::to_vec(&have)?)?;
+    }
+    Ok(())
+}
+
+/// Remove the folder entries no applied statement or current release grants any more (a new statement, a new release,
+/// the agent's start).
+pub fn reconcile_folder_grants(layout: &crate::paths::Layout, release: Option<&crate::release::Release>,
+                               folders: &crate::folders::Folders) {
+    let mut want = vec![];
+    for m in release.map(|r| r.modules.clone()).unwrap_or_default() {
+        for (_, f) in folders.granted(&m["sandbox"]["folders"]) {
+            want.push((m["module_id"].as_str().unwrap_or("").to_string(), f["path"].as_str().unwrap_or("").to_string(),
+                       f["access"].as_str().unwrap_or("").to_string()));
+        }
+    }
+    let have = load_grants(layout);
+    let keep: Vec<_> = have.iter().filter(|g| want.contains(g)).cloned().collect();
+    if keep.len() == have.len() {
+        return;
+    }
+    let Ok(lock) = ffi::AclLock::try_take() else { return };
+    for (module, path, _) in have.iter().filter(|g| !want.contains(g)) {
+        match ffi::capability_sid(&runner_capability(module)) {
+            Ok(mut cap) => {
+                if let Err(e) = ffi::revoke(path, cap.as_mut_ptr() as _) {
+                    tracing::warn!(error = %e, "removing a folder grant failed");
+                    continue;
+                }
+                tracing::info!(module = %module, path = %path, "folder grant removed");
+            }
+            Err(e) => tracing::warn!(error = %e, "folder grant"),
+        }
+    }
+    drop(lock);
+    let _ = crate::fsutil::write_private(&acl_state(layout), &serde_json::to_vec(&keep).unwrap_or_default());
 }
 
 /// The `sandbox-exec` subcommand on Windows: start argv in the module's AppContainer, wait, exit with its code.
@@ -456,6 +607,24 @@ pub fn exec(args: &[String]) -> ! {
             die(70, &e);
         }
     }
+    // a runner's folders: entries for the capability SID only runner tokens of the module carry
+    let mut folder_cap = if pol.kind == "runner" && !(pol.rd.is_empty() && pol.wo.is_empty()) {
+        match ffi::capability_sid(&runner_capability(&pol.module)) {
+            Ok(c) => Some(c),
+            Err(e) => die(70, &e),
+        }
+    } else {
+        None
+    };
+    if let Some(cap) = folder_cap.as_mut() {
+        for (paths, mask) in [(&pol.rd, FOLDER_READ), (&pol.wo, FOLDER_WRITE)] {
+            for p in paths {
+                if let Err(e) = ffi::grant(p, cap.as_mut_ptr() as _, mask) {
+                    die(70, &format!("folder {e}"));
+                }
+            }
+        }
+    }
     // user32 (and with it COM, ctypes, Python's platform module) initialises only if the container can read the window
     // station and desktop it starts on
     if let Err(e) = ffi::open_desktop(sid) {
@@ -471,6 +640,9 @@ pub fn exec(args: &[String]) -> ! {
             die(70, "internetClient capability SID");
         }
         caps.push(SID_AND_ATTRIBUTES { Sid: cap_sid.as_mut_ptr() as _, Attributes: SE_GROUP_ENABLED });
+    }
+    if let Some(cap) = folder_cap.as_mut() {
+        caps.push(SID_AND_ATTRIBUTES { Sid: cap.as_mut_ptr() as _, Attributes: SE_GROUP_ENABLED });
     }
     let sc = SECURITY_CAPABILITIES { AppContainerSid: sid, Capabilities: if caps.is_empty() { std::ptr::null_mut() } else { caps.as_mut_ptr() },
                                      CapabilityCount: caps.len() as u32, Reserved: 0 };

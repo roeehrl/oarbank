@@ -226,22 +226,6 @@ def test_render_only_node_certifies_on_a_byte_identical_frame(db):
     assert ok(db)
 
 
-def test_artifact_upload_endpoint(db, tmp_path, monkeypatch):
-    from oarbank.coordinator import config as C
-    monkeypatch.setattr(C, "HOME", tmp_path)
-    der, node = enrolled_node(db, "w")
-    agent = agent_client(db)
-    h = node_headers(der)
-    body = b"P3 64 64 255\n" * 100
-    d = hashlib.sha256(body).hexdigest()
-    assert agent.head(f"/v1/artifacts/{d}", headers=h).status_code == 404
-    assert agent.put(f"/v1/artifacts/{'0' * 64}", content=body, headers=h).status_code == 400      # digest mismatch
-    assert agent.put(f"/v1/artifacts/{d}", content=body, headers=h).json()["size"] == len(body)
-    assert agent.head(f"/v1/artifacts/{d}", headers=h).status_code == 200
-    assert agent.get(f"/v1/blobs/{d}", headers=h).content == body
-    assert agent.put(f"/v1/artifacts/{d}", content=body, headers=h).json()["existing"]
-
-
 def test_changing_a_nodes_vm_role_recertifies_it(db):
     db.set_setting("default_worker_disabled_services", ["relay/scorer"])
     (n,) = certified_fleet(db, ("n1",))

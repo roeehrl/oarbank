@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Datasets · Oarbank{% endblock %}
+{% block body %}
+<h1>Datasets <a class="small" href="/datasets/upload">Upload a folder…</a></h1>
+<p class="small mut">A dataset is a list of files named by sha256 and size. Nodes fetch each file from its origins when it has any
+(public https downloads), else from the coordinator. Job artifacts are listed on their campaigns.</p>
+<form class="row small" method="get">
+  <label>kind <select name="kind"><option value="">any</option>{% for k in kinds %}<option {% if kind == k %}selected{% endif %}>{{ k }}</option>{% endfor %}</select></label>
+  <button>Filter</button></form>
+<table class="small"><tr><th>dataset</th><th>kind</th><th>owner</th><th class="num">files</th><th class="num">size</th><th>origins</th><th>platform</th><th>created</th></tr>
+{% for d in datasets %}<tr><td><a class="mono" href="/datasets/{{ d.dataset_id }}">{{ d.dataset_id }}</a></td><td>{{ d.kind }}</td>
+<td>{{ d.module or 'operator' }}</td><td class="num">{{ d.n_files }}</td><td class="num">{{ (d.size / 1048576) | num(1) }} MB</td>
+<td>{% if d.origins %}<span class="chip">{{ d.origins }} by URL</span>{% endif %}</td><td class="mut">{{ d.platform or '' }}</td>
+<td class="mut">{{ d.created_at | ago }}</td></tr>
+{% else %}<tr><td colspan="8" class="mut">no datasets yet</td></tr>{% endfor %}</table>
+{% endblock %}

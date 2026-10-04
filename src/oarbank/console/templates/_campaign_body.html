@@ -21,7 +21,7 @@
 {% for p in panels %}<h2>{{ p.title }} <span class="small mut">({{ p.module }})</span></h2>{{ p.html | safe }}
 {% endfor %}
 
-{% if results %}<h2>Results</h2>
+{% if results %}<h2>Results <a class="small" href="/campaigns/{{ c.campaign_id }}/artifacts.zip" download>download artifacts (zip)</a></h2>
 <table class="small"><tr><th>job</th><th>node</th><th>platform</th>{% for col in result_cols %}<th>{{ col.header }}</th>{% endfor %}<th>at</th></tr>
 {% for x in results %}<tr><td><a href="/jobs/{{ x.job_id }}">{{ x.name or x.job_id }}</a></td><td>{{ x.hostname or '–' }}</td><td class="mut">{{ x.platform or '–' }}</td>
 {% for cell in x.cells %}<td class="mono">{{ cell }}</td>{% endfor %}

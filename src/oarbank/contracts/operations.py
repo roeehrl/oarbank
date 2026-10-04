@@ -75,6 +75,11 @@ def OPR(op_id):
     return [R("POST", OPS_ROUTE_PATH, op=op_id)]
 
 
+# oarbank-console's blob staging for a browser upload: bytes only, forwarded to oarbankd's upload routes with the account's
+# identity; nothing changes until datasets.register names them
+CONSOLE_UPLOADS = [R("POST", "/datasets/uploads/{digest}"), R("PATCH", "/datasets/uploads/{digest}")]
+
+
 # oarbank-console's operation form endpoint (T2/T3 continue on POST /apply/{op} with the reviewed plan)
 CONSOLE_ROUTE_PATH = "/do/{op}"
 
@@ -179,9 +184,16 @@ OPS: list[Operation] = [
               gui=CON("campaigns.rebind_platform")),
 
     # ------------------------------------------------------------------ datasets
-    Operation(id="datasets.register", area="datasets", summary="Register a dataset whose files are on the coordinator (module importers call it)",
+    Operation(id="datasets.register", area="datasets", summary="Register a dataset from uploaded blobs, files on the coordinator or origin URLs",
               tier="T1", category="create", idempotency="natural",
-              routes=OPR("datasets.register"), cli=["oarbank dataset register <file.json>", "module CLIs (importers)"], gui=CON("datasets.register")),
+              # the resumable blob upload stages bytes for it (they change nothing until this operation names them)
+              routes=[*OPR("datasets.register"), R("POST", "/api/v1/uploads/{digest}"), R("PATCH", "/api/v1/uploads/{digest}")],
+              cli=["oarbank dataset upload <dir> --kind <kind>", "oarbank dataset register <file.json>"],
+              gui=[*CON("datasets.register"), *CONSOLE_UPLOADS]),
+    Operation(id="settings.origins.update", area="datasets", summary="Restrict the hosts dataset origins may name (empty: any public https host)",
+              tier="T2", preview=True, min_role="admin", category="modify", idempotency="declarative", versioned=True,
+              routes=OPR("settings.origins.update"), cli=["oarbank op settings.origins.update -p hosts=..."],
+              gui=CON("settings.origins.update")),
 
     # ------------------------------------------------------------------ modules
     Operation(id="modules.set_pipeline", area="modules", summary="Run a module single-stage or split",
@@ -328,6 +340,13 @@ OPS: list[Operation] = [
     Operation(id="settings.tools.update", area="settings", summary="Map a host tool id to its paths per OS in the tool registry (modules request tools by id)",
               tier="T2", preview=True, min_role="admin", category="modify", idempotency="declarative", versioned=True,
               gui=CON("settings.tools.update"), routes=OPR("settings.tools.update")),
+    Operation(id="settings.folders.update", area="settings", summary="Map a folder id to a path on each node in the folder registry (modules request folders by id)",
+              tier="T2", preview=True, min_role="admin", category="modify", idempotency="declarative", versioned=True,
+              gui=CON("settings.folders.update"), routes=OPR("settings.folders.update"),
+              cli=["oarbank folders map <id> --access read|write --node <node>=<path>"]),
+    Operation(id="folders.sign", area="settings", summary="Attach the owner's signature to a node's folder statement (signing mode)",
+              tier="T1", min_role="admin", category="modify", idempotency="natural",
+              routes=OPR("folders.sign"), cli=["oarbank folders sign <node>"], gui=CON("folders.sign")),
     Operation(id="access.accounts.create", area="access", summary="Create a console account (a TOTP seed is shown once; a password is optional)",
               tier="T2", preview=True, min_role="admin", category="create", idempotency="natural",
               gui=CON("access.accounts.create"), routes=OPR("access.accounts.create"), cli=["oarbank account create <name>"]),
@@ -401,7 +420,8 @@ for _op in OPS:
 AGENT_ROUTES = {
     ("POST", "/v1/agent/enroll"), ("POST", "/v1/agent/hello"), ("POST", "/v1/agent/heartbeat"),
     ("POST", "/v1/agent/claim"), ("POST", "/v1/agent/cert"), ("POST", "/v1/attempts/{aid}/complete"), ("POST", "/v1/attempts/{aid}/release"),
-    ("POST", "/v1/attempts/{aid}/fail"), ("POST", "/v1/attempts/{aid}/log"), ("PUT", "/v1/artifacts/{digest}"),
+    ("POST", "/v1/attempts/{aid}/fail"), ("POST", "/v1/attempts/{aid}/log"), ("POST", "/v1/attempts/{aid}/checkpoint"),
+    ("POST", "/v1/uploads/{digest}"), ("PATCH", "/v1/uploads/{digest}"),
     # the coordinator-move channel between the old coordinator and its standby target (coordinator-move.md):
     # authenticated by the pairing code, then a move token plus the target's tailnet identity, or by a
     # signature from the paired coordinator's key; the operations that start and stop a move are audited

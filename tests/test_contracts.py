@@ -53,9 +53,11 @@ def test_no_operation_points_at_a_missing_route(routes):
 
 
 def test_console_mutations_are_only_operation_forwards(routes):
-    """oarbank-console has no write path of its own: its mutating routes forward operations or proxy /api."""
+    """oarbank-console has no write path of its own: its mutating routes forward operations, proxy /api, or stage a
+    browser upload's bytes for datasets.register (forwarded to oarbankd, which changes nothing until the operation)."""
     allowed = {("POST", ops.CONSOLE_ROUTE_PATH), ("POST", "/apply/{op}"),
-               ("POST", "/api/{path:path}"), ("PUT", "/api/{path:path}"), ("DELETE", "/api/{path:path}")}
+               ("POST", "/api/{path:path}"), ("PUT", "/api/{path:path}"), ("PATCH", "/api/{path:path}"),
+               ("DELETE", "/api/{path:path}")} | {(r.method, r.path) for r in ops.CONSOLE_UPLOADS}
     assert routes["console"] <= allowed | ops.CONSOLE_SESSION_ROUTES
 
 

@@ -320,7 +320,7 @@ fn backend_report() -> Value {
     return json!({"backend": "seatbelt", "enforcement": {
         "filesystem": "enforced", "ipc": "enforced", "net.none": "enforced", "net.egress-allowlist": "enforced",
         "net.egress-any": "enforced", "no_loopback": "enforced", "gpu.compute": "enforced",
-        "exec_writable_deny": "enforced", "no_link_local": "unavailable"}});
+        "exec_writable_deny": "enforced", "no_link_local": "unavailable", "folders.read": "enforced", "folders.write": "enforced"}});
     #[cfg(target_os = "linux")]
     return crate::sandbox_linux::report();
     #[cfg(windows)]

@@ -559,6 +559,10 @@ impl ProtectionRule {
     }
 }
 
+/// The bounds of `[node] max_pause_s` (spec/runner-protocol.md: a pause lasts at most 10 minutes).
+pub const MAX_PAUSE_S: f64 = 600.0;
+pub const MIN_PAUSE_S: f64 = 10.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtectionConfig {
     pub mode: ProtectionMode,
@@ -578,6 +582,9 @@ pub struct ProtectionConfig {
     /// CPU stall signal over every unmatched owner process.
     pub implicit_frontmost: bool,
     pub owner_stall_max: Option<f64>,
+    /// The longest a fleet job stays paused before it is released (checkpointed first when its runner can): at most
+    /// 600 s; an owner may set less (`[node] max_pause_s`, 10 to 600).
+    pub max_pause_s: f64,
     pub rules: Vec<ProtectionRule>,
     /// Where each part came from ("central", "local"), for the status page.
     pub sources: Vec<String>,
@@ -598,6 +605,7 @@ impl Default for ProtectionConfig {
             gpu_jobs: "when_no_gpu_protected".to_string(),
             implicit_frontmost: true,
             owner_stall_max: Some(0.15),
+            max_pause_s: MAX_PAUSE_S,
             rules: vec![],
             sources: vec![],
         }
@@ -643,6 +651,12 @@ impl ProtectionConfig {
                     Some(f64_of(get(Some(os), "max")).unwrap_or(0.15))
                 };
             }
+        }
+        if let Some(v) = f64_of(get(node, "max_pause_s")) {
+            if !(MIN_PAUSE_S..=MAX_PAUSE_S).contains(&v) {
+                return err(format!("node.max_pause_s {v} is outside {MIN_PAUSE_S}..{MAX_PAUSE_S}"));
+            }
+            c.max_pause_s = v;
         }
         c.memory = MemoryFloors::from_json(get(node, "memory"));
         let d = get(node, "defaults");
@@ -728,6 +742,7 @@ impl ProtectionConfig {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             },
+            max_pause_s: self.max_pause_s.min(o.max_pause_s),
             rules,
             sources: self.sources.iter().chain(&o.sources).cloned().collect(),
         }

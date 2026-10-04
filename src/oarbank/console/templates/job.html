@@ -17,8 +17,12 @@
 </div>
 <h2>Attempts</h2>
 <table class="small"><tr><th>attempt</th><th>node</th><th>state</th><th>reason</th><th>phase</th><th class="num">cpu s</th><th>granted</th><th>ended</th></tr>
-{% for a in attempts %}<tr><td>{{ a.attempt_id }}</td><td>{{ a.hostname }}</td><td>{{ a.state }}</td><td>{{ a.end_reason or '' }}</td>
+{% for a in attempts %}<tr><td>{{ a.attempt_id }}{% if a.resume %} <span class="chip" title="resumed from attempt {{ a.resume.from_attempt }}'s checkpoint, written on {{ a.resume.node_id }}">resumed from {{ a.resume.from_attempt }}</span>{% endif %}</td><td>{{ a.hostname }}</td><td>{{ a.state }}</td><td>{{ a.end_reason or '' }}</td>
 <td>{{ a.phase or '' }}</td><td class="num">{{ a.cpu_s | num(0) }}</td><td class="mut">{{ a.granted_at | hm }}</td><td class="mut">{{ a.ended_at | hm if a.ended_at else '' }}</td></tr>{% endfor %}</table>
+{% if checkpoint %}<h2>Checkpoint</h2>
+<p class="small">The job's latest checkpoint, from attempt {{ checkpoint.attempt_id }} on {{ checkpoint.node_id }}, {{ checkpoint.at | ago }}:
+{{ checkpoint.files | length }} files, {{ (checkpoint.size / 1048576) | num(1) }} MB (digest <span class="mono">{{ checkpoint.digest[:12] }}</span>).
+The job's next attempt resumes from it on any node.</p>{% endif %}
 <h2>Waterfall <span class="small mut">({{ waterfall.span_s | secs }} from creation)</span></h2>
 {% for row in waterfall.rows %}<div class="small">attempt {{ row.attempt_id }} on {{ row.node or '?' }} · {{ row.state }}{% if row.end_reason %} ({{ row.end_reason }}){% endif %}</div>
 <div class="wf" role="img" aria-label="attempt {{ row.attempt_id }} timeline">{% for g in row.segments %}<span class="{{ g.cls }}" style="left:{{ g.left }}%;width:{{ g.width }}%" title="{{ g.label }} {{ g.secs | secs }}">{{ g.label }}</span>{% endfor %}</div>

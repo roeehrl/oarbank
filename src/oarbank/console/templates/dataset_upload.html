@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Upload a folder · Oarbank{% endblock %}
+{% block body %}
+<h1>Upload a folder</h1>
+<p class="small mut">Pick a folder: each file is hashed here (SHA-256), uploaded to the coordinator in resumable chunks (an
+interrupted upload continues where it stopped, also after a reload), then registered as one dataset. From a terminal:
+<span class="mono">oarbank dataset upload &lt;dir&gt; --kind &lt;kind&gt; [--module &lt;module&gt;]</span>.</p>
+<div class="card" id="upload" data-csrf="{{ csrf }}">
+  <label class="small">folder <input type="file" id="up-files" webkitdirectory multiple required></label>
+  <label class="small">module (optional: the dataset is then the module's own; otherwise every module sees it)
+    <select id="up-module"><option value="">the operator's</option>{% for name, kinds in module_kinds.items() %}<option data-kinds="{{ kinds | join(',') }}">{{ name }}</option>{% endfor %}</select></label>
+  <label class="small">kind <input id="up-kind" class="mono" required pattern="[a-z][a-z0-9_-]{0,40}" placeholder="inputs"></label>
+  <label class="small">dataset id (optional) <input id="up-id" class="mono" pattern="[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}" placeholder="inputs:batch-1"></label>
+  <button type="button" id="up-start">Hash and upload</button>
+  <div class="small" id="up-status" role="status" aria-live="polite"></div>
+  {% call m.op_form("datasets.register", "", "Register the dataset", inline=False, return_to="/datasets") %}
+    <textarea name="params" id="up-params" rows="4" class="mono" style="width:100%" readonly aria-label="dataset to register"></textarea>
+  {% endcall %}
+</div>
+<script src="/static/upload.js" defer></script>
+{% endblock %}

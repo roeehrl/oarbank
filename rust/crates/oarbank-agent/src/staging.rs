@@ -3,7 +3,8 @@
 //! Blobs are content-addressed in `cache/blobs/<d[0:2]>/<d>`. A download tries the dataset's origins first, then the
 //! coordinator, resuming partials and hashing while streaming; the final SHA-256 guards every blob. Origins are
 //! fetched outside any module's sandbox, so they are held to a strict rule: `https` only, to names that resolve to
-//! public addresses only, no redirects (a dataset manifest cannot point the agent at the LAN or loopback).
+//! public addresses only, and a redirect only to a URL under the same rule, at most five (a dataset manifest cannot
+//! point the agent at the LAN or loopback; the public places models live answer with a redirect to their CDN).
 //! Workspaces get read-only regular files (a clone or hardlink where possible, else a copy), never symlinks.
 
 use crate::api::Api;
@@ -26,37 +27,84 @@ fn valid_digest(d: &str) -> bool {
     d.len() == 64 && d.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
-pub fn origin_client() -> Result<reqwest::Client> {
+/// How many redirects an origin download follows, each checked like the origin itself.
+const MAX_REDIRECTS: usize = 5;
+
+fn origin_client_builder() -> Result<reqwest::ClientBuilder> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    #[cfg(debug_assertions)]
+    if let Ok(pem) = std::env::var("OARBANK_TEST_ORIGIN_CA") {
+        // test builds only: the end-to-end suite serves origins from a local https server with its own CA
+        for c in rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(pem)?)) {
+            roots.add(c?)?;
+        }
+    }
     let cfg = rustls::ClientConfig::builder_with_provider(crate::tls::provider()).with_safe_default_protocol_versions()?
         .with_root_certificates(roots).with_no_client_auth();
     Ok(reqwest::Client::builder().use_preconfigured_tls(cfg).redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(15)).build()?)
+        .connect_timeout(std::time::Duration::from_secs(15)))
 }
 
-/// An origin URL the agent may fetch: https, a host name (never an IP literal) resolving only to public addresses.
-pub async fn origin_allowed(url: &str) -> Result<()> {
-    let u = reqwest::Url::parse(url).context("origin is not a URL")?;
+/// A client with public CA roots and no redirects (rescue locations answer themselves or not at all).
+pub fn origin_client() -> Result<reqwest::Client> {
+    Ok(origin_client_builder()?.build()?)
+}
+
+/// The addresses an origin URL may be fetched from: https, a host name (never an IP literal) resolving only to public
+/// addresses. The fetch connects to exactly these, so a name cannot resolve to a public address for the check and to
+/// the LAN for the connection.
+async fn origin_addrs(u: &reqwest::Url) -> Result<(String, Vec<std::net::SocketAddr>)> {
     if u.scheme() != "https" {
-        bail!("origin {url}: only https");
+        bail!("origin {u}: only https");
     }
     let host = u.host_str().context("origin without a host")?.to_string();
     if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
-        bail!("origin {url}: an IP address");
+        bail!("origin {u}: an IP address");
     }
     let port = u.port_or_known_default().unwrap_or(443);
+    #[cfg(debug_assertions)]
+    if test_origin_host(&host) {
+        return Ok((host, vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))]));
+    }
     let addrs: Vec<_> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
     if addrs.is_empty() {
         bail!("origin {host}: no address");
     }
-    for a in addrs {
+    for a in &addrs {
         let ip = a.ip();
         if !oarbank_core::egress::is_global(ip) || ip.is_multicast() {
             bail!("origin {host} resolves to {ip}, which is not a public address");
         }
     }
-    Ok(())
+    Ok((host, addrs))
+}
+
+/// Test builds only: the end-to-end suite serves origins from a local https server under public-looking names
+/// (OARBANK_TEST_ORIGIN_HOSTS, comma-separated), which then resolve to loopback.
+#[cfg(debug_assertions)]
+fn test_origin_host(host: &str) -> bool {
+    std::env::var("OARBANK_TEST_ORIGIN_HOSTS").is_ok_and(|v| v.split(',').any(|h| h.trim() == host))
+}
+
+/// GET an origin from byte `have`: every URL on the way (redirects included) is held to `origin_addrs`.
+async fn origin_get(url: &str, have: u64) -> Result<reqwest::Response> {
+    let mut u = reqwest::Url::parse(url).context("origin is not a URL")?;
+    for _ in 0..=MAX_REDIRECTS {
+        let (host, addrs) = origin_addrs(&u).await?;
+        let mut req = origin_client_builder()?.resolve_to_addrs(&host, &addrs).build()?.get(u.clone());
+        if have > 0 {
+            req = req.header("range", format!("bytes={have}-"));
+        }
+        let r = req.send().await?;
+        if r.status().is_redirection() {
+            let loc = r.headers().get("location").and_then(|v| v.to_str().ok()).context("a redirect without a location")?;
+            u = u.join(loc)?;
+            continue;
+        }
+        return Ok(r);
+    }
+    bail!("origin {url}: more than {MAX_REDIRECTS} redirects")
 }
 
 async fn prehash(path: &Path) -> Result<(Sha256, u64)> {
@@ -105,16 +153,10 @@ pub async fn fetch_blob(api: &Api, l: &Layout, file: &Value) -> Result<PathBuf> 
         .filter_map(|o| o.as_str().map(str::to_string)).collect();
     let mut last_err = None;
     if !origins.is_empty() {
-        let oc = origin_client()?;
         for o in &origins {
             match async {
-                origin_allowed(o).await?;
                 let (h, have) = prehash(&partial).await?;
-                let mut req = oc.get(o);
-                if have > 0 {
-                    req = req.header("range", format!("bytes={have}-"));
-                }
-                let r = req.send().await?;
+                let r = origin_get(o, have).await?;
                 let ok = match r.status().as_u16() {
                     206 => stream_into(r, &partial, h, true, digest).await?,
                     200 => stream_into(r, &partial, Sha256::new(), false, digest).await?,
@@ -245,5 +287,14 @@ mod tests {
         sweep_partials(&l);
         assert!(!old.exists() && young.exists());
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn origins_are_https_names_resolving_only_to_public_addresses() {
+        for (url, why) in [("http://example.org/m.bin", "only https"), ("https://93.184.216.34/m.bin", "an IP address"),
+                           ("https://[::1]/m.bin", "an IP address"), ("https://localhost/m.bin", "not a public address")] {
+            let e = origin_addrs(&reqwest::Url::parse(url).unwrap()).await.unwrap_err().to_string();
+            assert!(e.contains(why), "{url}: {e}");
+        }
     }
 }

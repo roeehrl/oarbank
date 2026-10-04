@@ -120,9 +120,10 @@ their process groups, deletes their workspaces, and does not report them.
                "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
                "budget_cores": 6, "front": "app 812 (lsappinfo)", "source_error": null, "lowering": true}},
  "capacity": { …Capacity… },
- "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused", "cpu_s": 55.2,
+ "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused|checkpointing", "cpu_s": 55.2,
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
+ "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
  "journal": [{"t": 1790000000.1, "seq": 41, "kind": "rule_active", "reason": "PROTECTION_ACTIVE", "rule": "zoom"}],
  "processes": [{"pid": 812, "ppid": 1, "start_us": 1790000000000000, "path": "/Applications/…", "comm": "…",
                 "argv": ["…"], "team_id": "ABCDE12345", "signing_id": "…", "bundle_id": "…", "cpu_cores": 1.2,
@@ -133,6 +134,7 @@ their process groups, deletes their workspaces, and does not report them.
 - **`clock`** (hello and heartbeat) is the agent's wall clock when it sent the request. oarbankd records the node's clock
   offset from it (see Clocks).
 - **`doctor`**, when present, is the latest doctor report (see Doctor).
+- **`folders`** is the outcome, per folder id, of the folder statement the agent applied (see Folders).
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
   `journal_ack`, the highest seq it stored.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
@@ -141,8 +143,10 @@ their process groups, deletes their workspaces, and does not report them.
   not be read (another account's process), and a rule key that needs it counts as holding (a rule's `unreadable`
   counts the processes it matched that way).
 - **Leases.** oarbankd extends `expires_at = now + 60 s` for each listed attempt that is live server-side and
-  shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, or it is `paused` by host
-  protection. The agent bounds a pause at 10 minutes, then releases the attempt.
+  shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, it is `paused` by host protection, or it
+  is `checkpointing` (uploading a checkpoint before it releases). The agent bounds a pause at 10 minutes (less with the
+  node's protection `[node] max_pause_s`, 10 to 600 s), then releases the attempt: after a checkpoint when the stage
+  keeps them (see Checkpoints).
 
 **Directives** (the answer to hello and to every heartbeat):
 ```json
@@ -151,7 +155,8 @@ their process groups, deletes their workspaces, and does not report them.
  "release": {"release_id": "r_…", "url": "/v1/releases/r_….tar.gz", "sha256": "…", "statement": "…", "signature": "…"},
  "release_pubkey": null, "prefetch": ["tool:example-1.0", "scene:atrium"], "run_doctor": false, "recertify": false,
  "cancel": [125], "revoke": [126], "run_probe": false, "send_processes": false, "journal_ack": 41,
- "modules_disabled": ["example"]}
+ "modules_disabled": ["example"],
+ "folders": {"statement": "{…oarbank.folders/v1…}", "signature": null}}
 ```
 | Directive | Meaning |
 |---|---|
@@ -163,6 +168,7 @@ their process groups, deletes their workspaces, and does not report them.
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
 | `modules_disabled` | Modules the owner disabled (the kill switch, `modules.disable`): every service of theirs is disabled on the node (stopped, never offered) until they are enabled again. |
+| `folders` | This node's latest folder statement and the owner's signature (`null` in developer mode, or until the owner signs); `null` when no folder is mapped here (see Folders). |
 
 ## Work
 
@@ -195,12 +201,15 @@ of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while th
           "job_key": "…", "stage": null, "protocol": 1, "platform": "darwin-arm64",
           "datasets": ["tool:example-1.0", "scene:atrium", "data:textures-1"],
           "mounts": {"scene:atrium": "scene", "data:textures-1": "textures"}, "inputs": {}, "resources": {"cpu": 1, "mem_gb": 2.0},
-          "timeout_s": 1800, "payload": {…the module's own spec…}}}
+          "timeout_s": 1800, "payload": {…the module's own spec…}},
+ "checkpoint": {"files": [{"name": "state.json", "digest": "sha256…", "size": 812}, …]}}
 ```
 - **`module_version`** is the version this node runs: its pin, its canary, or the current version.
 - **`resources`** is what the stage reserves on this node's platform (the stage's variant for it applied); the agent
   accounts running jobs by it.
 - **`timeout_s`** is the stage's timeout on this node's platform (or the job's own); `hard_deadline` follows it.
+- **`checkpoint`** and the spec's **`resume`** (`{"from_attempt", "digest", "data"}`) are present when the job resumes
+  from a checkpoint an earlier attempt recorded (see Checkpoints).
 - **`issued_at`**, `expires_at` and `hard_deadline` are oarbankd's clock. The agent stops the attempt
   `hard_deadline - issued_at` seconds after the grant arrived, on its monotonic clock (see Clocks).
 - **`secrets`** (only for a job whose stage lists secrets): `{name: value}`, resolved for this node. The agent writes
@@ -230,9 +239,10 @@ console and in the node's explain.
    array, no shell, in its own process container (process group, cgroup or Job Object), under the module sandbox, with
    exactly the environment of runner protocol 1 (spec/runner-protocol.md, "Environment"): `OARBANK_WORKDIR`,
    `OARBANK_TMP`, `OARBANK_MODULE_DATA`, `OARBANK_PLATFORM`, `OARBANK_MODULE`, `OARBANK_ATTEMPT_ID`,
-   `OARBANK_PROTOCOL`, `OARBANK_SETTINGS_FILE`, `OARBANK_TOOLS_FILE`, `OARBANK_POOL_<NAME>_TOKENS`,
-   `OARBANK_DISABLED_SERVICES`, `OARBANK_BROKER` (container modules), `OARBANK_SERVICE_<NAME>` (a connector to each
-   endpoint service of the module providing a pool the stage reserves), the proxy variables (egress-allowlist) and the
+   `OARBANK_PROTOCOL`, `OARBANK_SETTINGS_FILE`, `OARBANK_TOOLS_FILE`, `OARBANK_FOLDERS_FILE`,
+   `OARBANK_POOL_<NAME>_TOKENS`, `OARBANK_DISABLED_SERVICES`, `OARBANK_BROKER` (container modules),
+   `OARBANK_SERVICE_<NAME>` (a connector to each endpoint service of the module providing a pool the stage reserves),
+   the proxy variables (egress-allowlist) and the
    OS's conventional variables, then the module entry's `runner.env`. Nothing is inherited. An entry whose env names
    a reserved variable (`OARBANK_*` or the SDK's `RESERVED_ENV`, compared case-insensitively) is refused: the job
    fails and the doctor reports unhealthy.
@@ -275,11 +285,37 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   each digest's first run per module (`module_images`, the event `container_image_first_run` and an audit row
   `containers.first_run` by `node:<id>`).
 
-**Artifacts.** A runner lists output files as `artifacts: [{name, files: [{path, local}]}]`. Before completing,
-the agent uploads each file with `PUT /v1/artifacts/<sha256>`: streamed and digest-checked, after a `HEAD`
-that skips files the coordinator already holds. It then reports `{path, digest, size}`. On the canonical
-completion, oarbankd registers each artifact as the content-addressed dataset `art:<…>`, served through
-`/v1/blobs/<digest>`.
+**Artifacts.** A runner lists output files as `artifacts: [{name, files: [{path, local, thumbnail?: {local}}]}]`.
+Before completing, the agent uploads each file (and its thumbnail) as a blob (see Uploads) and reports `{path, digest,
+size}` (`thumbnail: {digest, size}`). On the canonical completion, oarbankd registers each artifact as the
+content-addressed dataset `art:<…>`, served through `/v1/blobs/<digest>`.
+
+**Uploads** (artifacts and checkpoint files; the core of tus 1.0, the digest naming the upload):
+
+- `POST /v1/uploads/{digest}` with `{"size": N}` → `{"offset": k, "complete": bool}`: where this node's upload stands;
+  `complete` when oarbankd already holds the blob, so nothing is sent.
+- `PATCH /v1/uploads/{digest}` with `Upload-Offset: k` and the bytes → 204 with the new `Upload-Offset`; at `size`,
+  oarbankd checks the sha256 and registers the blob (`Upload-Complete: 1`) or drops the partial (422
+  `digest_mismatch`). A wrong offset is 409 `offset_mismatch` with the current one in `Upload-Offset`.
+
+The agent sends 8 MiB chunks and, after a failure or a restart, asks again and goes on from the offset. Partials are
+per uploader, so two nodes uploading the same digest never mix their bytes. A blob is at most `BLOB_MAX_BYTES`.
+
+**Checkpoints.** A runner that declares the `checkpoint` capability, on a stage the release marks with `checkpoint =
+{max_mb, min_interval_s}`, announces checkpoints in its events file: `{"kind": "checkpoint", "files": [{"path",
+"name"}], "data"}` (spec/runner-protocol.md, "Checkpoints"). The agent moves the files out of the workdir at once,
+uploads them (at most `max_mb` in all; a periodic one sooner than `min_interval_s` after the last is skipped) and
+records the checkpoint with `POST /v1/attempts/{id}/checkpoint` `{"seq", "files": [{"name", "digest", "size"}], "data"}`
+→ `{"recorded": bool, "digest"}`. oarbankd keeps each open job's latest checkpoint for its current generation and drops
+it when the job is done. Bootstrap jobs and goldens keep none.
+
+When host protection releases an attempt whose runner keeps checkpoints (a pause past the limit, a memory or schedule
+limit), the agent writes `{"stop": true, "checkpoint": true}` to the control document instead of signalling: the runner
+writes a checkpoint at its next safe point and exits 75 within `runner.checkpoint_grace_s`. The attempt shows the phase
+`checkpointing` while the files upload, then is released. The job's next attempt, on any node, gets the files read-only
+under `<workdir>/checkpoint/` (the grant's `checkpoint`, staged like dataset files) and `resume` in its envelope. A
+result resumed from another node's checkpoint is always checked by a replica on a third node, and a node convicted of
+nondeterminism takes the results resumed from its checkpoints with it.
 
 ## Datasets and staging
 
@@ -288,10 +324,16 @@ completion, oarbankd registers each artifact as the content-addressed dataset `a
 {"dataset_id": "scene:atrium", "files": [{"path": "atrium.scene", "digest": "sha256…", "size": 65000000,
   "origins": ["https://data.example.org/scenes/atrium.scene"]}, …]}
 ```
-- **Origin first.** Agents download from the origin first (https only, and only to public names), hashing while
-  streaming into `<agent home>/cache/tmp/<digest>.partial`, then rename it into
-  `<agent home>/cache/blobs/<digest[0:2]>/<digest>`. On an origin failure or a digest mismatch they fall back to
-  `GET /v1/blobs/{digest}` (oarbankd, range-capable).
+- **Origin first.** Agents download from the origin first, hashing while streaming into
+  `<agent home>/cache/tmp/<digest>.partial`, then rename it into `<agent home>/cache/blobs/<digest[0:2]>/<digest>`.
+  An origin is `https` to a host name (never an IP literal) whose every address is public; the agent connects to the
+  addresses it checked, and follows at most 5 redirects, each to a URL under the same rule. The manifest lists only
+  the origins the operator's origin host policy (setting `dataset_origins`) admits. On an origin failure or a digest
+  mismatch the agent falls back to `GET /v1/blobs/{digest}` (oarbankd, range-capable).
+- **Origin-only blobs.** A dataset may name a blob oarbankd does not hold (registered by URL and digest). When a node
+  asks for one, oarbankd fetches it from the origins under the same rule, once however many nodes ask (later requests
+  follow the same fetch), streams it to them as it arrives, and keeps it only if its size and sha256 match. No origin
+  answering is 502 `origin_failed`.
 - **Resumable.** Partials survive failures and agent restarts and are dropped after 7 days. A download
   resumes with `Range: bytes=<size>-`, pre-hashing the bytes already on disk:
   - 206 appends the rest;
@@ -301,6 +343,20 @@ completion, oarbankd registers each artifact as the content-addressed dataset `a
   The final SHA-256 check guards every blob.
 - **Ready.** A dataset is ready when every file is present and verified. `prefetch` names registered datasets to
   stage ahead of need.
+
+## Folders
+
+An operator maps the folder ids modules ask for (`[sandbox].folders`, approved per version) to a path per node in the
+folder registry (`settings.folders.update`). Each node gets a **folder statement** in its directives: canonical JSON
+`{"type": "oarbank.folders/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}},
+"signed_at"}` and a signature. With release signing the agent applies a statement only with a valid signature by the
+pinned release key (`oarbank folders sign <node>`) and a seq above the last one it applied; in developer mode statements
+are unsigned. The agent checks each folder (an absolute, existing directory, granted by its canonical path; not a root,
+a home directory, Oarbank's data, a system directory or a path the sandbox already grants; no two folders overlapping),
+keeps the outcome in `state/folders.json` and reports it in every heartbeat. A job of a module that asks for folders is
+placed only where every one of them reports `ok` with the access asked for (else `FOLDER_UNAVAILABLE`). The runner gets
+the granted folders in `OARBANK_FOLDERS_FILE`, read folders read-only and write folders as outboxes it can create and
+write files in but never read, list or delete (the SDK's spec/sandbox.md, "Folders").
 
 ## Releases
 

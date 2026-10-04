@@ -38,6 +38,44 @@
   {% endcall %}</details>
 </div>
 <div class="card">
+  <b>Folders</b>
+  <div class="small mut">Modules ask for folders by id (<span class="mono">[sandbox].folders</span>): an input folder their runners
+  may read, or an outbox they may only write new files into. This registry says where each folder is on each node; the node checks
+  the path (no homes, roots, data or system directories) and reports it.{% if s.folder_statements %} In signing mode a node applies a
+  changed mapping only once the owner signed its statement: <span class="mono">oarbank folders sign &lt;node&gt;</span>.{% endif %}</div>
+  <table class="small">{% for id, f in (s.folder_registry or {}).items() %}<tr><td class="mono">{{ id }}</td>
+    <td><span class="chip {{ 'warn' if f.access == 'write' else '' }}">{{ 'outbox (write)' if f.access == 'write' else 'read' }}</span></td>
+    <td class="mono">{% for nid, path in f.nodes.items() %}{% set n = s.nodes.get(nid) %}{{ n.hostname if n else nid }}: {{ path }}
+      {% set st = (n.folders.get(id) if n else none) %}{% if st %} <span class="chip {{ 'ok' if st.status == 'ok' else 'bad' }}" title="{{ st.status }}">{{ 'ok' if st.status == 'ok' else 'refused' }}</span>{% else %} <span class="chip">not applied yet</span>{% endif %}
+      {% set stmt = (s.folder_statements or {}).get(nid) %}{% if stmt and not stmt.signature %} <span class="chip warn" title="statement seq {{ stmt.seq }}">unsigned</span>{% endif %}<br>{% endfor %}</td></tr>
+  {% else %}<tr><td class="mut">No folders mapped.</td></tr>{% endfor %}</table>
+  {% for nid, stmt in (s.folder_statements or {}).items() if not stmt.signature %}
+  <details class="small"><summary>Attach the owner's signature to {{ s.nodes[nid].hostname if s.nodes.get(nid) else nid }}'s statement (seq {{ stmt.seq }})</summary>
+  {% call m.op_form("folders.sign", nid, "Attach", inline=False) %}
+    <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" readonly>{{ stmt.statement }}</textarea></label>
+    <label>signature <input name="p.signature" class="mono" style="width:100%" placeholder="from: oarbank folders sign {{ nid }}"></label>
+  {% endcall %}</details>{% endfor %}
+  <details class="small"><summary>Map a folder…</summary>
+  {% call m.op_form("settings.folders.update", "", "Review…", inline=False) %}
+    <label>folder id <input name="target_input" class="mono" required placeholder="inputs"></label>
+    <label>access <select name="access"><option value="read">read (an input folder)</option><option value="write">write (an outbox: give it an empty directory)</option></select></label>
+    <label>paths, one <span class="mono">node=path</span> per line (an empty path removes the node)
+      <textarea name="nodes" rows="3" class="mono" style="width:100%" placeholder="{% for nid, n in s.nodes.items() %}{{ nid }}=/path/on/{{ n.hostname }}&#10;{% endfor %}"></textarea></label>
+  {% endcall %}</details>
+</div>
+<div class="card">
+  <b>Dataset origins</b>
+  <div class="small mut">Datasets may name public https origins for their files (model weights, reference data): nodes download
+  from them and check each file's sha256, and the coordinator fetches a file only when every origin fails for a node. Restrict the
+  hosts here (<span class="mono">example.org</span>, <span class="mono">*.example.org</span>, an optional <span class="mono">:port</span>);
+  none admits any public host.</div>
+  <div class="small">{% for h in (s.dataset_origins or {}).get('hosts') or [] %}<span class="chip mono">{{ h }}</span> {% else %}<span class="mut">any public https host</span>{% endfor %}</div>
+  <details class="small"><summary>Change…</summary>
+  {% call m.op_form("settings.origins.update", "dataset_origins", "Review…", inline=False) %}
+    <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ ((s.dataset_origins or {}).get('hosts') or []) | join('\n') }}</textarea></label>
+  {% endcall %}</details>
+</div>
+<div class="card">
   <b>Releases</b> {{ m.op_form("releases.build", "release", "Build release", confirm="Build a release bundle from the installed modules? It is not deployed until promoted.") }}
   <table class="small">{% for r in releases %}<tr><td class="mono">{{ r.release_id }}</td><td class="mono">{{ r.platform }}</td><td>{{ r.status }}</td><td class="mut">{{ r.created_at | ago }}</td>
   <td>{% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
@@ -53,7 +91,7 @@
   {% endcall %}</details>
 </div>
 <div class="card">
-  <b>Datasets</b>
+  <b>Datasets</b> <a class="small" href="/datasets">browse</a> · <a class="small" href="/datasets/upload">upload a folder</a>
   <div class="small">{% for d in dscount %}<span class="chip">{{ d.kind }} {{ d.n }}</span> {% endfor %}</div>
   <details class="small" style="margin-top:6px"><summary>Register a dataset (JSON)</summary>
   {% call m.op_form("datasets.register", "", "Register…", inline=False) %}
