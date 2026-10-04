@@ -101,9 +101,9 @@ pub struct Ctx {
     pub policy: Value,
     pub table: Table,
     pub registry: Option<Arc<oarbank_protection::SpawnRegistry>>,
-    /// The agent's container runtime, for modules approved for containers.
+    /// The agent's container runtimes, for modules approved for containers.
     #[cfg(unix)]
-    pub containers: Option<Arc<dyn crate::container_runtime::ContainerRuntime>>,
+    pub containers: Option<crate::container_runtime::Containers>,
     /// Verifies container set images (shared by every attempt of the agent).
     #[cfg(unix)]
     pub images: Arc<crate::imageset::Verifier>,
@@ -380,15 +380,18 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let broker = if !runs_containers {
         None
     } else {
-        let rt = ctx.containers.clone().context("the module runs containers but this node has no container runtime")?;
+        let rts = ctx.containers.clone().context("the module runs containers but this node has no container runtime")?;
         let sock = crate::paths::socket_path(&ctx.layout.home, &format!("broker-{aid}.sock"))?;
         let res = &spec["resources"];
+        let gpu = res["pools"]["gpu"].as_i64().unwrap_or(0) > 0;
+        // a job that reserved the gpu pool runs every container on the GPU runtime (macOS: the krunkit VM)
+        let rt = rts.for_job(gpu);
         let sets = sets.iter().map(oarbank_core::images::ContainerSet::from_json).collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("the release's container sets: {e}"))?;
         let job_images = grant["images"].as_array().cloned().unwrap_or_default().iter()
             .filter_map(|i| i.as_str().map(str::to_string)).collect();
         let grant = crate::broker::BrokerGrant { attempt_id: aid, module: module.to_string(), approved_images: images, sets,
-            job_images, gpu: res["pools"]["gpu"].as_i64().unwrap_or(0) > 0,
+            job_images, gpu,
             workdir: ws.to_path_buf(), module_data: data.clone(), network_granted: net != "none",
             cpus: res["cpu"].as_f64().unwrap_or(1.0), mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0) };
         Some(crate::broker::Broker::start(sock, grant, rt, ctx.images.clone()).await?)

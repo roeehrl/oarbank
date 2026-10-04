@@ -29,7 +29,9 @@ This page describes how the pieces fit and how each works on each operating syst
   that OS, the node's sandbox enforces every capability it needs, and the agent is recent enough. Each refusal has a
   reason code that `explain` shows, with the module's own reason when it gives one (`requires.unsupported.runner`). A
   stage limited to some platforms runs only there, and so does a job limited to some platforms (jobs.enqueue `platforms`)
-  or reading a platform-bound dataset (datasets.create `platform`).
+  or reading a platform-bound dataset (datasets.create `platform`). A job whose stage needs GPU APIs (the runner's
+  `gpu.apis_any` for the node's platform, a GPU service's it reserves) runs only where the node's doctor reports one of
+  each (`GPU_API_MISSING`; [gpu-placement.md](gpu-placement.md)).
 - **Units of work** ([per-platform-modules.md](per-platform-modules.md), D33). A module's `[placement]`, or a stricter
   campaigns.create `placement`, keeps each unit of work (a campaign, a job group, a dataset's jobs, a pipeline) on one
   platform class (`mix`: any, same-os, same-arch, same-platform) while other units use other classes. Each unit has one
@@ -78,7 +80,7 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Session helpers (the system service) | a LaunchAgent in every GUI login, reporting over `/Library/Application Support/Oarbank/run/session.sock` | a global systemd user unit per person, reporting over `/run/oarbank/session.sock` | started by the elevated helper in each person's session, reporting over `\\.\pipe\oarbank-session` |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
 | Module sandbox | Seatbelt | Landlock and seccomp | AppContainer in a Job Object, plus an elevated helper for the egress allowlist |
-| Containers | an agent-owned Colima profile | rootless Podman, else Docker Engine | not yet |
+| Containers | agent-owned Colima profiles: one on Virtualization.framework with Rosetta, and one on krunkit for GPU jobs where krunkit is installed | rootless Podman, else Docker Engine | not yet |
 
 Host protection runs on every OS ([protection.md](protection.md), "On each OS" and "Whose processes"): the rules,
 their process trees and triggers, presence, the front app, GPU time, the dynamic controller's measured signals and its
@@ -220,10 +222,13 @@ verifies a set image's signature before the runtime pulls it, offline with the k
 client (`imageset.rs`, on `oarbank-core`'s `images.rs`), and reports each set image an attempt ran so the coordinator
 audits each digest's first run ([secrets-and-signed-images.md](secrets-and-signed-images.md)). macOS uses an
 agent-owned Colima profile, Linux the host's rootless Podman or Docker Engine (platforms from binfmt: any enabled
-handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). GPU passthrough is CDI: a Linux node with a CDI spec
-for its GPU offers the `gpu` pool and runs `gpus = "all"` containers with `--device <kind>=all`; macOS runtimes have
-no passthrough (`containers.gpu = "undetected"`). Windows has no runtime yet (planned: an agent-owned WSL2
-distribution running Podman, with GPU-PV through the same CDI path).
+handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). GPU passthrough: a Linux node with a CDI spec for its
+GPU offers the `gpu` pool and runs `gpus = "all"` containers with `--device <kind>=all`, its containers' GPU APIs read
+from the spec; a Mac with krunkit runs the containers of jobs that reserved the `gpu` pool in a second agent-owned
+Colima VM, `oarbank-gpu`, whose virtio-gpu device gives them Vulkan on the Mac's GPU (`--device /dev/dri`, Mesa's Venus
+driver in the image, MoltenVK on the host; `containers.gpu = "virtio-gpu:venus"`; [gpu-placement.md](gpu-placement.md)).
+Windows has no runtime yet (planned: an agent-owned WSL2 distribution running Podman, with GPU-PV through the same CDI
+path).
 
 ## Packaging and CI
 

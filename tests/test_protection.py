@@ -88,7 +88,7 @@ def test_golden_list_gets_the_nodes_platform_class(db, monkeypatch):
     monkeypatch.setattr(modcalls, "call", lambda db_, name, verb, params, *a, **k:
                         (seen.append(params["node_class"]) if verb == "golden.list" else None) or real(db_, name, verb, params, *a, **k))
     facts = {**facts_for("linux-amd64", os_version="6.8"), "cpu": {"model": "EPYC", "logical": 32},
-             "gpus": [{"vendor": "nvidia", "model": "L4", "apis": ["cuda"], "vram_gb": 24}]}
+             "gpus": [{"vendor": "nvidia", "model": "L4", "vram_gb": 24}]}
     certify(db, enrolled_node(db, "box", facts=facts)[1])
     assert seen and all(c["platform"] == "linux-amd64" and c["os_version"] == "6.8" for c in seen), seen
     assert seen[0]["cpu"] == {"model": "EPYC", "logical": 32} and seen[0]["gpus"][0]["model"] == "L4"

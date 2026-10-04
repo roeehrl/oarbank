@@ -165,9 +165,10 @@ pub fn collect(home: &std::path::Path) -> Value {
     let plat = platform_token();
     let (os, arch) = plat.split_once('-').unwrap_or(("unknown", "unknown"));
     let SysInfo { os_version, os_build, kernel, model, perf, eff, logical, mem, distro, libc, libc_version } = sysinfo();
+    // the GPU inventory; which APIs the node provides is the doctor's report (gpuapi.rs)
     let apple = cfg!(target_os = "macos") && arch == "arm64";
     let gpus = if apple {
-        json!([{"vendor": "apple", "model": model.clone().unwrap_or_default(), "apis": ["metal"], "vram_gb": null, "unified": true}])
+        json!([{"vendor": "apple", "model": model.clone().unwrap_or_default(), "vram_gb": null, "unified": true}])
     } else {
         json!([])
     };
@@ -185,18 +186,13 @@ pub fn collect(home: &std::path::Path) -> Value {
     })
 }
 
-/// GPU passthrough to containers: `cdi:<kind>` on Linux when a container engine and a CDI spec with an `all` device
-/// exist; `undetected` elsewhere (macOS container runtimes have no Metal passthrough; Windows has no agent container
-/// runtime yet).
+/// GPU passthrough to containers (container_runtime::gpu_passthrough): `cdi:<kind>` on Linux with a container engine
+/// and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with krunkit; `undetected` elsewhere (Windows has no
+/// agent container runtime yet).
 fn container_gpu() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        let engine = ["/usr/bin", "/usr/local/bin", "/bin"].iter()
-            .any(|d| ["podman", "docker"].iter().any(|n| std::path::Path::new(d).join(n).is_file()));
-        let dirs = crate::container_runtime::CDI_DIRS.map(std::path::Path::new);
-        if let (true, Some(kind)) = (engine, crate::container_runtime::cdi_kind(&dirs)) {
-            return format!("cdi:{kind}");
-        }
+    #[cfg(unix)]
+    if let Some(p) = crate::container_runtime::gpu_passthrough() {
+        return p.kind;
     }
     "undetected".into()
 }

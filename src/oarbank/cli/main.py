@@ -543,11 +543,13 @@ def cmd_fleet(a):
         cap, tel, lim = n["cap"], n["tel"], n["limits"]
         caps = ",".join(f"{k}={v}" for k, v in lim.items() if k != "enforce") or "none"
         mods = ",".join(f"{m}:{st.get('state')}" for m, st in (n.get("mods") or {}).items()) or "-"
+        g = (n.get("doctor") or {}).get("gpu_apis") or {}
+        gpu = f"gpu {','.join(g.get('host') or []) or '-'} containers {','.join(g.get('containers') or []) or '-'}"
         print(f"{n['hostname']:<20} {n['node_id']:<11} {n['lifecycle']:<11} {n['desired_state']:<9} "
               f"{'online ' if n['online'] else 'OFFLINE'} jobs {n['live']}/{cap.get('cpu_slots', 0)} "
               f"(auto {cap.get('auto_cpu_slots')}, bind {cap.get('binding_limit')}) guard {tel.get('guard')} "
               f"protecting {','.join((tel.get('protection') or {}).get('active') or []) or '-'} "
-              f"modules {mods} caps {caps}"
+              f"modules {mods} {gpu} caps {caps}"
               + "".join(f" STOPPED {k} ({why})" for k, why in sorted((tel.get("services_held") or {}).items())))
     for e in d["enrollments"]:
         print(f"PENDING enrollment {e['enrollment_id']} from {e['hostname']} ({e['peer_ip']})  -> oarbank node approve {e['enrollment_id']}")

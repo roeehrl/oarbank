@@ -20,6 +20,7 @@ Everything a predicate needs is resolved here into plain data (`facts`), so clai
 """
 import json
 
+from oarbank_sdk import gpu
 from oarbank_sdk import manifest as mf
 from oarbank_sdk import platform as pf
 
@@ -199,7 +200,7 @@ def _serving(module: str, stage: str | None):
 
 def classes_running(db: DB, module: str, stages, mix: str, online: bool = False, cache: dict | None = None) -> set:
     """The classes under `mix` where, for every one of `stages`, a ready node that can serve the module for that stage
-    (_serving) runs it (its platforms) and holds its pools and capabilities. `online`: only active nodes that heartbeat
+    (_serving) runs it (its platforms) and holds its pools, capabilities and GPU APIs. `online`: only active nodes that heartbeat
     recently (a unit's class able to take its work now). Binding, the capacity choice and the stranded check all use this
     one test, so a unit never binds where a stage of its work can never run."""
     from . import core
@@ -220,8 +221,10 @@ def classes_running(db: DB, module: str, stages, mix: str, online: bool = False,
     for st in stages:
         res, plats = mi.stage_resources(st), modcalls.stage_platforms(module, st)
         caps, serves = set(modcalls.stage_capabilities(module, st)), _serving(module, st)
+        gpus = modcalls.stage_gpu_apis(module, st)
         here = {pf.class_key(n["platform"], mix) for n, state, have in nodes
-                if serves(n, state) and (not plats or n["platform"] in plats) and core._pools_fit(n, res) and caps <= have}
+                if serves(n, state) and (not plats or n["platform"] in plats) and core._pools_fit(n, res) and caps <= have
+                and not gpu.unmet(gpus.get(n["platform"], []), predicates.node_gpu_apis(n))}
         out = here if out is None else out & here
     out = out or set()
     if cache is not None:
