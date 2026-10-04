@@ -9,17 +9,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import agentbin  # noqa: E402
-from agentbin import EXE  # noqa: E402
-from conftest import CARGO, REPO, agent_env, pointer  # noqa: E402
+from conftest import agent_env, pointer  # noqa: E402
 from helpers import stop_tree  # noqa: E402
 from oarbank.platform import files  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
-LAUNCHER = REPO / "rust" / "target" / "debug" / f"oarbank-launcher{EXE}"
+LAUNCHER = agentbin.LAUNCHER_BIN    # built with the agent by the agent_bin fixture
 
 
 def test_setup_then_the_launcher_joins_with_the_code_file(agent_bin, coordinator, tmp_path):
-    assert subprocess.run([CARGO, "build", "-q", "-p", "oarbank-launcher"], cwd=REPO / "rust", env=agentbin.cargo_env()).returncode == 0
     plan = coordinator.api("POST", "/api/v1/ops/nodes.join_code", json={"params": {"label": "pkg"}, "dry_run": True})["plan"]
     code = coordinator.api("POST", "/api/v1/ops/nodes.join_code", json={"plan_id": plan["plan_id"], "reason": "e2e"})["result"]["code"]
     (tmp_path / "code.txt").write_text(code + "\n")
