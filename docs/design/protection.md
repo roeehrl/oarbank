@@ -44,6 +44,23 @@ over ssh, or before their helper's first report) is not seen; when that is the c
 as unknown, which counts as in front and shows as a node condition. The macOS service reads the rest itself: every
 account's processes and paths (`sysctl kern.proc`, libproc), code-signing identity, GPU time and the HID idle time.
 
+## Module services
+
+A running module service is fleet work, like a job: its processes are in the fleet's pids, so they never match an owner
+rule and never count as the owner's work (a GPU-resident model server cannot make a `gpu_active` rule fire). Its
+`reserves_host_memory` reservation is charged to capacity, and a job reserving a pool of a GPU service (`services[].gpu`)
+is a GPU job. Protection may stop only a `yieldable` service, and it releases the attempts using it with the same
+reason, so they are requeued without a charge ([service-endpoints.md](service-endpoints.md)):
+
+- at the memory hard floor the victim is the largest footprint among jobs and yieldable services (journaled as
+  `MEMORY_HARD_FLOOR_SERVICE`); the soft floor then keeps an idle yieldable service from starting again;
+- a rule's `evict` stops every yieldable service with the jobs;
+- while GPU work may not run (`gpu_jobs` is 0: the owner's `never`, a protected process using the GPU, a rule's GPU cap
+  or pause), every yieldable GPU service stops.
+
+A stopped service is held down for as long as its cause lasts (`services_held` in the telemetry); each stop is journaled
+as `service_stopped` (`PROTECTION_SERVICE_STOP`).
+
 ## Modes
 
 A node's mode selects a controller profile. It changes thresholds and triggers, never authority; owner rules bind in

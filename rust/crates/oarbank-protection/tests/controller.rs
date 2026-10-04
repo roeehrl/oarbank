@@ -788,3 +788,124 @@ fn pausing_and_lowering_fleet_attempts_is_journaled_on_change() {
     ctl.evaluate(&tick(604.0, mem, jobs), &both[..1], &no_cpu());
     assert_eq!(records("attempt_paused").len(), 2);
 }
+
+fn service(key: &str, footprint_gb: f64, gpu: bool, yieldable: bool, users: &[i64]) -> FleetServiceView {
+    FleetServiceView {
+        key: key.into(),
+        footprint_gb,
+        started_at: 0.0,
+        gpu,
+        yieldable,
+        users: users.to_vec(),
+    }
+}
+
+fn stops(r: &ProtectionTickResult) -> Vec<(&str, &str)> {
+    r.service_stops
+        .iter()
+        .map(|s| (s.key.as_str(), s.reason.as_str()))
+        .collect()
+}
+
+#[test]
+fn the_memory_guard_stops_a_yieldable_service_as_its_victim_and_releases_its_users() {
+    let j = Arc::new(DecisionJournal::in_memory());
+    let mut ctl = ProtectionController::new(Some(j.clone()), Host::unavailable());
+    ctl.apply(
+        Some(&json!({"node": {"mode": "fleet_first"}})),
+        &LocalProtection::Absent,
+    );
+    let jobs = vec![
+        FleetJobView::new(1, Some(500), 1.0, 10.0, 2.0),
+        FleetJobView::new(2, Some(501), 1.0, 20.0, 2.0),
+    ];
+    let mut i = tick(0.0, MemorySignals::new(64.0, 61.0, 3), jobs);
+    // the model server is the biggest; a bigger service that may not be stopped is never a candidate
+    i.services = vec![
+        service("m/model", 12.0, false, true, &[1, 2]),
+        service("m/db", 20.0, false, false, &[]),
+    ];
+    let r = ctl.evaluate(&i, &[], &no_cpu());
+    assert_eq!(r.guard_level, GuardLevel::Hard);
+    assert_eq!(stops(&r), [("m/model", "preempt_memory")]);
+    assert_eq!(
+        r.evictions
+            .iter()
+            .map(|e| (e.attempt_id, e.reason.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "preempt_memory"), (2, "preempt_memory")]
+    );
+    let rec = j.recent_records();
+    let fired = rec.iter().find(|r| r.kind() == "guard_fired").unwrap();
+    assert_eq!(fired.get("service"), Some(&json!("m/model")));
+    let stopped: Vec<_> = rec
+        .iter()
+        .filter(|r| r.kind() == "service_stopped")
+        .collect();
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0].get("service"), Some(&json!("m/model")));
+    // still under the floor next tick: the guard waits for the reclaim before another victim (the soft floor keeps a
+    // yieldable service down meanwhile, in the agent)
+    let r = ctl.evaluate(&i, &[], &no_cpu());
+    assert!(r.service_stops.is_empty() && r.evictions.iter().all(|e| e.reason != "preempt_memory"));
+    assert_eq!(
+        j.recent_records()
+            .iter()
+            .filter(|r| r.kind() == "service_stopped")
+            .count(),
+        1
+    );
+    // memory recovered: nothing held
+    i.memory = MemorySignals::new(64.0, 20.0, 0);
+    i.now = 400.0;
+    let r = ctl.evaluate(&i, &[], &no_cpu());
+    assert!(r.service_stops.is_empty(), "{:?}", r.service_stops);
+}
+
+#[test]
+fn a_rule_evict_stops_every_yieldable_service_with_the_jobs() {
+    let mut ctl = controller(
+        json!({"node": {"mode": "fleet_first"},
+               "rule": [{"id": "game", "match": {"name": "game"}, "active_when": {"for_s": 0}, "evict": {}}]}),
+    );
+    let mut i = tick(
+        0.0,
+        MemorySignals::new(64.0, 20.0, 0),
+        vec![FleetJobView::new(1, Some(10), 1.0, 0.0, 1.0)],
+    );
+    i.services = vec![
+        service("m/model", 4.0, false, true, &[1]),
+        service("m/vm", 4.0, false, false, &[]),
+    ];
+    let r = ctl.evaluate(&i, &[proc_fp(5, "/x/game", 1.0)], &no_cpu());
+    assert_eq!(stops(&r), [("m/model", "preempt_protection")]);
+    assert_eq!(r.evictions.len(), 1);
+}
+
+#[test]
+fn gpu_services_stop_while_gpu_work_may_not_run() {
+    let mut ctl = controller(json!({"node": {"mode": "fleet_first", "gpu_jobs": "never"}}));
+    let mut i = tick(
+        0.0,
+        MemorySignals::new(64.0, 20.0, 0),
+        vec![FleetJobView::new(7, Some(10), 1.0, 0.0, 1.0)],
+    );
+    i.services = vec![
+        service("m/model", 4.0, true, true, &[7]),
+        service("m/pinned", 4.0, true, false, &[]),
+        service("m/cpu", 4.0, false, true, &[]),
+    ];
+    let r = ctl.evaluate(&i, &[], &no_cpu());
+    assert_eq!(r.constraint.gpu_jobs, Some(0));
+    assert_eq!(stops(&r), [("m/model", "preempt_protection")]);
+    assert_eq!(
+        r.evictions
+            .iter()
+            .map(|e| (e.attempt_id, e.reason.as_str()))
+            .collect::<Vec<_>>(),
+        [(7, "preempt_protection")]
+    );
+    // GPU work allowed: the service is free
+    let mut ctl = controller(json!({"node": {"mode": "fleet_first"}}));
+    assert!(ctl.evaluate(&i, &[], &no_cpu()).service_stops.is_empty());
+}

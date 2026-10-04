@@ -107,7 +107,8 @@ def tool_paths(db: DB, tool_ids, os_: str) -> tuple[list[str], list[str]]:
 def sandbox_gaps(manifest, facts: dict) -> list[str]:
     """Sandbox capabilities this module needs that the node's backend does not enforce (spec/sandbox.md, "Placement").
     Every module needs the always-on rules; grants add their own capability names. Denying execution of written files
-    (`exec_writable = false`) is best effort: Windows cannot enforce it without application control."""
+    (`exec_writable = false`) is best effort: Windows cannot enforce it without application control. A module with an
+    endpoint service needs an agent that hands out service endpoints (`endpoints`, docs/design/service-endpoints.md)."""
     enf = ((facts or {}).get("sandbox") or {}).get("enforcement") or {}
     sb = manifest.sandbox
     need = ["filesystem", "ipc", f"net.{sb.net.mode}"]
@@ -115,6 +116,8 @@ def sandbox_gaps(manifest, facts: dict) -> list[str]:
         need.append("no_loopback")
     if sb.devices.gpu != "none":
         need.append(f"gpu.{sb.devices.gpu}")
+    if any(s.endpoint for s in manifest.services):
+        need.append("endpoints")
     return [c for c in need if enf.get(c) != "enforced"]
 
 

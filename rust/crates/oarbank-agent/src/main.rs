@@ -13,6 +13,7 @@ mod container_runtime;
 mod coordinstall;
 mod discover;
 mod doctor;
+mod endpoints;
 mod facts;
 mod fsutil;
 mod host;

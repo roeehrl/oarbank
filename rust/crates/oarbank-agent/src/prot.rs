@@ -26,6 +26,8 @@ pub struct Protection {
     pub service_pools: std::collections::BTreeMap<String, i64>,
     /// Host memory running services reserve (`reserves_host_memory`), GB.
     pub service_reserved_mem_gb: f64,
+    /// Running module services, set by the agent before each tick: fleet work, which protection may stop.
+    pub services: Vec<crate::services::ServiceView>,
 }
 
 impl Protection {
@@ -50,7 +52,7 @@ impl Protection {
         let local = l.home.parent().unwrap_or(&l.home).join("protection.json");
         Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
                      last: None, capacity: None, telemetry: json!({}),
-                     service_pools: Default::default(), service_reserved_mem_gb: 0.0 }
+                     service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![] }
     }
 
     pub fn tick(&mut self, d: &Value, table: &Table, facts: &Value) {
@@ -70,6 +72,7 @@ impl Protection {
         let mut mem = P::MemorySignals::new(m.ram_gb, m.used_gb, m.pressure);
         mem.swap_used_gb = m.swap_used_gb;
         let mut inputs = P::TickInputs::new(now, mem);
+        let mut inputs_services = vec![];
         let (jobs, fleet_pids, fleet_rss, used_cpu, used_mem, live) = {
             let t = table.lock().unwrap();
             let mut pids = HashSet::new();
@@ -87,6 +90,19 @@ impl Protection {
                 v.bandwidth = j.bandwidth.clone();
                 views.push(v);
             }
+            // services are fleet work too: never the owner's, and stoppable when yieldable (their users go with them)
+            let svc_views: Vec<P::FleetServiceView> = self.services.iter().map(|s| {
+                let usage = s.pgid.map(procs::group_usage).unwrap_or_default();
+                if let Some(pg) = s.pgid {
+                    pids.extend(procs::group_pids(pg));
+                    pids.insert(pg);
+                }
+                let users = t.values().filter(|j| j.module == s.module && j.needs.iter().any(|n| s.pools.contains(n)))
+                    .map(|j| j.attempt_id).collect();
+                P::FleetServiceView { key: s.key.clone(), footprint_gb: usage.footprint_gb, started_at: s.started_at, gpu: s.gpu,
+                                      yieldable: s.yieldable, users }
+            }).collect();
+            inputs_services = svc_views;
             let rss: f64 = t.values().map(|j| j.usage.footprint_gb).sum();
             (views, pids, rss, t.values().map(|j| j.cpu).sum::<f64>(), t.values().map(|j| j.mem_gb).sum::<f64>(), t.len() as i64)
         };
@@ -102,6 +118,7 @@ impl Protection {
         inputs.on_battery = on_battery;
         inputs.run_on_battery = policy["run_on_battery"].as_bool().unwrap_or(false);
         inputs.jobs = jobs;
+        inputs.services = inputs_services;
         inputs.user_idle_s = idle;
         inputs.allocatable_cores = perf as f64 + eff as f64 / 2.0;
         inputs.lowering = can_lower();
@@ -256,7 +273,7 @@ mod caps_tests {
     fn table(jobs: &[(i64, f64)]) -> Table {
         let t = Table::default();
         for &(aid, started_at) in jobs {
-            t.lock().unwrap().insert(aid, JobState { attempt_id: aid, phase: "running".into(), cpu: 1.0, mem_gb: 1.0, gpu: false,
+            t.lock().unwrap().insert(aid, JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 1.0, gpu: false,
                 pgid: None, stop: None, pause: false, usage: Default::default(), log_bytes: 0, started_at, caps: vec![],
                 bandwidth: None, threads: None, needs: vec![], wake: Default::default() });
         }
@@ -437,7 +454,7 @@ mod e2e {
     }
 
     fn state(aid: i64, pgid: i32, caps: &[&str]) -> JobState {
-        JobState { attempt_id: aid, phase: "running".into(), cpu: 1.0, mem_gb: 0.1, gpu: false, pgid: Some(pgid), stop: None,
+        JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 0.1, gpu: false, pgid: Some(pgid), stop: None,
                    pause: false, usage: Default::default(), log_bytes: 0, started_at: crate::doctor::now(),
                    caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, needs: vec![],
                    wake: Default::default() }

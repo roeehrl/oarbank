@@ -375,6 +375,23 @@ mod imp {
         (ok != 0).then_some(info.TotalProcesses)
     }
 
+    /// Whether process `pid` is in the container led by `pgid` (its Job Object; checked on the process's own handle, so
+    /// a recycled pid is never taken for a member).
+    pub fn in_container(pgid: i32, pid: u32) -> bool {
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        let Some(job) = job_of(pgid) else { return false };
+        unsafe {
+            let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if p.is_null() {
+                return false;
+            }
+            let mut inside = 0;
+            let ok = IsProcessInJob(p, job, &mut inside);
+            CloseHandle(p);
+            ok != 0 && inside != 0
+        }
+    }
+
     pub fn release(pgid: i32) {
         if let Some(h) = JOBS.lock().unwrap().as_mut().and_then(|m| m.remove(&pgid)) {
             unsafe { CloseHandle(h as HANDLE) };

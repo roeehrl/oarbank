@@ -13,9 +13,10 @@
 //! - **IPC.** Named pipes, sections and other objects outside the AppContainer's namespace are denied.
 //! - Execution of written files cannot be refused without application control: `exec_writable_deny` is unavailable.
 //! - **Handles.** The module inherits its standard handles and, for a job, the control event the agent names in
-//!   OARBANK_CONTROL_EVENT (sys.rs `Nudge`), and nothing else the shim inherited: a handle list
-//!   (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), as the agent's own CreateProcess passes every inheritable handle it holds,
-//!   other jobs' events among them.
+//!   OARBANK_CONTROL_EVENT (sys.rs `Nudge`) and its endpoint connectors (OARBANK_SERVICE_<NAME>), for an endpoint
+//!   service's `start` its channel (OARBANK_ENDPOINT_CHANNEL; endpoints.rs), and nothing else the shim inherited: a
+//!   handle list (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), as the agent's own CreateProcess passes every inheritable handle
+//!   it holds, other jobs' events and connectors among them.
 //!
 //! The parent checks that the shim's children run with an AppContainer token.
 
@@ -230,6 +231,12 @@ fn inheritable(handles: &[HANDLE]) -> Vec<HANDLE> {
 /// The job's control event, from the agent's OARBANK_CONTROL_EVENT (none for a doctor, a service or a probe).
 fn control_event() -> HANDLE {
     std::env::var(crate::sys::CONTROL_EVENT_ENV).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) as HANDLE
+}
+
+/// The endpoint handles the agent names (`handle:<n>`): a job's connectors, an endpoint service's channel.
+fn endpoint_handles() -> Vec<HANDLE> {
+    std::env::vars().filter(|(k, _)| k.starts_with(crate::endpoints::SERVICE_ENV_PREFIX) || k == crate::endpoints::CHANNEL_ENV)
+        .filter_map(|(_, v)| v.strip_prefix("handle:").and_then(|n| n.parse::<usize>().ok())).map(|h| h as HANDLE).collect()
 }
 
 fn die(code: i32, msg: &str) -> ! {
@@ -467,7 +474,7 @@ pub fn exec(args: &[String]) -> ! {
                                      CapabilityCount: caps.len() as u32, Reserved: 0 };
     unsafe {
         let (stdin, stdout, stderr) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE));
-        let inherit = inheritable(&[stdin, stdout, stderr, control_event()]);
+        let inherit = inheritable(&[&[stdin, stdout, stderr, control_event()][..], &endpoint_handles()].concat());
         let mut size = 0usize;
         InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut size);
         let mut buf = vec![0u8; size];

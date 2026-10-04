@@ -252,6 +252,8 @@ def _node_directives(db: DB, node: dict) -> dict:
                             "epoch": identity.epoch(db)},
             "install_coordinator": jl(node.get("install_coordinator_json")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
+            # the kill switch: a disabled module's services stop on every node (its attempts are revoked)
+            "modules_disabled": sorted(modstore.disabled_names(db)),
             **coordmove.directives(db), **owner.directives(db)}
 
 

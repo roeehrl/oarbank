@@ -11,7 +11,7 @@ This page describes how the pieces fit and how each works on each operating syst
 | **oarbankd** (`src/oarbank/coordinator`, Python) | The coordinator: one process, one SQLite database (WAL, one writer lock), the agent API on an mTLS listener, the admin API on loopback and an owner-only local socket, the background loops (reaper, campaigns, discovery, audit digests, invariants, backups) and one sandboxed process per enabled module (the module host, D1). |
 | **oarbank-console** (`src/oarbank/console`) | The web console, a separate read-only process (D10): it renders pages from its own snapshot of the database and sends every change to oarbankd's operation endpoint. Module frames are served from a second origin. |
 | **oarbank** (`src/oarbank/cli`) | The admin CLI: the same admin API the console uses; every write is an operation (D14). |
-| **oarbank-agent** (`rust/crates/oarbank-agent`) | The node agent (D26): enrollment, sessions, staging, jobs in the module sandbox, services and probes, host protection (`oarbank-protection`, [protection.md](protection.md)), self-update requests, coordinator moves and rescue moves. |
+| **oarbank-agent** (`rust/crates/oarbank-agent`) | The node agent (D26): enrollment, sessions, staging, jobs in the module sandbox, services and probes (with the endpoints jobs reach a warm service through, [service-endpoints.md](service-endpoints.md)), host protection (`oarbank-protection`, [protection.md](protection.md)), self-update requests, coordinator moves and rescue moves. |
 | **oarbank-launcher** (`rust/crates/oarbank-launcher`) | Keeps the agent running under the OS service manager and owns which agent version runs. |
 | **oarbank-core** (`rust/crates/oarbank-core`) | The contracts that must match byte for byte: canonical JSON, portable paths, bundle digests and release verification, sandbox policies and profiles, the protection matcher. The SDK's Python code is held to it by parity tests through `oarbank-core-py`. |
 | **oarbank-sdk** (`vendor/oarbank-sdk`, Apache-2.0) | The open module contract: manifest, module, runner and service protocols, bundles, the sandbox contract, the conformance kit and the reference `toy` module. The core consumes it, never the other way round. |
@@ -122,6 +122,10 @@ confinement and fails closed. Grants are whole directories or files, approved pe
 - **GPU** is one coarse `compute` device class per backend.
 - **Every node reports enforcement per capability** (enforced, cooperative, unavailable) with its backend and ABI; work
   is placed only where every capability it needs is enforced.
+- **Service endpoints** ([service-endpoints.md](service-endpoints.md)): a job reaches its module's warm endpoint service
+  through a connector the agent hands it, and the service is handed each connection on its own endpoint channel; both
+  are inherited, already-connected handles (socketpairs and SCM_RIGHTS on macOS and Linux, pipe handles duplicated into
+  a member of the right Job Object on Windows), so no backend rule names a socket or pipe and nothing listens.
 - **Bootstrap jobs** ([bootstrap-stages.md](bootstrap-stages.md)) run with less: the module's egress allowlist and their
   work directory, no tools, GPU, containers, module data or settings. The agent narrows them from the signed release's
   module entry and reports `grants.bootstrap`; they run before the module is certified on the node, and the

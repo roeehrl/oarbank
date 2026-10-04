@@ -99,7 +99,10 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                           "idle_timeout_s": sv.idle_timeout_s, "start_timeout_s": sv.start_timeout_s,
                           "stop_timeout_s": sv.stop_timeout_s, "restart": sv.restart.model_dump(),
                           "provides": {"capabilities": list(sv.provides.capabilities), "pools": list(sv.provides.pools)},
-                          "reserves_host_memory": sv.reserves_host_memory, "yieldable": sv.yieldable, "freeze_ok": sv.freeze_ok}
+                          "reserves_host_memory": sv.reserves_host_memory, "yieldable": sv.yieldable, "freeze_ok": sv.freeze_ok,
+                          # endpoint and gpu only when set, so other entries keep their bytes
+                          **({"endpoint": True} if sv.endpoint else {}),
+                          **({"gpu": sv.gpu.model_dump()} if sv.gpu.use != "none" or sv.gpu.apis_any else {})}
                          for sv in on(m.services)],
             "probes": [{"name": pr.name, "exec": list(pr.exec), "period_s": pr.period_s} for pr in on(m.probes)],
             # the module sandbox (spec/sandbox.md): the node-side grants, operator-approved before this version could
