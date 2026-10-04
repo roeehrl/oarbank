@@ -478,7 +478,8 @@ impl ContainerRuntime for ColimaRuntime {
 #[cfg(target_os = "linux")]
 /// On Linux containers run on the host's engine, no VM: rootless Podman when installed, else Docker Engine. The agent
 /// uses an empty `DOCKER_CONFIG` of its own (no credential helpers); Podman keeps the agent account's own storage.
-/// Only `linux/<host arch>` runs, plus foreign platforms when binfmt has a QEMU handler for them.
+/// Only `linux/<host arch>` runs, plus foreign platforms binfmt has an enabled handler for (QEMU's, or Rosetta's in a
+/// macOS VM, under whatever name it was registered).
 pub struct NativeRuntime {
     pub cli: PathBuf,
     pub home: PathBuf,
@@ -512,13 +513,45 @@ impl NativeRuntime {
 
     pub fn platforms() -> Vec<String> {
         let native = if cfg!(target_arch = "aarch64") { "linux/arm64" } else { "linux/amd64" };
-        let mut v = vec![native.to_string()];
-        for (handler, plat) in [("qemu-x86_64", "linux/amd64"), ("qemu-aarch64", "linux/arm64")] {
-            if plat != native && Path::new("/proc/sys/fs/binfmt_misc").join(handler).exists() {
-                v.push(plat.into());
-            }
-        }
-        v
+        let dir = Path::new("/proc/sys/fs/binfmt_misc");
+        let on = std::fs::read_to_string(dir.join("status")).is_ok_and(|s| s.trim() == "enabled");
+        let mut foreign: Vec<&str> = if on {
+            std::fs::read_dir(dir).into_iter().flatten().flatten()
+                .filter(|e| !matches!(e.file_name().to_str(), Some("register" | "status")))
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .filter_map(|t| binfmt_platform(&t))
+                .filter(|p| *p != native)
+                .collect()
+        } else {
+            vec![]
+        };
+        foreign.sort();
+        foreign.dedup();
+        std::iter::once(native).chain(foreign).map(String::from).collect()
+    }
+}
+
+/// The OCI platform a binfmt_misc handler (the text of `/proc/sys/fs/binfmt_misc/<name>`) runs: an enabled handler for
+/// 64-bit little-endian ELF executables of x86-64 or AArch64 (the ELF machine field, bytes 18-19 of the magic), whatever
+/// it is called: qemu-user-static's `qemu-x86_64`, Fedora's `x86_64`, Lima's and OrbStack's `rosetta`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn binfmt_platform(text: &str) -> Option<&'static str> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "enabled" {
+        return None;
+    }
+    let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)).map(str::trim);
+    if field("offset ").unwrap_or("0") != "0" {
+        return None;
+    }
+    let magic = field("magic ")?.to_ascii_lowercase();
+    if magic.len() < 40 || !magic.starts_with("7f454c460201") {     // \x7fELF, 64-bit, little-endian
+        return None;
+    }
+    match &magic[36..40] {
+        "3e00" => Some("linux/amd64"),
+        "b700" => Some("linux/arm64"),
+        _ => None,
     }
 }
 
@@ -593,6 +626,30 @@ pub fn for_node(layout: &crate::paths::Layout) -> Option<std::sync::Arc<dyn Cont
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A foreign platform runs wherever binfmt has an enabled handler for its executables, whatever the handler is
+    /// called: Rosetta in a Lima VM registers as `rosetta`, so looking only for `qemu-x86_64` offered amd64 images to no
+    /// one there (the broker refused hap.py: "this node's container runtime runs linux/arm64, not linux/amd64").
+    #[test]
+    fn binfmt_handlers_name_the_platforms_they_run() {
+        // Lima (vz, rosetta.binfmt), as /proc/sys/fs/binfmt_misc/rosetta reads
+        let rosetta = "enabled\ninterpreter /mnt/lima-rosetta/rosetta\nflags: OCF\noffset 0\n\
+                       magic 7f454c4602010100000000000000000002003e00\nmask fffffffffffefe00fffffffffffffffffeffffff\n";
+        assert_eq!(binfmt_platform(rosetta), Some("linux/amd64"));
+        // qemu-user-static's handlers
+        let qemu_x86 = "enabled\ninterpreter /usr/libexec/qemu-binfmt/x86_64-binfmt-P\nflags: POCF\noffset 0\n\
+                        magic 7f454c4602010100000000000000000002003e00\nmask fffffffffffefe00fffffffffffffffffeffffff\n";
+        let qemu_arm = "enabled\ninterpreter /usr/libexec/qemu-binfmt/aarch64-binfmt-P\nflags: POCF\noffset 0\n\
+                        magic 7f454c460201010000000000000000000200b700\nmask ffffffffffffff00fffffffffffffffffeffffff\n";
+        assert_eq!(binfmt_platform(qemu_x86), Some("linux/amd64"));
+        assert_eq!(binfmt_platform(qemu_arm), Some("linux/arm64"));
+        // disabled, another file type (Python bytecode), 32-bit x86, and the register/status files are not platforms
+        assert_eq!(binfmt_platform(&rosetta.replacen("enabled", "disabled", 1)), None);
+        assert_eq!(binfmt_platform("enabled\ninterpreter /usr/bin/python3.14\nflags: \noffset 0\nmagic 2b0e0d0a\n"), None);
+        assert_eq!(binfmt_platform("enabled\ninterpreter /usr/bin/qemu-i386\nflags: \noffset 0\n\
+                                    magic 7f454c4601010100000000000000000002000300\n"), None);
+        assert_eq!(binfmt_platform("enabled\n"), None);
+    }
 
     /// A root filesystem of this host's `sh` and `cat` with the libraries they load (`ldd`), as a tar to import: an
     /// image that needs no registry.

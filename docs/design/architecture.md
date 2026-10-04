@@ -196,7 +196,8 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
 
 The agent's container broker is the only way a module reaches a container runtime: images approved by digest, mounts
 confined to the job's directories, no other flags; the `containers` pool is sized by the runtime. macOS uses an
-agent-owned Colima profile, Linux the host's rootless Podman or Docker Engine (platforms from binfmt). Windows has no
+agent-owned Colima profile, Linux the host's rootless Podman or Docker Engine (platforms from binfmt: any enabled
+handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). Windows has no
 runtime yet (planned: an agent-owned WSL2 distribution running Podman).
 
 ## Packaging and CI
