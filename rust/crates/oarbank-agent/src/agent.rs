@@ -39,7 +39,7 @@ pub struct Agent {
     pub healthy: Vec<String>,
     pub draining: bool,
     pub prot: Option<crate::prot::Protection>,
-    /// Serve session helpers (`run --session-hub`: the system service on Linux and Windows).
+    /// Serve session helpers (`run --session-hub`: a system install's service).
     pub session_hub: bool,
     facts: Value,
     pub update: crate::selfupdate::SelfUpdate,

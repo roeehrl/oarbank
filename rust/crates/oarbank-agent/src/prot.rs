@@ -29,7 +29,7 @@ pub struct Protection {
 }
 
 impl Protection {
-    /// `session_hub`: serve session helpers (the system service on Linux and Windows), whose reports tell what the
+    /// `session_hub`: serve session helpers (a system install's service), whose reports tell what the
     /// service's own account may not read.
     pub fn new(l: &Layout, session_hub: bool) -> Self {
         let journal = Arc::new(P::DecisionJournal::new(Box::new(P::SystemClock),
@@ -393,6 +393,8 @@ mod tests {
 mod e2e {
     use super::*;
     use crate::jobs::JobState;
+    #[cfg(target_os = "macos")]
+    use std::{os::unix::fs::PermissionsExt, path::PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -522,5 +524,94 @@ mod e2e {
         assert!(!lowered(pb));
         drop((a, b));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// macOS, a system install's view of a person's work: the agent's protection serving session helpers runs as
+    /// another account (`nobody`, through passwordless sudo), with its home and the helpers' socket in a throwaway
+    /// directory, and this account's session helper reports to it. What only this account may read (arguments, CPU
+    /// time) arrives through the helper and decides the rules, and the console's front app is the helper's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs passwordless sudo: runs the service side as nobody"]
+    fn a_system_agent_sees_a_person_s_work_through_their_session_helper() {
+        const NAME: &str = "prot::e2e::a_system_agent_sees_a_person_s_work_through_their_session_helper";
+        let role = std::env::var("OARBANK_E2E_ROLE").unwrap_or_default();
+        if role == "helper" {
+            panic!("{}", P::platform::run_session_helper());
+        }
+        if role == "service" {
+            return session_service_side();
+        }
+        let dir = PathBuf::from(format!("/private/tmp/oarbank-session-e2e-{}", std::process::id()));
+        let svc = dir.join("svc");
+        std::fs::create_dir_all(&svc).unwrap();
+        // the service's account makes its home and socket here; it runs a copy of this test (homes are private)
+        std::fs::set_permissions(&svc, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let exe = dir.join("tests");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        let socket = svc.join("session.sock");
+        let marker = format!("oarbank-owner-{}", std::process::id());
+        let _busy = Owner(Command::new("/bin/sh").args(["-c", "while :; do :; done", &format!("{marker}-busy")]).spawn().unwrap());
+        // two commands, so the shell stays (it would exec a lone one) and keeps its marker
+        let _idle = Owner(Command::new("/bin/sh").args(["-c", "sleep 600; :", &format!("{marker}-idle")]).spawn().unwrap());
+        let _helper = Owner(Command::new(&exe).args(["--exact", NAME, "--ignored", "--nocapture"]).env("OARBANK_E2E_ROLE", "helper")
+            .env("OARBANK_SESSION_SOCKET", &socket).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let out = Command::new("/usr/bin/sudo").args(["-n", "-u", "nobody", "/usr/bin/env", "OARBANK_E2E_ROLE=service"])
+            .arg(format!("OARBANK_SESSION_SOCKET={}", socket.display())).arg(format!("OARBANK_E2E_DIR={}", svc.display()))
+            .arg(format!("OARBANK_E2E_MARKER={marker}")).arg(&exe).args(["--exact", NAME, "--ignored", "--nocapture"])
+            .output().unwrap();
+        let _ = Command::new("/usr/bin/sudo").args(["-n", "-u", "nobody", "/bin/rm", "-rf"]).arg(svc.join("agent")).status();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "the service side failed:\n{text}");
+        eprintln!("{text}");
+    }
+
+    /// The service side, as `nobody`: wait until the helper's reports decide the rules.
+    #[cfg(target_os = "macos")]
+    fn session_service_side() {
+        let dir = PathBuf::from(std::env::var("OARBANK_E2E_DIR").unwrap());
+        let marker = std::env::var("OARBANK_E2E_MARKER").unwrap();
+        let l = Layout::new(dir.join("agent"));
+        l.ensure().unwrap();
+        let mut p = Protection::new(&l, true);
+        let rule = |id: &str, args: &str, when: Value| json!({"id": id, "match": {"argv_regex": args}, "active_when": when,
+                                                             "pause_fleet": {}, "exit_after_s": 0});
+        let d = json!({"desired_state": "active", "limits": {}, "policy": {"protection": {"node": {"mode": "fleet_first"}, "rule": [
+            rule("busy", &format!("{marker}-busy"), json!({"for_s": 0, "cpu_cores_gt": 0.5})),
+            rule("idle", &format!("{marker}-idle"), json!({"for_s": 0, "cpu_cores_gt": 0.5})),
+            rule("present", &format!("{marker}-idle"), json!({"for_s": 0})),
+            rule("absent", "no-such-arguments-anywhere", json!({"for_s": 0})),
+            rule("front", "no-such-arguments-anywhere", json!({"for_s": 0, "frontmost": false}))]}}});
+        let (table, facts) = (Table::default(), json!({"cpu": {"logical": 4}}));
+        let want = [("busy", true), ("idle", false), ("present", true), ("absent", false)];
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let r = loop {
+            p.tick(&d, &table, &facts);
+            let r = p.last.clone().unwrap();
+            let active = |id: &str| r.reports.iter().any(|x| x.id == id && x.active);
+            if want.iter().all(|(id, a)| active(id) == *a) || Instant::now() > deadline {
+                break r;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        };
+        let report = |id: &str| r.reports.iter().find(|x| x.id == id).unwrap().clone();
+        eprintln!("{:#?}", r.reports);
+        for (id, a) in want {
+            assert_eq!(report(id).active, a, "{id}: {:?}", report(id));
+        }
+        // the arguments came from the helper: this account cannot read them, and nothing matched for want of them
+        let busy = report("busy");
+        assert!(busy.processes == 1 && busy.unreadable == 0 && busy.cpu_cores > 0.5, "{busy:?}");
+        let theirs = P::platform::macos::kinfo_of(P::platform::macos::console_uid().unwrap());
+        assert!(theirs.iter().all(|k| P::platform::macos::argv(k.pid).is_none()), "the service reads no argv of theirs itself");
+        // the front app: the console's account's helper read it
+        let front = p.ctrl.telemetry(&r).front.unwrap();
+        eprintln!("front: {front}; presence: {}", p.telemetry["presence"]);
+        assert!(front.contains("session helper: lsappinfo"), "{front}");
+        assert!(P::platform::macos::hid_idle_s().is_some(), "the HID idle time is anyone's to read");
+        // code-signing identity is read by the service itself
+        let sleep = theirs.iter().find(|k| P::platform::macos::path(k.pid).as_deref() == Some("/bin/sleep")).unwrap();
+        assert_eq!(P::platform::macos::signing(sleep.pid).signing_id.as_deref(), Some("com.apple.sleep"));
     }
 }

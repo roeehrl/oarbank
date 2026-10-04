@@ -106,7 +106,7 @@ enum Cmd {
         #[arg(long)]
         join_file: Option<PathBuf>,
         /// Serve session helpers, which tell host protection what this service's account may not read about the
-        /// people using the machine (system installs on Linux and Windows).
+        /// people using the machine (system installs).
         #[arg(long)]
         session_hub: bool,
     },

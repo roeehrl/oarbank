@@ -2,7 +2,8 @@
 //! through the Security framework, GPU time through IOKit, and acts through signals and `setpriority`.
 //! Linux reads procfs, DRM `fdinfo` and systemd-logind; Windows the native process list, the GPU Engine
 //! performance counters and the sessions WTS lists. On both, here is an actuator that never registers a
-//! process: the agent builds its registry there with its own actuator over its process containers.
+//! process: the agent builds its registry there with its own actuator over its process containers. On every
+//! OS a system install's agent learns what its account may not read from the people's session helpers.
 
 use std::sync::Arc;
 
@@ -18,19 +19,18 @@ use crate::table::ProcessSource;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix_session;
 #[cfg(windows)]
 pub mod windows;
 
 /// This platform's host interfaces; `hub` carries what the session helpers report (the system service's).
 pub fn native_host(hub: Option<Arc<SessionHub>>) -> Host {
     #[cfg(target_os = "macos")]
-    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = {
-        let _ = hub;
-        (
-            Box::new(macos::NativeProcessSource::new()),
-            Box::new(macos::NativeMeter::new()),
-        )
-    };
+    let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
+        Box::new(macos::NativeProcessSource::new(hub.clone())),
+        Box::new(macos::NativeMeter::new(hub)),
+    );
     #[cfg(target_os = "linux")]
     let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
         Box::new(linux::NativeProcessSource::new(hub.clone())),
@@ -67,7 +67,7 @@ pub fn native_host(hub: Option<Arc<SessionHub>>) -> Host {
 pub fn native_presence(hub: Option<Arc<SessionHub>>) -> Box<dyn Presence> {
     #[cfg(target_os = "macos")]
     return {
-        let _ = hub;
+        let _ = hub; // the HID system's idle time is anyone's to read
         Box::new(macos::NativePresence::new())
     };
     #[cfg(target_os = "linux")]
@@ -84,10 +84,12 @@ pub fn native_presence(hub: Option<Arc<SessionHub>>) -> Box<dyn Presence> {
     }
 }
 
-/// Serve session helpers (the system service on Linux and Windows): what they report goes into `hub`.
+/// Serve session helpers (the system service): what they report goes into `hub`.
 pub fn serve_sessions(hub: Arc<SessionHub>) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     return linux::serve(hub);
+    #[cfg(target_os = "macos")]
+    return macos::serve(hub);
     #[cfg(windows)]
     return windows::serve(hub);
     #[allow(unreachable_code)]
@@ -100,10 +102,12 @@ pub fn serve_sessions(hub: Arc<SessionHub>) -> std::io::Result<()> {
     }
 }
 
-/// Run as a session helper (`oarbank-agent session-helper`): never returns on Linux and Windows.
+/// Run as a session helper (`oarbank-agent session-helper`): never returns on macOS, Linux and Windows.
 pub fn run_session_helper() -> std::io::Error {
     #[cfg(target_os = "linux")]
     linux::run_helper();
+    #[cfg(target_os = "macos")]
+    macos::run_helper();
     #[cfg(windows)]
     windows::run_helper();
     #[allow(unreachable_code)]

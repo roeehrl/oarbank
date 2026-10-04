@@ -211,7 +211,7 @@ fn gpu_time_is_found_when_a_window_server_runs() {
 /// own groups.
 #[test]
 fn summary_lists_own_processes_with_identity_and_honours_exclusions() {
-    let mut t = ProcessTable::new(Box::new(macos::NativeProcessSource::new()));
+    let mut t = ProcessTable::new(Box::new(macos::NativeProcessSource::new(None)));
     // SAFETY: getpid cannot fail.
     let me = unsafe { libc::getpid() };
     let now = SystemClock.now();
@@ -240,7 +240,7 @@ fn snapshot_resolves_signing_argv_and_requirements_of_a_live_process() {
         "central",
     )
     .unwrap();
-    let mut t = ProcessTable::new(Box::new(macos::NativeProcessSource::new()));
+    let mut t = ProcessTable::new(Box::new(macos::NativeProcessSource::new(None)));
     let snap = t
         .snapshot(&cfg, &HashSet::new(), SystemClock.now())
         .unwrap();
@@ -313,7 +313,7 @@ fn the_native_host_ticks() {
 #[test]
 #[ignore = "reads the live GPU for a few seconds"]
 fn gpu_active_rules_read_live_gpu_use() {
-    let mut meter = macos::NativeMeter::new();
+    let mut meter = macos::NativeMeter::new(None);
     let a = meter.gpu_times().expect("AGX user clients found");
     let t0 = SystemClock.now();
     sleep(Duration::from_secs(2));
@@ -325,7 +325,7 @@ fn gpu_active_rules_read_live_gpu_use() {
     let me = unsafe { libc::getpid() };
     assert_eq!(busy.group([me]), Some(0.0));
     // the busiest same-user GPU process right now, if any
-    let mut t = ProcessTable::new(Box::new(macos::NativeProcessSource::new()));
+    let mut t = ProcessTable::new(Box::new(macos::NativeProcessSource::new(None)));
     let own = t.summary(5000, &HashSet::new(), SystemClock.now()).unwrap();
     let busiest = own
         .iter()

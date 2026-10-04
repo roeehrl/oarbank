@@ -3,10 +3,12 @@
 
 use std::ops::{Add, Sub};
 
+use serde::{Deserialize, Serialize};
+
 use crate::gpu::GpuTimes;
 
 /// Cumulative per-process counters, sampled each tick. Times are seconds, counts raw.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcCounters {
     pub cpu_s: f64,
     /// Time runnable, including time on a core.

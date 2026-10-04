@@ -66,8 +66,24 @@ impl ProcessSource for NativeProcessSource {
             .list(|uid| owners.contains(&uid), excluding)
             .ok_or_else(|| SourceError::Unreadable("/proc cannot be listed".into()))?;
         let hub = self.hub.as_deref();
+        let helped: HashSet<u32> = hub
+            .map(SessionHub::principals)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| match p {
+                Principal::Uid(u) => Some(u),
+                Principal::Session(_) => None,
+            })
+            .collect();
         Ok(entries
             .into_iter()
+            // a process whose path only its account's helper may read is listed once the helper has described it
+            // (at most one report after it started): until then it would match every rule its path decides
+            .filter(|e| {
+                e.path.is_some()
+                    || !helped.contains(&e.uid)
+                    || hub.is_some_and(|h| h.identity(e.pid, e.start_us).is_some())
+            })
             .map(|e| RawProcess {
                 pid: e.pid,
                 ppid: e.ppid,
