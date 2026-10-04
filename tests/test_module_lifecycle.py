@@ -174,11 +174,14 @@ def test_canary_recertifies_only_its_nodes_then_promote_and_rollback(db):
     assert ra != rb and fresh(db, b)["assigned_release"] is None
     assert releases.composition_of(db, ra)["relay"]["version"] == "1.1.0"
     assert core.heartbeat(db, fresh(db, a), {"capacity": CAPACITY})["release"]["release_id"] == ra
-    # before the canary proves itself, promotion is refused
-    with pytest.raises(core.ApiError, match="not certified"):
+    # before the canary proves itself, promotion is refused, saying what each canary node still lacks
+    with pytest.raises(core.ApiError, match=r"relay 1.1.0 is not certified on every canary node yet \(canary: not on 1.1.0 "
+                                            r"yet \(installing its release; certified on the previous version\)\)"):
         planned(db, "modules.promote", "relay")
     rehello(db, a)
     assert state(db, a)["state"] == "certifying"                           # the digest changed: re-certify
+    with pytest.raises(core.ApiError, match=r"\(canary: certifying: its goldens have not all passed\)"):
+        planned(db, "modules.promote", "relay@1.1.0")
     run_goldens(db, a)
     assert state(db, a)["state"] == "certified" and state(db, a)["digest"] != d0
     assert state(db, b)["digest"] == d0 and state(db, b)["state"] == "certified"   # untouched
@@ -189,8 +192,8 @@ def test_canary_recertifies_only_its_nodes_then_promote_and_rollback(db):
     assert core.complete(db, fresh(db, a), g["attempt_id"], relay_result())["canonical"]
     assert db.one("SELECT module_version FROM results WHERE attempt_id=?", (g["attempt_id"],))["module_version"] == "1.1.0"
     assert "relay@1.1.0" in modcalls.host(db).specs
-    plan, r = planned(db, "modules.promote", "relay")
-    assert plan["impact"]["ready"] and plan["impact"]["canary_nodes"] == {"canary": "certified"}
+    plan, r = planned(db, "modules.promote", "relay@1.1.0")                # the canary's version names it as well
+    assert plan["impact"]["ready"] and plan["impact"]["canary_nodes"] == {"canary": "certified"} and plan["target"] == "relay"
     ch = modstore.channel(db, "relay")
     assert (ch["current"], ch["previous"], ch["canary"]) == ("1.1.0", "1.0.0", None)
     assert fresh(db, a)["assigned_release"] is None and releases.assigned(db, fresh(db, b)) == ra
@@ -201,6 +204,28 @@ def test_canary_recertifies_only_its_nodes_then_promote_and_rollback(db):
     assert (ch["current"], ch["previous"]) == ("1.0.0", "1.1.0")
     assert releases.composition_of(db, releases.assigned(db, fresh(db, b)))["relay"]["version"] == "1.0.0"
     assert modcalls.info("relay").version == "1.0.0"
+
+
+def test_module_operations_take_the_target_form_they_act_on(db):
+    """name@version where a version is acted on, the name where the module is; promote takes both (the version names its
+    canary). Another form is refused naming the form the operation takes, never read as a module name."""
+    certify(db, enrolled_node(db, "canary")[1])
+    modstore.install(db, bundle_of(relay_version("1.1.0")), self_test=False)
+    with pytest.raises(core.ApiError, match=r"no_canary: relay has no canary to promote: oarbank module canary relay@<version>"):
+        planned(db, "modules.promote", "relay@1.1.0")
+    with pytest.raises(core.ApiError, match=r"bad_target: modules.enable_canary needs <name>@<version>, e\.g\. relay@1.1.0 "
+                                            r"\(installed: 1.0.0, 1.1.0\)"):
+        planned(db, "modules.enable_canary", "relay", {"nodes": ["canary"]})
+    planned(db, "modules.enable_canary", "relay@1.1.0", {"nodes": ["canary"]})
+    with pytest.raises(core.ApiError, match=r"not_canary: relay's canary is 1.1.0, not 1.0.0: promote relay or relay@1.1.0"):
+        planned(db, "modules.promote", "relay@1.0.0")
+    with pytest.raises(core.ApiError, match=r"not_found: no module 'bench' is installed"):
+        planned(db, "modules.promote", "bench@2.4.1")
+    for name in ("modules.rollback", "modules.disable"):
+        with pytest.raises(core.ApiError, match=rf"bad_target: {name} takes a module name \(relay\), not relay@1.1.0"):
+            op(db, name, "relay@1.1.0", reason="test")
+    assert modstore.channel(db, "relay")["canary"] == "1.1.0" and not modstore.channel(db, "relay")["disabled"]
+    op(db, "modules.pin", "relay", params={"node": "canary", "clear": True})        # unpinning names no version
 
 
 def test_abandoning_a_canary_returns_its_nodes(db):

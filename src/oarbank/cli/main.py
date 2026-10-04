@@ -786,8 +786,9 @@ def main():
     mo.add_argument("action", choices=["list", "show", "install", "verify", "check", "approve", "enable", "canary", "promote", "rollback", "disable",
                                        "pin", "unpin", "uninstall"])
     mo.add_argument("--deep", action="store_true", help="check: also re-hash every module file")
-    mo.add_argument("what", nargs="?", help="a bundle file (install), <name>@<version> (enable, canary, pin, uninstall) or <name> "
-                                            "(show: where it runs, per platform)")
+    mo.add_argument("what", nargs="?", help="a bundle file (install); <name>@<version> (canary, pin, uninstall, approve; enable "
+                                            "takes either form); <name> or <name>@<its canary version> (promote); <name> "
+                                            "(rollback, disable, verify, check, show: where it runs, per platform)")
     mo.add_argument("--node", action="append", help="canary or pin node (repeat for several canary nodes)")
     mo.add_argument("--reason")
     mo.add_argument("--yes", action="store_true")

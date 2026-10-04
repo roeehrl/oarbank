@@ -65,6 +65,7 @@ class Handler:
     atomic: bool = True                     # False: runs outside the transaction (module IPC, long I/O)
     prepare: Callable[[DB, "OpRequest"], Any] | None = None   # outside the transaction (module IPC); result in req.prepared
     name: Callable[[DB, OpRequest], str] = lambda db, r: str(r.target)  # what a T3 confirmation must type
+    target: Callable[[DB, OpRequest], None] | None = None   # checks the target's form (normalizing it) before anything reads it
 
 
 HANDLERS: dict[str, Handler] = {}
@@ -170,6 +171,8 @@ def _execute(db: DB, req: OpRequest, op: registry.Operation, h: Handler) -> dict
                 if stored.get("_payload") != req.payload:
                     raise OpError(422, "idempotency_key_reused", "the key was used for a different request")
                 return {**stored["response"], "replayed": True}
+    if h.target is not None and not req.plan_id:
+        h.target(db, req)                     # a plan's target was checked when it was previewed
     # preview
     if req.dry_run:
         impact = h.impact(db, req)                    # outside the lock: may ask the module (op.plan)
@@ -693,14 +696,52 @@ def _register_dataset(db, req):
         raise core.ApiError(422, "bad_dataset", str(e))
 
 
-@handler("modules.set_pipeline", target_type="module", snapshot=lambda db, r: {"pipeline": db.get_setting(f"pipeline:{r.target}", "single")},
+# The forms of a module operation's target: a module's channel operations take its name, version operations
+# <name>@<version>, and modules.promote either form (the version names its canary). A form an operation does not take
+# is refused with the form it does take, never misread as a module name.
+
+def _module_name(db, req):
+    """Operations on a module, whatever version runs (rollback, disable, set_pipeline, restart_host, check, verify,
+    cli_token): the target is its name."""
+    t = req.target or ""
+    if "@" in t:
+        n = t.split("@", 1)[0]
+        raise OpError(422, "bad_target", f"{req.op} takes a module name ({n}), not {t}: it acts on the module, whichever "
+                      "version runs")
+
+
+def _module_version(db, req):
+    """Operations on one version (canary, pin, uninstall, approve): <name>@<version>, or the name with params.version."""
+    n, v = _name_ver(req)
+    if not v and not req.params.get("clear"):          # unpinning needs no version
+        from . import modstore
+        have = [r["version"] for r in modstore.installed(db, n)]
+        raise OpError(422, "bad_target", f"{req.op} needs <name>@<version>, e.g. {n or 'bench'}@{have[-1] if have else '2.4.1'}"
+                      + (f" (installed: {', '.join(have)})" if have else ""))
+
+
+def _module_canary(db, req):
+    """modules.promote: the module's name, or <name>@<version> naming its canary (the version that is promoted)."""
+    from . import modstore
+    n, _, v = (req.target or "").partition("@")
+    if not modstore.installed(db, n):
+        raise OpError(404, "not_found", f"no module {n!r} is installed (oarbank module list)")
+    canary = modstore.channel(db, n)["canary"]
+    if not canary:
+        raise OpError(409, "no_canary", f"{n} has no canary to promote: oarbank module canary {n}@<version> --node <node>")
+    if v and v != canary:
+        raise OpError(409, "not_canary", f"{n}'s canary is {canary}, not {v}: promote {n} or {n}@{canary}")
+    req.target = n
+
+
+@handler("modules.set_pipeline", target_type="module", target=_module_name, snapshot=lambda db, r: {"pipeline": db.get_setting(f"pipeline:{r.target}", "single")},
          impact=lambda db, r: {"pending_eval_jobs": db.one("SELECT COUNT(*) n FROM jobs WHERE module=? AND kind='eval' "
                                                            "AND state='pending' AND depends_on IS NULL AND stage IS NULL", (r.target,))["n"]})
 def _pipeline(db, req):
     return core.set_pipeline(db, req.target, req.params["mode"], req.actor)
 
 
-@handler("modules.restart_host", target_type="module")
+@handler("modules.restart_host", target_type="module", target=_module_name)
 def _restart_host(db, req):
     from . import modcalls
     modcalls.host(db).restart(req.target)
@@ -781,7 +822,7 @@ def _install(db, req):
     return out
 
 
-@handler("modules.uninstall", target_type="module", impact=lambda db, r: {"removes": r.target})
+@handler("modules.uninstall", target_type="module", target=_module_version, impact=lambda db, r: {"removes": r.target})
 def _uninstall(db, req):
     from . import modstore
     n, v = _name_ver(req)
@@ -797,7 +838,7 @@ def _uninstall(db, req):
     return {"uninstalled": f"{n}@{v}"}
 
 
-@handler("modules.verify", target_type="module")
+@handler("modules.verify", target_type="module", target=_module_name)
 def _mverify(db, req):
     from . import modstore
     out = modstore.verify_installed(db, req.target or None)
@@ -820,7 +861,7 @@ def _approve_impact(db, r):
             "note": "Jobs of this version may use exactly these on every node; nothing else outside their own directories."}
 
 
-@handler("modules.approve", target_type="module", impact=_approve_impact)
+@handler("modules.approve", target_type="module", target=_module_version, impact=_approve_impact)
 def _approve(db, req):
     """Approve a module version's node-side sandbox grants (spec/sandbox.md), by the digest of its requests."""
     from . import modsandbox
@@ -831,7 +872,7 @@ def _approve(db, req):
         raise OpError(409, "nothing_to_approve" if "no sandbox" in str(e) else "not_found", str(e))
 
 
-@handler("modules.check", target_type="module", atomic=False)
+@handler("modules.check", target_type="module", target=_module_name, atomic=False)
 def _mcheck(db, req):
     """Run module integrity checks: the module's own integrity.check plus the core's checks of its files."""
     from . import modcalls, modlife
@@ -855,7 +896,7 @@ def _enable(db, req):
     return _lifecycle(fn)(db, req)
 
 
-@handler("modules.enable_canary", target_type="module", atomic=False, snapshot=_channel_snap,
+@handler("modules.enable_canary", target_type="module", target=_module_version, atomic=False, snapshot=_channel_snap,
          impact=lambda db, r: {"canary": _name_ver(r), "nodes": r.params.get("nodes") or [],
                                "then": "the canary nodes install it, re-doctor and re-certify on its goldens; promote when they pass"})
 def _canary(db, req):
@@ -871,34 +912,51 @@ def _canary(db, req):
 
 
 def _promote_impact(db, r):
-    """Promotable once every canary node is certified on the canary's own digest (not merely certified)."""
+    """Promotable once every canary node is certified on the canary's own digest (not merely certified). `canary_nodes`
+    says, per node, where it stands."""
     from . import modstore
     ch = modstore.channel(db, r.target)
-    rec = modstore.record(db, r.target, ch["canary"]) if ch["canary"] else None
+    rec = modstore.record(db, r.target, ch["canary"])
+    want = (rec or {}).get("content_digest")
+    rows = {n["node_id"]: n for n in db.q("SELECT node_id, hostname, lifecycle, release_id, modules_json FROM nodes WHERE node_id "
+                                          "IN (%s)" % ",".join("?" * len(ch["canary_nodes"])), tuple(ch["canary_nodes"]))}
     cert = {}
-    for n in db.q("SELECT node_id, hostname, modules_json FROM nodes WHERE node_id IN (%s)" % ",".join("?" * len(ch["canary_nodes"])),
-                  tuple(ch["canary_nodes"])) if ch["canary_nodes"] else []:
+    for nid in ch["canary_nodes"]:
+        n = rows.get(nid)
+        if n is None or n["lifecycle"] == "retired":
+            cert[n["hostname"] if n else nid] = "retired: not a node any more (roll the canary back and start it again)"
+            continue
         st = jl(n["modules_json"], {}).get(r.target) or {}
-        on_canary = rec is not None and st.get("digest") == rec["content_digest"]
-        cert[n["hostname"]] = st.get("state") if on_canary else f"{st.get('state') or 'not reported'} (previous version)"
+        runs = (releases.composition_of(db, n["release_id"]).get(r.target) or {}).get("digest")
+        if want and st.get("state") == "certified" and st.get("digest") == want:
+            cert[n["hostname"]] = "certified"
+        elif not want or runs != want:
+            cert[n["hostname"]] = (f"not on {ch['canary']} yet (installing its release; {st.get('state') or 'nothing reported'} "
+                                   "on the previous version)")
+        elif st.get("state") in ("certified", "certifying"):
+            cert[n["hostname"]] = "certifying: its goldens have not all passed"
+        else:
+            cert[n["hostname"]] = (st.get("state") or "nothing reported") + (f" ({st['reason']})" if st.get("reason") else "")
     return {"from": ch["current"], "to": ch["canary"], "canary_nodes": cert,
             "ready": bool(cert) and all(s == "certified" for s in cert.values())}
 
 
-@handler("modules.promote", target_type="module", atomic=False, snapshot=_channel_snap, impact=_promote_impact)
+@handler("modules.promote", target_type="module", target=_module_canary, atomic=False, snapshot=_channel_snap, impact=_promote_impact)
 def _mpromote(db, req):
     def fn(db, req):
         from . import modstore
         imp = _promote_impact(db, req)
         if not imp["ready"] and not req.params.get("force"):
-            raise modstore.LifecycleError(f"canary not certified on every canary node: {imp['canary_nodes']}")
+            waiting = "; ".join(f"{h}: {s}" for h, s in imp["canary_nodes"].items() if s != "certified")
+            raise modstore.LifecycleError(f"{req.target} {imp['to']} is not certified on every canary node yet ({waiting}); "
+                                          "promote once its goldens pass there")
         ch = modstore.promote(db, req.target)
         db.event("module_promoted", actor=req.actor, reason=f"{req.target} {ch['current']}")
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 
 
-@handler("modules.rollback", target_type="module", atomic=False, snapshot=_channel_snap)
+@handler("modules.rollback", target_type="module", target=_module_name, atomic=False, snapshot=_channel_snap)
 def _mrollback(db, req):
     def fn(db, req):
         from . import modstore
@@ -908,7 +966,7 @@ def _mrollback(db, req):
     return _lifecycle(fn)(db, req)
 
 
-@handler("modules.disable", target_type="module", atomic=False, snapshot=_channel_snap,
+@handler("modules.disable", target_type="module", target=_module_name, atomic=False, snapshot=_channel_snap,
          impact=lambda db, r: {"live_attempts": _live_of(db, r.target)})
 def _disable(db, req):
     def fn(db, req):
@@ -923,7 +981,7 @@ def _disable(db, req):
     return _lifecycle(fn)(db, req)
 
 
-@handler("modules.pin", target_type="module", atomic=False, snapshot=_channel_snap)
+@handler("modules.pin", target_type="module", target=_module_version, atomic=False, snapshot=_channel_snap)
 def _mpin(db, req):
     def fn(db, req):
         from . import modstore
@@ -1508,7 +1566,7 @@ def _join_code(db, req):
     return {**out, "command": f"oarbank-agent run --join {out['code']}"}
 
 
-@handler("modules.cli_token", target_type="module")
+@handler("modules.cli_token", target_type="module", target=_module_name)
 def _cli_token(db, req):
     """A one-hour token for `oarbank cli <module>`: the caller's role (at most operator), only that module's own
     operations and reads."""

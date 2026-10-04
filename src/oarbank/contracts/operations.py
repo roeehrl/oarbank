@@ -212,7 +212,7 @@ OPS: list[Operation] = [
               gui=CON("modules.enable_canary")),
     Operation(id="modules.promote", area="modules", summary="Make the canary version the default on all nodes",
               tier="T2", preview=True, min_role="admin", category="modify", reverses="modules.rollback", idempotency="declarative",
-              routes=OPR("modules.promote"), cli=["oarbank module promote <name>"], gui=CON("modules.promote")),
+              routes=OPR("modules.promote"), cli=["oarbank module promote <name>[@<canary version>]"], gui=CON("modules.promote")),
     Operation(id="modules.rollback", area="modules", summary="Abandon the canary, or flip the default back to the retained previous version",
               tier="T1", category="modify", idempotency="declarative", routes=OPR("modules.rollback"),
               cli=["oarbank module rollback <name>"], gui=CON("modules.rollback")),
