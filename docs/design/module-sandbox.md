@@ -68,8 +68,12 @@ hardware details. ENOENT and EPERM differ, which reveals whether a path exists. 
     (an event on Windows), named in `OARBANK_CONFINED` and closed before the module starts. The agent waits for that
     or the launcher's exit, never a fixed window, then checks the confinement (`sandbox_check` here) and kills a
     process that is not confined. A 60 s guard catches only a hung launcher (`sandbox_hung`).
-  - On Windows every container's leader starts suspended and runs only once it is in its Job Object, so the shim,
-    the runner and all it starts are born in the job.
+  - Every container's leader is in its container before it runs a line, so all it starts is born there: on Windows
+    it starts suspended and runs only once in its Job Object; on Linux it enters its cgroup between fork and exec.
+  - On Windows the agent watches each sandboxed job and service for as long as it runs: any member of the job
+    besides the shim outside the AppContainer kills it (`sandbox_escape`). None is allowed: children inherit the
+    AppContainer, breakaway is refused, and the console host Windows starts for a console client runs in the
+    client's AppContainer. The runner gets a console without a window, which its console children share.
   - The broker and the `oarbank` Colima runtime provide the `containers` pool.
 - **Conformance.** `oarbank-sdk conform` runs the runner and `doctor` under the module's sandbox, so violations show
   up before install.

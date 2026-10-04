@@ -348,6 +348,21 @@ mod imp {
         Ok(())
     }
 
+    /// Put another process in the container's job (a test stands in for an escape with it).
+    #[cfg(test)]
+    pub fn join(pgid: i32, pid: u32) -> io::Result<()> {
+        let job = job_of(pgid).ok_or_else(|| io::Error::other("no such container"))?;
+        unsafe {
+            let p = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if p.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let ok = AssignProcessToJobObject(job, p);
+            CloseHandle(p);
+            if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        }
+    }
+
     /// How many processes have ever been in the container (alive or not): its job's accounting.
     #[cfg(test)]
     pub fn processes_ever(pgid: i32) -> Option<u32> {

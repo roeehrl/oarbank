@@ -148,6 +148,8 @@ CODES: list[ReasonCode] = [
       node=False, job=False),
     C("GOLDEN_SUPERSEDED", "attempt_end", "A new golden set replaced this golden job", wire=["superseded"], node=False, job=False),
     C("OOM", "attempt_end", "Killed for memory", wire=["oom"], node=False, job=True),
+    C("SANDBOX_ESCAPE", "attempt_end", "A process of the attempt ran outside the module sandbox; the attempt was killed",
+      wire=["sandbox_escape"], node=False, job=True),
     C("PREEMPT_MEMORY", "attempt_end", "Preempted by the memory guard", wire=["preempt_memory"], node=False, job=False),
     C("RELEASED_CAP_CPU", "attempt_end", "Released: the CPU cap was lowered", wire=["limit_cpu"], node=False, job=False),
     C("RELEASED_CAP_MEM", "attempt_end", "Released: over its declared memory under a memory floor, or the memory cap was lowered",

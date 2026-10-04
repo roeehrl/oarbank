@@ -732,12 +732,25 @@ impl ServiceManager {
                 todo.push((k.clone(), Job::Probe));
             }
         }
+        let sandboxed = crate::sandbox::available();
         for (k, s) in sh.services.iter_mut() {
             if let Some(g) = s.pgid.filter(|g| !group_alive(*g)) {
                 s.pgid = None;                                    // the service's processes are gone
                 if let Some(r) = &self.registry {
                     r.unregister(g);
                 }
+            }
+            // for as long as it runs, nothing of it may run outside the sandbox: ended at once, a failure of the service
+            if let Some((g, e)) = s.pgid.filter(|_| sandboxed).and_then(|g| crate::sandbox::escape(g).map(|e| (g, e))) {
+                warn!(service = %k, "sandbox_escape: {e}; ended");
+                procs::signal_group(g, procs::Sig::Kill);
+                if let Some(r) = &self.registry {
+                    r.unregister(g);
+                }
+                s.pgid = None;
+                s.running = false;
+                s.ready = false;
+                s.failed(k, "sandbox", &format!("sandbox_escape: {e}"));
             }
             s.users = s.decl.users(jobs_need);
             if s.users > 0 {

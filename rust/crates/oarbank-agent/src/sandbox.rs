@@ -74,6 +74,20 @@ pub fn holds(pid: i32) -> bool {
     is_confined(pid)
 }
 
+/// A process of the container led by `pid` that runs outside the module sandbox, described; watched for as long as
+/// the container lives. Windows: a member of the shim's job besides the shim outside the AppContainer
+/// (sandbox_windows.rs `escape`: nothing confined can start one). Elsewhere none can exist: Seatbelt and Landlock with
+/// seccomp pass to every child and cannot be dropped.
+pub fn escape(pid: i32) -> Option<String> {
+    #[cfg(windows)]
+    return crate::sandbox_windows::escape(pid);
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Names the launcher's confinement signal in its environment: a pipe's write end on POSIX (an fd), an event on
 /// Windows (a handle value), inherited from the agent.
 pub const CONFINED_ENV: &str = "OARBANK_CONFINED";

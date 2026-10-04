@@ -349,6 +349,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     // the launcher says when its sandbox holds, just before the module runs: a runner that does not come up confined
     // is killed, never left running
+    let sandboxed = signal.is_some();
     if let Some(s) = signal {
         use crate::sandbox::Came;
         let came = tokio::task::spawn_blocking(move || s.wait(pid as u32, crate::sandbox::CONFINE_GUARD)).await
@@ -371,9 +372,17 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let mut paused = false;
     let mut threads: Option<i64> = None;
     let mut log_sent = 0u64;
+    let mut escaped: Option<String> = None;
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break st;
+        }
+        // for as long as it runs, nothing of it may run outside the sandbox: killed at once, reported as the job's
+        if let Some(e) = sandboxed.then(|| crate::sandbox::escape(pid)).flatten() {
+            warn!(attempt = aid, "sandbox_escape: {e}; killed");
+            procs::signal_group(pid, procs::Sig::Kill);
+            escaped = Some(e);
+            break child.wait().await?;
         }
         let usage = procs::group_usage(pid);
         let log_len = std::fs::metadata(ws.join(".runner.log")).map(|m| m.len()).unwrap_or(0);
@@ -446,6 +455,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     drop(proxy);
     #[cfg(unix)]
     drop(broker);                                              // stops serving and removes this attempt's containers
+    if let Some(e) = escaped {
+        return Ok(Outcome::Failed { reason: "sandbox_escape".into(), exit_code: status.code(), fault: Some("job".into()),
+                                    stderr_tail: format!("{e}\n{}", tail(&ws.join(".runner.log"), 2000)) });
+    }
     if let Some((s, _)) = stopping {
         if s == Stop::Release("timeout".into()) {
             return Ok(Outcome::Failed { reason: "timeout".into(), exit_code: status.code(), stderr_tail: tail(&ws.join(".runner.log"), 2000), fault: None });

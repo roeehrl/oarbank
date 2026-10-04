@@ -90,24 +90,80 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn is_app_container(pid: u32) -> bool {
+/// Whether a process runs in an AppContainer: None when it is gone (it ended between being listed and asked); a process
+/// that cannot be asked for any other reason is not shown to be confined.
+fn app_container(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_INVALID_PARAMETER};
     unsafe {
         let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if p.is_null() {
-            return false;
+            return (GetLastError() != ERROR_INVALID_PARAMETER).then_some(false);
         }
         let mut tok: HANDLE = std::ptr::null_mut();
         let ok = OpenProcessToken(p, TOKEN_QUERY, &mut tok);
         CloseHandle(p);
         if ok == 0 {
-            return false;
+            return Some(false);
         }
         let mut v: u32 = 0;
         let mut len = 0u32;
         let got = GetTokenInformation(tok, TokenIsAppContainer, &mut v as *mut u32 as *mut _, 4, &mut len);
         CloseHandle(tok);
-        got != 0 && v != 0
+        Some(got != 0 && v != 0)
     }
+}
+
+fn is_app_container(pid: u32) -> bool {
+    app_container(pid) == Some(true)
+}
+
+/// A process's executable path, or None when it cannot be asked (it ended).
+fn image_of(pid: u32) -> Option<String> {
+    use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+    unsafe {
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if p.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(p, 0, buf.as_mut_ptr(), &mut n);
+        CloseHandle(p);
+        (ok != 0).then(|| String::from_utf16_lossy(&buf[..n as usize]))
+    }
+}
+
+/// Every process's parent, from one snapshot.
+fn parents() -> std::collections::HashMap<u32, u32> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                                                            TH32CS_SNAPPROCESS};
+    let mut out = std::collections::HashMap::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snap, &mut e) != 0;
+        while more {
+            out.insert(e.th32ProcessID, e.th32ParentProcessID);
+            more = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+/// The first member of the shim `pid`'s job, besides the shim, that runs outside the AppContainer, described. Nothing a
+/// confined process starts can be: its children inherit the AppContainer, the job refuses breakaway, and the console
+/// host Windows starts for a console client runs in the client's AppContainer (and the runner has its own windowless
+/// one, so its console children share it). So any such member is an escape, with no exception.
+pub fn escape(pid: i32) -> Option<String> {
+    let bad = crate::sys::group_pids(pid).into_iter().find(|p| *p != pid && app_container(*p as u32) == Some(false))?;
+    let parent = parents().get(&(bad as u32)).copied().unwrap_or(0);
+    Some(format!("process {bad} ({}, started by {parent}) runs in the job outside the AppContainer",
+                 image_of(bad as u32).unwrap_or_else(|| "?".into())))
 }
 
 /// `pid` is the shim: confined when every other member of its job runs in an AppContainer (and there is one).
@@ -119,7 +175,7 @@ pub fn is_confined(pid: i32) -> bool {
 /// No member of the shim's job besides the shim is outside an AppContainer (after the shim said its runner started:
 /// the runner may have ended since).
 pub fn holds(pid: i32) -> bool {
-    crate::sys::group_pids(pid).into_iter().filter(|p| *p != pid).all(|p| is_app_container(p as u32))
+    escape(pid).is_none()
 }
 
 /// The AppContainer name for a module: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most).
@@ -292,7 +348,7 @@ pub fn exec(args: &[String]) -> ! {
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
     use windows_sys::Win32::System::Threading::{CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
                                                 InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
-                                                DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
+                                                CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
                                                 PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
                                                 STARTF_USESTDHANDLES, STARTUPINFOEXW};
     // taken first, so the runner's environment does not name it
@@ -377,9 +433,10 @@ pub fn exec(args: &[String]) -> ! {
         let mut cmd = wide(&args[sep + 1..].iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" "));
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let ok = CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), (!inherit.is_empty()).into(),
-                                // no console of its own (the shim has none to share): a console host would join
-                                // the job outside the AppContainer
-                                EXTENDED_STARTUPINFO_PRESENT | DETACHED_PROCESS, std::ptr::null(), std::ptr::null(), &si.StartupInfo, &mut pi);
+                                // a console without a window: its host runs in the runner's AppContainer, and the
+                                // runner's console children share it (with none, each would get a host of its own,
+                                // which fails to start in the AppContainer and takes the child down, 0xC0000142)
+                                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, std::ptr::null(), std::ptr::null(), &si.StartupInfo, &mut pi);
         DeleteProcThreadAttributeList(list);
         if ok == 0 {
             die(71, &format!("start {}: {}", args[sep + 1], std::io::Error::last_os_error()));
@@ -428,63 +485,151 @@ mod tests {
         launcher
     };
 
-    /// A runner whose first statement starts 20 processes: the runner and every one of them are in the job the agent
-    /// made for the shim, and in the AppContainer (the shim is in the job before it runs, so all it starts is born
-    /// there).
-    #[test]
-    fn a_runner_and_everything_it_starts_at_once_are_in_its_job() {
-        use crate::sandbox::{Came, ConfinedSignal, CONFINE_GUARD};
+    fn python() -> (std::path::PathBuf, String) {
         let py = std::env::var("OARBANK_TEST_PYTHON").map(std::path::PathBuf::from).ok()
             .or_else(|| crate::runtime::which("python")).expect("a Python (OARBANK_TEST_PYTHON or on PATH)");
         let real = std::fs::canonicalize(&py).unwrap().display().to_string();
         let home = std::path::Path::new(real.strip_prefix(r"\\?\").unwrap_or(&real)).parent().unwrap().display().to_string();
-        let d = std::env::temp_dir().join(format!("oarbank-born-in-job-{}", std::process::id()));
+        (py, home)
+    }
+
+    /// A Python runner through the shim, contained as the agent contains it: (the shim, its work directory, its stderr
+    /// file). `script` gets the work directory as argv[1].
+    fn runner(tag: &str, script: &str) -> (std::process::Child, std::path::PathBuf) {
+        use crate::sandbox::{Came, ConfinedSignal, CONFINE_GUARD};
+        let (py, home) = python();
+        let d = std::env::temp_dir().join(format!("oarbank-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let mut pol = Policy::new("dev.test.born");
+        let mut pol = Policy::new(format!("dev.test.{tag}"));
         pol.ro = vec![home];
         pol.rw = vec![d.display().to_string()];
         pol.exe = Some(py.display().to_string());
         let pf = d.with_extension("policy.json");
         std::fs::write(&pf, serde_json::to_vec(&pol).unwrap()).unwrap();
-        let pids = d.join("pids");
-        let script = "import subprocess, sys\n\
-                      ps = [subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],\n\
-                                             creationflags=subprocess.DETACHED_PROCESS) for _ in range(20)]\n\
-                      import os, time\n\
-                      open(sys.argv[1] + '.tmp', 'w').write(' '.join([str(os.getpid())] + [str(p.pid) for p in ps]))\n\
-                      os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n\
-                      time.sleep(120)";
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-        cmd.arg("sandbox-exec").arg(&pf).arg("--").arg(&py).args(["-I", "-c", script]).arg(&pids)
+        cmd.arg("sandbox-exec").arg(&pf).arg("--").arg(&py).args(["-I", "-c", script]).arg(&d).current_dir(&d)
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(d.join("stderr")).unwrap());
         let signal = ConfinedSignal::new().unwrap();
         signal.prepare(&mut cmd);
-        let mut shim = crate::sys::spawn_contained(&mut cmd, false).unwrap();
-        let shim_pid = shim.id() as i32;
+        let shim = crate::sys::spawn_contained(&mut cmd, false).unwrap();
         assert_eq!(signal.wait(shim.id(), CONFINE_GUARD), Came::Confined);
+        (shim, d)
+    }
+
+    /// The runner's `name` file, once written (up to 120 s on a loaded host), or None if the shim ended first.
+    fn read(shim: &mut std::process::Child, d: &std::path::Path, name: &str) -> Option<String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !pids.exists() && std::time::Instant::now() < deadline && shim.try_wait().unwrap().is_none() {
+        while std::time::Instant::now() < deadline {
+            if let Ok(s) = std::fs::read_to_string(d.join(name)) {
+                return Some(s);
+            }
+            if shim.try_wait().unwrap().is_some() {
+                return std::fs::read_to_string(d.join(name)).ok();
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let started: Vec<i32> = std::fs::read_to_string(&pids).unwrap_or_default().split_whitespace().filter_map(|p| p.parse().ok())
-            .collect();
-        let members = crate::sys::group_pids(shim_pid);
-        let ever = crate::sys::processes_ever(shim_pid);
-        let held = crate::sandbox::holds(shim_pid);
-        crate::sys::signal_group(shim_pid, crate::sys::Sig::Kill);
+        None
+    }
+
+    fn end(mut shim: std::process::Child, d: &std::path::Path) -> String {
+        let pid = shim.id() as i32;
+        crate::sys::signal_group(pid, crate::sys::Sig::Kill);
         let _ = shim.wait();
-        crate::sys::release(shim_pid);
+        crate::sys::release(pid);
         let err = std::fs::read_to_string(d.join("stderr")).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_file(&pf);
-        assert_eq!(started.len(), 21, "the runner and its 20 children: {started:?}\n{err}");
-        // every process ever in the job: the shim, the runner and its 20, consoleless (one that already ended still
-        // counts; a console would bring a conhost.exe each)
-        assert_eq!(ever, Some(22), "members now {members:?}, started {started:?}");
-        let outside: Vec<&i32> = started.iter().filter(|p| !members.contains(p) && crate::sys::alive(**p)).collect();
-        assert!(outside.is_empty(), "alive outside the job: {outside:?} (members {members:?})");
-        assert!(held, "a member of the job outside the AppContainer");
+        let _ = std::fs::remove_dir_all(d);
+        let _ = std::fs::remove_file(d.with_extension("policy.json"));
+        err
+    }
+
+    /// A runner whose first statement starts 20 processes (plain console ones, as a module would): the runner and
+    /// every one of them are in the job the agent made for the shim, all alive and in the AppContainer, with the
+    /// runner's one windowless console host besides them (the shim is in the job before it runs, so all it starts is
+    /// born there).
+    #[test]
+    fn a_runner_and_everything_it_starts_at_once_are_in_its_job() {
+        let script = "import subprocess, sys\n\
+                      ps = [subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']) for _ in range(20)]\n\
+                      import os, time\n\
+                      time.sleep(1)\n\
+                      open(sys.argv[1] + '/pids.tmp', 'w').write(' '.join([str(os.getpid())] + [str(p.pid) for p in ps if p.poll() is None]))\n\
+                      os.replace(sys.argv[1] + '/pids.tmp', sys.argv[1] + '/pids')\n\
+                      time.sleep(120)";
+        let (mut shim, d) = runner("born", script);
+        let shim_pid = shim.id() as i32;
+        let started: Vec<i32> = read(&mut shim, &d, "pids").unwrap_or_default().split_whitespace().filter_map(|p| p.parse().ok()).collect();
+        let members = crate::sys::group_pids(shim_pid);
+        let hosts: Vec<i32> = members.iter().copied().filter(|p| image_of(*p as u32).is_some_and(|i| i.to_ascii_lowercase().ends_with(r"\system32\conhost.exe")))
+            .collect();
+        let ever = crate::sys::processes_ever(shim_pid);
+        let escaped = escape(shim_pid);
+        let err = end(shim, &d);
+        assert_eq!(started.len(), 21, "the runner and its 20 children, alive a second later: {started:?}\n{err}");
+        let outside: Vec<&i32> = started.iter().filter(|p| !members.contains(p)).collect();
+        assert!(outside.is_empty(), "outside the job: {outside:?} (members {members:?})");
+        assert!(hosts.len() <= 1, "one console host at most, the runner's: {hosts:?}");
+        assert_eq!(ever, Some(22 + hosts.len() as u32), "members {members:?}, started {started:?}");
+        assert_eq!(escaped, None);
+    }
+
+    /// What a runner may do with consoles and processes keeps it confined: console children run (sharing the runner's
+    /// console), AllocConsole is refused (it has one), breaking away from the job is refused, and the escape watch
+    /// sees nothing outside the AppContainer while they run.
+    #[test]
+    fn console_children_allocconsole_and_breakaway_stay_confined() {
+        let script = r#"
+import ctypes, subprocess, sys, time
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+r = {}
+c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+cmd = subprocess.Popen(r'C:\Windows\System32\cmd.exe /c ""%s" -c "import time; time.sleep(120)""' % sys.executable, cwd=sys.argv[1])
+time.sleep(1)
+r["console_child"] = c.poll()
+r["cmd_child"] = cmd.poll()
+r["alloc"] = k.AllocConsole()
+try:
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], creationflags=0x01000000)
+    r["breakaway"] = "started"
+except OSError as e:
+    r["breakaway"] = e.winerror
+open(sys.argv[1] + "/r.tmp", "w").write(repr(r))
+import os
+os.replace(sys.argv[1] + "/r.tmp", sys.argv[1] + "/r")
+time.sleep(120)
+"#;
+        let (mut shim, d) = runner("consoles", script);
+        let shim_pid = shim.id() as i32;
+        let got = read(&mut shim, &d, "r");
+        let mut escapes = vec![];
+        for _ in 0..20 {
+            escapes.extend(escape(shim_pid));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let members: Vec<(i32, bool)> = crate::sys::group_pids(shim_pid).into_iter().filter(|p| *p != shim_pid)
+            .map(|p| (p, is_app_container(p as u32))).collect();
+        let err = end(shim, &d);
+        assert_eq!(got.as_deref(), Some("{'console_child': None, 'cmd_child': None, 'alloc': 0, 'breakaway': 5}"), "{err}");
+        assert!(escapes.is_empty(), "{escapes:?}");
+        assert!(members.len() >= 4 && members.iter().all(|(_, ac)| *ac), "{members:?}");
+    }
+
+    /// Anything in the job outside the AppContainer is an escape: here a plain process the test puts there itself.
+    #[test]
+    fn a_member_outside_the_appcontainer_is_an_escape() {
+        let (mut shim, d) = runner("intruder", "import sys, time\nopen(sys.argv[1] + '/up', 'w').write('1')\ntime.sleep(120)");
+        let shim_pid = shim.id() as i32;
+        assert!(read(&mut shim, &d, "up").is_some());
+        assert_eq!(escape(shim_pid), None);
+        let ping = format!(r"{}\System32\PING.EXE", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()));
+        let mut intruder = std::process::Command::new(ping).args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        crate::sys::join(shim_pid, intruder.id()).unwrap();
+        let seen = escape(shim_pid);
+        let _ = intruder.kill();
+        let _ = intruder.wait();
+        end(shim, &d);
+        let seen = seen.expect("the intruder is seen");
+        assert!(seen.contains(&intruder.id().to_string()) && seen.to_ascii_lowercase().contains("ping.exe"), "{seen}");
     }
 }

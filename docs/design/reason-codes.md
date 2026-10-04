@@ -110,6 +110,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `GOLDEN_FAILED` | Golden jobs kept failing on the node; its certification stopped | P1 | no / no | – | `golden_failed` |
 | `GOLDEN_SUPERSEDED` | A new golden set replaced this golden job | P1 | no / no | – | `superseded` |
 | `OOM` | Killed for memory | P1 | no / yes | – | `oom` |
+| `SANDBOX_ESCAPE` | A process of the attempt ran outside the module sandbox; the attempt was killed | P1 | no / yes | – | `sandbox_escape` |
 | `PREEMPT_MEMORY` | Preempted by the memory guard | P1 | no / no | – | `preempt_memory` |
 | `RELEASED_CAP_CPU` | Released: the CPU cap was lowered | P1 | no / no | – | `limit_cpu` |
 | `RELEASED_CAP_MEM` | Released: over its declared memory under a memory floor, or the memory cap was lowered | P1 | no / no | – | `limit_mem` |
