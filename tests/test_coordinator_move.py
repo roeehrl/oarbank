@@ -387,6 +387,17 @@ def test_signing_mode_moves_install_only_a_signed_build_for_the_targets_platform
         coordbuilds.register(db, coordbuilds.stage(b"not an archive")["sha256"], "t")
 
 
+def test_developer_mode_moves_to_a_node_only_from_a_checkout(tmp_path, db, monkeypatch):
+    """Signing off, a node installs the running checkout; a coordinator not run from one refuses the plan."""
+    from oarbank.coordinator import config as C, coordbundle
+    monkeypatch.setattr(C, "RELEASE_SIGNING", False)
+    monkeypatch.setattr(coordbundle, "REPO", tmp_path)
+    enrolled_node(db, "mini")
+    with pytest.raises(coordmove.MoveError, match="does not run from a git checkout"):
+        coordmove.prepare(db, "mini", "test")
+    assert coordmove.plan(db) is None
+
+
 # ------------------------------------------------------------------ coordinator platforms (D33)
 
 def coordinator_here_only(tmp_path) -> Path:

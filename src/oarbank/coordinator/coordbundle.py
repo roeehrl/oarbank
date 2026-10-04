@@ -19,8 +19,16 @@ from .db import DB
 REPO = Path(__file__).resolve().parents[3]
 
 
+class NotACheckout(Exception):
+    pass
+
+
 def _tracked(root: Path) -> list[str]:
-    r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True)
+    r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True)
+    if r.returncode:
+        raise NotACheckout(f"this coordinator does not run from a git checkout ({root}), so there is no checkout bundle "
+                           "for a node to install: move with a signed coordinator build (release signing on), or start "
+                           "the standby by hand and prepare the move with its URL")
     return [p for p in r.stdout.decode().split("\0") if p]
 
 
@@ -44,7 +52,7 @@ def build(repo: Path = REPO) -> bytes:
 
 def ensure(db: DB) -> dict:
     """Build (or reuse) the bundle for the running checkout; returns {bundle_sha256, bundle_size, bundle_url}."""
-    data = build()
+    data = build(REPO)
     sha = hashlib.sha256(data).hexdigest()
     d = C.HOME / "move" / "bundles"
     d.mkdir(parents=True, exist_ok=True)

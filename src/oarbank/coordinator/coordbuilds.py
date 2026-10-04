@@ -150,7 +150,10 @@ def directive_bundle(db: DB, platform: str | None) -> dict:
                 "platform": platform, "bundle_url": f"/v1/move/bundle/{b['sha256']}",
                 "statement": b["statement"], "signature": b["signature"]}
     from . import coordbundle
-    return {"kind": "dev-checkout", **coordbundle.ensure(db)}
+    try:
+        return {"kind": "dev-checkout", **coordbundle.ensure(db)}
+    except coordbundle.NotACheckout as e:
+        raise BuildError(str(e))
 
 
 def bundle_file(db: DB, sha: str) -> Path | None:
