@@ -82,7 +82,8 @@ def ask(prompt: str, flag: str) -> str:
         sys.exit(f"\n{prompt.strip()} has no answer on stdin: pass {flag}")
 
 
-def run_op(op, target=None, params=None, reason=None, yes=False, confirm=None, if_match=None, dry_run=False, out=print):
+def run_op(op, target=None, params=None, reason=None, yes=False, confirm=None, if_match=None, dry_run=False, out=print,
+           secret=None):
     """One operation through POST /api/v1/ops/<op>: T2/T3 preview first, print the impact, ask (unless
     --yes), then apply the plan; creations get an Idempotency-Key. Exit codes: 0 applied / no-op,
     2 changes previewed but not applied, 1 error (Terraform's -detailed-exitcode convention)."""
@@ -97,6 +98,8 @@ def run_op(op, target=None, params=None, reason=None, yes=False, confirm=None, i
     if if_match is not None:
         headers["if-match"] = str(if_match)
     body = {"target": target, "params": params or {}, "reason": reason}
+    if secret is not None:
+        body["secret"] = secret                  # secrets.set's value, beside params (never echoed back)
 
     def post(b):
         r = http_request("POST", f"{URL}/api/v1/ops/{op}", json=b, headers={**headers, **auth_headers()}, timeout=3600)
@@ -131,6 +134,34 @@ def cmd_op(a):
     res = run_op(a.op, a.target, {**_kv(a.param), **(json.loads(a.json) if a.json else {})}, a.reason, a.yes,
                  a.confirm, a.if_match, a.dry_run)
     print(json.dumps(res, indent=1, default=str))
+
+
+def cmd_secret(a):
+    """Module secrets, write-only: set reads the value from stdin (or a prompt that does not echo), never from argv."""
+    if a.action == "list":
+        d = api("GET", f"/api/v1/modules/{a.module}/secrets")
+        for s in d["secrets"]:
+            scopes = ([f"module {s['module']['fingerprint']}{'' if s['module']['readable'] else ' (unreadable here)'}"]
+                      if s["module"] else []) + [f"{n['hostname'] or n['node_id']} {n['fingerprint']}" for n in s["nodes"]]
+            print(f"{s['name']:<24} {'set' if s['set'] else 'NOT SET':<8} stages={','.join(s['stages']) or '-'}"
+                  f"{' +coordinator' if s['coordinator'] else ''}  {'; '.join(scopes)}")
+        return
+    if not a.name:
+        sys.exit(f"oarbank secret {a.action} <module> <name>")
+    params = {"name": a.name, **({"node": a.node} if a.node else {})}
+    if a.action == "clear":
+        print(json.dumps(run_op("secrets.clear", a.module, params, a.reason, a.yes)["result"], default=str))
+        return
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass(f"{a.module}/{a.name}: ")
+        if getpass.getpass("again: ") != value:
+            sys.exit("the two entries differ; nothing was set")
+    else:
+        value = sys.stdin.read()
+        value = value[:-1] if value.endswith("\n") else value
+    res = run_op("secrets.set", a.module, params, a.reason, True, secret=value)["result"]
+    print(f"{a.module}/{a.name} set for {res['node'] or 'the module'}: fingerprint {res['fingerprint']}")
 
 
 def cmd_module(a):
@@ -794,6 +825,14 @@ def main():
     mo.add_argument("--yes", action="store_true")
     mo.add_argument("--dry-run", action="store_true")
     mo.set_defaults(fn=cmd_module)
+    se = sub.add_parser("secret", help="module secrets, write-only: set (value from stdin or a no-echo prompt), clear, list")
+    se.add_argument("action", choices=["set", "clear", "list"])
+    se.add_argument("module")
+    se.add_argument("name", nargs="?")
+    se.add_argument("--node", help="a node's own value (hostname or id) instead of the module's")
+    se.add_argument("--reason")
+    se.add_argument("--yes", action="store_true")
+    se.set_defaults(fn=cmd_secret)
     co = sub.add_parser("coordinator", help="move the coordinator to another machine: status, prepare, move, cancel, finalize")
     co.add_argument("action", choices=["status", "prepare", "move", "sign", "cancel", "finalize"])
     co.add_argument("--owner-key", help="move/sign: the owner key file that signs the move (signing mode)")

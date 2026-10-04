@@ -682,11 +682,11 @@ def expand_pipeline(db: DB, job_id: int) -> int | None:
     mi = modcalls.info(j["module"])
     head, tail = mi.chain
     cid = db.x("INSERT INTO jobs(job_key,campaign_id,labels_json,dataset_id,kind,priority,subpriority,state,spec_json,"
-               "datasets_json,created_at,module,resources_json,stage,spec_version,platforms_json,group_key)"
-               " VALUES(?,?,?,?,'call',?,?,'pending',?,?,?,?,?,?,?,?,?)",
+               "datasets_json,created_at,module,resources_json,stage,spec_version,platforms_json,group_key,images_json)"
+               " VALUES(?,?,?,?,'call',?,?,'pending',?,?,?,?,?,?,?,?,?,?)",
                (j["job_key"] + ":" + head, j["campaign_id"], j["labels_json"], j["dataset_id"], j["priority"], j["subpriority"],
                 j["spec_json"], j["datasets_json"], now(), j["module"], json.dumps(mi.stage_resources(head)), head,
-                j["spec_version"], j["platforms_json"], j["group_key"]))
+                j["spec_version"], j["platforms_json"], j["group_key"], j["images_json"]))
     db.x("UPDATE jobs SET stage=?, depends_on=?, resources_json=? WHERE job_id=?",
          (tail, cid, json.dumps(mi.stage_resources(tail)), job_id))
     placement.assign(db, job_id)                 # head and tail: one unit, feasible for both stages (D33)
@@ -791,10 +791,16 @@ def _module_serves(node: dict, f: dict) -> bool:
 def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: float, free_mem: float,
                         body: dict) -> predicates.NodeView:
     """Every node-level fact claim() decides on (read inside its transaction). explain builds the same."""
-    from . import modsandbox
+    from . import modsandbox, modsecrets
     nid = node["node_id"]
     excluded = modsandbox.node_exclusions(db, node, set(offered))
+    unset = {}
+    for m in set(offered) - set(excluded):
+        names = list(modsecrets.declared(m))
+        if names:
+            unset[m] = set(modsecrets.missing_for(db, m, names, nid))
     return predicates.NodeView(
+        secrets_unset=unset,
         node=node, states=node_modules(node), offered=set(offered) - set(excluded), excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in set(offered) - set(excluded)},
@@ -817,6 +823,7 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
     return {**j, "dispute": {**d, "scope": (cmp or {}).get("scope"), "class": (cmp or {}).get("class")} if cmp is not None else d,
             "stage_platforms": modcalls.stage_platforms(j["module"], j["stage"]), "retry": modcalls.stage_retry(j["module"], j["stage"]),
             "stage_capabilities": modcalls.stage_capabilities(j["module"], j["stage"]),
+            "secrets": modcalls.stage_secrets(j["module"], j["stage"]),
             "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]), "placement": placement.facts(db, j, cache)}
 
 
@@ -950,10 +957,18 @@ def claim(db: DB, node: dict, body: dict) -> dict:
                 nv.pool_use[p] = nv.pool_use.get(p, 0) + int(k)
             nv.gpu_use += modcalls.job_uses_gpu(j["module"], res, node.get("platform"))
             per_campaign[j["campaign_id"]] = per_campaign.get(j["campaign_id"], 0) + 1
-            grants.append({"attempt_id": aid, "job_id": j["job_id"], "job_key": j["job_key"],
-                           "generation": j["generation"], "kind": j["kind"], "module": j["module"],
-                           "issued_at": t, "expires_at": t + C.LEASE_TTL,
-                           "hard_deadline": t + max(600, spec.get("timeout_s") or 1800), "spec": spec})
+            grant = {"attempt_id": aid, "job_id": j["job_id"], "job_key": j["job_key"],
+                     "generation": j["generation"], "kind": j["kind"], "module": j["module"],
+                     "issued_at": t, "expires_at": t + C.LEASE_TTL,
+                     "hard_deadline": t + max(600, spec.get("timeout_s") or 1800), "spec": spec}
+            names = modcalls.stage_secrets(j["module"], j["stage"])
+            if names:                       # only for the stage that lists them; never in spec.json, never stored
+                from . import modsecrets
+                grant["secrets"] = modsecrets.for_job(db, j["module"], names, nid)
+            images = jl(j.get("images_json"), [])
+            if images:
+                grant["images"] = images
+            grants.append(grant)
     for g in grants:
         db.event("granted", node_id=nid, job_id=g["job_id"], attempt_id=g["attempt_id"], reason=g["module"])
     return {"grants": grants}
@@ -1032,6 +1047,7 @@ def fail(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
     """A failed attempt. `fault` comes from the runner's failure.json (runner protocol, "Exit codes"): `transient` is
     no failure at all (the attempt is released and the job retried), `host` implicates this node (re-doctor), `job`
     is the job's own fault (it never trips this node's breaker)."""
+    _record_images(db, node, attempt_id, body)
     fault = body.get("fault")
     if fault == "transient":
         return release(db, node, attempt_id, "transient")
@@ -1377,8 +1393,22 @@ def _await_module(db: DB, attempt_id: int, e: Exception):
     raise ApiError(503, "module_unavailable", str(e)[:300], headers={"Retry-After": str(max(1, int(retry)))})
 
 
+def _record_images(db: DB, node: dict, attempt_id: int, body: dict):
+    """The container set images the attempt ran (the agent's report, whatever the outcome): each digest's first run
+    per module is recorded and audited (modimages.record_runs)."""
+    if not body.get("images"):
+        return
+    a = db.one("SELECT j.module FROM attempts a JOIN jobs j ON j.job_id=a.job_id WHERE a.attempt_id=? AND a.node_id=?",
+               (attempt_id, node["node_id"]))
+    if a:
+        from . import modimages
+        with db.tx():
+            modimages.record_runs(db, a["module"], node["node_id"], attempt_id, body["images"])
+
+
 def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
     ik = body.get("idempotency_key") or f"att-{attempt_id}-complete"
+    _record_images(db, node, attempt_id, body)
     res = body.get("result") or {}
     post = []
     prev = db.one("SELECT response_json FROM idempotency WHERE key=?", (ik,))    # cheap optimistic check
@@ -1609,16 +1639,21 @@ def _stranded_disputes(db: DB) -> list[dict]:
 
 
 def _goldens_waiting(db: DB, node_id: str, module: str) -> str:
-    """Why a node's goldens may not have run: the unregistered datasets they name, and whether the module pins them (a
-    bootstrap job brings those)."""
-    missing = sorted({d for j in db.q("SELECT datasets_json FROM jobs WHERE target_node=? AND kind='golden' AND module=? "
-                                      "AND state='pending'", (node_id, module))
-                      for d in placement.unregistered(db, j)})
+    """Why a node's goldens may not have run: the secrets their stages receive that have no value for the node, the
+    unregistered datasets they name, and whether the module pins them (a bootstrap job brings those)."""
+    from . import modsecrets
+    goldens = db.q("SELECT datasets_json, stage FROM jobs WHERE target_node=? AND kind='golden' AND module=? "
+                   "AND state='pending'", (node_id, module))
+    unset = sorted(set(modsecrets.missing_for(db, module, sorted({n for j in goldens
+                                                                  for n in modcalls.stage_secrets(module, j["stage"])}),
+                                              node_id)))
+    out = f"; its goldens wait for secrets {', '.join(unset)} (oarbank secret set)" if unset else ""
+    missing = sorted({d for j in goldens for d in placement.unregistered(db, j)})
     if not missing:
-        return ""
+        return out
     i = modcalls.CATALOG.get(module)
     pinned = [d for d in missing if i and i.manifest.datasets.pin(d)]
-    out = f"; its goldens wait for unregistered datasets {', '.join(missing)}"
+    out += f"; its goldens wait for unregistered datasets {', '.join(missing)}"
     if pinned:
         stages = [st.name for st in i.manifest.stages if st.bootstrap]
         out += f" ({', '.join(pinned)} pinned: a job of bootstrap stage {', '.join(stages)} brings them)"

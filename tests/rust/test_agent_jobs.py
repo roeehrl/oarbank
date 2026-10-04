@@ -80,3 +80,62 @@ def test_a_bootstrap_stage_provisions_what_the_goldens_mount_on_a_fresh_fleet(ag
         p.terminate()
         out += p.communicate(timeout=10)[0]
         print(out[-5000:])
+
+
+VAULT = REPO / "tests" / "fixtures" / "modules" / "vault"
+
+
+def test_a_secret_reaches_only_its_stage_runner_and_no_log_shows_it(agent_bin, coordinator, tmp_path):
+    """docs/design/secrets-and-signed-images.md (#14) on a real agent: the call stage's runner finds the secret in an
+    owner-only file inside its work directory; the probe stage's runner gets no file; a runner that prints the key has it
+    redacted from the log the agent streams and from its failure; the coordinator's database never holds it."""
+    import hashlib
+    import json
+    import sqlite3
+    install_module(coordinator, VAULT, tmp_path, approve=True)
+    key = "sk-e2e-6d0b1f2a9c8e7d34"
+    coordinator.api("POST", "/api/v1/ops/secrets.set", json={"target": "vault", "params": {"name": "api_key"}, "secret": key,
+                                                             "reason": "e2e"})
+    home = tmp_path / "agent"
+    p = subprocess.Popen([str(agent_bin), "--home", str(home), "run", "--coordinator", coordinator.url], env=agent_env(),
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out = ""
+    db = coordinator.home / "oarbank.sqlite3"
+
+    def q(sql, *args):
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return c.execute(sql, args).fetchall()
+        finally:
+            c.close()
+    try:
+        pending = wait(lambda: [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"])
+        coordinator.admit(pending[0]["enrollment_id"])
+        wait(lambda: node_modules(coordinator).get("vault", {}).get("state") == "certified", timeout=120)
+        coordinator.api("POST", "/api/v1/ops/mod.vault.call", json={"params": {}, "reason": "e2e"},
+                        headers={"idempotency-key": "e2e-call"})
+        wait(lambda: (lambda j: j if j["d"] == 2 else None)(coordinator.api("GET", "/api/v1/campaigns/c_call")["jobs"]), timeout=120)
+        seen = {stage: json.loads(r)["payload"]["secrets"] for stage, r in q(
+            "SELECT j.stage, r.result_json FROM results r JOIN jobs j ON j.job_id=r.job_id WHERE j.campaign_id='c_call'")}
+        assert seen["probe"] == {"file": False}
+        call = seen["call"]
+        assert call["file"] and call["names"] == ["api_key"] and call["inside_workdir"]
+        assert call["key_sha256"] == hashlib.sha256(key.encode()).hexdigest()
+        if os.name == "posix":
+            assert call["mode"] == "0o600"
+        coordinator.api("POST", "/api/v1/ops/mod.vault.call", json={"params": {"leak": True, "campaign_id": "c_leak"},
+                                                                    "reason": "e2e"}, headers={"idempotency-key": "e2e-leak"})
+        wait(lambda: q("SELECT 1 FROM attempts a JOIN jobs j ON j.job_id=a.job_id WHERE j.campaign_id='c_leak' "
+                       "AND j.stage='call' AND a.state='failed'"), timeout=120)
+        tails = " ".join(json.loads(pj or "{}").get("stderr_tail") or "" for (pj,) in q(
+            "SELECT payload_json FROM events WHERE kind='attempt_failed'"))
+        assert key not in tails
+        logs = " ".join(f.read_text(errors="replace") for f in (coordinator.home / "attempt-logs").glob("*.log"))
+        assert key not in logs and "[secret:api_key]" in logs
+        assert key.encode() not in db.read_bytes()
+        assert not list((home / "work").glob("*/.grants/secrets.json"))         # deleted with the work directory
+    finally:
+        p.terminate()
+        out += p.communicate(timeout=10)[0]
+        print(out[-5000:])
+    assert key not in out                                                        # nor in the agent's own log

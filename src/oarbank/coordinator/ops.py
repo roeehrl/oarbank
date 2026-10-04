@@ -50,6 +50,8 @@ class OpRequest:
     plan_impact: dict | None = None         # the reviewed plan's impact (T2/T3), for handlers that need it
     role: str | None = None                 # the caller's role (access.py); None: the coordinator itself
     scope: str | None = None                # a scoped token's scope ("module:<name>"), which limits the operations
+    # secrets.set's value, beside params: never in the payload hash, a plan, an idempotency row, the audit or a repr
+    secret: str | None = field(default=None, repr=False)
 
     def payload_hash(self) -> str:
         return hashlib.sha256(canonical_json({"op": self.op, "target": self.target, "params": self.params}).encode()).hexdigest()
@@ -154,6 +156,8 @@ def _execute(db: DB, req: OpRequest, op: registry.Operation, h: Handler) -> dict
         mod = req.scope.split(":", 1)[1] if req.scope.startswith("module:") else ""
         if not mod or not req.op.startswith(f"mod.{mod.replace('-', '_')}."):
             raise OpError(403, "token_scope", f"this token may run only {req.scope}'s own operations, not {req.op}")
+    if req.secret is not None and (req.op != SECRET_OP or req.dry_run or req.plan_id):
+        raise OpError(400, "secret_not_accepted", f"only {SECRET_OP} takes a secret value, and never as a preview or a plan")
     req.payload = req.payload_hash()          # of the request as sent (handlers may fill in the target)
     # reason policy
     if op.reason_policy == "required" and not (req.reason and req.reason.strip()) and not req.dry_run:
@@ -421,6 +425,8 @@ def _retire(db, req):
     pinned = _pinned_open(db, nid)
     for jid in pinned:
         core.cancel_job(db, jid, req.actor)
+    from . import modsecrets
+    modsecrets.drop_node(db, nid)                    # the node's own secret values go with it
     db.event("node_retired", actor=req.actor, node_id=nid, reason=f"{len(pinned)} pinned jobs cancelled" if pinned else None)
     return {"lifecycle": "retired", "pinned_jobs_cancelled": len(pinned)}
 
@@ -1036,7 +1042,8 @@ def _prepare_impact(db, r):
                 if facts.get("filevault") == "on" and not facts.get("autologin") else None,
                 "this coordinator's checkout has uncommitted changes: the bundle installed on the target carries tracked "
                 "files as they are on disk and no untracked ones (commit first)" if node and _bundle_dirty() else None) if w],
-            "this_coordinator": {"fingerprint": identity.key(coordmove.home(db)).fingerprint[:16], "epoch": identity.epoch(db)}}
+            "this_coordinator": {"fingerprint": identity.key(coordmove.home(db)).fingerprint[:16], "epoch": identity.epoch(db)},
+            "secrets_carried": _secrets_carried(db)}
 
 
 @handler("coordinator.prepare", target_type="coordinator", atomic=False, impact=_prepare_impact,
@@ -1055,8 +1062,14 @@ def _move_impact(db, r):
             "epoch": f"{identity.epoch(db)} -> {identity.epoch(db) + 1}", "timelock_s": tl,
             "starts_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + tl)),
             "signing": "owner-signed" if r.params.get("owner_sig") else "UNSIGNED move (release signing is off)",
-            "live_attempts_carried": live,
+            "live_attempts_carried": live, "secrets_carried": _secrets_carried(db),
             "frozen_window": "about a minute (dispatch paused; running work continues)", **_move_modules(db, p, tl, r)}
+
+
+def _secrets_carried(db) -> list[str] | str:
+    """Module secrets the move carries (by name and scope, never values), re-encrypted for the target."""
+    from . import modsecrets
+    return modsecrets.names_for_preview(db) or "none"
 
 
 def _move_modules(db, p, tl, r) -> dict:
@@ -1610,6 +1623,59 @@ def _setting(db, req):
     db.set_setting(req.target, req.params.get("value"))
     db.event("settings_changed", actor=req.actor, reason=req.target)
     return {"updated": req.target}
+
+
+# ------------------------------------------------------------------ module secrets (write-only)
+
+SECRET_OP = "secrets.set"
+
+
+def _secret_scope(db, req) -> tuple[str, str, str]:
+    """(module, secret name, node id or '') from target (the module) and params {name, node?}; nothing else."""
+    from . import modsecrets
+    extra = set(req.params) - {"name", "node"}
+    if extra:
+        raise OpError(400, "bad_params", f"{req.op} takes params name and node only (the value goes beside params, as "
+                      f"`secret`), not {sorted(extra)}")
+    name = req.params.get("name")
+    if not req.target or not isinstance(name, str) or not name:
+        raise OpError(400, "bad_params", f"{req.op}: target is the module, params.name the secret")
+    try:
+        return req.target, name, modsecrets.node_id(db, req.params.get("node"))
+    except modsecrets.SecretError as e:
+        raise OpError(e.status, e.code, e.detail)
+
+
+def _secret_snap(db, req):
+    from . import modsecrets
+    module, name, node = _secret_scope(db, req)
+    return {"secret": name, "scope": node or "module", **modsecrets.state(db, module, name, node)}
+
+
+@handler(SECRET_OP, target_type="module", target=_module_name, snapshot=_secret_snap)
+def _secret_set(db, req):
+    from . import modsecrets
+    module, name, node = _secret_scope(db, req)
+    if req.secret is None:
+        raise OpError(400, "secret_required", "send the value as `secret`, beside params (never inside params)")
+    try:
+        out = modsecrets.put(db, module, name, node, req.secret, req.actor)
+    except modsecrets.SecretError as e:
+        raise OpError(e.status, e.code, e.detail)
+    db.event("secret_set", actor=req.actor, node_id=node or None, reason=f"{module}/{name} {out['fingerprint']}")
+    return {"module": module, "name": name, "node": node or None, **out}
+
+
+@handler("secrets.clear", target_type="module", target=_module_name, snapshot=_secret_snap)
+def _secret_clear(db, req):
+    from . import modsecrets
+    module, name, node = _secret_scope(db, req)
+    try:
+        out = modsecrets.clear(db, module, name, node)
+    except modsecrets.SecretError as e:
+        raise OpError(e.status, e.code, e.detail)
+    db.event("secret_cleared", actor=req.actor, node_id=node or None, reason=f"{module}/{name}")
+    return {"module": module, "name": name, "node": node or None, **out}
 
 
 @handler("audit.verify", target_type="audit")

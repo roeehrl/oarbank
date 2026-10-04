@@ -141,6 +141,7 @@ rules, the memory guard, heat, battery and a present user). A cap can only lower
 {% endfor %}</div>
 <div class="small mut">module settings: <span class="mono">{{ (n.policy.module_settings or {}) | tojson }}</span></div>
 {% endcall %}
+{% if node_secrets %}<div class="small mut">module secrets with this node's own value: {% for s in node_secrets %}<a href="/modules/{{ s.module }}/secrets" class="mono">{{ s.module }}/{{ s.name }}</a> ({{ s.fingerprint }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 </div>
 
 <h2>Last 6 hours</h2>

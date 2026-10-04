@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 82 operations, 2 explain kinds, 117 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 84 operations, 2 explain kinds, 118 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -86,6 +86,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `access.tokens.create` | T2 | yes | `oarbank token create` | yes |
 | `access.tokens.revoke` | T1 | yes | `oarbank op access.tokens.revoke` | yes |
 | `access.login_link` | T1 | yes | `oarbank console login [--account <name>]` | yes |
+| `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]` | yes |
+| `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]` | yes |
 | `modules.cli_token` | T1 | yes | `oarbank cli <module> [args...]` | yes |
 | `access.passkeys.remove` | T1 | yes | `oarbank op access.passkeys.remove` | yes |
 | `settings.update` | T2 | yes | `oarbank op settings.update <key>`<br>`module CLIs (golden:<module>, dataset_groups)` | yes |
@@ -114,6 +116,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `PLATFORM_BOUND_ELSEWHERE` | `campaigns.rebind_platform` |
 | `PLACEMENT_UNPINNED` | `campaigns.rebind_platform` |
 | `STAGE_CAPABILITY_MISSING` | `nodes.run_doctor` |
+| `SECRETS_NOT_SET` | `secrets.set` |
 | `DATASET_PLATFORM_MISMATCH` | `jobs.cancel` |
 | `TOOL_UNAVAILABLE` | `settings.tools.update` |
 | `AGENT_TOO_OLD` | `agent.promote` |

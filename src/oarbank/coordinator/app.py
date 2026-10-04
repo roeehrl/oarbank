@@ -644,6 +644,7 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
                             source=request.headers.get("x-oarbank-source", "api"),
                             target=body.get("target"), params=body.get("params") or {}, reason=body.get("reason"),
                             dry_run=bool(body.get("dry_run")), plan_id=body.get("plan_id"), confirm=body.get("confirm"),
+                            secret=body.get("secret"),
                             if_match=int(im.strip('"')) if im else None,
                             idempotency_key=request.headers.get("idempotency-key"),
                             user_agent=request.headers.get("user-agent"),
@@ -728,6 +729,12 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return {"installed": [{k: v for k, v in r.items() if k != "manifest"} for r in modstore.installed(db)],
                 "channels": modstore.channels(db), "pins": [{"name": n, "node_id": nd, "version": v}
                                                             for (n, nd), v in modstore.pins(db).items()]}
+
+    @app.get("/api/v1/modules/{name}/secrets")
+    def api_module_secrets(name: str, actor=Depends(who)):
+        """The module's declared secrets: set or not, fingerprints, when and by whom, per scope. Never a value."""
+        from . import modsecrets
+        return {"module": name, "secrets": modsecrets.listing(db, name)}
 
     @app.get("/api/v1/ops")
     def api_ops(actor=Depends(who)):

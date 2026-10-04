@@ -23,3 +23,4 @@ Generated from `oarbank.contracts.alert_rules` by `python -m oarbank.contracts.d
 | `protection_probe_harm` | P3 | 0 min | – | Fleet work measurably slowed a protected process: consider strict_yield on that node or a tighter rule. |
 | `quarantined` | P4 | 0 min | – | The node gave wrong answers (dispute lost or nondeterminism): its results were invalidated. Investigate before clearing the quarantine. |
 | `revoked` | P4 | 0 min | – | A golden mismatch revoked the module on the node: its results are not trusted until it re-certifies. Check the node's tools. |
+| `secret_unreadable` | P3 | 0 min | – | A module secret is stored but this coordinator cannot decrypt it (a backup restored or a home copied to another machine, whose secrets key stayed behind): set it again with `oarbank secret set`. Jobs needing it wait with SECRETS_NOT_SET. |

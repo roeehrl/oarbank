@@ -174,7 +174,9 @@ oarbankd grants jobs:
 - whose datasets are all registered (else `DATASETS_NOT_REGISTERED`) and in `ready_datasets`;
 - whose pool needs fit the node's pools;
 - whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor);
-  otherwise the job waits with `STAGE_CAPABILITY_MISSING`.
+  otherwise the job waits with `STAGE_CAPABILITY_MISSING`;
+- whose stage's secrets (`stages[].secrets`) each have a value the coordinator can read for this node (its own, else
+  the module's); otherwise the job waits with `SECRETS_NOT_SET` (docs/design/secrets-and-signed-images.md).
 
 With `pool_jobs_only`, only jobs reserving pools are granted. `gpu_jobs` is how many more GPU jobs the node
 may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`; it waits
@@ -196,6 +198,13 @@ with `GPU_BLOCKED` while the node's live GPU jobs reach that number.
 - **`timeout_s`** is the stage's timeout on this node's platform (or the job's own); `hard_deadline` follows it.
 - **`issued_at`**, `expires_at` and `hard_deadline` are oarbankd's clock. The agent stops the attempt
   `hard_deadline - issued_at` seconds after the grant arrived, on its monotonic clock (see Clocks).
+- **`secrets`** (only for a job whose stage lists secrets): `{name: value}`, resolved for this node. The agent writes
+  them to `<ws>/.grants/secrets.json` (mode 0600; on Windows the work directory's protected DACL) and sets
+  `OARBANK_SECRETS_FILE`; they are never part of `spec`, never stored by oarbankd and never written to the agent's log.
+  The agent replaces exact copies of a value (6 bytes or more) with `[secret:<name>]` in the log chunks it streams and in
+  `stderr_tail`, holding back the last bytes of the log until it knows a value is not split across two chunks.
+- **`images`** (only for a job that listed them in jobs.enqueue): the container set images its runner may run. The
+  broker refuses any other set image.
 
 **Clocks.** oarbankd's clock is the fleet's: every absolute time it sends (a grant's deadlines, a move statement's
 `not_before` and `expires`) is in it, and a node's wall clock may be hours off. The agent never compares such a time
@@ -232,7 +241,7 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
 **Results and endings**
 
 - `POST /v1/attempts/{id}/log`: a `text/plain` body appended to the attempt log.
-- `POST /v1/attempts/{id}/complete` with `{"idempotency_key": "att-123-complete", "result": <ResultEnvelope>}`
+- `POST /v1/attempts/{id}/complete` with `{"idempotency_key": "att-123-complete", "result": <ResultEnvelope>, "images"?: [{"set", "image"}]}`
   → `{"accepted": true, "canonical": true, "reason": "ok"}`. Replays return the stored response. The module's
   `result.evaluate` judges the envelope; while the module cannot answer, oarbankd returns 503 with
   `Retry-After` and charges nothing (S15). The `accepted: false` reasons are:
@@ -245,7 +254,7 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
     checks the pins instead of calling `result.evaluate`, and registers the datasets when the result is accepted.
 - `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel"}`;
   a release without a reason is refused (400 `reason_required`). These are not failures.
-- `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient"}`.
+- `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient", "images"?: [{"set", "image"}]}`.
   `fault` comes from the runner's `failure.json`: `transient` is no failure at all (the attempt is released and
   the job retried), `host` implicates this node, `job` never trips its breaker. `doctor`, `mode_mismatch`, `oom` and
   `no_metrics` implicate the host first.
@@ -256,6 +265,9 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   quarantined. A node whose platform's attempts are spent is skipped (`RETRIES_EXHAUSTED`), and explain shows the
   retries left on each node. Golden jobs count failures per node and module instead (a node stops certifying after 3).
 - Every end reason has a reason code; docs/design/reason-codes.md lists them per code.
+- **`images`** on complete and fail: the container set images the attempt's broker verified and ran. oarbankd records
+  each digest's first run per module (`module_images`, the event `container_image_first_run` and an audit row
+  `containers.first_run` by `node:<id>`).
 
 **Artifacts.** A runner lists output files as `artifacts: [{name, files: [{path, local}]}]`. Before completing,
 the agent uploads each file with `PUT /v1/artifacts/<sha256>`: streamed and digest-checked, after a `HEAD`
@@ -320,7 +332,9 @@ A stage's `platforms` limits where its jobs are granted (empty: every platform o
 protection uses it to pick rungs when the harm is to a GPU-bound protected group (docs/design/protection.md).
 `sandbox.tools`
 carries the host paths the operator's tool registry (`settings.tools.update`) maps each approved tool id to on the
-release's OS.
+release's OS. `sandbox.container_sets` (present only when the manifest declares sets) carries each approved set with its
+public key: `[{"name", "registry", "repository", "platform", "key": "<PEM>", "index"?}]`; the agent verifies a set
+image's cosign signature (or its index membership) with it before the runtime pulls the image.
 - **Fetch.** `GET /v1/releases/{release_id}.tar.gz` serves the tarball; its sha256 comes with the
   `release` directive.
 - **Install.** The agent verifies the tarball and every MANIFEST entry's digest and mode. It creates one
@@ -537,8 +551,10 @@ The agent computes `capacity` every tick and sends it in the heartbeat:
  "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|user",
  "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_mem_gb": 6.1}
 ```
-`cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide (a node
-that reports none is offered no pool work). They are computed after:
+`cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide, plus the
+agent's own `containers` pool (its container runtime) and `gpu` pool (one token where containers can get the node's
+GPUs through CDI; never on macOS) (a node that reports none is offered no pool work). The facts' `containers.gpu` says
+which: `cdi:<kind>` or `undetected`. They are computed after:
 
 - user caps, thermal state, battery and user presence;
 - running jobs and the memory services hold;

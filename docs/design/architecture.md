@@ -88,8 +88,13 @@ actions on fleet jobs.
 
 - **`oarbank/platform`** holds every OS-touching helper: owner-only files (POSIX modes; the per-user data roots on
   Windows are private to the account), the secret store, interpreter paths, process launch.
-- **The secret store** keeps small secrets out of the database: the login Keychain on macOS, an owner-only file under
-  `<home>/keys/` elsewhere (and in tests, `OARBANK_SECRET_STORE=file`). The audit signing key lives there.
+- **The secret store** keeps small secrets out of the database: the login Keychain on macOS, a DPAPI-wrapped file under
+  `<home>/keys/` on Windows, an owner-only file there elsewhere (and in tests, `OARBANK_SECRET_STORE=file`). The audit
+  signing key lives there, and so does the key that encrypts module secrets.
+- **Module secrets** ([secrets-and-signed-images.md](secrets-and-signed-images.md)) are write-only: `secrets.set` takes
+  the value beside its params, the `secrets` table holds it AES-256-GCM encrypted, pages and reads show only a keyed
+  fingerprint, and only the grant of a job whose stage lists it (resolved per node) or `host.secrets.get` (with
+  `secrets:read:self`) carries it. A coordinator move seals each value to the target's transport key.
 - **Module processes** run in the OS's sandbox through the agent's launcher (`bin/oarbank-sandbox` in a coordinator
   build; `sandboxexec.py`), with the module's own venv (`python` resolves to the bundle's `.venv`). A coordinator on an
   OS without a sandbox backend refuses to start module processes.
@@ -198,11 +203,17 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
 
 ## Containers
 
-The agent's container broker is the only way a module reaches a container runtime: images approved by digest, mounts
-confined to the job's directories, no other flags; the `containers` pool is sized by the runtime. macOS uses an
+The agent's container broker is the only way a module reaches a container runtime: images approved by digest, or by
+an approved image set (a registry and repository prefix with a pinned cosign key, or a signed index) for images the job
+lists, mounts confined to the job's directories, no other flags; the `containers` pool is sized by the runtime. The agent
+verifies a set image's signature before the runtime pulls it, offline with the key, through its own small OCI registry
+client (`imageset.rs`, on `oarbank-core`'s `images.rs`), and reports each set image an attempt ran so the coordinator
+audits each digest's first run ([secrets-and-signed-images.md](secrets-and-signed-images.md)). macOS uses an
 agent-owned Colima profile, Linux the host's rootless Podman or Docker Engine (platforms from binfmt: any enabled
-handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). Windows has no
-runtime yet (planned: an agent-owned WSL2 distribution running Podman).
+handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). GPU passthrough is CDI: a Linux node with a CDI spec
+for its GPU offers the `gpu` pool and runs `gpus = "all"` containers with `--device <kind>=all`; macOS runtimes have
+no passthrough (`containers.gpu = "undetected"`). Windows has no runtime yet (planned: an agent-owned WSL2
+distribution running Podman, with GPU-PV through the same CDI path).
 
 ## Packaging and CI
 
