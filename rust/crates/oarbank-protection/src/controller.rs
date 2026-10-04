@@ -218,6 +218,9 @@ pub struct ProtectionController {
     last_front: Option<FrontReading>,
     /// Whether the agent could lower its jobs on the last tick.
     lowering: bool,
+    /// Per `protect.metric = ipc_ratio` rule, whether its processes' instruction and cycle counters count, as last
+    /// told by a sample with enough CPU time.
+    instruction_counters: BTreeMap<String, bool>,
     last_inputs: Option<CachedInputs>,
 }
 
@@ -266,6 +269,7 @@ impl ProtectionController {
             source_error: None,
             last_front: None,
             lowering: true,
+            instruction_counters: BTreeMap::new(),
             last_inputs: None,
         }
     }
@@ -733,6 +737,11 @@ impl ProtectionController {
             }
             if let Some(p) = &rule.protect {
                 let m = metrics.get(&format!("rule:{}", rule.id));
+                if let Some(c) = m.and_then(|m| m.instruction_counters) {
+                    if p.metric == "ipc_ratio" {
+                        self.instruction_counters.insert(rule.id.clone(), c);
+                    }
+                }
                 // GPU-bound when the group's GPU share is above 5 %, or unknown (fail-safe: CPU proxies then
                 // cannot grow)
                 let gpu_bound = m.and_then(|m| m.gpu_share).is_none_or(|g| g > 0.05);
@@ -961,6 +970,18 @@ impl ProtectionController {
             front: self.last_front.as_ref().map(FrontReading::describe),
             source_error: self.source_error.clone(),
             lowering: self.lowering,
+            no_instruction_counters: self
+                .instruction_counters
+                .iter()
+                .filter(|(id, counts)| {
+                    !**counts
+                        && self.config.rules.iter().any(|r| {
+                            r.id == **id
+                                && r.protect.as_ref().is_some_and(|p| p.metric == "ipc_ratio")
+                        })
+                })
+                .map(|(id, _)| id.clone())
+                .collect(),
         }
     }
 }

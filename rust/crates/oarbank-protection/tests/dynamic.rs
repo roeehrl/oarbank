@@ -347,6 +347,29 @@ fn unvalidated_proxies_shrink_but_never_grow() {
     }
 }
 
+/// ipc_ratio may grow the budget, but not while it is unknown (a VM's guest has no instruction or cycle counters):
+/// after a violation halves the budget, a stretch with no value never grows it back.
+#[test]
+fn an_unknown_ipc_ratio_never_grows_the_budget() {
+    let mut c = DynamicController::new();
+    let mut t = 0.0;
+    while t < 1800.0 {
+        let mut i = DynInputs::new(t, ProtectionMode::Moderate, 10.0);
+        let value = (t < 120.0).then_some(0.3);
+        i.signals = vec![ProtectedSignal::with_max("rule:a", "ipc_ratio", value, 0.1)];
+        i.any_protected_active = true;
+        i.protection_started = t == 0.0;
+        i.jobs = jobs(2);
+        let o = c.step(&i);
+        assert!(
+            !o.events.iter().any(|e| e.reason == "L1_GROW"),
+            "grew at {t}"
+        );
+        t += 2.0;
+    }
+    assert!(c.budget().unwrap_or(10.0) < 10.0);
+}
+
 #[test]
 fn validated_proxies_grow_back() {
     for (metric, gpu) in [
@@ -663,6 +686,25 @@ fn cpu_stall_is_the_waiting_share_of_runnable_time() {
         Some(0.3)
     );
     assert_eq!(GroupMetrics::default().value("nonsense"), None);
+    // a VM exposes no performance counters: rusage's instructions and cycles stay 0 while the group runs, which is
+    // no IPC of zero but none at all; a group that barely ran tells nothing either way
+    let no_pmu = GroupMetrics::from_delta(d(1.0, 1.2), 2.0);
+    assert_eq!(
+        (no_pmu.ipc, no_pmu.instruction_counters),
+        (None, Some(false))
+    );
+    assert_eq!(no_pmu.value("ipc_ratio"), None);
+    assert!(
+        no_pmu
+            .cpu_stall
+            .is_some_and(|x| (x - 0.2 / 1.2).abs() < 1e-12),
+        "the stall needs no PMU"
+    );
+    assert_eq!(ipc.instruction_counters, Some(true));
+    assert_eq!(
+        GroupMetrics::from_delta(d(0.01, 0.01), 2.0).instruction_counters,
+        None
+    );
     // a delta never goes negative
     assert_eq!((d(1.0, 1.0) - d(2.0, 2.0)).cpu_s, 0.0);
 }

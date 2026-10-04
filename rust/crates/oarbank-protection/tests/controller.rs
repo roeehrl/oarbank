@@ -560,6 +560,58 @@ fn tick_measures_protected_groups_and_feeds_the_dynamic_layer() {
     assert!(ctl.process_summary(400.0, &HashSet::new()).is_some());
 }
 
+/// Without instruction and cycle counters (a VM's guest: rusage reports 0 for both while the process runs), an
+/// `ipc_ratio` rule's metric is unknown, not a ratio of zeros (dynamic.rs: an unknown ipc_ratio never grows the
+/// budget), and the node reports the rule; once the counters count, it is measured and the report goes.
+#[test]
+fn an_ipc_rule_without_instruction_counters_is_unknown_and_holds_the_budget() {
+    let host = Shared::default();
+    {
+        let mut s = host.0.lock().unwrap();
+        s.procs = vec![raw(7, 1, "/opt/build/cc", 0.0)];
+        s.counters = HashMap::from([(7, ProcCounters::default())]);
+    }
+    let mut ctl = scripted(
+        &host,
+        json!({"node": {"mode": "moderate"},
+               "rule": [{"id": "build", "match": {"path_prefix": "/opt/build/"}, "active_when": {"for_s": 0},
+                         "protect": {"metric": "ipc_ratio", "max_slowdown": 0.1}}]}),
+    );
+    let mut i = TickInputs::new(0.0, MemorySignals::new(64.0, 20.0, 0));
+    i.allocatable_cores = 8.0;
+    let counters = |cpu_s: f64, instructions: f64, cycles: f64| ProcCounters {
+        cpu_s,
+        runnable_s: cpu_s,
+        instructions,
+        cycles,
+        pageins: 0.0,
+    };
+    let mut r = ctl.tick(&i);
+    for t in 1..=3 {
+        host.0
+            .lock()
+            .unwrap()
+            .counters
+            .insert(7, counters(t as f64, 0.0, 0.0));
+        i.now = 2.0 * t as f64;
+        r = ctl.tick(&i);
+    }
+    assert!(r.reports[0].active);
+    assert_eq!(ctl.telemetry(&r).no_instruction_counters, ["build"]);
+    // the counters count: measured, no longer reported
+    for t in 4..=5 {
+        let c = t as f64;
+        host.0
+            .lock()
+            .unwrap()
+            .counters
+            .insert(7, counters(c, 3e9 * c, 1e9 * c));
+        i.now = 2.0 * c;
+        r = ctl.tick(&i);
+    }
+    assert!(ctl.telemetry(&r).no_instruction_counters.is_empty());
+}
+
 fn scripted(host: &Shared, central: Value) -> ProtectionController {
     let mut ctl = ProtectionController::new(
         None,

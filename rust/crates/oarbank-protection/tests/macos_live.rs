@@ -151,7 +151,23 @@ fn a_lone_busy_process_stalls_only_for_the_time_it_waits() {
         "stall {stall:.2} with {:.2} cores",
         m.cpu_cores
     );
-    assert!(b.instructions > a.instructions && b.cycles > a.cycles);
+    // the instruction and cycle counters count on a Mac, and are absent in a virtual machine's guest (no PMU
+    // exposed: rusage reports 0), where ipc_ratio is unknown (tests/dynamic.rs and tests/controller.rs hold that
+    // path with fixtures)
+    if virtual_machine() {
+        eprintln!("a virtual machine: instruction counters {:?}", m.instruction_counters);
+    } else {
+        assert_eq!(m.instruction_counters, Some(true), "{a:?} -> {b:?}");
+        assert!(m.ipc.is_some_and(|x| x > 0.0));
+    }
+}
+
+/// Whether this Mac is a virtual machine's guest (the hypervisor framework says so).
+fn virtual_machine() -> bool {
+    Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.hv_vmm_present"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
 }
 
 #[test]

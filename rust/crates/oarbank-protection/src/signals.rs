@@ -45,13 +45,20 @@ impl Add for ProcCounters {
     }
 }
 
+/// CPU time over a sample below which still counters tell nothing (a group that barely ran).
+const MIN_CPU_TO_TELL_S: f64 = 0.05;
+
 /// The metrics a `protect` rule can target, computed for a group over one sample interval.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GroupMetrics {
     /// (Δrunnable − Δcpu) ÷ Δrunnable: the share of runnable time spent waiting for a core (PSI-cpu analogue).
     pub cpu_stall: Option<f64>,
-    /// Δinstructions ÷ Δcycles (valid above 0.25 cores).
+    /// Δinstructions ÷ Δcycles (valid above 0.25 cores, and only where the counters count).
     pub ipc: Option<f64>,
+    /// Whether the processes' instruction and cycle counters count: Some(false) when the group used CPU time and
+    /// they did not move (no performance counters exposed, as in a virtual machine), None when it used too little
+    /// to tell.
+    pub instruction_counters: Option<bool>,
     /// Pageins per second.
     pub pageins_rate: Option<f64>,
     pub cpu_cores: f64,
@@ -74,9 +81,19 @@ impl GroupMetrics {
         } else {
             0.0
         };
+        // counters that never move while the group runs are absent, not an IPC of zero
+        let instruction_counters = if d.instructions > 0.0 && d.cycles > 0.0 {
+            Some(true)
+        } else if d.cpu_s >= MIN_CPU_TO_TELL_S {
+            Some(false)
+        } else {
+            None
+        };
         GroupMetrics {
             cpu_stall: Some(stall),
-            ipc: (cores >= 0.25 && d.cycles > 0.0).then(|| d.instructions / d.cycles),
+            ipc: (cores >= 0.25 && instruction_counters == Some(true))
+                .then(|| d.instructions / d.cycles),
+            instruction_counters,
             pageins_rate: Some(d.pageins / seconds),
             cpu_cores: cores,
             gpu_share: None,
