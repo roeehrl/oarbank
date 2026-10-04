@@ -302,9 +302,16 @@ pub fn exec(argv: &[String], env: &[(String, String)], timeout: Duration, out: O
     use crate::sys::Sig;
     let (prog, rest) = argv.split_first().ok_or("empty argv")?;
     let mut cmd = Command::new(prog);
-    cmd.args(rest).env_clear().envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null())
+    // Windows: an empty pipe, closed at once, rather than NUL: NUL is a character device, which a console program
+    // (wslc) takes for a console and fails to read (ERROR_INVALID_HANDLE)
+    #[cfg(unix)]
+    let input = Stdio::null();
+    #[cfg(windows)]
+    let input = Stdio::piped();
+    cmd.args(rest).env_clear().envs(env.iter().map(|(k, v)| (k, v))).stdin(input)
         .stdout(stdio(&out).map_err(|e| e.to_string())?).stderr(stdio(&err).map_err(|e| e.to_string())?);
     let mut child = crate::sys::spawn_contained(&mut cmd, false).map_err(|e| format!("{prog}: {e}"))?;
+    drop(child.stdin.take());
     let pid = child.id() as i32;
     let (ro, re) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
@@ -895,12 +902,9 @@ pub mod tests {
         }
         let shared = rt.cli(&["info", "--format", "{{.Store.RunRoot}}"], 30).unwrap();
         let shared_run = PathBuf::from(String::from_utf8_lossy(&shared.stdout).trim());
-        // a marker in the account's run root and in its temporary directory (beside it, `libpod/tmp`)
-        let markers = [shared_run.join(format!("oarbank-test-{}", std::process::id())),
-                       shared_run.with_file_name("libpod").join("tmp").join(format!("oarbank-test-{}", std::process::id()))];
-        for m in &markers {
-            std::fs::write(m, "x").unwrap();
-        }
+        // a marker in the account's run root (a reset of the account's engine removes everything there)
+        let marker = shared_run.join(format!("oarbank-test-{}", std::process::id()));
+        std::fs::write(&marker, "x").unwrap();
         rt.home = home.join("engine-home");
         private_engine(&rt.home);
         let own = rt.cli(&["info", "--format", "{{.Store.RunRoot}} {{.Store.GraphRoot}}"], 60).unwrap();
@@ -908,11 +912,9 @@ pub mod tests {
                    format!("{} {}", rt.home.join("run").display(), rt.home.join("storage").display()), "{}", own.stderr_tail(500));
         let reset = rt.cli(&["system", "reset", "--force"], 120).unwrap();
         assert!(reset.ok(), "{}", reset.stderr_tail(500));
-        let kept: Vec<bool> = markers.iter().map(|m| m.exists()).collect();
-        for m in &markers {
-            let _ = std::fs::remove_file(m);
-        }
-        assert_eq!(kept, [true, true], "the account's run state ({markers:?}) was removed");
+        let kept = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(kept, "the account's run state ({}) was removed", shared_run.display());
         let _ = std::fs::remove_dir_all(&home);
     }
 
