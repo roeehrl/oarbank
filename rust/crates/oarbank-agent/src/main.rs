@@ -18,6 +18,8 @@ mod facts;
 mod fsutil;
 mod host;
 mod identity;
+#[cfg(unix)]
+mod imageset;
 mod jobs;
 mod join;
 mod keys;

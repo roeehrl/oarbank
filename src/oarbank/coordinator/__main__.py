@@ -62,6 +62,10 @@ def main():
     from . import modcalls, modlife
     modlife.runtimes_ok(db)                   # module venvs an earlier coordinator build made run on its interpreter
     modcalls.use(db)                          # the module catalog comes from the store (oarbank module install)
+    if identity.role(db) == "active":
+        from . import modsecrets
+        modsecrets.adopt_sealed(db)           # a move's copy holds module secrets sealed to this machine's transport key
+        modsecrets.check_readable(db)
     if tightened:
         db.event("home_tightened", reason=f"{len(tightened)} paths made owner-only")
     secret = secrets.token_hex(24)

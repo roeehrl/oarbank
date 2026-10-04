@@ -21,7 +21,7 @@ from pathlib import Path
 from ..common import sha256_file, sha256_hex
 from . import clock
 from . import config as C
-from . import modstore, platforms
+from . import modimages, modstore, platforms
 from .db import DB, jl
 
 MODULES_FORMAT = 2       # modules.json: {format, platform, modules[]}
@@ -110,7 +110,9 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
             "sandbox": {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": list(sb.net.allow)},
                         "tools": [{"id": t.id, "trust": t.trust, "paths": list((tools or {}).get(t.id) or [])} for t in sb.tools],
                         "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
-                        "containers": [{"image": c.image, "platform": c.platform} for c in sb.containers]}}
+                        "containers": [{"image": c.image, "platform": c.platform} for c in sb.containers],
+                        # image sets with their keys (only when declared, so other entries keep their bytes)
+                        **({"container_sets": modimages.release_sets(m, path)} if sb.container_sets else {})}}
 
 
 def build(db: DB, make_current: bool = True, comp: dict | None = None, platform: str = platforms.DEFAULT_PLATFORM) -> dict:

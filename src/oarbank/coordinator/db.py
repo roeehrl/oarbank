@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   module TEXT, resources_json TEXT, name TEXT, stage TEXT, depends_on INTEGER,
   dispute_json TEXT,    -- {"nodes": [...], "results": [...], "scope", "class"}: replicas disagreed, awaiting a tie-break
   spec_version INT,
-  placement_unit TEXT, platforms_json TEXT, group_key TEXT);   -- D33: its unit of work, its platforms, its group
+  placement_unit TEXT, platforms_json TEXT, group_key TEXT,   -- D33: its unit of work, its platforms, its group
+  images_json TEXT);    -- the container set images its runner may run (jobs.enqueue images)
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, priority);
 CREATE INDEX IF NOT EXISTS jobs_dispatch ON jobs(state, priority DESC, subpriority DESC, job_id);
 CREATE INDEX IF NOT EXISTS jobs_target ON jobs(target_node, state) WHERE target_node IS NOT NULL;
@@ -160,6 +161,14 @@ CREATE TABLE IF NOT EXISTS module_channels (
   disabled INT DEFAULT 0, updated_at REAL);
 CREATE TABLE IF NOT EXISTS module_pins (name TEXT NOT NULL, node_id TEXT NOT NULL, version TEXT NOT NULL,
   PRIMARY KEY (name, node_id));
+-- Module secrets (modsecrets.py): write-only values, encrypted under the coordinator's secrets key; node_id '' is the
+-- module scope; sealed = 1 while a move's copy holds them sealed to this coordinator's transport key
+CREATE TABLE IF NOT EXISTS secrets (module TEXT NOT NULL, name TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT '',
+  ciphertext BLOB NOT NULL, fingerprint TEXT, set_at REAL, set_by TEXT, sealed INT NOT NULL DEFAULT 0,
+  PRIMARY KEY(module, name, node_id));
+-- The first run of each container set image digest per module (audited; spec/sandbox.md "Image sets")
+CREATE TABLE IF NOT EXISTS module_images (module TEXT NOT NULL, digest TEXT NOT NULL, image TEXT NOT NULL,
+  set_name TEXT NOT NULL, key_sha256 TEXT, first_run_at REAL, node_id TEXT, attempt_id INT, PRIMARY KEY(module, digest));
 -- Operator approvals of a module version's node-side sandbox grants (spec/sandbox.md), by digest of the requests
 CREATE TABLE IF NOT EXISTS module_grants (
   name TEXT NOT NULL, version TEXT NOT NULL, requests_json TEXT NOT NULL, digest TEXT NOT NULL, approved_by TEXT,
@@ -182,7 +191,7 @@ CREATE TABLE IF NOT EXISTS agent_channel (
 -- Coordinator moves (coordinator-move.md): one plan (target, pairing) and the signed move statements
 CREATE TABLE IF NOT EXISTS coordinator_plans (
   plan_id TEXT PRIMARY KEY, target_url TEXT, target_stable_id TEXT, target_node_id TEXT, code_sha TEXT, expires_at REAL,
-  state TEXT, created_at REAL, actor TEXT, b_url TEXT, b_cik TEXT, b_audit_pub TEXT, move_token_sha TEXT, paired_at REAL,
+  state TEXT, created_at REAL, actor TEXT, b_url TEXT, b_cik TEXT, b_audit_pub TEXT, b_secrets_pub TEXT, move_token_sha TEXT, paired_at REAL,
   b_tls_ca TEXT,                                    -- the standby's TLS CA, learned at pairing: calls to it pin it
   target_platform TEXT);                            -- the target's platform: the enrolled node's, then what the standby reports
 CREATE TABLE IF NOT EXISTS coordinator_moves (

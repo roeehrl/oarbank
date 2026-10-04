@@ -1,0 +1,98 @@
+# vault: the core test suite's fixture module for secrets and container image sets (not shipped). "eval" is the default
+# stage, the one certification tests; "call" receives the secret api_key (its runner checks the file it gets); "probe"
+# lists no secret and reports what it sees; "task" runs images of the signed set "tasks" through the container broker.
+manifest = 1
+
+[module]
+id = "dev.codonic.oarbank.vault"
+version = "1.0.0"
+compat = "vault1"
+publisher = "oarbank"
+license = "Apache-2.0"
+codeowners = ["roeehrl"]
+stability = "experimental"
+description = "Core test fixture: a write-only secret for one stage, and signed container image sets"
+
+[requires]
+core = ">=2.5,<3"
+module_protocol = [1]
+runner_protocol = [1]
+platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]
+
+[coordinator]
+exec = ["python", "-I", "{bundle}/vault_module.py"]
+runtime = { kind = "python" }
+capabilities = ["result.merge", "op.plan", "op.apply"]
+permissions = ["secrets:read:self"]
+
+[runner]
+exec = ["python", "-I", "{bundle}/vault_runner.py"]
+runtime = { kind = "python" }
+capabilities = ["deterministic_output"]
+
+[[stages]]
+name = "eval"
+default = true
+timeout_s = 600
+requires = { resources = { cpu = 1, mem_gb = 0.5 } }
+
+[[stages]]
+name = "call"
+determinism = "none"
+secrets = ["api_key"]
+timeout_s = 600
+requires = { resources = { cpu = 0.5, mem_gb = 0.25 } }
+
+[[stages]]
+name = "probe"
+determinism = "none"
+timeout_s = 600
+requires = { resources = { cpu = 0.5, mem_gb = 0.25 } }
+
+[[stages]]
+name = "task"
+determinism = "none"
+timeout_s = 600
+requires = { resources = { cpu = 0.5, mem_gb = 0.25 }, pools = { containers = 1 } }
+
+[[secrets]]
+name = "api_key"
+description = "The provider key the call stage uses"
+
+[sandbox]
+net = { mode = "egress-allowlist", allow = ["api.example.org"] }
+
+[[sandbox.container_sets]]
+name = "tasks"
+registry = "registry.example.org"
+repository = "bench/tasks/"
+platform = "linux/amd64"
+key = "keys/tasks.pub"
+
+[results]
+schema = "schemas/result.schema.json"
+schema_version = 1
+determinism = "exact"
+digest = { version = 1, over = ["digest"] }
+fields = [{ name = "digest", type = "string" }]
+
+[[operations]]
+verb = "call"
+title = "Call the provider"
+tier = "T1"
+target = "none"
+effects = ["campaigns.create", "jobs.enqueue"]
+
+[[operations]]
+verb = "queue_tasks"
+title = "Queue container tasks"
+tier = "T1"
+target = "none"
+effects = ["campaigns.create", "jobs.enqueue"]
+
+[[operations]]
+verb = "key_check"
+title = "Check the key from the coordinator side"
+tier = "T1"
+target = "none"
+effects = ["store.write"]

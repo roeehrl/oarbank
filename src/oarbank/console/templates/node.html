@@ -33,6 +33,7 @@
       {%- else %}{{ n.live }} running / {{ s.slots }} CPU slots{% if s.auto is not none %} (auto {{ s.auto }}){% endif %} · binding: <b>{{ s.binding or 'automatic capacity' }}</b>{% endif %}</span>
     {% if n.cap.mem_gb_free is known %}<span class="mut">memory for jobs</span><span>{{ n.cap.mem_gb_free | num(1) }} GB free</span>{% endif %}
     {% if n.cap.pools %}<span class="mut">pools</span><span>{% for p, k in n.cap.pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
+    {% if n.facts.containers %}<span class="mut">GPU in containers</span><span>{% if (n.facts.containers.gpu or '').startswith('cdi:') %}{{ n.facts.containers.gpu[4:] }} (CDI){% else %}undetected{% if n.platform and n.platform.startswith('darwin') %}: macOS container runtimes have no GPU passthrough{% elif n.platform and n.platform.startswith('windows') %}: no container runtime on Windows yet{% endif %}{% endif %}</span>{% endif %}
     {% if T0.services_reserved_gb %}<span class="mut">services hold</span><span>{{ T0.services_reserved_gb | num(1) }} GB</span>{% endif %}
     {% if T0.services_held %}<span class="mut">services stopped by protection</span><span>{% for k, why in T0.services_held | dictsort %}{{ k }} ({{ why }}){% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
     {% set mem = [(T0.mem_used_gb | num(1)) ~ ' GB used' if T0.mem_used_gb is known, (T0.mem_free_pct | num(0)) ~ '% free' if T0.mem_free_pct is known,
@@ -142,6 +143,7 @@ rules, the memory guard, heat, battery and a present user). A cap can only lower
 {% endfor %}</div>
 <div class="small mut">module settings: <span class="mono">{{ (n.policy.module_settings or {}) | tojson }}</span></div>
 {% endcall %}
+{% if node_secrets %}<div class="small mut">module secrets with this node's own value: {% for s in node_secrets %}<a href="/modules/{{ s.module }}/secrets" class="mono">{{ s.module }}/{{ s.name }}</a> ({{ s.fingerprint }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 </div>
 
 <h2>Last 6 hours</h2>

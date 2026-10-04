@@ -82,6 +82,9 @@ MAPPERS = {
     "access.accounts.set_password": lambda f, ctx: {"password": f.get("p.password") or ""},
     "access.tokens.create": lambda f, ctx: {"label": f.get("p.label") or "", "role": f.get("p.role") or "viewer",
                                             "days": float(f.get("p.days") or 90)},
+    # a secret's value is the form's `secret` field, sent beside params; never a parameter
+    "secrets.set": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {})},
+    "secrets.clear": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {})},
     "jobs.set_priority": lambda f, ctx: {"priority": int(f.get("priority") or 0)},
     "modules.set_pipeline": lambda f, ctx: {"mode": f.get("mode")},
 }

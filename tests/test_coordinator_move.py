@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from oarbank.coordinator import audit, coordmove, core, identity, movepull, ops
+from oarbank.coordinator import audit, coordmove, core, identity, modcalls, movepull, ops
 from oarbank.coordinator import app as fapp
 
 from helpers import agent_client, enrolled_node, fresh, make_db, node_headers
@@ -90,6 +90,15 @@ def setup_move(tmp_path, db):
 
 def test_a_whole_move_hands_the_fleet_to_b_with_identical_data(tmp_path, db, monkeypatch):
     der, node = enrolled_node(db, "mini")
+    # a module secret: it travels sealed for B and B re-encrypts it under its own key
+    from helpers import FIXTURES, install
+    from oarbank.coordinator import modsandbox, modsecrets, modstore
+    v = install(db, FIXTURES / "vault", enable=False)
+    modsandbox.approve(db, "vault", v["version"], "test", None)
+    modstore.enable(db, "vault", v["version"])
+    modcalls.use(db)
+    secret = "sk-move-0f9e8d7c6b5a"
+    fp = op(db, "secrets.set", "vault", params={"name": "api_key"}, secret=secret)["result"]["fingerprint"]
     # a dataset registered from a file outside the coordinator's home (as a module's archive is)
     ext = tmp_path / "outside" / "archive.bin"
     ext.parent.mkdir()
@@ -174,6 +183,12 @@ def test_a_whole_move_hands_the_fleet_to_b_with_identical_data(tmp_path, db, mon
     for r in db_b2.q("SELECT path FROM modules"):
         assert not Path(r["path"]).is_absolute() and (home_b / r["path"]).is_dir()
     assert db_b2.one("SELECT operation FROM audit WHERE operation='coordinator.handoff'")
+    staged = tmp_path / "b" / "oarbank.sqlite3"
+    assert secret.encode() not in staged.read_bytes()
+    assert modsecrets.module_value(db_b2, "vault", "api_key") is None          # sealed for B until B adopts it
+    assert modsecrets.adopt_sealed(db_b2) >= 2
+    assert modsecrets.module_value(db_b2, "vault", "api_key") == secret
+    assert db_b2.one("SELECT fingerprint FROM secrets WHERE module='vault' AND node_id=''")["fingerprint"] == fp
 
 
 def make_db_plain(path):
@@ -441,7 +456,7 @@ def test_a_move_to_a_platform_a_modules_coordinator_side_does_not_run_on_needs_f
 
 def test_pairing_reports_the_standbys_platform(tmp_path, db):
     a_client, db_b, puller, b_client, plan = setup_move(tmp_path, db)
-    body = {"code": plan["pair_code"], "b_url": "http://testclient:7443", "b_cik": "k", "b_audit_pub": "a"}
+    body = {"code": plan["pair_code"], "b_url": "http://testclient:7443", "b_cik": "k", "b_audit_pub": "a", "b_secrets_pub": "s"}
     with pytest.raises(coordmove.MoveError, match="pairing needs b_platform"):
         coordmove.pair(db, body, "testclient")
     with pytest.raises(coordmove.MoveError, match="not a platform token"):

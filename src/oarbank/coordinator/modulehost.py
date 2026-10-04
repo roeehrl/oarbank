@@ -158,6 +158,7 @@ class _Proc:
         self.peer = Peer(self.proc.stdout, self.proc.stdin, self._on_request, self._on_notification,
                          max_workers=4, name=f"mod-{spec.name}").start()
         self._log_path = log_path
+        self.delivered: dict[str, str] = {}        # secret values this process received (host.secrets.get)
         threading.Thread(target=self._drain_stderr, name=f"mod-{spec.name}-stderr", daemon=True).start()
 
     def _on_request(self, req: Request):
@@ -167,9 +168,12 @@ class _Proc:
         if entry[2] not in self.spec.permissions:
             raise RpcError(mp.ERR_PERMISSION_DENIED, f"{req.method} needs permission {entry[2]}")
         try:
-            return self.callbacks[req.method](self.spec.name.split("@", 1)[0], req.params)   # name@version: the module is the name
+            out = self.callbacks[req.method](self.spec.name.split("@", 1)[0], req.params)   # name@version: the module is the name
         except ValueError as e:                    # bad input (a file path, a missing file): the module's to handle
             raise RpcError(mp.ERR_INVALID_PARAMS, str(e)[:300])
+        if req.method == "host.secrets.get" and out.get("set"):
+            self.delivered[str(req.params.get("name"))] = out["value"]     # redacted from this process's log from now on
+        return out
 
     def _on_notification(self, method: str, params: dict):
         if method == "log":
@@ -181,6 +185,9 @@ class _Proc:
         try:
             if self._log_path.exists() and self._log_path.stat().st_size > LOG_MAX_BYTES:
                 self._log_path.replace(self._log_path.with_suffix(".log.1"))
+            if self.delivered:                     # a safety net: an encoded or split value passes through
+                from .modsecrets import redact
+                line = redact(line, self.delivered)
             with open(self._log_path, "a") as f:
                 f.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + line.rstrip("\n") + "\n")
         except OSError:

@@ -46,6 +46,7 @@ class NodeView:
     excluded_why: dict = field(default_factory=dict)   # {module: the module's own words}: requires.unsupported.runner
     capabilities: dict = field(default_factory=dict)   # {module: node_capabilities(node, module)} for the offered modules
     bootstrap_grants: bool = False    # the agent runs bootstrap jobs with the bootstrap grants (modsandbox.bootstrap_enforced)
+    secrets_unset: dict = field(default_factory=dict)  # {module: declared secrets with no readable value for this node}
 
     @property
     def certified(self) -> set:
@@ -196,6 +197,8 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
                   nv.bootstrap_grants if boot else None, True if boot else None),
         lambda: (lambda have: R("stage capabilities", "STAGE_CAPABILITY_MISSING", capabilities_fit(job, have),
                                 sorted(have & set(stage_caps)), stage_caps))(nv.capabilities.get(mod, set())),
+        lambda: (lambda miss: R("secrets set for this node", "SECRETS_NOT_SET", not miss, miss, job["secrets"]))(
+            sorted(set(job["secrets"]) & nv.secrets_unset.get(mod, set()))),
         lambda: R("job platforms", "STAGE_PLATFORM_UNSUPPORTED", bool(plat) and pf.matches(plat, pl["platforms"]) if pl["platforms"]
                   else True, plat, pl["platforms"]),
         lambda: R("a feasible class of its unit", "STAGE_PLATFORM_UNSUPPORTED",

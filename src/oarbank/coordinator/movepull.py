@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from . import config as C
-from . import identity
+from . import identity, modsecrets
 from .db import DB
 
 RESTART_EXIT = 75
@@ -131,6 +131,7 @@ class Puller:
         r = self.http.post(self.st["from_url"] + "/v1/move/pair",
                            json={"code": self.st.pop("code"), "b_url": self.st["my_url"], "b_cik": k.public_b64,
                                  "b_audit_pub": audit_pub, "b_platform": portable.host_platform(),
+                                 "b_secrets_pub": modsecrets.transport_public(self.home),
                                  "b_tls_ca": (self.home / "tls" / "ca.pem").read_text() if (self.home / "tls" / "ca.pem").exists() else None})
         if r.status_code >= 400:
             raise PullError(f"pairing refused: {r.status_code} {r.text[:300]}")

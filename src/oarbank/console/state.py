@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 
@@ -50,6 +51,7 @@ class Reader:
 
     def __init__(self, path: str, budget_s: float | None = None):
         self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
+        self.home = Path(path).parent         # stored paths are relative to the coordinator's home
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA query_only=1")
         self.conn.execute("PRAGMA busy_timeout=5000")

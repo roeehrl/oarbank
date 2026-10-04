@@ -1,10 +1,14 @@
 //! The per-attempt container broker (spec/sandbox.md, "Containers: the agent's broker"; the SDK's `broker` module is
 //! the client). A job whose module is approved for containers gets a unix socket, `OARBANK_BROKER=unix:/path`, the
 //! only IPC its sandbox allows. One JSON request per connection, one JSON answer line. Ops: `container.run`,
-//! `container.pull`, `status`. Every run is validated against the module's approved images, its directories and its
-//! reservation, runs on the agent's own runtime with a fixed argument shape, and dies with the attempt.
+//! `container.pull`, `status`. Every run is validated against the module's approved images (its static `containers`, or
+//! an image of one of its `container_sets` that the job lists, whose signature the agent verifies before pulling), its
+//! directories and its reservation (the GPU only for a job that reserved the agent's `gpu` pool), runs on the agent's own
+//! runtime with a fixed argument shape, and dies with the attempt.
 
 use crate::container_runtime::{image_key, ContainerRuntime, Mount, RunResult, RunSpec};
+use crate::imageset::Verifier;
+use oarbank_core::images::ContainerSet;
 use serde_json::{json, Value};
 use std::io::ErrorKind;
 use std::os::unix::fs::{FileTypeExt, FileExt, PermissionsExt};
@@ -32,6 +36,11 @@ pub struct BrokerGrant {
     pub module: String,
     /// (image reference with an `@sha256:` digest, OCI platform such as `linux/amd64`).
     pub approved_images: Vec<(String, String)>,
+    /// The module's image sets, and the set images this job listed (jobs.enqueue `images`): only those may run.
+    pub sets: Vec<ContainerSet>,
+    pub job_images: Vec<String>,
+    /// The job reserved the agent's `gpu` pool: its containers may get every GPU (`gpus = "all"`).
+    pub gpu: bool,
     pub workdir: PathBuf,
     pub module_data: PathBuf,
     pub network_granted: bool,
@@ -111,17 +120,44 @@ pub fn is_env_key(k: &str) -> bool {
     matches!(b.next(), Some(c) if c == b'_' || c.is_ascii_alphabetic()) && b.all(|c| c == b'_' || c.is_ascii_alphanumeric())
 }
 
-/// The image must exactly equal an approved entry's reference, and the platform that entry's platform.
-pub fn approved(image: Option<&str>, platform: Option<&str>, g: &BrokerGrant) -> Result<(), Refusal> {
+/// Which approval an image falls under: a static entry (None), or a set (Some) whose signature the agent must still
+/// verify. A static image must exactly equal an approved entry's reference with that entry's platform; a set image lies
+/// under the set's prefix with its platform and is listed by the job.
+pub fn approved<'a>(image: Option<&str>, platform: Option<&str>, g: &'a BrokerGrant) -> Result<Option<&'a ContainerSet>, Refusal> {
     let image = image.filter(|i| !i.is_empty()).ok_or_else(|| Refusal::bad_request("image is required"))?;
     let platforms: Vec<&str> = g.approved_images.iter().filter(|(i, _)| i == image).map(|(_, p)| p.as_str()).collect();
+    if platforms.contains(&platform.unwrap_or("")) {
+        return Ok(None);
+    }
+    let norm = oarbank_core::images::normalize(image).ok();
+    let set = norm.as_ref().filter(|n| n.digest.is_some())
+        .and_then(|n| g.sets.iter().find(|s| Some(s.platform.as_str()) == platform && s.covers(&n.repository)));
+    if let (Some(set), Some(n)) = (set, &norm) {
+        let listed = g.job_images.iter().any(|j| oarbank_core::images::normalize(j).ok()
+            .is_some_and(|m| m.repository == n.repository && m.digest == n.digest));
+        if !listed {
+            return Err(Refusal::new("image_not_approved", format!("{image} is in set {} but this job does not list it \
+                                                                   (jobs.enqueue images)", set.name)));
+        }
+        return Ok(Some(set));
+    }
     if platforms.is_empty() {
         return Err(Refusal::new("image_not_approved", format!("{image} is not an approved image of this module")));
     }
-    match platform {
-        Some(p) if platforms.contains(&p) => Ok(()),
-        p => Err(Refusal::new("image_not_approved",
-                              format!("{image} is approved for {}, not {}", platforms.join(", "), p.unwrap_or("(none)")))),
+    Err(Refusal::new("image_not_approved", format!("{image} is approved for {}, not {}", platforms.join(", "),
+                                                   platform.unwrap_or("(none)"))))
+}
+
+/// `gpus`: "none" (or absent) or "all"; a count comes later. "all" needs the job's `gpu` pool reservation.
+fn gpus(v: &Value, g: &BrokerGrant) -> Result<bool, Refusal> {
+    match v {
+        Value::Null => Ok(false),
+        Value::String(s) if s == "none" => Ok(false),
+        Value::String(s) if s == "all" && g.gpu => Ok(true),
+        Value::String(s) if s == "all" => Err(Refusal::new("gpu_not_granted", "this job did not reserve the gpu pool \
+                                                            (stages[].requires.pools gpu = 1)")),
+        Value::Number(_) => Err(Refusal::bad_request("gpus is \"none\" or \"all\"; a GPU count is not supported yet")),
+        _ => Err(Refusal::bad_request("gpus is \"none\" or \"all\"")),
     }
 }
 
@@ -183,15 +219,17 @@ pub fn resolve_mount_source(src: &str, s: &Scope) -> Result<PathBuf, Refusal> {
     Ok(resolved)
 }
 
-/// Validate a `container.run` request into the exact run (output files not yet attached).
-pub fn plan(req: &Value, s: &Scope) -> Result<RunSpec, Refusal> {
+/// Validate a `container.run` request into the exact run (output files not yet attached), and the set whose signature
+/// must still be verified (none for a static image).
+pub fn plan<'a>(req: &Value, s: &'a Scope) -> Result<(RunSpec, Option<&'a ContainerSet>), Refusal> {
     let g = &s.grant;
     if !req.is_object() {
         return Err(Refusal::bad_request("request must be a JSON object"));
     }
     let image = opt_str(&req["image"], "image")?;
     let platform = opt_str(&req["platform"], "platform")?;
-    approved(image.as_deref(), platform.as_deref(), g)?;
+    let set = approved(image.as_deref(), platform.as_deref(), g)?;
+    let gpus = gpus(&req["gpus"], g)?;
     let mut args = Vec::new();
     match &req["args"] {
         Value::Null => {}
@@ -250,10 +288,11 @@ pub fn plan(req: &Value, s: &Scope) -> Result<RunSpec, Refusal> {
     let cpus = opt_num(&req["cpus"], "cpus")?.unwrap_or(max_cpus).clamp(MIN_CPUS, max_cpus);
     let mem_gb = opt_num(&req["mem_gb"], "mem_gb")?.unwrap_or(max_mem).clamp(MIN_MEM_GB, max_mem);
     let timeout = opt_num(&req["timeout_s"], "timeout_s")?.filter(|t| *t > 0.0).unwrap_or(DEFAULT_TIMEOUT_S);
-    Ok(RunSpec {
+    Ok((RunSpec {
         image: image.unwrap_or_default(), platform: platform.unwrap_or_default(), args, entrypoint, mounts, env, workdir, network,
         cpus, mem_gb, attempt_id: g.attempt_id, module: g.module.clone(), timeout_s: timeout.max(1.0), stdout: None, stderr: None,
-    })
+        gpu_device: gpus.then(String::new),
+    }, set))
 }
 
 // MARK: the broker
@@ -261,6 +300,9 @@ pub fn plan(req: &Value, s: &Scope) -> Result<RunSpec, Refusal> {
 struct Shared {
     scope: Scope,
     runtime: Arc<dyn ContainerRuntime>,
+    verifier: Arc<Verifier>,
+    /// The set images this attempt ran, `{set, image}`, for its report (the coordinator audits each first run).
+    ran_images: std::sync::Mutex<Vec<Value>>,
     /// Set when the attempt ends: refuses new requests and cancels the running container.
     closed: AtomicBool,
     inflight: AtomicUsize,
@@ -324,8 +366,17 @@ async fn handle(sh: &Arc<Shared>, req: &Value) -> Value {
     }
 }
 
-/// `{ok, running, images[]}`: the approved images already present.
+/// The set image's signature (or index membership), checked before anything is pulled.
+async fn verified(sh: &Arc<Shared>, set: Option<&ContainerSet>, image: &str, platform: &str) -> Result<(), Refusal> {
+    match set {
+        None => Ok(()),
+        Some(s) => sh.verifier.verify(s, image, platform).await.map_err(|r| Refusal::new(r.code, r.detail)),
+    }
+}
+
+/// `{ok, running, images[], gpus}`: the approved images already present, and whether containers here can get the GPU.
 async fn status(sh: &Arc<Shared>) -> Value {
+    let gpus = if sh.runtime.gpu_device().is_some() { "all" } else { "none" };
     let r = blocking(sh, |s| {
         let running = s.runtime.status().is_ok_and(|st| st.running);
         let present: Vec<(String, String)> = if running { s.runtime.images().iter().map(|i| image_key(i)).collect() } else { vec![] };
@@ -338,7 +389,7 @@ async fn status(sh: &Arc<Shared>) -> Value {
         (running, images)
     }).await;
     match r {
-        Ok((running, images)) => json!({"ok": true, "running": running, "images": images}),
+        Ok((running, images)) => json!({"ok": true, "running": running, "images": images, "gpus": gpus}),
         Err(r) => r.json(),
     }
 }
@@ -346,8 +397,9 @@ async fn status(sh: &Arc<Shared>) -> Value {
 async fn pull(sh: &Arc<Shared>, req: &Value) -> Result<Value, Refusal> {
     let image = opt_str(&req["image"], "image")?;
     let platform = opt_str(&req["platform"], "platform")?;
-    approved(image.as_deref(), platform.as_deref(), &sh.scope.grant)?;
+    let set = approved(image.as_deref(), platform.as_deref(), &sh.scope.grant)?;
     let (image, platform) = (image.unwrap_or_default(), platform.unwrap_or_default());
+    verified(sh, set, &image, &platform).await?;
     ready(sh, &platform).await?;
     let p2 = platform.clone();
     match blocking(sh, move |s| s.runtime.pull(&image, &p2)).await? {
@@ -404,7 +456,19 @@ fn tail(f: Option<&std::fs::File>) -> String {
 }
 
 async fn run(sh: &Arc<Shared>, req: &Value) -> Result<Value, Refusal> {
-    let mut spec = plan(req, &sh.scope)?;
+    let (mut spec, set) = plan(req, &sh.scope)?;
+    if spec.gpu_device.is_some() {
+        spec.gpu_device = Some(sh.runtime.gpu_device().ok_or_else(|| Refusal::new("gpu_unavailable",
+            "this node's container runtime cannot pass a GPU through (no CDI device; macOS runtimes have none)"))?);
+    }
+    verified(sh, set, &spec.image, &spec.platform).await?;
+    if let Some(s) = set {
+        let rec = json!({"set": s.name, "image": spec.image});
+        let mut ran = sh.ran_images.lock().unwrap();
+        if !ran.contains(&rec) {
+            ran.push(rec);
+        }
+    }
     ready(sh, &spec.platform).await?;
     let _gate = sh.gate.lock().await;
     if sh.closed.load(Ordering::SeqCst) {
@@ -483,7 +547,8 @@ pub struct Broker {
 impl Broker {
     /// Bind a fresh socket at `socket_path` (mode 0600, parent dir private) and serve requests for this grant until
     /// dropped. Also creates the work directory's `broker/` output directory.
-    pub async fn start(socket_path: PathBuf, grant: BrokerGrant, runtime: Arc<dyn ContainerRuntime>) -> std::io::Result<Broker> {
+    pub async fn start(socket_path: PathBuf, grant: BrokerGrant, runtime: Arc<dyn ContainerRuntime>,
+                       verifier: Arc<Verifier>) -> std::io::Result<Broker> {
         if socket_path.as_os_str().len() > MAX_SOCKET_PATH {
             return Err(std::io::Error::new(ErrorKind::InvalidInput,
                                            format!("broker socket path too long ({} bytes): {}", socket_path.as_os_str().len(), socket_path.display())));
@@ -502,7 +567,7 @@ impl Broker {
         let listener = UnixListener::bind(&socket_path)?;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
         let shared = Arc::new(Shared {
-            scope, runtime, closed: AtomicBool::new(false), inflight: AtomicUsize::new(0), counter: AtomicU64::new(0),
+            scope, runtime, verifier, ran_images: std::sync::Mutex::new(Vec::new()), closed: AtomicBool::new(false), inflight: AtomicUsize::new(0), counter: AtomicU64::new(0),
             ran: AtomicBool::new(false), gate: tokio::sync::Mutex::new(()),
         });
         let sh = shared.clone();
@@ -525,6 +590,11 @@ impl Broker {
     /// The job's `OARBANK_BROKER`.
     pub fn endpoint(&self) -> String {
         format!("unix:{}", self.socket.display())
+    }
+
+    /// The set images the attempt ran so far, `[{set, image}]`.
+    pub fn ran_images(&self) -> Vec<Value> {
+        self.shared.ran_images.lock().unwrap().clone()
     }
 }
 
@@ -582,8 +652,17 @@ mod tests {
     fn grant(base: &Path, egress: bool) -> BrokerGrant {
         BrokerGrant {
             attempt_id: 42, module: "toy".into(), approved_images: vec![(IMAGE.into(), "linux/amd64".into())],
+            sets: vec![], job_images: vec![], gpu: false,
             workdir: base.join("work"), module_data: base.join("data"), network_granted: egress, cpus: 4.0, mem_gb: 8.0,
         }
+    }
+
+    fn plan_spec(req: &Value, s: &Scope) -> Result<RunSpec, Refusal> {
+        plan(req, s).map(|(spec, _)| spec)
+    }
+
+    fn verifier(base: &Path) -> Arc<Verifier> {
+        Arc::new(Verifier::new(base.join("image-sets.json")).unwrap())
     }
 
     fn scope(base: &Path, egress: bool) -> Scope {
@@ -609,7 +688,7 @@ mod tests {
         let r = req(json!({"args": ["tool", "--in", "/w/x"], "entrypoint": "/bin/tool", "workdir": "/w",
                            "mounts": [{"src": "inputs", "dst": "/w", "ro": true}, {"src": "data:cache", "dst": "/cache"}, {"src": "out", "dst": "/out"}],
                            "env": {"B": "2", "A_1": "x y"}, "network": true, "timeout_s": 100, "cpus": 16, "mem_gb": 2.5}));
-        let p = plan(&r, &s).unwrap();
+        let p = plan_spec(&r, &s).unwrap();
         let (w, d) = (s.work.to_string_lossy().to_string(), s.data.to_string_lossy().to_string());
         assert_eq!(p.docker_args(), [
             "run", "--rm", "--platform", "linux/amd64", "--network", "bridge", "--cpus", "4", "--memory", "2.5g",
@@ -622,7 +701,7 @@ mod tests {
         // defaults: no network, the whole reservation, the SDK's nulls
         let minimal = req(json!({"args": [], "entrypoint": null, "workdir": null, "cpus": null, "mem_gb": null, "mounts": [], "env": {},
                                  "network": false, "timeout_s": 3600}));
-        assert_eq!(plan(&minimal, &s).unwrap().docker_args(),
+        assert_eq!(plan_spec(&minimal, &s).unwrap().docker_args(),
                    ["run", "--rm", "--platform", "linux/amd64", "--network", "none", "--cpus", "4", "--memory", "8g",
                     "--label", "oarbank.attempt_id=42", "--label", "oarbank.module=toy", IMAGE]);
     }
@@ -631,16 +710,16 @@ mod tests {
     fn refuses_unapproved_images_and_platforms() {
         let t = tmp();
         let s = scope(&t.0, false);
-        let r = |i: &str, p: &str| code(plan(&json!({"op": "container.run", "image": i, "platform": p, "args": []}), &s));
+        let r = |i: &str, p: &str| code(plan_spec(&json!({"op": "container.run", "image": i, "platform": p, "args": []}), &s));
         assert_eq!(r(IMAGE, "linux/amd64"), None);
         assert_eq!(r(IMAGE, "linux/arm64").as_deref(), Some("image_not_approved"));
         assert_eq!(r("docker.io/org/tool:1.2", "linux/amd64").as_deref(), Some("image_not_approved"));
         assert_eq!(r(&format!("{IMAGE} "), "linux/amd64").as_deref(), Some("image_not_approved"));
         assert_eq!(r("org/tool@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "linux/amd64").as_deref(),
                    Some("image_not_approved"));                    // the exact approved spelling only
-        assert_eq!(code(plan(&json!({"op": "container.run", "platform": "linux/amd64"}), &s)).as_deref(), Some("bad_request"));
-        assert_eq!(code(plan(&json!({"op": "container.run", "image": IMAGE}), &s)).as_deref(), Some("image_not_approved"));
-        assert_eq!(code(plan(&json!({"op": "container.run", "image": 7, "platform": "linux/amd64"}), &s)).as_deref(), Some("bad_request"));
+        assert_eq!(code(plan_spec(&json!({"op": "container.run", "platform": "linux/amd64"}), &s)).as_deref(), Some("bad_request"));
+        assert_eq!(code(plan_spec(&json!({"op": "container.run", "image": IMAGE}), &s)).as_deref(), Some("image_not_approved"));
+        assert_eq!(code(plan_spec(&json!({"op": "container.run", "image": 7, "platform": "linux/amd64"}), &s)).as_deref(), Some("bad_request"));
     }
 
     #[test]
@@ -656,7 +735,7 @@ mod tests {
         std::os::unix::fs::symlink("cache", s.data.join("inner")).unwrap();
         std::os::unix::net::UnixListener::bind(s.work.join("sock")).unwrap();
         std::fs::write(s.work.join("inputs/a.txt"), "x").unwrap();
-        let m = |src: &str, dst: &str| code(plan(&req(json!({"mounts": [{"src": src, "dst": dst}]})), &s));
+        let m = |src: &str, dst: &str| code(plan_spec(&req(json!({"mounts": [{"src": src, "dst": dst}]})), &s));
         let ok = |src: &str| m(src, "/m");
         assert_eq!(ok("inputs"), None);
         assert_eq!(ok("."), None);
@@ -673,9 +752,9 @@ mod tests {
         for dst in ["relative", "/a/../etc", "/w:rw", "", "/a\nb"] {
             assert_eq!(m("inputs", dst).as_deref(), Some("bad_mount"), "{dst:?}");
         }
-        assert_eq!(code(plan(&req(json!({"mounts": [{"src": "inputs"}]})), &s)).as_deref(), Some("bad_mount"));
-        assert_eq!(code(plan(&req(json!({"mounts": [{"src": "inputs", "dst": "/m", "ro": "yes"}]})), &s)).as_deref(), Some("bad_mount"));
-        assert_eq!(code(plan(&req(json!({"mounts": "inputs:/m"})), &s)).as_deref(), Some("bad_request"));
+        assert_eq!(code(plan_spec(&req(json!({"mounts": [{"src": "inputs"}]})), &s)).as_deref(), Some("bad_mount"));
+        assert_eq!(code(plan_spec(&req(json!({"mounts": [{"src": "inputs", "dst": "/m", "ro": "yes"}]})), &s)).as_deref(), Some("bad_mount"));
+        assert_eq!(code(plan_spec(&req(json!({"mounts": "inputs:/m"})), &s)).as_deref(), Some("bad_request"));
         assert!(!base.join("outside/sub").exists());
     }
 
@@ -683,7 +762,7 @@ mod tests {
     fn refuses_network_without_grant_and_bad_fields_and_clamps_resources() {
         let t = tmp();
         let s = scope(&t.0, false);
-        let r = |extra: Value| code(plan(&req(extra), &s));
+        let r = |extra: Value| code(plan_spec(&req(extra), &s));
         assert_eq!(r(json!({"network": true})).as_deref(), Some("network_not_granted"));
         assert_eq!(r(json!({"network": false})), None);
         assert_eq!(r(json!({"network": "host"})).as_deref(), Some("bad_request"));
@@ -696,13 +775,13 @@ mod tests {
         assert_eq!(r(json!({"workdir": "rel"})).as_deref(), Some("bad_mount"));
         assert_eq!(r(json!({"entrypoint": ""})).as_deref(), Some("bad_request"));
         assert_eq!(r(json!({"cpus": "lots"})).as_deref(), Some("bad_request"));
-        let p = plan(&req(json!({"cpus": 0, "mem_gb": 0, "timeout_s": -5})), &s).unwrap();
+        let p = plan_spec(&req(json!({"cpus": 0, "mem_gb": 0, "timeout_s": -5})), &s).unwrap();
         let a = p.docker_args();
         assert!(a.contains(&"0.1".to_string()) && a.contains(&"0.25g".to_string()), "{a:?}");
         assert_eq!(p.timeout_s, DEFAULT_TIMEOUT_S);
-        assert_eq!(plan(&req(json!({"timeout_s": 0.2})), &s).unwrap().timeout_s, 1.0);
+        assert_eq!(plan_spec(&req(json!({"timeout_s": 0.2})), &s).unwrap().timeout_s, 1.0);
         let net = scope(&t.0, true);
-        assert!(plan(&req(json!({"network": true})), &net).unwrap().docker_args().windows(2).any(|w| w == ["--network", "bridge"]));
+        assert!(plan_spec(&req(json!({"network": true})), &net).unwrap().docker_args().windows(2).any(|w| w == ["--network", "bridge"]));
     }
 
     #[test]
@@ -717,8 +796,8 @@ mod tests {
                        ("ipc", json!("host")), ("runtime", json!("runc")), ("extra_args", json!(["--privileged"]))] {
             hostile[k] = v;
         }
-        let a = plan(&hostile, &s).unwrap().docker_args();
-        assert_eq!(a, plan(&base, &s).unwrap().docker_args());    // unknown keys never reach the command
+        let a = plan_spec(&hostile, &s).unwrap().docker_args();
+        assert_eq!(a, plan_spec(&base, &s).unwrap().docker_args());    // unknown keys never reach the command
         let image_at = a.iter().position(|x| x == IMAGE).unwrap();
         let flags = &a[..image_at];
         assert!(!flags.iter().any(|x| x.contains("privileged") || x.contains("host") || x.contains("docker.sock")
@@ -744,6 +823,7 @@ mod tests {
         block: bool,
         exit_code: i32,
         images: Vec<String>,
+        gpu: Option<String>,
     }
 
     #[derive(Default)]
@@ -790,6 +870,9 @@ mod tests {
             }
             Ok(RunResult { exit_code: if time_out { 143 } else { exit_code }, timed_out: time_out, cancelled: false })
         }
+        fn gpu_device(&self) -> Option<String> {
+            self.with(|s| s.gpu.clone())
+        }
         fn images(&self) -> Vec<String> {
             self.with(|s| s.images.clone())
         }
@@ -826,7 +909,7 @@ mod tests {
         let t = tmp();
         let rt = Fake::running();
         let sock = t.0.join("b/42.sock");
-        let b = Broker::start(sock.clone(), grant(&t.0, false), rt.clone()).await.unwrap();
+        let b = Broker::start(sock.clone(), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
         let ep = b.endpoint();
         assert_eq!(ep, format!("unix:{}", sock.display()));
         let m = std::fs::symlink_metadata(&sock).unwrap();
@@ -863,7 +946,7 @@ mod tests {
 
         rt.with(|s| s.images = vec!["org/tool@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(), "alpine@sha256:00".into()]);
         let st = ask(&ep, r#"{"op": "status"}"#).await;
-        assert_eq!(st, json!({"ok": true, "running": true, "images": [IMAGE]}));
+        assert_eq!(st, json!({"ok": true, "running": true, "images": [IMAGE], "gpus": "none"}));
         assert_eq!(ask(&ep, &json!({"op": "container.pull", "image": IMAGE, "platform": "linux/amd64"}).to_string()).await, json!({"ok": true}));
         assert_eq!(ask(&ep, &json!({"op": "container.pull", "image": IMAGE, "platform": "linux/arm64"}).to_string()).await["error"],
                    "image_not_approved");
@@ -876,7 +959,7 @@ mod tests {
         rt.with(|s| (s.running, s.start_fails) = (false, true));
         let un = ask(&ep, &req(json!({})).to_string()).await;
         assert_eq!(un["error"], "runtime_unavailable");
-        assert_eq!(ask(&ep, r#"{"op": "status"}"#).await, json!({"ok": true, "running": false, "images": []}));
+        assert_eq!(ask(&ep, r#"{"op": "status"}"#).await, json!({"ok": true, "running": false, "images": [], "gpus": "none"}));
         rt.with(|s| (s.running, s.start_fails) = (true, false));
 
         let sh = b.shared.clone();
@@ -898,7 +981,7 @@ mod tests {
         let rt = Fake::running();
         let mut g = grant(&t.0, false);
         g.approved_images.push((IMAGE.into(), "linux/riscv64".into()));
-        let b = Broker::start(t.0.join("p.sock"), g, rt.clone()).await.unwrap();
+        let b = Broker::start(t.0.join("p.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
         let r = ask(&b.endpoint(), &json!({"op": "container.run", "image": IMAGE, "platform": "linux/riscv64"}).to_string()).await;
         assert_eq!(r["error"], "platform_unavailable");
         assert!(rt.with(|s| s.runs.is_empty()));
@@ -909,7 +992,7 @@ mod tests {
         let t = tmp();
         let rt = Fake::running();
         rt.with(|s| s.time_out = true);
-        let b = Broker::start(t.0.join("t.sock"), grant(&t.0, false), rt.clone()).await.unwrap();
+        let b = Broker::start(t.0.join("t.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
         let r = ask(&b.endpoint(), &req(json!({"timeout_s": 1})).to_string()).await;
         assert_eq!((r["ok"].as_bool(), r["error"].as_str()), (Some(false), Some("timeout")), "{r}");
         assert_eq!(r["stdout_tail"], "hello from the container\n");
@@ -922,7 +1005,7 @@ mod tests {
         let rt = Fake::running();
         rt.with(|s| s.block = true);
         let sock = t.0.join("d.sock");
-        let b = Broker::start(sock.clone(), grant(&t.0, false), rt.clone()).await.unwrap();
+        let b = Broker::start(sock.clone(), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
         let ep = b.endpoint();
         let pending = tokio::spawn(async move { ask(&ep, &req(json!({})).to_string()).await });
         eventually("the run to start", || rt.with(|s| !s.runs.is_empty())).await;
@@ -939,7 +1022,7 @@ mod tests {
     async fn sdk_python_client_round_trip() {
         let t = tmp();
         let rt = Fake::running();
-        let b = Broker::start(t.0.join("py.sock"), grant(&t.0, false), rt.clone()).await.unwrap();
+        let b = Broker::start(t.0.join("py.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
         let script = format!(r#"
 import json
 from oarbank_sdk import broker
@@ -973,5 +1056,138 @@ print(json.dumps(out))
         let data = std::fs::canonicalize(t.0.join("data")).unwrap();
         assert!(args.contains(&format!("{}/cache:/c", data.display())) && args.contains(&"A=1".to_string()), "{args:?}");
         assert_eq!(args[args.len() - 3..], [IMAGE, "echo", "hi"]);
+    }
+
+    /// One approval (a set: prefix and key) covers any number of signed images: 500 distinct ones run through one
+    /// broker, each verified against the local registry once, each reported for the coordinator's audit; an unsigned
+    /// image, one outside the set and one the job did not list are refused with image_not_approved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn five_hundred_signed_images_run_under_one_set_and_the_rest_are_refused() {
+        use crate::imageset::tests::{serve, set, Key, Store};
+        let t = tmp();
+        let key = Key::new();
+        let store = Arc::new(Mutex::new(Store { referrers_api: true, ..Default::default() }));
+        let reg = serve(store.clone()).await;
+        let mut images = vec![];
+        {
+            let mut s = store.lock().unwrap();
+            for i in 0..500 {
+                let path = format!("org/tasks/task-{i}");
+                let d = s.image(&path, format!("task {i}").as_bytes());
+                s.sign(&key, &reg, &path, &d, i % 2 == 1);         // both cosign formats
+                images.push(format!("{reg}/{path}@{d}"));
+            }
+        }
+        let unsigned = { store.lock().unwrap().image("org/tasks/unsigned", b"u") };
+        let outside = { store.lock().unwrap().image("org/elsewhere", b"o") };
+        let (unsigned, outside) = (format!("{reg}/org/tasks/unsigned@{unsigned}"), format!("{reg}/org/elsewhere@{outside}"));
+        let not_listed = images.pop().unwrap();
+        let mut g = grant(&t.0, false);
+        g.sets = vec![set(&reg, &key, None)];
+        g.job_images = images.iter().cloned().chain([unsigned.clone(), outside.clone()]).collect();
+        let rt = Fake::running();
+        let b = Broker::start(t.0.join("s.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let ep = b.endpoint();
+        let run = |image: &str| json!({"op": "container.run", "image": image, "platform": "linux/amd64"}).to_string();
+        for i in &images {
+            let r = ask(&ep, &run(i)).await;
+            assert_eq!(r["ok"], true, "{i}: {r}");
+        }
+        assert_eq!(rt.with(|s| s.runs.len()), 499);
+        assert_eq!(b.ran_images().len(), 499);
+        assert_eq!(b.ran_images()[0], json!({"set": "tasks", "image": images[0]}));
+        for (img, why) in [(&unsigned, "no cosign signature"), (&outside, "not an approved image"), (&not_listed, "does not list it")] {
+            let r = ask(&ep, &run(img)).await;
+            assert_eq!(r["error"], "image_not_approved", "{img}: {r}");
+            assert!(r["detail"].as_str().unwrap().contains(why), "{r}");
+        }
+        // verified once: running them all again asks the registry nothing
+        let hits = store.lock().unwrap().hits;
+        for i in images.iter().take(20) {
+            assert_eq!(ask(&ep, &run(i)).await["ok"], true);
+        }
+        assert_eq!(store.lock().unwrap().hits, hits);
+        assert_eq!(b.ran_images().len(), 499, "each image is reported once");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpus_need_the_gpu_pool_and_a_runtime_that_passes_one_through() {
+        let t = tmp();
+        let rt = Fake::running();
+        let b = Broker::start(t.0.join("g.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let ep = b.endpoint();
+        assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["error"], "gpu_not_granted");
+        assert_eq!(ask(&ep, &req(json!({"gpus": 1})).to_string()).await["error"], "bad_request");
+        assert_eq!(ask(&ep, &req(json!({"gpus": "some"})).to_string()).await["error"], "bad_request");
+        assert_eq!(ask(&ep, &req(json!({"gpus": "none"})).to_string()).await["ok"], true);
+        drop(b);
+        let mut g = grant(&t.0, false);
+        g.gpu = true;
+        let b = Broker::start(t.0.join("g2.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let ep = b.endpoint();
+        assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["error"], "gpu_unavailable");
+        rt.with(|s| s.gpu = Some("nvidia.com/gpu".into()));
+        assert_eq!(ask(&ep, r#"{"op": "status"}"#).await["gpus"], "all");
+        assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["ok"], true);
+        let args = rt.with(|s| s.runs.last().unwrap().0.clone());
+        assert!(args.windows(2).any(|w| w == ["--device", "nvidia.com/gpu=all"]), "{args:?}");
+    }
+
+    /// Linux with an engine: a signed image of the host's own shell, served by a local registry, verified by the broker
+    /// and then pulled by digest and run by the real engine; an unsigned one in the same set is refused before any pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(target_os = "linux")]
+    async fn a_signed_image_from_a_registry_is_verified_pulled_and_run_by_the_real_engine() {
+        use crate::container_runtime::{tests::host_rootfs, NativeRuntime};
+        use crate::imageset::tests::{serve, Key, Store};
+        let t = tmp();
+        let layout = crate::paths::Layout::new(t.0.join("agent"));
+        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
+            eprintln!("no container engine here: skipped");
+            return;
+        };
+        // a private engine home: its own storage, and the local registry allowed over plain HTTP
+        rt.home = t.0.join("engine-home");
+        let tar = t.0.join("rootfs.tar");
+        host_rootfs(&tar);
+        let key = Key::new();
+        let store = Arc::new(Mutex::new(Store { referrers_api: true, ..Default::default() }));
+        let reg = serve(store.clone()).await;
+        std::fs::create_dir_all(rt.home.join(".config/containers")).unwrap();
+        std::fs::write(rt.home.join(".config/containers/registries.conf"),
+                       format!("[[registry]]\nlocation = \"{reg}\"\ninsecure = true\n")).unwrap();
+        if !rt.status().is_ok_and(|s| s.running) {
+            eprintln!("the engine is not running: skipped");
+            return;
+        }
+        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+        let platform = format!("linux/{arch}");
+        let (signed, unsigned) = {
+            let mut s = store.lock().unwrap();
+            let bytes = std::fs::read(&tar).unwrap();
+            let d = s.rootfs_image("org/tasks/shell", &bytes, arch);
+            s.sign(&key, &reg, "org/tasks/shell", &d, false);
+            let u = s.image("org/tasks/unsigned", b"never pulled: refused before");
+            (format!("{reg}/org/tasks/shell@{d}"), format!("{reg}/org/tasks/unsigned@{u}"))
+        };
+        let (cli, engine_home) = (rt.cli.clone(), rt.home.clone());
+        let mut g = grant(&t.0, false);
+        g.approved_images = vec![];
+        g.sets = vec![oarbank_core::images::ContainerSet { name: "tasks".into(), registry: reg.clone(), repository: "org/tasks/".into(),
+                                                          platform: platform.clone(), key_pem: key.pem(), index: None }];
+        g.job_images = vec![signed.clone(), unsigned.clone()];
+        let b = Broker::start(t.0.join("live.sock"), g, Arc::new(rt), verifier(&t.0)).await.unwrap();
+        let ep = b.endpoint();
+        let r = ask(&ep, &json!({"op": "container.run", "image": signed, "platform": platform, "args": ["sh", "-c", "echo signed-ok"],
+                                 "timeout_s": 120}).to_string()).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["exit_code"], 0, "{r}");
+        assert!(r["stdout_tail"].as_str().unwrap().contains("signed-ok"), "{r}");
+        let r = ask(&ep, &json!({"op": "container.run", "image": unsigned, "platform": platform, "args": ["true"]}).to_string()).await;
+        assert_eq!(r["error"], "image_not_approved", "{r}");
+        assert_eq!(b.ran_images(), vec![json!({"set": "tasks", "image": signed})]);
+        drop(b);
+        // the private storage holds files of the user namespace's ids: the engine removes them
+        let _ = std::process::Command::new(cli).env("HOME", &engine_home).args(["system", "reset", "--force"]).output();
     }
 }

@@ -1,6 +1,6 @@
 # Service endpoints: jobs reach a warm per-node service
 
-Status: built (oarbank-sdk issue #12; PLAN D35) in **oarbank-sdk 1.5.0** and **core 2.5.0**; see Implementation status.
+Status: built (oarbank-sdk issue #12; PLAN D36) in **oarbank-sdk 1.5.0** and **core 2.5.0**; see Implementation status.
 
 ## The problem
 

@@ -293,6 +293,14 @@ def host_callbacks(db) -> dict:
     def settings_get(module, p):
         return {"value": (_db().get_setting(f"module_settings:{module}", {}) or {}).get(p.get("key"))}
 
+    def secrets_get(module, p):
+        from . import modsecrets
+        name = p.get("name")
+        if name not in modsecrets.declared(module):
+            raise ValueError(f"{module} declares no secret {name!r}")
+        v = modsecrets.module_value(_db(), module, name)
+        return {"set": v is not None, "value": v}
+
     def store_get(module, p):
         r = _db().one("SELECT doc_json FROM module_store WHERE module=? AND collection=? AND key=?",
                       (module, p.get("collection"), str(p.get("key"))))
@@ -363,7 +371,7 @@ def host_callbacks(db) -> dict:
         return modfiles.read(_db(), module, p.get("path"), int(p.get("offset") or 0), int(p.get("length") or modfiles.READ_MAX))
 
     return {"host.jobs.query": jobs_query, "host.datasets.query": datasets_query, "host.blobs.stat": blobs_stat, "host.settings.get": settings_get,
-            "host.store.get": store_get, "host.store.query": store_query, "host.nodes.query": nodes_query,
+            "host.secrets.get": secrets_get, "host.store.get": store_get, "host.store.query": store_query, "host.nodes.query": nodes_query,
             "host.files.list": files_list, "host.files.stat": files_stat, "host.files.read": files_read}
 
 
@@ -564,6 +572,12 @@ def stage_retry(name: str, stage: str | None) -> dict:
     if st is None:
         return {"max": mf.Retry().max_attempts, "by_platform": {}}
     return {"max": st.retry.max_attempts, "by_platform": {k: v.retry.max_attempts for k, v in st.variants.items() if v.retry}}
+
+
+def stage_secrets(name: str, stage: str | None) -> list[str]:
+    """The secrets a job's stage receives (oarbank-sdk stages[].secrets): its grant carries them, resolved for the node."""
+    i = CATALOG.get(name)
+    return i.manifest.secrets_of(stage or i.single_stage) if i else []
 
 
 def stage_bootstrap(name: str, stage: str | None) -> bool:

@@ -149,15 +149,23 @@ def node_excluded(db: DB, node: dict, offered: set) -> set:
 
 # ------------------------------------------------------------------ approvals of node-side grants
 
-def requests(manifest) -> dict:
-    """A manifest's sandbox requests, canonical (empty dict: nothing to approve)."""
+def requests(manifest, bundle) -> dict:
+    """A manifest's sandbox requests, canonical (empty dict: nothing to approve). Container sets are approved by their
+    prefix and their key's fingerprint (read from the bundle), never by a list of digests; GPU passthrough to containers
+    (a stage reserving the agent's `gpu` pool) is a request of its own."""
     sb = getattr(manifest, "sandbox", None)
     if sb is None or not sb.requests():
         return {}
-    return {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": sorted(sb.net.allow)},
-            "tools": sorted(({"id": t.id, "trust": t.trust} for t in sb.tools), key=lambda t: t["id"]),
-            "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
-            "containers": sorted(({"image": c.image, "platform": c.platform} for c in sb.containers), key=lambda c: c["image"])}
+    from . import modimages
+    out = {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": sorted(sb.net.allow)},
+           "tools": sorted(({"id": t.id, "trust": t.trust} for t in sb.tools), key=lambda t: t["id"]),
+           "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
+           "containers": sorted(({"image": c.image, "platform": c.platform} for c in sb.containers), key=lambda c: c["image"])}
+    if sb.container_sets:
+        out["container_sets"] = modimages.set_requests(manifest, bundle)
+    if any("gpu" in s.requires.pools for s in manifest.stages):
+        out["container_gpu"] = True
+    return out
 
 
 def digest(req: dict) -> str:
@@ -165,11 +173,12 @@ def digest(req: dict) -> str:
 
 
 def _manifest(db: DB, name: str, version: str):
+    """(manifest, bundle directory) of an installed version."""
     from oarbank_sdk import manifest as mf
     r = db.one("SELECT path FROM modules WHERE name=? AND version=?", (name, version))
     if not r:
         raise GrantError(f"{name} {version} is not installed")
-    return mf.load(db.abs(r["path"]) / "oarbank-module.toml")
+    return mf.load(db.abs(r["path"]) / "oarbank-module.toml"), db.abs(r["path"])
 
 
 def approval(db: DB, name: str, version: str) -> dict | None:
@@ -179,7 +188,7 @@ def approval(db: DB, name: str, version: str) -> dict | None:
 
 def status(db: DB, name: str, version: str) -> dict:
     """{requests, digest, approved} for one version (approved is True when nothing is requested)."""
-    req = requests(_manifest(db, name, version))
+    req = requests(*_manifest(db, name, version))
     a = approval(db, name, version)
     return {"requests": req, "digest": digest(req) if req else None,
             "approved": not req or bool(a and a["digest"] == digest(req)), "approval": a}
@@ -223,4 +232,9 @@ def describe(req: dict) -> str:
         out.append("execute written files")
     if req.get("containers"):
         out.append("containers " + ", ".join(f"{c['image'].split('@')[0]} ({c['platform']})" for c in req["containers"]))
+    for s in req.get("container_sets") or []:
+        out.append(f"container images under {s['registry']}/{s['repository']} ({s['platform']}) signed by key "
+                   f"SHA256:{s['key_sha256'][:16]}" + (f", listed in index {s['index']}" if s.get("index") else ""))
+    if req.get("container_gpu"):
+        out.append("GPU passthrough to containers")
     return "; ".join(out)

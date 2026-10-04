@@ -51,6 +51,9 @@ pub struct Agent {
     pub coord_clock: crate::clock::CoordClock,
     #[cfg(unix)]
     pub containers: Option<Arc<dyn crate::container_runtime::ContainerRuntime>>,
+    /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
+    #[cfg(unix)]
+    images: Option<Arc<crate::imageset::Verifier>>,
     /// Module services and probes (service protocol 1), created with the first release.
     pub services: Option<Arc<std::sync::Mutex<crate::services::ServiceManager>>>,
     /// What the services were last configured with: release id, policy, limits.
@@ -96,6 +99,8 @@ impl Agent {
                    rescue: Default::default(), coord_clock: Default::default(),
                    #[cfg(unix)]
                    containers: None,
+                   #[cfg(unix)]
+                   images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![],
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
             services_halted: false, coord_install: Default::default(), layout })
@@ -597,7 +602,7 @@ impl Agent {
     #[cfg(unix)]
     fn container_runtime(&mut self) -> Option<Arc<dyn crate::container_runtime::ContainerRuntime>> {
         let wants = self.release.as_ref().is_some_and(|r| r.modules.iter()
-            .any(|m| m["sandbox"]["containers"].as_array().is_some_and(|c| !c.is_empty())));
+            .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))));
         if !wants {
             return None;
         }
@@ -605,6 +610,15 @@ impl Agent {
             self.containers = crate::container_runtime::for_node(&self.layout);
         }
         self.containers.clone()
+    }
+
+    /// The container set verifier, made once (its index seqs live in the agent's home).
+    #[cfg(unix)]
+    fn image_verifier(&mut self) -> anyhow::Result<Arc<crate::imageset::Verifier>> {
+        if self.images.is_none() {
+            self.images = Some(Arc::new(crate::imageset::Verifier::new(self.layout.home.join("image-sets.json"))?));
+        }
+        Ok(self.images.clone().expect("made above"))
     }
 
     /// At start no attempt is live, so a container still carrying the attempt label was left by an earlier run of the
@@ -627,8 +641,12 @@ impl Agent {
         }
         let l = Layout::new(self.layout.home.clone());
         #[cfg(unix)]
-        let mut pools: std::collections::BTreeMap<String, i64> = self.container_runtime()
-            .map(|rt| ("containers".to_string(), rt.pool_tokens() as i64)).into_iter().collect();
+        // the runtime's `containers` pool, and the `gpu` pool where containers can get the node's GPUs (CDI)
+        let mut pools: std::collections::BTreeMap<String, i64> = self.container_runtime().map(|rt| {
+            let gpu = rt.gpu_device().is_some();
+            [("containers".to_string(), rt.pool_tokens() as i64)].into_iter().chain(gpu.then(|| ("gpu".to_string(), 1)))
+                .collect()
+        }).unwrap_or_default();
         #[cfg(windows)]
         let mut pools = std::collections::BTreeMap::<String, i64>::new();
         let (mut reserved, mut running) = (0.0, vec![]);
@@ -760,6 +778,8 @@ impl Agent {
                                        table: self.table.clone(), registry: self.prot.as_ref().map(|p| p.registry.clone()),
                                        #[cfg(unix)]
                                        containers: self.container_runtime(),
+                                       #[cfg(unix)]
+                                       images: self.image_verifier().map_err(io_err)?,
                                        services: self.services.clone() });
         for g in &grants {
             let aid = g["attempt_id"].as_i64().unwrap_or(0);
@@ -799,6 +819,7 @@ impl Agent {
     /// process exit code: 0 stopped, 75 a staged update or a rollback for the launcher.
     pub async fn run(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
         staging::sweep_partials(&self.layout);
+        jobs::clear_workdirs(&self.layout);
         #[cfg(unix)]
         self.reap_containers().await;
         let mut backoff = Duration::from_secs(2);

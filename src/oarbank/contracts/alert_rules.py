@@ -27,6 +27,8 @@ POLICY: dict[str, dict] = {
                                          "runbook": "The coordinator moved to a platform this module's coordinator side does not run on (requires.coordinator_platforms), so the module was disabled. Install a version that supports this platform and enable it, or move the coordinator back."},
     "pinned_dataset_conflict": {"severity": "P3", "pending_s": 0,
                                 "runbook": "A bootstrap job brought a module's pinned dataset, but another dataset with other files is registered under its id (often a hand registration), so it was left as it is. Delete that dataset; the next bootstrap job registers the pinned one."},
+    "secret_unreadable": {"severity": "P3", "pending_s": 0,
+                          "runbook": "A module secret is stored but this coordinator cannot decrypt it (a backup restored or a home copied to another machine, whose secrets key stayed behind): set it again with `oarbank secret set`. Jobs needing it wait with SECRETS_NOT_SET."},
     "placement_stranded": {"severity": "P3", "pending_s": 0,
                            "runbook": "A unit of work is bound to a platform class with no eligible node left: bring a node of that class back (online, certified), or move the campaign with campaigns.rebind_platform; its finished jobs run again in the new class."},
     "placement_rebound": {"severity": "P2", "pending_s": 0,
