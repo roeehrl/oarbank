@@ -22,7 +22,6 @@
     {% if hw.os %}<span class="mut">system</span><span>{{ hw.os }}{% if hw.arch %} · {{ hw.arch }}{% endif %}</span>{% endif %}
     {% if T0.disk_free_gb is known %}<span class="mut">disk free</span><span>{{ T0.disk_free_gb | num(0) }} GB</span>{% endif %}
     {% if n.ts_ip %}<span class="mut">address</span><span class="mono">{{ n.ts_ip }}</span>{% endif %}
-    {% if T0.services_running is known %}<span class="mut">services running</span><span>{{ T0.services_running | join(', ') or 'none' }}</span>{% endif %}
   </div>
 </div>
 <div class="card">
@@ -36,7 +35,6 @@
     {% if n.cap.pools %}<span class="mut">pools</span><span>{% for p, k in n.cap.pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
     {% if n.facts.containers %}<span class="mut">GPU in containers</span><span>{% if n.gpu.mechanism %}{{ n.gpu.mechanism }}{% if n.gpu.containers %}: {{ n.gpu.containers | join(', ') }}{% endif %}{% else %}undetected{% if n.platform and n.platform.startswith('darwin') %}: krunkit is not installed{% elif n.platform and n.platform.startswith('windows') %}: no container runtime on Windows yet{% endif %}{% endif %}</span>{% endif %}
     {% if T0.services_reserved_gb %}<span class="mut">services hold</span><span>{{ T0.services_reserved_gb | num(1) }} GB</span>{% endif %}
-    {% if T0.services_held %}<span class="mut">services stopped by protection</span><span>{% for k, why in T0.services_held | dictsort %}{{ k }} ({{ why }}){% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
     {% set mem = [(T0.mem_used_gb | num(1)) ~ ' GB used' if T0.mem_used_gb is known, (T0.mem_free_pct | num(0)) ~ '% free' if T0.mem_free_pct is known,
                   'fleet jobs ' ~ (T0.fleet_rss_gb | num(1)) ~ ' GB' if T0.fleet_rss_gb is known, 'swap ' ~ (T0.swap_used_gb | num(1)) ~ ' GB' if T0.swap_used_gb is known] | select | list %}
     {% if mem %}<span class="mut">memory</span><span>{{ mem | join(' · ') }}</span>{% endif %}
@@ -157,6 +155,14 @@ rules, the memory guard, heat, battery and a present user). A cap can only lower
 {% for m, st in n.mods.items() %}<tr><td>{{ m }}</td><td><span class="chip {{ 'ok' if st.state == 'certified' else ('warn' if st.state == 'certifying' else 'bad') }}">{{ st.state }}</span></td>
 <td>{{ st.generation }}</td><td class="mono">{{ st.release or '' }}</td><td class="mut">{{ st.at | ago }}</td><td>{{ st.reason or '' }}</td></tr>
 {% else %}<tr><td colspan="6" class="mut">waiting for the release install and doctor</td></tr>{% endfor %}</table>
+{% if n.services %}
+<h2>Services <span class="small mut">(reported {{ n.services_at | ago }})</span></h2>
+<table class="small"><tr><th scope="col">module</th><th scope="col">service</th><th scope="col">health</th><th scope="col">state</th><th scope="col">why stopped</th><th scope="col">jobs using it</th><th scope="col">error</th></tr>
+{% for sv in n.services %}<tr><td><a href="/modules/{{ sv.module }}">{{ sv.module }}</a></td><td>{{ sv.service }}{% if sv.endpoint %} <span class="chip">endpoint</span>{% endif %}</td>
+<td><span class="chip {{ 'ok' if sv.health == 'healthy' else ('bad' if sv.health == 'unhealthy' else '') }}">{{ sv.health or 'unknown' }}</span></td>
+<td><span class="chip {{ 'ok' if sv.state == 'ready' else ('acc' if sv.state == 'starting' else '') }}">{{ sv.state }}</span></td>
+<td>{{ sv.stopped_reason or '' }}{% if sv.gpu_api_missing %}: {{ sv.gpu_api_missing }}{% endif %}</td><td>{{ sv.users or 0 }}</td><td class="mono">{{ sv.error or '' }}</td></tr>{% endfor %}</table>
+{% endif %}
 {% if n.doctor and n.doctor.modules %}
 <h2>Doctor</h2>
 {% for m, rep in n.doctor.modules.items() %}

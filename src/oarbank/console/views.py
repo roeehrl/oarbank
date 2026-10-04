@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import time
 
+from ..coordinator import nodeservices
+
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
 CLOCK_SKEW_S = 60.0           # oarbankd core.CLOCK_SKEW_S
 LIMIT_KEYS = ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps", "schedule")
@@ -113,6 +115,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
     v["gpu"] = gpu_view(facts, v["doctor"])
+    v["services"] = nodeservices.rows(n)
     return v
 
 
