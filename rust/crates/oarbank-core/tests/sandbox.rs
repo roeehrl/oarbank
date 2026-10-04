@@ -28,7 +28,7 @@ fn s(p: &std::path::Path) -> String {
 fn golden_profiles_are_reproduced() {
     let cases: Value = serde_json::from_str(&std::fs::read_to_string(golden_dir().join("cases.json")).unwrap()).unwrap();
     let cases = cases.as_array().unwrap();
-    assert_eq!(cases.len(), 5);
+    assert_eq!(cases.len(), 6);
     for c in cases {
         let name = c["name"].as_str().unwrap();
         let want = std::fs::read_to_string(golden_dir().join(format!("{name}.sb"))).unwrap();
@@ -43,6 +43,8 @@ fn golden_profiles_are_reproduced() {
             c["gpu"].as_bool().unwrap(),
             c.get("proxy_port").and_then(Value::as_u64).map(|p| p as u16),
             c.get("exec_rw").and_then(Value::as_bool).unwrap_or(false),
+            c.get("rd").and_then(Value::as_u64).unwrap_or(0) as usize,
+            c.get("wo").and_then(Value::as_u64).unwrap_or(0) as usize,
         )
         .unwrap();
         assert_eq!(got, want, "{name}");
@@ -67,7 +69,7 @@ fn paths_are_parameters_resolved_with_their_links() {
     assert_eq!(get("LINK_0").unwrap(), s(&t.join("link")));
     assert!(get("LINK_1").is_none());
     assert!(!text.contains(t.to_str().unwrap()), "paths never enter the text");
-    assert_eq!(text, sandbox::render_text("runner", 1, 1, 1, "none", false, false, None, false).unwrap());
+    assert_eq!(text, sandbox::render_text("runner", 1, 1, 1, "none", false, false, None, false, 0, 0).unwrap());
     std::fs::remove_dir_all(&t).unwrap();
 }
 
@@ -100,7 +102,7 @@ fn links_are_followed_hop_by_hop_and_deduplicated() {
     let names: Vec<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(names, ["MODULE_ID", "RO_0", "RW_0", "LINK_0", "LINK_1", "BROKER_SOCKET"]);
     assert_eq!(params[5].1, s(&t.join("c/broker.sock")));
-    assert_eq!(text, sandbox::render_text("runner", 1, 1, 2, "egress-allowlist", true, false, Some(47001), false).unwrap());
+    assert_eq!(text, sandbox::render_text("runner", 1, 1, 2, "egress-allowlist", true, false, Some(47001), false, 0, 0).unwrap());
     std::fs::remove_dir_all(&t).unwrap();
 }
 

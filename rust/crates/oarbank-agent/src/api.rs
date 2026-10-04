@@ -94,34 +94,44 @@ impl Api {
         self.finish(r).await
     }
 
-    pub async fn head_ok(&self, path: &str) -> Result<bool, ApiError> {
-        let r = self.client.head(self.url(path)).send().await?;
-        Ok(r.status().is_success())
-    }
-
-    pub async fn put_file(&self, path: &str, file: &std::path::Path) -> Result<Value, ApiError> {
-        let f = tokio::fs::File::open(file).await.map_err(|e| ApiError::Http {
-            status: 0, code: "io".into(), detail: e.to_string(), retry_after: None, body: Box::default() })?;
-        let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
-        let stream = tokio_util_stream(f);
-        let r = self.client.put(self.url(path)).header("content-length", len).body(reqwest::Body::wrap_stream(stream))
-            .timeout(Duration::from_secs(3600)).send().await?;
-        Ok(self.finish(r).await?.json().await.unwrap_or(Value::Null))
-    }
-}
-
-fn tokio_util_stream(f: tokio::fs::File) -> impl futures_util::Stream<Item = std::io::Result<bytes::Bytes>> {
-    futures_util::stream::unfold(f, |mut f| async move {
-        use tokio::io::AsyncReadExt;
-        let mut buf = vec![0u8; 1 << 16];
-        match f.read(&mut buf).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buf.truncate(n);
-                Some((Ok(bytes::Bytes::from(buf)), f))
-            }
-            Err(e) => Some((Err(e), f)),
+    /// Upload a file as the blob `digest` (`size` bytes) through the coordinator's resumable upload (after tus 1.0:
+    /// `POST /v1/uploads/{digest}` says where it stands, `PATCH` appends at `Upload-Offset`), resuming from the
+    /// coordinator's offset after a cut. A blob the coordinator holds already costs one request.
+    pub async fn upload(&self, digest: &str, file: &std::path::Path, size: u64) -> Result<(), ApiError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let io = |e: std::io::Error| ApiError::Http { status: 0, code: "io".into(), detail: e.to_string(), retry_after: None,
+                                                    body: Box::default() };
+        let path = format!("/v1/uploads/{digest}");
+        let st = self.post(&path, &serde_json::json!({"size": size})).await?;
+        if st["complete"].as_bool() == Some(true) {
+            return Ok(());
         }
-    })
+        let mut offset = st["offset"].as_u64().unwrap_or(0);
+        let mut f = tokio::fs::File::open(file).await.map_err(io)?;
+        loop {
+            f.seek(std::io::SeekFrom::Start(offset)).await.map_err(io)?;
+            let mut chunk = vec![0u8; UPLOAD_CHUNK.min((size - offset) as usize)];
+            f.read_exact(&mut chunk).await.map_err(io)?;
+            let r = self.client.patch(self.url(&path)).header("upload-offset", offset.to_string())
+                .header("content-type", "application/offset+octet-stream").body(chunk)
+                .timeout(Duration::from_secs(3600)).send().await?;
+            let conflict = r.status().as_u16() == 409;
+            let at = r.headers().get("upload-offset").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+            let complete = r.headers().get("upload-complete").is_some_and(|v| v == "1");
+            if conflict {
+                if let Some(at) = at {
+                    offset = at;                   // the coordinator stands elsewhere (an earlier try landed): go on from there
+                    continue;
+                }
+            }
+            self.finish(r).await?;
+            if complete {
+                return Ok(());
+            }
+            offset = at.unwrap_or(offset);
+        }
+    }
 }
 
+/// The size of one PATCH of an upload.
+const UPLOAD_CHUNK: usize = 8 << 20;

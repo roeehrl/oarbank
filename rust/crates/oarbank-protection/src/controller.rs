@@ -394,6 +394,7 @@ impl ProtectionController {
                     ("error", opt_str(self.config_error.as_deref())),
                 ]),
             );
+            self.dynamic.max_pause_s = new.max_pause_s;
             self.config = new;
             self.sources.reset();
         }

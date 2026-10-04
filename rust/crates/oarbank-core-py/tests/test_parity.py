@@ -245,7 +245,7 @@ def test_sandbox_goldens_and_shapes():
     for c in json.loads((golden / "cases.json").read_text()):
         want = (golden / f"{c['name']}.sb").read_text()
         got = oc.render_sandbox_text(c["kind"], c["ro"], c["rw"], c["links"], c["net"], c["broker"], c["gpu"],
-                                     c.get("proxy_port"), c.get("exec_rw", False))
+                                     c.get("proxy_port"), c.get("exec_rw", False), c.get("rd", 0), c.get("wo", 0))
         assert got == want, c["name"]
     for kind in ("runner", "service", "coordinator", "doctor"):
         for n_ro in (0, 1, 3):
@@ -253,9 +253,9 @@ def test_sandbox_goldens_and_shapes():
                 for n_links in (0, 1, 12):
                     for net in ("none", "egress-allowlist", "egress-any", "open"):
                         for port in (None, 0, 1, 47001, 65535):
-                            for flags in range(8):
+                            for flags in range(32):
                                 broker, gpu, exec_rw = bool(flags & 1), bool(flags & 2), bool(flags & 4)
-                                a = (kind, n_ro, n_rw, n_links, net, broker, gpu, port, exec_rw)
+                                a = (kind, n_ro, n_rw, n_links, net, broker, gpu, port, exec_rw, (flags >> 3) & 1, (flags >> 4) & 1)
                                 same(outcome(sandbox.render_text, *a), outcome(oc.render_sandbox_text, *a), str(a), messages=True)
 
 

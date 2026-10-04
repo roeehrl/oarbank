@@ -132,3 +132,60 @@ fn a_contained_runner_is_alone_in_its_job_with_the_shim() {
     let _ = shim.wait();
     assert!(!others.is_empty() && contained.iter().all(|c| *c), "members besides the shim {others:?}: AppContainer {contained:?}");
 }
+
+#[test]
+fn a_runner_reads_its_read_folder_and_writes_only_into_its_outbox() {
+    // folder grants (spec/sandbox.md, "Folders"): entries for the module's runner capability SID, which the shim adds to
+    // the runner's token; a read folder is read and listed, never written; an outbox takes new files, never a read, a
+    // listing or a delete
+    let d = scratch("folders");
+    let (inbox, outbox) = (d.join("inbox"), d.join("outbox"));
+    std::fs::create_dir_all(&inbox).unwrap();
+    std::fs::create_dir_all(&outbox).unwrap();
+    std::fs::write(inbox.join("input.txt"), "ferry me").unwrap();
+    std::fs::write(outbox.join("earlier.txt"), "not yours").unwrap();
+    let work = d.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let (py, roots) = python();
+    let policy = serde_json::json!({"module": "dev.test.folders", "ro": roots, "rw": [work.display().to_string()], "net": "none",
+                                    "proxy_port": null, "broker_socket": null, "gpu": false, "exec_rw": false,
+                                    "kind": "runner", "exe": py, "rd": [inbox.display().to_string()],
+                                    "wo": [outbox.display().to_string()]});
+    let p = d.join("policy.json");
+    std::fs::write(&p, policy.to_string()).unwrap();
+    let probe = r#"
+import json, os, sys
+inbox, outbox, out = sys.argv[1], sys.argv[2], sys.argv[3]
+def tried(fn):
+    try:
+        fn()
+        return "allowed"
+    except OSError:
+        return "refused"
+r = {}
+r["read_inbox"] = open(os.path.join(inbox, "input.txt")).read()
+r["list_inbox"] = tried(lambda: os.listdir(inbox))
+r["write_inbox"] = tried(lambda: open(os.path.join(inbox, "planted.txt"), "w").write("x"))
+def send():
+    with open(os.path.join(outbox, "ferried.txt"), "w") as f:
+        f.write("done")
+r["write_outbox"] = tried(send)
+r["read_outbox"] = tried(lambda: open(os.path.join(outbox, "earlier.txt")).read())
+r["read_own_outbox_file"] = tried(lambda: open(os.path.join(outbox, "ferried.txt")).read())
+r["list_outbox"] = tried(lambda: os.listdir(outbox))
+r["delete_outbox"] = tried(lambda: os.remove(os.path.join(outbox, "earlier.txt")))
+open(out, "w").write(json.dumps(r))
+"#;
+    let result = work.join("probe.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_oarbank-agent")).arg("sandbox-exec").arg(&p).arg("--")
+        .args([py.as_str(), "-I", "-c", probe, &inbox.display().to_string(), &outbox.display().to_string(),
+               &result.display().to_string()])
+        .output().unwrap();
+    assert!(out.status.success(), "{:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
+    assert_eq!(r, serde_json::json!({"read_inbox": "ferry me", "list_inbox": "allowed", "write_inbox": "refused",
+                                     "write_outbox": "allowed", "read_outbox": "refused", "read_own_outbox_file": "refused",
+                                     "list_outbox": "refused", "delete_outbox": "refused"}));
+    assert_eq!(std::fs::read_to_string(outbox.join("ferried.txt")).unwrap(), "done");
+    assert!(!inbox.join("planted.txt").exists() && outbox.join("earlier.txt").exists());
+}

@@ -326,3 +326,15 @@ fn the_agent_refuses_what_its_os_cannot_do() {
     assert_eq!(c.config().mode, ProtectionMode::Moderate, "the last good config (the default) stays");
     assert!(c.config().rules.is_empty());
 }
+
+/// `[node] max_pause_s`: an owner may shorten the longest pause (never past 10 minutes); the union keeps the shorter.
+#[test]
+fn max_pause_is_bounded_and_the_union_keeps_the_shorter() {
+    use oarbank_protection::config::{ProtectionConfig, MAX_PAUSE_S};
+    let c = |v: serde_json::Value| ProtectionConfig::from_json(&serde_json::json!({"schema": 1, "node": v}), "central");
+    assert_eq!(c(serde_json::json!({})).unwrap().max_pause_s, MAX_PAUSE_S);
+    let short = c(serde_json::json!({"max_pause_s": 30})).unwrap();
+    assert_eq!(short.max_pause_s, 30.0);
+    assert!(c(serde_json::json!({"max_pause_s": 601})).is_err() && c(serde_json::json!({"max_pause_s": 5})).is_err());
+    assert_eq!(ProtectionConfig::default().union(&short).max_pause_s, 30.0);
+}

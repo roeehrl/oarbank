@@ -909,3 +909,24 @@ fn gpu_services_stop_while_gpu_work_may_not_run() {
     let mut ctl = controller(json!({"node": {"mode": "fleet_first"}}));
     assert!(ctl.evaluate(&i, &[], &no_cpu()).service_stops.is_empty());
 }
+
+/// `[node] max_pause_s`: a job paused that long is released (preempt_protection), the agent then checkpoints a
+/// checkpointing runner first; without the setting the limit stays 10 minutes.
+#[test]
+fn a_job_paused_past_the_nodes_max_pause_is_released() {
+    let evicted_at = |node: Value| {
+        let mut ctl = ProtectionController::new(None, Host::unavailable());
+        ctl.apply(Some(&json!({"node": node, "rule": [{"id": "calls", "match": {"name": "zoom"}, "pause_fleet": {},
+                                                          "active_when": {"for_s": 0}}]})), &LocalProtection::Absent);
+        let jobs = vec![FleetJobView { pausable: true, ..FleetJobView::new(1, Some(10), 1.0, 0.0, 1.0) }];
+        let mem = MemorySignals::new(64.0, 20.0, 0);
+        (0..400).map(|k| f64::from(k) * 2.0).find(|t| {
+            ctl.evaluate(&tick(*t, mem, jobs.clone()), &[proc_fp(5, "/x/zoom", 0.5)], &no_cpu()).evictions.iter()
+                .any(|e| e.attempt_id == 1 && e.reason == "preempt_protection")
+        })
+    };
+    let short = evicted_at(json!({"mode": "fleet_first", "max_pause_s": 20})).expect("released");
+    assert!((20.0..=26.0).contains(&short), "released at {short}");
+    let default = evicted_at(json!({"mode": "fleet_first"})).expect("released");
+    assert!((600.0..=606.0).contains(&default), "released at {default}");
+}
