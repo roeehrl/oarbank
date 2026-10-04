@@ -155,6 +155,7 @@ pub fn image_key(reference: &str) -> (String, String) {
 /// A reference with its registry spelled out as Docker resolves a short name (docker.io, and library/ for a one-part
 /// name), its tag and digest kept. Modules approve images in Docker's form (`genonet/hap-py@sha256:…`), and Podman
 /// refuses a short name unless the host configures unqualified-search registries, which a default install does not.
+#[cfg(any(target_os = "linux", test))]
 pub fn qualified(reference: &str) -> String {
     let (name, digest) = match reference.split_once('@') {
         Some((n, d)) => (n, Some(d)),
