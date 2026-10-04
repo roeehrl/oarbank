@@ -3,9 +3,46 @@
 
 use crate::signals::PresenceReading;
 
-/// Linux: the login sessions systemd-logind tracks (`loginctl show-session`).
+/// Linux: the login sessions systemd-logind tracks (`loginctl show-session`), and whether a person is using the
+/// machine through one of them: a desktop session (x11, wayland, mir) that is active and whose desktop does not say
+/// idle, or a text session (a local console, or a remote login) that has a terminal with recent input. Sessions
+/// that are not a person at the machine never count: user managers, greeters, lock screens, background and closing
+/// sessions, sessions switched away from on a seat, and ssh commands or automation without a terminal.
 pub mod logind {
     use super::*;
+
+    /// A terminal one of a session's processes has as its controlling terminal.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Terminal {
+        /// Its name under /dev ("pts/0", "tty3").
+        pub name: String,
+        /// Its last input: the device's access time, which the kernel moves when the terminal is read (in steps of
+        /// 8 s), CLOCK_REALTIME microseconds.
+        pub input_us: u64,
+    }
+
+    /// The controlling terminals of a session's processes, which the platform reads where logind has no input
+    /// time: OpenSSH opens a login's PAM session before it allocates the pty, so logind records no terminal (and
+    /// no idle time) for any ssh session, with a pty or without.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub enum Terminals {
+        /// Not read: not needed, or the session's processes could not be listed.
+        #[default]
+        NotRead,
+        /// The most recently read controlling terminal among the session's processes; None: none of them has one.
+        Read(Option<Terminal>),
+    }
+
+    /// What one session says about a person using the machine.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Activity {
+        /// A person's interactive session: seconds since its last input.
+        Idle(f64),
+        /// A person's interactive session whose last input cannot be read: why.
+        Unknown(String),
+        /// Not a person using the machine: what it is ("user manager", "no terminal", …).
+        Ignored(&'static str),
+    }
 
     /// One login session.
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -14,21 +51,31 @@ pub mod logind {
         pub uid: u32,
         pub user: String,
         pub service: String,
-        /// user, user-early, user-incomplete, greeter, lock-screen, background, manager, manager-early, …
+        /// user, user-early, user-incomplete, user-light, greeter, lock-screen, background, manager,
+        /// manager-early, …
         pub class: String,
-        /// x11, wayland, mir, tty, web, unspecified
+        /// x11, wayland, mir, tty, web, unspecified (an ssh session is tty, with or without a pty)
         pub kind: String,
+        /// online (logged in, not in front on its seat), active, closing (logged out, processes left behind)
+        pub state: String,
         pub active: bool,
         pub remote: bool,
+        pub remote_host: String,
         pub seat: String,
+        /// The terminal logind recorded ("tty2", "pts/0"); empty when it recorded none.
+        pub tty: String,
         /// The X11 display (":0") of an X11 session.
         pub display: String,
         /// The session's leading process.
         pub leader: i32,
+        /// The session's scope unit ("session-5.scope").
+        pub scope: String,
         pub idle_hint: bool,
         /// CLOCK_REALTIME microseconds; 0: never tracked.
         pub idle_since_us: u64,
         pub locked: bool,
+        /// Its processes' controlling terminals (filled in by the platform, see `needs_terminals`).
+        pub terminals: Terminals,
     }
 
     impl Session {
@@ -41,31 +88,84 @@ pub mod logind {
             matches!(self.kind.as_str(), "x11" | "wayland" | "mir")
         }
 
-        /// Seconds since this session's last input; None when logind cannot tell. A graphical session's desktop
-        /// sets the idle hint (IdleSinceHint is when it last changed); a text session's is the terminal's last
-        /// access time, kept whether or not it counts as idle yet. A session with neither (no terminal, no
-        /// desktop) has no idle time.
-        pub fn idle_s(&self, now_us: u64) -> Option<f64> {
-            let since = (self.idle_since_us > 0)
-                .then(|| now_us.saturating_sub(self.idle_since_us) as f64 / 1e6);
+        /// A person's session in front of them: active (on its seat; a session at no seat is always active), and
+        /// not one left closing after its person logged out.
+        fn in_front(&self) -> bool {
+            self.is_person() && self.active && self.state != "closing"
+        }
+
+        /// Whether the platform should read its processes' terminals: a person's text session in front whose input
+        /// time logind does not know.
+        pub fn needs_terminals(&self) -> bool {
+            self.in_front() && !self.graphical() && self.idle_since_us == 0
+        }
+
+        /// Whether a person is using the machine through this session, and how long since their last input.
+        /// A desktop's idle hint decides a graphical session (IdleSinceHint is when it went idle). A text
+        /// session's last input is its terminal's: the one logind recorded or the leader's controlling terminal
+        /// (logind reports its access time as IdleSinceHint, whether or not it counts as idle yet), else the most
+        /// recently read controlling terminal of its processes. A text session with no terminal is no person at
+        /// the machine (an ssh command, automation); one whose terminal's input time cannot be read is unknown.
+        pub fn activity(&self, now_us: u64) -> Activity {
+            if !self.is_person() {
+                return Activity::Ignored(match self.class.as_str() {
+                    c if c.starts_with("manager") => "user manager",
+                    c if c.starts_with("greeter") => "greeter",
+                    c if c.starts_with("lock-screen") => "lock screen",
+                    c if c.starts_with("background") => "background",
+                    _ => "not a user session",
+                });
+            }
+            if self.state == "closing" {
+                return Activity::Ignored("closing");
+            }
+            if !self.active {
+                return Activity::Ignored("switched away");
+            }
+            let ago = |us: u64| now_us.saturating_sub(us) as f64 / 1e6;
             if self.graphical() {
-                Some(if self.idle_hint {
-                    since.unwrap_or(0.0)
+                return Activity::Idle(if self.idle_hint && self.idle_since_us > 0 {
+                    ago(self.idle_since_us)
                 } else {
                     0.0
-                })
-            } else {
-                since
+                });
+            }
+            let theirs = match &self.terminals {
+                Terminals::Read(Some(t)) => Some(t.input_us),
+                _ => None,
+            };
+            let logind = (self.idle_since_us > 0).then_some(self.idle_since_us);
+            match (logind.max(theirs), &self.terminals) {
+                (Some(input), _) => Activity::Idle(ago(input)),
+                _ if !self.tty.is_empty() => Activity::Unknown(format!(
+                    "logind has no input time for its terminal {}",
+                    self.tty
+                )),
+                (None, Terminals::Read(_)) => Activity::Ignored("no terminal"),
+                (None, Terminals::NotRead) => Activity::Unknown(
+                    "logind records no terminal for it and its processes could not be read".into(),
+                ),
             }
         }
 
         fn label(&self) -> String {
-            let via = if self.service.is_empty() {
-                &self.kind
+            let mut parts = vec![if self.service.is_empty() {
+                self.kind.clone()
             } else {
-                &self.service
-            };
-            format!("session {} ({via})", self.id)
+                self.service.clone()
+            }];
+            if self.graphical() {
+                parts.push(self.kind.clone());
+                parts.extend((!self.seat.is_empty()).then(|| self.seat.clone()));
+            } else if !self.tty.is_empty() {
+                parts.push(self.tty.clone());
+            } else if let Terminals::Read(Some(t)) = &self.terminals {
+                parts.push(t.name.clone());
+            }
+            if !self.remote_host.is_empty() {
+                parts.push(format!("from {}", self.remote_host));
+            }
+            format!("session {} ({})", self.id, parts.join(", "))
         }
     }
 
@@ -78,7 +178,8 @@ pub mod logind {
     }
 
     /// The sessions from `loginctl show-session <ids…> -p …`: one `Key=Value` block per session, separated
-    /// by blank lines.
+    /// by blank lines. A property this systemd does not have is left out of the block, and an empty value is
+    /// printed as `Key=`: either way the field keeps its empty default (no terminal, no remote host, no idle time).
     pub fn parse_show(text: &str) -> Vec<Session> {
         let mut out = vec![];
         let mut cur: Option<Session> = None;
@@ -98,11 +199,15 @@ pub mod logind {
                 "Service" => s.service = v.to_string(),
                 "Class" => s.class = v.to_string(),
                 "Type" => s.kind = v.to_string(),
+                "State" => s.state = v.to_string(),
                 "Active" => s.active = yes,
                 "Remote" => s.remote = yes,
+                "RemoteHost" => s.remote_host = v.to_string(),
                 "Seat" => s.seat = v.to_string(),
+                "TTY" => s.tty = v.strip_prefix("/dev/").unwrap_or(v).to_string(),
                 "Display" => s.display = v.to_string(),
                 "Leader" => s.leader = v.parse().unwrap_or(0),
+                "Scope" => s.scope = v.to_string(),
                 "IdleHint" => s.idle_hint = yes,
                 "IdleSinceHint" => s.idle_since_us = v.parse().unwrap_or(0),
                 "LockedHint" => s.locked = yes,
@@ -113,38 +218,88 @@ pub mod logind {
         out
     }
 
+    /// The cgroup of a session's processes from its leader's `/proc/<pid>/cgroup`: the unified hierarchy's
+    /// (`0::/user.slice/user-501.slice/session-5.scope`), else systemd's own v1 hierarchy (`name=systemd`).
+    pub fn session_cgroup(proc_cgroup: &str) -> Option<String> {
+        let path = |prefix: &str| {
+            proc_cgroup
+                .lines()
+                .find_map(|l| l.split_once(prefix).map(|(_, p)| p.to_string()))
+                .filter(|p| p.len() > 1)
+        };
+        path("0::").or_else(|| path(":name=systemd:"))
+    }
+
+    /// A terminal's name under /dev from its device number: the Unix 98 ptys (major 136), the virtual consoles
+    /// (major 4, minors below 64) and the serial ports (major 4 from 64). None: another kind of terminal.
+    pub fn tty_name(major: u32, minor: u32) -> Option<String> {
+        match (major, minor) {
+            (136, n) => Some(format!("pts/{n}")),
+            (4, n @ 0..=63) => Some(format!("tty{n}")),
+            (4, n) => Some(format!("ttyS{}", n - 64)),
+            _ => None,
+        }
+    }
+
     /// The people logged in: their active sessions (a session switched away from on a seat is not in front of
     /// anyone; a session with no seat, such as ssh, is always active).
     pub fn people(sessions: &[Session]) -> impl Iterator<Item = &Session> {
         sessions.iter().filter(|s| s.is_person() && s.active)
     }
 
-    /// The machine's presence: the least idle of the people's sessions, infinite with nobody logged in. A
-    /// session whose idle time logind cannot tell makes the whole reading unknown (counted as present).
+    /// The machine's presence: the least idle of the sessions a person is using, infinite when nobody is. A
+    /// person's session whose last input cannot be read makes the whole reading unknown (counted as present).
     pub fn presence(sessions: &[Session], now_us: u64) -> PresenceReading {
-        let mut idle = f64::INFINITY;
+        let mut least: Option<(f64, &Session)> = None;
+        let mut using = 0;
         let mut unknown = vec![];
-        let mut any = false;
-        for s in people(sessions) {
-            any = true;
-            match s.idle_s(now_us) {
-                Some(x) => idle = idle.min(x),
-                None => unknown.push(s.label()),
+        let mut ignored: Vec<(&str, Vec<&str>)> = vec![];
+        for s in sessions {
+            match s.activity(now_us) {
+                Activity::Idle(x) => {
+                    using += 1;
+                    if least.is_none_or(|(l, _)| x < l) {
+                        least = Some((x, s));
+                    }
+                }
+                Activity::Unknown(why) => unknown.push(format!("{}: {why}", s.label())),
+                Activity::Ignored(what) => match ignored.iter_mut().find(|(w, _)| *w == what) {
+                    Some((_, ids)) => ids.push(&s.id),
+                    None => ignored.push((what, vec![&s.id])),
+                },
             }
         }
-        if !any {
-            return PresenceReading::new(Some(f64::INFINITY), "logind: nobody logged in");
-        }
+        let n: usize = ignored.iter().map(|(_, ids)| ids.len()).sum();
+        let note = if n == 0 {
+            String::new()
+        } else {
+            let groups: Vec<String> = ignored
+                .iter()
+                .map(|(what, ids)| format!("{what}: {}", ids.join(", ")))
+                .collect();
+            format!(
+                "; ignored {n} non-interactive session{} ({})",
+                if n == 1 { "" } else { "s" },
+                groups.join("; ")
+            )
+        };
         if !unknown.is_empty() {
-            return PresenceReading::new(
-                None,
-                format!(
-                    "unknown: logind has no idle time for {}",
-                    unknown.join(", ")
-                ),
-            );
+            return PresenceReading::new(None, format!("unknown: {}{note}", unknown.join("; ")));
         }
-        PresenceReading::new(Some(idle), "logind")
+        match least {
+            None => PresenceReading::new(
+                Some(f64::INFINITY),
+                format!("logind: nobody is using the machine{note}"),
+            ),
+            Some((x, s)) => {
+                let of = if using > 1 {
+                    format!(", the least idle of {using}")
+                } else {
+                    String::new()
+                };
+                PresenceReading::new(Some(x), format!("logind: {}{of}{note}", s.label()))
+            }
+        }
     }
 
     /// The session in front on the machine's seat (seat0): the active person's session there, if any.
@@ -258,16 +413,60 @@ pub mod wts {
 mod tests {
     use super::logind::*;
 
-    /// What `loginctl show-session 1 2 5 7 -p …` prints on Ubuntu 26.04 (systemd 259): a service account's user
-    /// manager, a person's user manager, an ssh session without a terminal, and a GNOME session on seat0.
-    const SHOW: &str = "Id=1\nUser=999\nName=oarbank\nSeat=\nTTY=\nDisplay=\nRemote=no\nType=unspecified\n\
-        Class=manager-early\nActive=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
-        Id=2\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nType=unspecified\nClass=manager-early\n\
-        Active=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
-        Id=5\nUser=501\nName=tnt\nService=sshd\nSeat=\nTTY=\nDisplay=\nRemote=no\nType=tty\nClass=user\n\
-        Active=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
-        Id=7\nUser=1000\nName=ada\nService=gdm-password\nLeader=1690\nSeat=seat0\nTTY=tty2\nDisplay=:0\nRemote=no\nType=x11\n\
-        Class=user\nActive=yes\nState=active\nIdleHint=yes\nIdleSinceHint=1790000000000000\nLockedHint=yes\n";
+    const NOW: u64 = 1_790_000_100_000_000;
+
+    /// What `loginctl show-session 1 2 5 10 7 3 12 -p Id -p User … -p LockedHint` prints on Ubuntu 26.04
+    /// (systemd 259). 1, 5 and 10 are the oarbank-ubuntu VM's: a service account's user manager, an ssh command
+    /// without a terminal and an ssh login with a pty, which logind cannot tell apart (no TTY, no idle time); 2 is a
+    /// person's user manager, 7 a GNOME session on seat0 whose desktop has been idle for 100 s, 3 a text console on
+    /// the same seat switched away from, 12 an ssh login from another machine whose pty logind recorded (an
+    /// OpenSSH that sets the terminal before it opens the PAM session), idle for two hours.
+    const SHOW: &str = "Id=1\nUser=999\nName=oarbank\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=systemd-user\n\
+        Scope=\nLeader=1596\nType=unspecified\nClass=manager-early\nActive=yes\nState=active\nIdleHint=no\n\
+        IdleSinceHint=0\nLockedHint=no\n\n\
+        Id=2\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=systemd-user\nScope=\n\
+        Leader=1600\nType=unspecified\nClass=manager\nActive=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\n\
+        LockedHint=no\n\n\
+        Id=5\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=sshd\nScope=session-5.scope\n\
+        Leader=2261\nType=tty\nClass=user\nActive=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
+        Id=10\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=sshd\n\
+        Scope=session-10.scope\nLeader=95009\nType=tty\nClass=user\nActive=yes\nState=active\nIdleHint=no\n\
+        IdleSinceHint=0\nLockedHint=no\n\n\
+        Id=7\nUser=1000\nName=ada\nSeat=seat0\nTTY=tty2\nDisplay=:0\nRemote=no\nRemoteHost=\nService=gdm-password\n\
+        Scope=session-7.scope\nLeader=1690\nType=x11\nClass=user\nActive=yes\nState=active\nIdleHint=yes\n\
+        IdleSinceHint=1790000000000000\nLockedHint=yes\n\n\
+        Id=3\nUser=1000\nName=ada\nSeat=seat0\nTTY=tty3\nDisplay=\nRemote=no\nRemoteHost=\nService=login\n\
+        Scope=session-3.scope\nLeader=1412\nType=tty\nClass=user\nActive=no\nState=online\nIdleHint=no\n\
+        IdleSinceHint=1790000060000000\nLockedHint=no\n\n\
+        Id=12\nUser=501\nName=tnt\nSeat=\nTTY=pts/1\nDisplay=\nRemote=yes\nRemoteHost=192.0.2.7\nService=sshd\n\
+        Scope=session-12.scope\nLeader=3310\nType=tty\nClass=user\nActive=yes\nState=active\nIdleHint=no\n\
+        IdleSinceHint=1789992900000000\nLockedHint=no\n";
+
+    /// GDM's login screen on seat0 with nobody logged in.
+    const GREETER: &str = "Id=c1\nUser=120\nName=gdm\nSeat=seat0\nTTY=tty1\nDisplay=\nRemote=no\nRemoteHost=\n\
+        Service=gdm-launch-environment\nScope=session-c1.scope\nLeader=1042\nType=wayland\nClass=greeter\nActive=yes\n\
+        State=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n";
+
+    /// The sessions of `SHOW`, their processes' terminals read as the platform reads them: none of the ssh
+    /// command's processes has a terminal, the ssh login's shell is on pts/0, last read 3 s ago.
+    fn sessions() -> Vec<Session> {
+        let mut s = parse_show(SHOW);
+        for x in s.iter_mut().filter(|x| x.needs_terminals()) {
+            x.terminals = Terminals::Read((x.id == "10").then(|| Terminal {
+                name: "pts/0".into(),
+                input_us: NOW - 3_000_000,
+            }));
+        }
+        s
+    }
+
+    fn get(s: &[Session], id: &str) -> Session {
+        s.iter().find(|x| x.id == id).cloned().unwrap()
+    }
+
+    fn pick(s: &[Session], ids: &[&str]) -> Vec<Session> {
+        ids.iter().map(|id| get(s, id)).collect()
+    }
 
     #[test]
     fn parses_sessions_and_session_ids() {
@@ -276,80 +475,221 @@ mod tests {
             ["1", "5"]
         );
         let s = parse_show(SHOW);
-        assert_eq!(s.len(), 4);
+        assert_eq!(s.len(), 7);
+        let ssh = get(&s, "5");
         assert_eq!(
             (
-                s[2].id.as_str(),
-                s[2].uid,
-                s[2].kind.as_str(),
-                s[2].service.as_str()
+                ssh.uid,
+                ssh.kind.as_str(),
+                ssh.service.as_str(),
+                ssh.state.as_str(),
+                ssh.scope.as_str()
             ),
-            ("5", 501, "tty", "sshd")
+            (501, "tty", "sshd", "active", "session-5.scope")
         );
-        let g = &s[3];
-        assert!(g.graphical() && g.is_person() && g.idle_hint && g.locked && g.active);
+        // empty values stay empty: no terminal, no remote host, no idle time
+        assert!(
+            ssh.tty.is_empty()
+                && ssh.remote_host.is_empty()
+                && !ssh.remote
+                && ssh.idle_since_us == 0
+        );
+        let g = get(&s, "7");
+        assert!(g.graphical() && g.is_person() && g.idle_hint && g.active);
+        assert_eq!(
+            (g.seat.as_str(), g.tty.as_str(), g.idle_since_us),
+            ("seat0", "tty2", NOW - 100_000_000)
+        );
+        let r = get(&s, "12");
+        assert!(r.remote);
+        assert_eq!(
+            (r.tty.as_str(), r.remote_host.as_str()),
+            ("pts/1", "192.0.2.7")
+        );
+        assert_eq!(get(&s, "3").state, "online");
+        assert!(!get(&s, "1").is_person() && !get(&s, "2").is_person());
+        // a systemd without some of the properties leaves them out of the block: nothing is misread
+        let old = parse_show(
+            "Id=4\nUser=501\nName=tnt\nService=sshd\nType=tty\nClass=user\nActive=yes\n",
+        );
         assert_eq!(
             (
-                g.seat.as_str(),
-                g.display.as_str(),
-                g.leader,
-                g.idle_since_us
+                old[0].tty.as_str(),
+                old[0].state.as_str(),
+                old[0].idle_since_us
             ),
-            ("seat0", ":0", 1690, 1_790_000_000_000_000)
+            ("", "", 0)
         );
-        assert!(!s[0].is_person() && !s[1].is_person());
+        // an older logind's "/dev/"-prefixed terminal
+        assert_eq!(parse_show("Id=4\nTTY=/dev/pts/2\n")[0].tty, "pts/2");
     }
 
     #[test]
-    fn idle_time_per_session_kind() {
-        let now = 1_790_000_100_000_000;
-        let s = parse_show(SHOW);
-        // the desktop says idle since 100 s ago
-        assert_eq!(s[3].idle_s(now), Some(100.0));
-        // a desktop that says active is present, whenever its hint last changed
-        let active = Session {
+    fn finds_a_sessions_cgroup_and_terminal_names() {
+        assert_eq!(
+            session_cgroup("0::/user.slice/user-501.slice/session-10.scope\n").as_deref(),
+            Some("/user.slice/user-501.slice/session-10.scope")
+        );
+        // cgroup v1 (hybrid or legacy): systemd's own hierarchy
+        let v1 = "12:pids:/user.slice/user-501.slice/session-3.scope\n1:name=systemd:/user.slice/user-501.slice/session-3.scope\n";
+        assert_eq!(
+            session_cgroup(v1).as_deref(),
+            Some("/user.slice/user-501.slice/session-3.scope")
+        );
+        assert_eq!(session_cgroup("0::/\n"), None);
+        assert_eq!(session_cgroup(""), None);
+        assert_eq!(tty_name(136, 0).as_deref(), Some("pts/0"));
+        assert_eq!(tty_name(136, 300).as_deref(), Some("pts/300"));
+        assert_eq!(tty_name(4, 3).as_deref(), Some("tty3"));
+        assert_eq!(tty_name(4, 65).as_deref(), Some("ttyS1"));
+        assert_eq!(tty_name(188, 0), None);
+    }
+
+    #[test]
+    fn what_each_session_says_about_a_person_at_the_machine() {
+        let s = sessions();
+        let act = |id: &str| get(&s, id).activity(NOW);
+        // user managers are no person
+        assert_eq!(act("1"), Activity::Ignored("user manager"));
+        assert_eq!(act("2"), Activity::Ignored("user manager"));
+        // an ssh command (or automation) has no terminal: not a person using the machine
+        assert_eq!(act("5"), Activity::Ignored("no terminal"));
+        // an ssh login with a pty: its shell's terminal had input 3 s ago
+        assert_eq!(act("10"), Activity::Idle(3.0));
+        // the desktop says idle since 100 s ago; a desktop that says active is present
+        assert_eq!(act("7"), Activity::Idle(100.0));
+        let busy = Session {
             idle_hint: false,
-            ..s[3].clone()
+            ..get(&s, "7")
         };
-        assert_eq!(active.idle_s(now), Some(0.0));
-        // a terminal's last access time counts whether or not logind calls it idle yet
-        let tty = Session {
-            idle_since_us: now - 30_000_000,
-            ..s[2].clone()
+        assert_eq!(busy.activity(NOW), Activity::Idle(0.0));
+        // a console switched away from on the seat is in front of nobody
+        assert_eq!(act("3"), Activity::Ignored("switched away"));
+        // the same console in front: its terminal's last input, whether or not logind calls it idle yet
+        let console = Session {
+            active: true,
+            state: "active".into(),
+            ..get(&s, "3")
         };
-        assert_eq!(tty.idle_s(now), Some(30.0));
-        // no terminal and no desktop: logind cannot tell
-        assert_eq!(s[2].idle_s(now), None);
+        assert_eq!(console.activity(NOW), Activity::Idle(40.0));
+        // a remote login logind recorded the pty of, untouched for two hours
+        assert_eq!(act("12"), Activity::Idle(7200.0));
+        // the most recent of logind's input time and the processes' terminals
+        let both = Session {
+            terminals: Terminals::Read(Some(Terminal {
+                name: "pts/4".into(),
+                input_us: NOW - 5_000_000,
+            })),
+            ..get(&s, "12")
+        };
+        assert_eq!(both.activity(NOW), Activity::Idle(5.0));
+        // greeters, lock screens, background jobs (cron) and sessions left closing after a logout never count
+        for (class, state, what) in [
+            ("greeter", "active", "greeter"),
+            ("lock-screen", "active", "lock screen"),
+            ("background", "active", "background"),
+            ("user", "closing", "closing"),
+        ] {
+            let x = Session {
+                class: class.into(),
+                state: state.into(),
+                ..get(&s, "10")
+            };
+            assert_eq!(x.activity(NOW), Activity::Ignored(what), "{class} {state}");
+            assert!(!x.needs_terminals());
+        }
+        // logind's terminal without an input time (its access time could not be read): unknown
+        let no_input = Session {
+            idle_since_us: 0,
+            ..console.clone()
+        };
+        assert!(
+            matches!(no_input.activity(NOW), Activity::Unknown(ref w) if w.contains("tty3")),
+            "{:?}",
+            no_input.activity(NOW)
+        );
+        // an ssh session whose processes could not be read: a pty cannot be ruled out
+        let unread = Session {
+            terminals: Terminals::NotRead,
+            ..get(&s, "5")
+        };
+        assert!(matches!(unread.activity(NOW), Activity::Unknown(_)));
+        // only a person's text session in front without logind's input time needs its processes read
+        let need: Vec<String> = parse_show(SHOW)
+            .into_iter()
+            .filter(Session::needs_terminals)
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(need, ["5", "10"]);
     }
 
     #[test]
     fn presence_is_the_least_idle_person_and_unknown_counts_as_present() {
-        let now = 1_790_000_100_000_000;
-        let s = parse_show(SHOW);
-        // the ssh session has no idle time: unknown, which capacity treats as someone present
-        let r = presence(&s, now);
+        let s = sessions();
+        // the VM today: user managers and the ssh command running this: nobody is using the machine
+        let r = presence(&pick(&s, &["1", "2", "5"]), NOW);
+        assert_eq!(r.idle_s, Some(f64::INFINITY));
+        assert_eq!(
+            r.source,
+            "logind: nobody is using the machine; ignored 3 non-interactive sessions (user manager: 1, 2; no terminal: 5)"
+        );
+        // someone logs in over ssh with a pty and types
+        let r = presence(&pick(&s, &["1", "2", "5", "10"]), NOW);
+        assert_eq!(r.idle_s, Some(3.0));
+        assert_eq!(
+            r.source,
+            "logind: session 10 (sshd, pts/0); ignored 3 non-interactive sessions (user manager: 1, 2; no terminal: 5)"
+        );
+        // the least idle of several people: the GNOME desktop beats an ssh login idle for an hour
+        let mut idle_ssh = get(&s, "10");
+        idle_ssh.terminals = Terminals::Read(Some(Terminal {
+            name: "pts/0".into(),
+            input_us: NOW - 3_600_000_000,
+        }));
+        let r = presence(&[idle_ssh, get(&s, "7"), get(&s, "3")], NOW);
+        assert_eq!(r.idle_s, Some(100.0));
+        assert_eq!(
+            r.source,
+            "logind: session 7 (gdm-password, x11, seat0), the least idle of 2; ignored 1 non-interactive session \
+             (switched away: 3)"
+        );
+        // a remote login left idle for two hours is far from present
+        let r = presence(&pick(&s, &["12"]), NOW);
+        assert_eq!(r.idle_s, Some(7200.0));
+        assert_eq!(r.source, "logind: session 12 (sshd, pts/1, from 192.0.2.7)");
+        // every session together
+        assert_eq!(presence(&s, NOW).idle_s, Some(3.0));
+        // nobody logged in at all
+        let r = presence(&[], NOW);
+        assert_eq!(
+            (r.idle_s, r.source.as_str()),
+            (Some(f64::INFINITY), "logind: nobody is using the machine")
+        );
+        // GDM's login screen with nobody logged in
+        let greeter = parse_show(GREETER);
+        let r = presence(&greeter, NOW);
+        assert_eq!(r.idle_s, Some(f64::INFINITY));
+        assert!(r.source.ends_with("(greeter: c1)"), "{}", r.source);
+        // an ssh session whose processes could not be read: unknown, which capacity treats as someone present
+        let mut unread = pick(&s, &["1", "5", "7"]);
+        unread[1].terminals = Terminals::NotRead;
+        let r = presence(&unread, NOW);
         assert_eq!(r.idle_s, None);
         assert_eq!(r.effective_idle_s(), 0.0);
-        assert!(r.source.contains("session 5 (sshd)"), "{}", r.source);
-        // without it, the GNOME session decides
-        let r = presence(&[s[0].clone(), s[3].clone()], now);
-        assert_eq!((r.idle_s, r.source.as_str()), (Some(100.0), "logind"));
-        // a typing ssh user is the least idle
-        let typing = Session {
-            idle_since_us: now - 2_000_000,
-            ..s[2].clone()
-        };
-        assert_eq!(presence(&[typing, s[3].clone()], now).idle_s, Some(2.0));
-        // only user managers (a service account's lingering manager): nobody is logged in
-        let r = presence(&s[..2], now);
-        assert_eq!(r.idle_s, Some(f64::INFINITY));
+        assert!(
+            r.source
+                .starts_with("unknown: session 5 (sshd): logind records no terminal"),
+            "{}",
+            r.source
+        );
+        assert!(r.source.ends_with("(user manager: 1)"), "{}", r.source);
         // a session switched away from on the seat is in front of nobody
         let away = Session {
             active: false,
-            ..s[3].clone()
+            ..get(&s, "7")
         };
         assert_eq!(
-            presence(std::slice::from_ref(&away), now).idle_s,
+            presence(std::slice::from_ref(&away), NOW).idle_s,
             Some(f64::INFINITY)
         );
         assert_eq!(front_session(&[away]), None);

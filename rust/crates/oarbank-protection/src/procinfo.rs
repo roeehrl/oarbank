@@ -22,6 +22,8 @@ pub mod procfs {
         pub state: char,
         pub ppid: i32,
         pub pgrp: i32,
+        /// The controlling terminal's device number (0: none); `tty_device` splits it.
+        pub tty_nr: u32,
         /// The foreground process group of the process's controlling terminal (-1: none).
         pub tpgid: i32,
         pub flags: u64,
@@ -43,6 +45,14 @@ pub mod procfs {
         }
     }
 
+    /// A stat `tty_nr` as (major, minor): the kernel's `new_encode_dev` (minor bits 0–7 and 20–31, major bits 8–19).
+    pub fn tty_device(tty_nr: u32) -> (u32, u32) {
+        (
+            (tty_nr >> 8) & 0xfff,
+            (tty_nr & 0xff) | ((tty_nr >> 12) & 0xfff00),
+        )
+    }
+
     /// Parse `/proc/<pid>/stat`. The command sits in parentheses and may itself hold spaces and parentheses:
     /// the fields start after the last `)`.
     pub fn parse_stat(s: &str) -> Option<Stat> {
@@ -57,6 +67,7 @@ pub mod procfs {
             state: f.first()?.chars().next()?,
             ppid: i(1)?,
             pgrp: i(2)?,
+            tty_nr: f.get(4)?.parse::<i32>().ok()? as u32,
             tpgid: i(5)?,
             flags: n(6)?,
             majflt: n(9)?,
@@ -585,6 +596,9 @@ mod tests {
             ),
             ('S', 2171, 4242, 4242, 37, 1520, 230, 482113)
         );
+        // its controlling terminal is /dev/pts/0 (major 136)
+        assert_eq!((s.tty_nr, tty_device(s.tty_nr)), (34816, (136, 0)));
+        assert_eq!(tty_device(0x0010_8801), (136, 257), "a minor past 255");
         assert!(s.is_live_user_process());
         let kthread = parse_stat("2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 2 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 0 1 0 0 0 0 0").unwrap();
         assert!(!kthread.is_live_user_process());

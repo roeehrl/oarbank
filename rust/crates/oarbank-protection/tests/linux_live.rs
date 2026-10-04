@@ -38,16 +38,40 @@ fn gpu_time_comes_from_drm_fdinfo() {
     );
 }
 
+/// Presence is a person using the machine: this test's own session counts when the test runs on a terminal (an ssh
+/// login with a pty, a console) and never when it runs as an ssh command or automation without one.
 #[test]
 #[ignore = "reads the live logind sessions"]
 fn presence_comes_from_logind() {
+    use oarbank_protection::presence::logind::{session_cgroup, Activity};
     let sessions = linux::sessions().expect("systemd-logind runs");
     let r = platform::native_presence(None).read();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64;
     eprintln!("{} sessions; presence {r:?}", sessions.len());
-    // whoever runs this test is logged in (ssh, a terminal or a desktop)
-    assert!(sessions.iter().any(|s| s.is_person()), "{sessions:?}");
-    assert!(r.source.starts_with("logind") || r.source.starts_with("unknown: logind has no idle time"), "{r:?}");
-    assert!(r.idle_s.is_none_or(|s| s.is_finite() && s >= 0.0));
+    for s in sessions.iter() {
+        eprintln!("  session {} {} {} tty {:?} {:?}: {:?}", s.id, s.class, s.kind, s.tty, s.terminals, s.activity(now));
+    }
+    assert!(r.source.starts_with("logind: ") || r.source.starts_with("unknown: "), "{r:?}");
+    assert!(r.idle_s.is_none_or(|s| s >= 0.0));
+    // this test's own session, from its cgroup
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+    let own = session_cgroup(&cgroup)
+        .and_then(|p| Some(p.rsplit('/').next()?.strip_prefix("session-")?.strip_suffix(".scope")?.to_string()));
+    let Some(id) = own else {
+        eprintln!("this test runs in no login session ({cgroup:?})");
+        return;
+    };
+    let s = sessions.iter().find(|s| s.id == id).expect("its session is listed");
+    let tty = linux::reader().stat(std::process::id() as i32).unwrap().tty_nr;
+    let a = s.activity(now);
+    eprintln!("own session {id}, controlling terminal {tty:#x}: {a:?}");
+    if tty != 0 {
+        assert!(matches!(a, Activity::Idle(x) if x >= 0.0), "on a terminal: a person's session, {a:?}");
+    }
+    if a == Activity::Ignored("no terminal") {
+        assert_eq!(tty, 0);
+        assert!(!r.source.contains(&format!("session {id} (")), "{r:?}");
+    }
 }
 
 /// The table lists the owner's processes with the identity rules match on; another account's executable link

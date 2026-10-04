@@ -124,7 +124,9 @@ when they are written (a promotion skips the nodes that cannot run them and says
 
 What depends on the moment rather than the OS the agent reports, and the console and explain show it as a node
 condition while the fail-safe default applies: a front app that cannot be read (`PROTECTION_FRONT_UNKNOWN`: a Wayland
-desktop), presence that cannot be read (`PROTECTION_PRESENCE_UNKNOWN`: counts as someone present), processes matched
+desktop), presence that cannot be read (`PROTECTION_PRESENCE_UNKNOWN`: counts as someone present; on Linux, where
+presence is a desktop session or a session with a terminal that has had input, only when logind cannot be asked or
+such a session's input time cannot be read, never because of an ssh command or a user manager), processes matched
 only because their path or arguments were unreadable (`PROTECTION_UNREADABLE`), an `ipc_ratio` rule whose processes
 have no instruction or cycle counters (`PROTECTION_NO_IPC_COUNTERS`: a virtual machine; the metric is unknown, so the
 budget does not grow on it), and a node that cannot lower its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused
