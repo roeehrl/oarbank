@@ -90,7 +90,8 @@ on the local network, a hint for the URL only.
   `canary --node <node>` and `promote`. The launcher keeps the previous version and rolls back a build that does not
   confirm itself within 10 minutes. Installing a newer pkg replaces the launcher and restarts the service.
 - **The coordinator**: run the installer again with the new build; `current` moves and the services restart (agents
-  reconnect by themselves). Earlier builds stay beside it for going back.
+  reconnect by themselves), and modules' Python environments made by the previous build are rebuilt on the new
+  build's interpreter when it starts. Earlier builds stay beside it for going back.
 - **Moving the coordinator** to another node: `oarbank coordinator prepare --to <node>`, then `move` (and `sign` with
   the owner key). The node's agent installs the standby from a signed coordinator build; agents verify the move and
   follow it after its time lock (docs/design/coordinator-move.md).

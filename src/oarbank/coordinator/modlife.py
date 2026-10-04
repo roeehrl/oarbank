@@ -251,16 +251,30 @@ def postflight(db: DB) -> dict:
 
 
 def runtimes_ok(db: DB) -> list[str]:
-    """Rebuild coordinator runtimes that do not resolve on this machine (a moved venv points at the old machine's
-    Python). Returns the modules rebuilt."""
+    """Rebuild the coordinator runtimes (module venvs) this coordinator cannot use: one whose interpreter does not
+    resolve here (a moved venv points at the old machine's Python), or resolves to another interpreter than the
+    running one (built by an earlier coordinator build: an in-place update leaves that build beside the new one, and
+    the module sandbox grants only the running interpreter, so the module could not even start). Runs at every start.
+    Returns the modules rebuilt; one that cannot be rebuilt is reported and left for its module host to fault."""
+    import shutil
+    import sys
     from pathlib import Path
+    from ..platform import files
+    mine = Path(sys.executable).resolve()
     done = []
     for r in db.q("SELECT name, version, path FROM modules WHERE runtime IS NOT NULL"):
         p = db.abs(r["path"])
-        py = p / ".venv" / "bin" / "python"
-        if (p / "requirements.txt").exists() and not (py.exists() and py.resolve().exists()):
-            import shutil
-            shutil.rmtree(p / ".venv", ignore_errors=True)
+        if not (p / "requirements.txt").exists():
+            continue
+        py = files.venv_python(p / ".venv")
+        if py.exists() and py.resolve() == mine:
+            continue
+        shutil.rmtree(p / ".venv", ignore_errors=True)
+        try:
             modstore._build_runtime(p)
-            done.append(f"{r['name']}@{r['version']}")
+        except modstore.InstallError as e:
+            db.event("module_runtime_failed", reason=f"{r['name']}@{r['version']}: {e}"[:500])
+            continue
+        db.event("module_runtime_rebuilt", reason=f"{r['name']}@{r['version']}")
+        done.append(f"{r['name']}@{r['version']}")
     return done

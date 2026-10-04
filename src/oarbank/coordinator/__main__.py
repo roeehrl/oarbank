@@ -59,7 +59,8 @@ def main():
         threading.Thread(target=puller.run, daemon=True, name="oarbankd-standby").start()
     elif identity.role(db) == "active" and not db.get_setting("coordinator_url"):
         db.set_setting("coordinator_url", my_url)
-    from . import modcalls
+    from . import modcalls, modlife
+    modlife.runtimes_ok(db)                   # module venvs an earlier coordinator build made run on its interpreter
     modcalls.use(db)                          # the module catalog comes from the store (oarbank module install)
     if tightened:
         db.event("home_tightened", reason=f"{len(tightened)} paths made owner-only")

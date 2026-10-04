@@ -102,3 +102,32 @@ def test_install_refuses_unpinned_requirements_even_in_a_hand_made_bundle(db, tm
     (dest / "requirements.txt").write_text("tinydep>=1.0\n")                         # tampered after the build check
     with pytest.raises(modstore.InstallError, match="requirements.txt"):
         modstore._build_runtime(dest)
+
+
+@pytest.mark.skipif(not shutil.which("uv"), reason="needs uv")
+def test_a_venv_an_earlier_coordinator_build_made_is_rebuilt_on_this_interpreter(db, tmp_path):
+    """An in-place coordinator update leaves the previous build (and its Python) beside the new one, so a module venv
+    made at install still resolves, to the old interpreter, which the module sandbox does not grant: the module could
+    not start until its venv is rebuilt on the running interpreter (oarbankd does it at every start)."""
+    import os
+    import sys
+    from oarbank.coordinator import modlife
+    from oarbank.platform import files
+    src = module_with_deps(tmp_path, "0.5.0")
+    out, _ = B.build(src, tmp_path / "toy-0.5.0.mfb")
+    venv = Path(modstore.install(db, out, actor="test", self_test=False)["path"]) / ".venv"
+    py = files.venv_python(venv)
+    assert py.resolve() == Path(sys.executable).resolve()
+    assert modlife.runtimes_ok(db) == []                                 # this build's venv: left alone
+    old = tmp_path / "coordinator-app" / "0.1.0-earlier" / "python" / "bin" / "python3.12"   # the earlier build's Python
+    old.parent.mkdir(parents=True)
+    shutil.copyfile(sys.executable, old)
+    py.unlink()
+    os.symlink(old, py)
+    assert modlife.runtimes_ok(db) == ["toy@0.5.0"]
+    assert files.venv_python(venv).resolve() == Path(sys.executable).resolve()
+    site = next(venv.glob("lib/python*/site-packages"))
+    assert (site / "tinydep" / "__init__.py").read_text() == "VALUE = 42\n"
+    assert db.one("SELECT reason FROM events WHERE kind='module_runtime_rebuilt'")["reason"] == "toy@0.5.0"
+    shutil.rmtree(venv)                                                  # gone altogether (a move): rebuilt too
+    assert modlife.runtimes_ok(db) == ["toy@0.5.0"]
