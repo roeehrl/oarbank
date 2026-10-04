@@ -1064,7 +1064,7 @@ impl ServiceManager {
         let services: Vec<Value> = sh.services.iter().map(|(k, s)| json!({
             "service": k, "health": s.health.as_str(), "running": s.running, "ready": s.ready, "pools": s.pools,
             "reserve_mem_gb": (s.reserve_mem_gb * 100.0).round() / 100.0, "disabled": s.disabled, "users": s.users,
-            "failures": s.failures, "withdrawn": s.withdrawn, "error": s.last_error, "held": s.held,
+            "failures": s.failures, "withdrawn": s.withdrawn, "error": s.last_error, "held": s.held, "busy": s.busy,
             "accepting": s.decl.endpoint && s.accepting(),
             "lifecycle": match s.decl.lifecycle { Lifecycle::OnDemand => "on_demand", Lifecycle::Always => "always",
                                                   Lifecycle::Manual => "manual" }})).collect();

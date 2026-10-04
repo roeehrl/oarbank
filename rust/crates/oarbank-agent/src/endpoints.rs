@@ -848,6 +848,16 @@ pub mod tests {
             self.root.join("home").join("modules-data").join("modelserver").join(name)
         }
 
+        /// What a failed wait shows: the services' state and the module's data directory (the daemon's log above all).
+        fn why(&self, m: &ServiceManager) -> String {
+            let dir = self.data("");
+            let files: Vec<String> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| {
+                format!("{} ({} bytes)", e.file_name().to_string_lossy(), e.metadata().map(|m| m.len()).unwrap_or(0))
+            }).collect()).unwrap_or_default();
+            format!("{}\ndata {}: {files:?}\nmodel.log: {}", m.report(), dir.display(),
+                    std::fs::read_to_string(self.data("model.log")).unwrap_or_default())
+        }
+
         fn loads(&self) -> Vec<String> {
             std::fs::read_to_string(self.data("model.loads")).unwrap_or_default().lines().map(str::to_string).collect()
         }
@@ -973,7 +983,7 @@ pub mod tests {
     fn two_concurrent_jobs_share_one_warm_sandboxed_service_that_loads_once() {
         let fx = Fx::new("share");
         let mut m = fx.manager();
-        assert!(tick_until(&mut m, 2, 90.0, ready), "{}", m.report());
+        assert!(tick_until(&mut m, 2, 90.0, ready), "{}", fx.why(&m));
         let pid = daemon(&fx);
         #[cfg(unix)]
         assert!(crate::sandbox::is_confined(pid), "the service's daemon runs sandboxed");
@@ -998,7 +1008,7 @@ pub mod tests {
         a.end();
         b.end();
         // no users: stopped after its idle timeout, its daemon gone (it exits on the end of its channel)
-        assert!(tick_until(&mut m, 0, 30.0, |m| m.running().is_empty()), "{}", m.report());
+        assert!(tick_until(&mut m, 0, 30.0, |m| m.running().is_empty()), "{}", fx.why(&m));
         assert!(gone(pid) && !fx.data("model.ready").exists());
         // and a later job starts it again, with a new channel
         assert!(tick_until(&mut m, 1, 90.0, ready));
@@ -1013,12 +1023,12 @@ pub mod tests {
     fn a_hold_by_host_protection_stops_the_service_and_keeps_it_down() {
         let fx = Fx::new("hold");
         let mut m = fx.manager();
-        assert!(tick_until(&mut m, 1, 90.0, ready), "{}", m.report());
+        assert!(tick_until(&mut m, 1, 90.0, ready), "{}", fx.why(&m));
         let pid = daemon(&fx);
         let mut j = fx.job(&m, 201, &["x"]);
         assert!(j.out()["answers"].is_array());
         m.set_held(&[("modelserver/model".to_string(), "preempt_memory".to_string())].into());
-        assert!(tick_until(&mut m, 1, 30.0, |m| m.running().is_empty()), "{}", m.report());
+        assert!(tick_until(&mut m, 1, 30.0, |m| m.running().is_empty()), "{}", fx.why(&m));
         assert!(gone(pid), "its processes are ended");
         assert_eq!(m.held(), BTreeMap::from([("modelserver/model".to_string(), "preempt_memory".to_string())]));
         assert!(!tick_until(&mut m, 1, 2.0, |m| !m.running().is_empty()), "not started again while held, even with users");
@@ -1035,7 +1045,7 @@ pub mod tests {
     fn a_release_without_the_module_stops_its_service() {
         let fx = Fx::new("unload");
         let mut m = fx.manager();
-        assert!(tick_until(&mut m, 1, 90.0, ready), "{}", m.report());
+        assert!(tick_until(&mut m, 1, 90.0, ready), "{}", fx.why(&m));
         let pid = daemon(&fx);
         let empty = Release { id: "r_none".into(), dir: fx.release.dir.clone(), modules: vec![] };
         m.configure(&empty, &json!({}), None);
