@@ -1380,10 +1380,10 @@ fn stop_job(x: &Exec, sh: &SharedRef, key: &str, pgid: Option<i32>, reg: Option<
     with_svc(sh, key, |s| {
         s.busy = false;
         if r.ok {
+            // failures and the last error stay: only a service that becomes ready again is past them, so one that
+            // fails after every start backs off and is withdrawn instead of being stopped and started for ever
             s.running = false;
             s.ready = false;
-            s.failures = 0;
-            s.last_error = None;
             s.idle_since = None;
             if s.pgid == pgid {
                 s.pgid = None;
@@ -1649,6 +1649,22 @@ mod tests {
         let r = m.report();
         assert_eq!(r["services"][0]["failures"], 3);
         assert!(r["services"][0]["error"].as_str().unwrap().contains("start refused"), "{r}");
+    }
+
+    #[test]
+    fn a_start_that_fails_halfway_backs_off_and_keeps_its_error() {
+        // an endpoint service whose start marks it up and then fails is fingerprinted running without a channel, so
+        // it is stopped; that stop must not wipe the failure, or it is started and stopped for ever with nothing in
+        // its report
+        let fx = Fx::new("halfway", json!([svc("vm", json!({"endpoint": true,
+            "restart": {"backoff_initial_s": 0.2, "backoff_max_s": 0.4, "max_failures": 3}}))]), json!([]));
+        fx.touch("vm.fail_after_up", "");
+        let mut m = fx.manager(json!({}), true);
+        let one = need(&[("vmpool", 1)]);
+        assert!(tick_until(&mut m, &one, &[], false, 30.0, |m| lock(&m.shared).services["mod/vm"].withdrawn), "{}", m.report());
+        let r = m.report();
+        assert!(r["services"][0]["error"].as_str().unwrap().contains("start broke halfway"), "{r}");
+        assert_eq!(fx.calls("vm", "start"), 3);
     }
 
     #[test]

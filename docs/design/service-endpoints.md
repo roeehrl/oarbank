@@ -290,3 +290,10 @@ Built as designed, in oarbank-sdk 1.5.0 and core 2.5.0. Where the build adds to 
   ends are), used by the kit and the SDK's tests.
 - **Windows synchronous pipes** need refcounted closing in the SDK's pipe wrapper (`close` waits for the files
   `makefile` returned, as a socket's does), else an HTTP response is lost after `Connection: close`.
+- **Found on CI (windows-2025):** Windows Server 2025 refuses an AppContainer the null device, so the reference service's
+  `subprocess.DEVNULL` failed there; it now passes on the stdin the agent gave `start` (the Windows backend page says
+  so). That start failed after marking itself up, so the service was fingerprinted running without a channel, stopped,
+  and started again for ever: a successful `stop` reset the failure count and the error. It no longer does: only a
+  service that becomes ready again is past its failures, so such a service backs off and is withdrawn, with its error
+  in the report. The Windows sandbox also stopped rewriting a granted interpreter's ACL at every launch (a file's
+  entries carry no inheritance flags, so an existing grant was never seen).

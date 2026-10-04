@@ -1,7 +1,8 @@
 #!/bin/sh
 # A fake service-protocol-1 service for the agent's tests. Its state is files in its data directory, named after
 # the service: <svc>.up (running), <svc>.ready (the daemon is ready), <svc>.calls (every op it was asked).
-# Test switches: <svc>.fail_start, <svc>.health, <svc>.no_running (fingerprint omits "running"), <svc>.owned.
+# Test switches: <svc>.fail_start, <svc>.fail_after_up (start marks itself up, then fails), <svc>.health, <svc>.no_running
+# (fingerprint omits "running"), <svc>.owned.
 D="$OARBANK_MODULE_DATA"
 S="$OARBANK_SERVICE"
 echo "$*" >> "$D/$S.calls"
@@ -19,6 +20,7 @@ fingerprint)
   ;;
 start)
   if [ -f "$D/$S.fail_start" ]; then echo "start refused" >&2; exit 1; fi
+  if [ -f "$D/$S.fail_after_up" ]; then : > "$D/$S.up"; echo "start broke halfway" >&2; exit 1; fi
   {
     echo "service=$OARBANK_SERVICE"
     echo "node=$OARBANK_NODE_ID"
