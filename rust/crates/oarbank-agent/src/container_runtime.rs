@@ -720,7 +720,7 @@ pub fn for_node(layout: &crate::paths::Layout) -> Option<std::sync::Arc<dyn Cont
 
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /// The engine's home: the account's own when it may write it, else the agent's (a system install's account home is
@@ -766,7 +766,7 @@ mod tests {
     /// A root filesystem of this host's `sh` and `cat` with the libraries they load (`ldd`), as a tar to import: an
     /// image that needs no registry.
     #[cfg(target_os = "linux")]
-    fn host_rootfs(tar: &Path) {
+    pub fn host_rootfs(tar: &Path) {
         let mut files: Vec<(String, PathBuf)> = vec![];
         for (name, bin) in [("bin/sh", "/bin/sh"), ("bin/cat", "/bin/cat")] {
             files.push((name.into(), PathBuf::from(bin)));

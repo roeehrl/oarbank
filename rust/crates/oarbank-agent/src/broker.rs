@@ -1132,4 +1132,62 @@ print(json.dumps(out))
         let args = rt.with(|s| s.runs.last().unwrap().0.clone());
         assert!(args.windows(2).any(|w| w == ["--device", "nvidia.com/gpu=all"]), "{args:?}");
     }
+
+    /// Linux with an engine: a signed image of the host's own shell, served by a local registry, verified by the broker
+    /// and then pulled by digest and run by the real engine; an unsigned one in the same set is refused before any pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(target_os = "linux")]
+    async fn a_signed_image_from_a_registry_is_verified_pulled_and_run_by_the_real_engine() {
+        use crate::container_runtime::{tests::host_rootfs, NativeRuntime};
+        use crate::imageset::tests::{serve, Key, Store};
+        let t = tmp();
+        let layout = crate::paths::Layout::new(t.0.join("agent"));
+        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
+            eprintln!("no container engine here: skipped");
+            return;
+        };
+        // a private engine home: its own storage, and the local registry allowed over plain HTTP
+        rt.home = t.0.join("engine-home");
+        let tar = t.0.join("rootfs.tar");
+        host_rootfs(&tar);
+        let key = Key::new();
+        let store = Arc::new(Mutex::new(Store { referrers_api: true, ..Default::default() }));
+        let reg = serve(store.clone()).await;
+        std::fs::create_dir_all(rt.home.join(".config/containers")).unwrap();
+        std::fs::write(rt.home.join(".config/containers/registries.conf"),
+                       format!("[[registry]]\nlocation = \"{reg}\"\ninsecure = true\n")).unwrap();
+        if !rt.status().is_ok_and(|s| s.running) {
+            eprintln!("the engine is not running: skipped");
+            return;
+        }
+        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+        let platform = format!("linux/{arch}");
+        let (signed, unsigned) = {
+            let mut s = store.lock().unwrap();
+            let bytes = std::fs::read(&tar).unwrap();
+            let d = s.rootfs_image("org/tasks/shell", &bytes, arch);
+            s.sign(&key, &reg, "org/tasks/shell", &d, false);
+            let u = s.image("org/tasks/unsigned", b"never pulled: refused before");
+            (format!("{reg}/org/tasks/shell@{d}"), format!("{reg}/org/tasks/unsigned@{u}"))
+        };
+        let (cli, engine_home) = (rt.cli.clone(), rt.home.clone());
+        let mut g = grant(&t.0, false);
+        g.approved_images = vec![];
+        g.sets = vec![oarbank_core::images::ContainerSet { name: "tasks".into(), registry: reg.clone(), repository: "org/tasks/".into(),
+                                                          platform: platform.clone(), key_pem: key.pem(), index: None }];
+        g.job_images = vec![signed.clone(), unsigned.clone()];
+        let b = Broker::start(t.0.join("live.sock"), g, Arc::new(rt), verifier(&t.0)).await.unwrap();
+        let ep = b.endpoint();
+        let r = ask(&ep, &json!({"op": "container.run", "image": signed, "platform": platform, "args": ["sh", "-c", "echo signed-ok"],
+                                 "timeout_s": 120}).to_string()).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["exit_code"], 0, "{r}");
+        assert!(r["stdout_tail"].as_str().unwrap().contains("signed-ok"), "{r}");
+        let r = ask(&ep, &json!({"op": "container.run", "image": unsigned, "platform": platform, "args": ["true"]}).to_string()).await;
+        assert_eq!(r["error"], "image_not_approved", "{r}");
+        assert_eq!(b.ran_images(), vec![json!({"set": "tasks", "image": signed})]);
+        drop(b);
+        // the private storage holds files of the user namespace's ids: the engine removes them
+        let _ = std::process::Command::new(cli).env("HOME", &engine_home).args(["system", "reset", "--force"]).output();
+    }
 }

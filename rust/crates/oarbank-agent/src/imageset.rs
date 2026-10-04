@@ -367,6 +367,19 @@ pub mod tests {
             d
         }
 
+        /// A one-layer image whose layer is a tar of a root filesystem, runnable on `arch`; its manifest digest.
+        #[cfg(target_os = "linux")]
+        pub fn rootfs_image(&mut self, path: &str, tar: &[u8], arch: &str) -> String {
+            let diff = I::digest_of(tar);
+            let cfg = self.put(&serde_json::to_vec(&json!({"architecture": arch, "os": "linux",
+                "config": {}, "rootfs": {"type": "layers", "diff_ids": [diff]}})).unwrap());
+            let layer = self.put(tar);
+            self.manifest(path, json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cfg["digest"], "size": cfg["size"]},
+                "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": layer["digest"], "size": layer["size"]}]}),
+                Some("latest"))
+        }
+
         /// A one-layer image; its manifest digest.
         pub fn image(&mut self, path: &str, content: &[u8]) -> String {
             let cfg = self.put(br#"{"architecture":"amd64","os":"linux"}"#);
@@ -434,11 +447,20 @@ pub mod tests {
                     let mut buf = vec![0u8; 8192];
                     let n = c.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let mut words = req.split_whitespace();
+                    let method = words.next().unwrap_or("GET").to_string();
+                    let path = words.next().unwrap_or("/").to_string();
                     let (status, body) = answer(&store, &path);
-                    let head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    // a manifest's own mediaType is its Content-Type, as a registry serves it
+                    let ctype = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["mediaType"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| "application/octet-stream".into());
+                    let digest = if status == 200 { I::digest_of(&body) } else { String::new() };
+                    let head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: {ctype}\r\n\
+                                        Docker-Content-Digest: {digest}\r\nConnection: close\r\n\r\n", body.len());
                     let _ = c.write_all(head.as_bytes()).await;
-                    let _ = c.write_all(&body).await;
+                    if method != "HEAD" {
+                        let _ = c.write_all(&body).await;
+                    }
                 });
             }
         });
@@ -448,6 +470,9 @@ pub mod tests {
     fn answer(store: &Arc<Mutex<Store>>, path: &str) -> (u16, Vec<u8>) {
         let mut s = store.lock().unwrap();
         s.hits += 1;
+        if path == "/v2/" {
+            return (200, b"{}".to_vec());                    // the API version check engines start with
+        }
         let Some(rest) = path.strip_prefix("/v2/") else { return (404, vec![]) };
         for (kind, sep) in [("manifests", "/manifests/"), ("blobs", "/blobs/"), ("referrers", "/referrers/")] {
             if let Some((repo, r)) = rest.split_once(sep) {
