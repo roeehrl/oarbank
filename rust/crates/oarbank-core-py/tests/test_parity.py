@@ -1,11 +1,11 @@
 """oarbank-core (Rust, through the `oarbank_core` extension) against the Python SDK, the reference: the shared vectors
-and goldens, then seeded random inputs. Runs under pytest or as a script.
+and goldens, then seeded random inputs. Runs under pytest or as a script; CI runs it in the agent job.
 
-    uv venv /tmp/ocore-venv --python 3.12
-    uv pip install --python /tmp/ocore-venv <oarbank_core wheel> -e vendor/oarbank-sdk
-    /tmp/ocore-venv/bin/python rust/crates/oarbank-core-py/tests/test_parity.py
+    uvx maturin@1.15.0 build --locked -i .venv/bin/python -m rust/crates/oarbank-core-py/Cargo.toml -o /tmp/ocore-wheels
+    uv pip install --python .venv /tmp/ocore-wheels/oarbank_core-*.whl
+    uv run --no-sync pytest -q rust/crates/oarbank-core-py/tests/test_parity.py
 
-The few known, deliberate differences are asserted as such (see KNOWN below), so any other mismatch fails.
+The one known, deliberate difference is asserted as such (see KNOWN below), so any other mismatch fails.
 """
 import ipaddress
 import json
@@ -23,11 +23,9 @@ SPEC = Path(__file__).resolve().parents[4] / "vendor" / "oarbank-sdk" / "spec"
 SEED = int(os.environ.get("OCORE_PARITY_SEED", 20261003))
 N = int(os.environ.get("OCORE_PARITY_N", 4000))         # random cases per test
 
-# Deliberate differences, each a Python behaviour that looks like a bug (see the oarbank-core docs):
-# - Python's `$` matches before a trailing newline, so the SDK accepts "a\n" as a PortablePath, "linux-amd64\n" as a
-#   platform token and "x-1-py3-none-any.whl\n" as a wheel; Rust refuses all three.
+# Deliberate differences, each a Python behaviour that looks like a bug:
 # - serde_json refuses lone surrogates ("\ud800"), which Python's json.loads passes through to canonical_json.
-KNOWN = {"trailing-newline": 0, "lone-surrogate": 0}
+KNOWN = {"lone-surrogate": 0}
 
 
 def outcome(f, *a, **kw):
@@ -203,12 +201,6 @@ def test_portable_path_random():
     for i in range(N * 2):
         p, dot = rand_path(rng), rng.random() < 0.5
         py, rs = py_path(p, dot), rs_path(p, dot)
-        if py != rs and rs[0] == "err" and any(seg.endswith("\n") for seg in p.split("/")):
-            # Python let a "seg\n" segment through, so it accepts or fails later (with another message)
-            assert rs[1].endswith("has a character that is not portable") or rs[1].endswith("ends with '.' or a space") \
-                or "reserved device name" in rs[1], (p, rs)
-            KNOWN["trailing-newline"] += 1
-            continue
         same(py, rs, f"path #{i} {p!r} dot={dot}", messages=p.isascii())
         paths = [p, p.upper(), p.lower(), p.swapcase(), p]
         assert [tuple(x) for x in oc.casefold_collisions(paths)] == portable.casefold_collisions(paths) or not p.isascii()
@@ -224,11 +216,7 @@ def test_platform_tokens():
         s = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 10)))
         if rng.random() < 0.3:
             s = rng.choice(["darwin", "linux", "x1", "Linux"]) + "-" + rng.choice(["arm64", "amd64", "riscv_64", "", "A"]) + rng.choice(["", "\n", "-x"])
-        py, rs = portable.is_platform_token(s), oc.is_platform_token(s)
-        if py and not rs and s.endswith("\n") and portable.is_platform_token(s[:-1]):
-            KNOWN["trailing-newline"] += 1
-            continue
-        assert py == rs, repr(s)
+        assert portable.is_platform_token(s) == oc.is_platform_token(s), repr(s)
     assert oc.is_platform_token(portable.host_platform())
 
 
@@ -338,22 +326,22 @@ def test_wheel_fits():
              "manylinux_2_17_x86_64.manylinux2014_x86_64", "musllinux_1_2_aarch64", "linux_riscv64", "win_amd64",
              "win_arm64", "win32", "manylinux_2_28_aarch64"]
     names = ["dep-1.0-py3-none.whl", "dep-1.0-b-py3-none-any.whl", "dep--py3-none-any.whl", "dep-1.0-py3-none-any.zip",
-             "dep-1-2-3-py3-none-any.whl", "dep-1.0-py3-none-.whl", "dep-1.0-py3-none-any.whl.whl"]
+             "dep-1-2-3-py3-none-any.whl", "dep-1.0-py3-none-.whl", "dep-1.0-py3-none-any.whl.whl",
+             "dep-1.0-py3-none-any.whl\n"]
     for _ in range(N):
         build = rng.choice(["", "", "-1", "-2b", "-x"])
         names.append(f"{rng.choice(dists)}-{rng.choice(['1.0', '2!1+l'])}{build}-{rng.choice(pys)}-{rng.choice(abis)}-{rng.choice(plats)}.whl")
     for name in names:
         for plat in PLATFORMS:
             assert oc.wheel_fits(name, plat) == deps.wheel_fits(name, plat), (name, plat)
-    n = "dep-1.0-py3-none-any.whl\n"
-    assert deps.wheel_fits(n, "linux-amd64") and not oc.wheel_fits(n, "linux-amd64")
-    KNOWN["trailing-newline"] += 1
 
 
 def test_parse_requirements():
     rng = random.Random(SEED + 9)
     h = ["0" * 64, "f" * 64, "a" * 63, "A" * 64, "0123456789abcdef" * 4 + "0"]
+    host = deps.host_provided()
     lines = ["", "# comment", "   ", "a==1", "Foo_Bar.baz[extra]==1.0.post1", "pydantic==2", "typing_extensions==4",
+             "jsonschema==4", "Jinja2==3", "MarkupSafe==3", "rpds_py==0.1", "oarbank-sdk==1",
              "a>=1", "-e .", "--extra-index-url https://x", "a==1 ; python_version>'3'", "a[x==1", "a==", "a == 1",
              "!!", "é==1", "q==2!3+local", "x==1  # via y", "1abc==0", "a==1;x"]
     for i in range(N):
@@ -366,7 +354,7 @@ def test_parse_requirements():
             out.append(line)
         text = rng.choice(["\n", "\r\n", "\r", "\x0c"]).join(out) + rng.choice(["", "\n"])
         py = outcome(lambda t: [(r["name"], r["version"], sorted(r["hashes"])) for r in deps.parse_requirements(t)], text)
-        rs = outcome(lambda t: [(n, v, list(hs)) for n, v, hs in oc.parse_requirements(t)], text)
+        rs = outcome(lambda t: [(n, v, list(hs)) for n, v, hs in oc.parse_requirements(t, host)], text)
         same(py, rs, f"requirements #{i} {text!r}", messages=text.isascii())
 
 

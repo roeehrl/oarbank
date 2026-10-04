@@ -3,9 +3,6 @@
 //! Every path that crosses the protocol (bundle files, artifacts, mounts, dataset files, module files, move rules) is
 //! a PortablePath: valid on macOS, Linux and Windows alike, so a bundle built on one OS unpacks safely on another and
 //! no name can escape its directory or collide on a case-insensitive filesystem.
-//!
-//! One deliberate difference: the SDK's regexes end in `$`, which in Python also matches before a trailing newline,
-//! so it accepts `"a\n"` as a path and `"linux-amd64\n"` as a platform token. Both are refused here.
 
 use std::collections::HashMap;
 

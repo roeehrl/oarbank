@@ -2,11 +2,10 @@
 //! requirements and the wheel filenames that fit a platform.
 //!
 //! - `requirements.txt` lists every distribution as `name==version --hash=sha256:<64 hex>`; options, markers,
-//!   unpinned or unhashed lines and host-provided distributions are refused.
+//!   unpinned or unhashed lines and host-provided distributions are refused. What the host provides is the SDK's whole
+//!   dependency closure, which only the runtime Python knows (`oarbank_sdk.deps.host_provided()`), so callers pass it.
 //! - A wheel fits a platform when its tags cover it and CPython 3.12 (`cp312`): pure `py3-none`, exactly `cp312`, or
 //!   `abi3` for cp3x <= 312.
-//!
-//! Like `portable`, the wheel name pattern is anchored strictly: Python's `$` also matches before a trailing newline.
 
 use std::collections::BTreeSet;
 
@@ -15,9 +14,6 @@ use crate::{portable, py};
 pub const WHEELS_DIR: &str = "wheels";
 /// The hosts' managed CPython (spec/manifest.md, runtime kind python).
 pub const PY_TAG: &str = "cp312";
-/// Distributions the host provides; a module must not pin them.
-pub const HOST_PROVIDED: [&str; 6] =
-    ["oarbank-sdk", "pydantic", "pydantic-core", "annotated-types", "typing-extensions", "typing-inspection"];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -113,7 +109,8 @@ fn find_hashes(rest: &str) -> Vec<String> {
 }
 
 /// The pins of a hash-pinned requirements file; DepsError (every problem, `; `-joined) on anything else.
-pub fn parse_requirements(text: &str) -> Result<Vec<Requirement>, DepsError> {
+/// `host_provided` holds the normalised names a module must not pin.
+pub fn parse_requirements(text: &str, host_provided: &BTreeSet<String>) -> Result<Vec<Requirement>, DepsError> {
     let joined = text.replace("\\\n", " ");
     let mut out = Vec::new();
     let mut errors = Vec::new();
@@ -143,8 +140,8 @@ pub fn parse_requirements(text: &str) -> Result<Vec<Requirement>, DepsError> {
                 "line {n}: {name}=={ver} has no --hash=sha256 (generate with `uv pip compile --generate-hashes`)"
             ));
         }
-        if HOST_PROVIDED.contains(&name.as_str()) {
-            errors.push(format!("line {n}: {name} is provided by the host; do not pin it"));
+        if host_provided.contains(&name) {
+            errors.push(format!("line {n}: {name} is provided by the host (the SDK's own dependencies); do not pin it"));
         }
         out.push(Requirement { name, version: ver.to_string(), hashes: hashes.into_iter().collect() });
     }
@@ -240,16 +237,25 @@ pub fn wheel_fits_py(filename: &str, platform: &str, py_tag: &str) -> Result<boo
 mod tests {
     use super::*;
 
+    fn host() -> BTreeSet<String> {
+        ["oarbank-sdk", "pydantic", "pydantic-core", "jinja2", "markupsafe"].map(String::from).into()
+    }
+
+    fn parse(text: &str) -> Result<Vec<Requirement>, DepsError> {
+        parse_requirements(text, &host())
+    }
+
     #[test]
     fn pins_and_hashes_are_required() {
         let h = "a".repeat(64);
-        let r = parse_requirements(&format!("a==1 --hash=sha256:{h}")).unwrap();
+        let r = parse(&format!("a==1 --hash=sha256:{h}")).unwrap();
         assert_eq!(r[0].version, "1");
         assert_eq!(r[0].hashes.iter().next().unwrap(), &h);
         for bad in ["a==1".to_string(), format!("a>=1 --hash=sha256:{h}"), "--extra-index-url https://x".into(),
-                    format!("pydantic==2 --hash=sha256:{h}"), format!("a==1 ; python_version>'3' --hash=sha256:{h}"),
-                    format!("-e . --hash=sha256:{h}"), format!("a[x==1 --hash=sha256:{h}"), format!("a== --hash=sha256:{h}")] {
-            assert!(parse_requirements(&bad).is_err(), "{bad}");
+                    format!("pydantic==2 --hash=sha256:{h}"), format!("MarkupSafe==3 --hash=sha256:{h}"),
+                    format!("a==1 ; python_version>'3' --hash=sha256:{h}"), format!("-e . --hash=sha256:{h}"),
+                    format!("a[x==1 --hash=sha256:{h}"), format!("a== --hash=sha256:{h}")] {
+            assert!(parse(&bad).is_err(), "{bad}");
         }
     }
 
@@ -259,24 +265,24 @@ mod tests {
         let text = format!(
             "# compiled\n\nFoo_Bar.baz[extra]==1.0.post1 \\\n    --hash=sha256:{h1} \\\n    --hash=sha256:{h2}  # via x\nqux==2!3+local --hash=sha256:{h1}\r\n"
         );
-        let r = parse_requirements(&text).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].name, "foo-bar-baz");
         assert_eq!(r[0].version, "1.0.post1");
         assert_eq!(r[0].hashes.len(), 2);
         assert_eq!(r[1].version, "2!3+local");
-        assert!(parse_requirements("").unwrap().is_empty());
-        let e = parse_requirements(&format!("a==1\n--index-url x\nPydantic_Core==2 --hash=sha256:{h1}\n!!")).unwrap_err().0;
+        assert!(parse("").unwrap().is_empty());
+        let e = parse(&format!("a==1\n--index-url x\nPydantic_Core==2 --hash=sha256:{h1}\n!!")).unwrap_err().0;
         assert_eq!(
             e,
             "line 1: a==1 has no --hash=sha256 (generate with `uv pip compile --generate-hashes`); \
              line 2: options are not allowed (--index-url): the host installs offline from wheels/; \
-             line 3: pydantic-core is provided by the host; do not pin it; \
+             line 3: pydantic-core is provided by the host (the SDK's own dependencies); do not pin it; \
              line 4: '!!' is not `name==version --hash=sha256:...`"
         );
         // an uppercase or short hash is no hash
-        assert!(parse_requirements(&format!("a==1 --hash=sha256:{}", "A".repeat(64))).is_err());
-        assert!(parse_requirements(&format!("a==1 --hash=sha256:{}", "a".repeat(63))).is_err());
+        assert!(parse(&format!("a==1 --hash=sha256:{}", "A".repeat(64))).is_err());
+        assert!(parse(&format!("a==1 --hash=sha256:{}", "a".repeat(63))).is_err());
     }
 
     #[test]
