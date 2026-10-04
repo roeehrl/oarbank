@@ -1587,8 +1587,10 @@ print(json.dumps(out))
             eprintln!("no container engine here: skipped");
             return;
         };
-        // a private engine home: its own storage, and the local registry allowed over plain HTTP
+        // a private engine home: its own storage and run state (the reset below removes only those), and the local
+        // registry allowed over plain HTTP
         rt.home = t.0.join("engine-home");
+        crate::container_runtime::tests::private_engine(&rt.home);
         let tar = t.0.join("rootfs.tar");
         host_rootfs(&tar);
         let key = Key::new();
@@ -1628,7 +1630,8 @@ print(json.dumps(out))
         assert_eq!(r["error"], "image_not_approved", "{r}");
         assert_eq!(b.ran_images(), vec![json!({"set": "tasks", "image": signed})]);
         drop(b);
-        // the private storage holds files of the user namespace's ids: the engine removes them
+        // the private storage holds files of the user namespace's ids: the engine removes them (its graph root, run
+        // root and temporary directory are all under the private home, so other tests' containers are untouched)
         let _ = std::process::Command::new(cli).env("HOME", &engine_home).args(["system", "reset", "--force"]).output();
     }
 }

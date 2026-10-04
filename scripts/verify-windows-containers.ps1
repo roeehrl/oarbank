@@ -41,7 +41,7 @@ try {
     New-Item -ItemType Directory -Force (Split-Path $settings) | Out-Null
     if ($text -match "(?m)^session:\s*$") { $text = $text -replace "(?m)^session:\s*$", "session:`n  hostLoopback: none" }
     else { $text = $text.TrimEnd() + "`nsession:`n  hostLoopback: none`n" }
-    Set-Content -NoNewline $settings $text.TrimStart()
+    [IO.File]::WriteAllText($settings, $text.TrimStart(), [Text.UTF8Encoding]::new($false))    # YAML: UTF-8, no BOM
     Write-Output "set session.hostLoopback: none in $settings"
   }
   $env:OARBANK_LIVE_WSLC = "1"

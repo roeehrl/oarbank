@@ -866,6 +866,56 @@ pub mod tests {
         assert_eq!(binfmt_platform("enabled\n"), None);
     }
 
+    /// Make `home` a rootless Podman home of its own: graph root, run root and temporary directory all inside it. A
+    /// private HOME alone moves only the graph root: the run root and the temporary directory stay the account's
+    /// (`$XDG_RUNTIME_DIR/containers`, `$XDG_RUNTIME_DIR/libpod/tmp`), so a `system reset` of the private engine would
+    /// delete the run state of every other container the account runs, those of concurrent tests among them.
+    #[cfg(target_os = "linux")]
+    pub fn private_engine(home: &Path) {
+        let conf = home.join(".config/containers");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(conf.join("storage.conf"), format!("[storage]\ndriver = \"overlay\"\ngraphroot = \"{}\"\nrunroot = \"{}\"\n",
+                                                         home.join("storage").display(), home.join("run").display())).unwrap();
+        std::fs::write(conf.join("containers.conf"), format!("[engine]\ntmp_dir = \"{}\"\n", home.join("tmp").display())).unwrap();
+    }
+
+    /// The account's own engine state outlives a private engine's reset (the test above relies on it).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_private_engine_reset_leaves_the_accounts_run_state_alone() {
+        let home = temp("private-engine");
+        let layout = crate::paths::Layout::new(home.join("agent"));
+        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
+            eprintln!("no container engine here: skipped");
+            return;
+        };
+        if !rt.cli.ends_with("podman") || !rt.status().is_ok_and(|s| s.running) {
+            eprintln!("no running rootless Podman here: skipped");
+            return;
+        }
+        let shared = rt.cli(&["info", "--format", "{{.Store.RunRoot}}"], 30).unwrap();
+        let shared_run = PathBuf::from(String::from_utf8_lossy(&shared.stdout).trim());
+        // a marker in the account's run root and in its temporary directory (beside it, `libpod/tmp`)
+        let markers = [shared_run.join(format!("oarbank-test-{}", std::process::id())),
+                       shared_run.with_file_name("libpod").join("tmp").join(format!("oarbank-test-{}", std::process::id()))];
+        for m in &markers {
+            std::fs::write(m, "x").unwrap();
+        }
+        rt.home = home.join("engine-home");
+        private_engine(&rt.home);
+        let own = rt.cli(&["info", "--format", "{{.Store.RunRoot}} {{.Store.GraphRoot}}"], 60).unwrap();
+        assert_eq!(String::from_utf8_lossy(&own.stdout).trim(),
+                   format!("{} {}", rt.home.join("run").display(), rt.home.join("storage").display()), "{}", own.stderr_tail(500));
+        let reset = rt.cli(&["system", "reset", "--force"], 120).unwrap();
+        assert!(reset.ok(), "{}", reset.stderr_tail(500));
+        let kept: Vec<bool> = markers.iter().map(|m| m.exists()).collect();
+        for m in &markers {
+            let _ = std::fs::remove_file(m);
+        }
+        assert_eq!(kept, [true, true], "the account's run state ({markers:?}) was removed");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// A root filesystem of this host's `sh` and `cat` with the libraries they load (`ldd`), as a tar to import: an
     /// image that needs no registry.
     #[cfg(target_os = "linux")]
