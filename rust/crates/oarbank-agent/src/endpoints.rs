@@ -854,8 +854,41 @@ pub mod tests {
             let files: Vec<String> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| {
                 format!("{} ({} bytes)", e.file_name().to_string_lossy(), e.metadata().map(|m| m.len()).unwrap_or(0))
             }).collect()).unwrap_or_default();
-            format!("{}\ndata {}: {files:?}\nmodel.log: {}", m.report(), dir.display(),
-                    std::fs::read_to_string(self.data("model.log")).unwrap_or_default())
+            format!("{}\ndata {}: {files:?}\nmodel.log: {}{}", m.report(), dir.display(),
+                    std::fs::read_to_string(self.data("model.log")).unwrap_or_default(), self.windows_why())
+        }
+
+        /// Windows: who may reach the interpreter (its ACL and its folders'), and what a sandboxed interpreter says,
+        /// five times over.
+        #[cfg(windows)]
+        fn windows_why(&self) -> String {
+            let mut out = String::new();
+            for p in self.python.ancestors() {
+                let r = std::process::Command::new("icacls").arg(p).output();
+                out += &format!("\nicacls {}: {}", p.display(), r.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default());
+            }
+            let ws = self.root.join("why");
+            std::fs::create_dir_all(&ws).unwrap();
+            let mut pol = oarbank_core::sandbox::Policy::new("dev.codonic.oarbank.modelserver");
+            pol.ro = self.roots.clone();
+            pol.rw = vec![ws.display().to_string()];
+            pol.kind = "service".into();
+            pol.exe = Some(self.python.display().to_string());
+            let probe = "import sys, oarbank_sdk; print(sys.prefix, sys.base_prefix, oarbank_sdk.__file__)";
+            let argv = crate::sandbox::wrap(&pol, &ws.join("why.sb"), &[self.python.display().to_string(), "-I".into(), "-c".into(),
+                                                                       probe.into()]).unwrap();
+            for _ in 0..5 {
+                let r = std::process::Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+                out += &format!("\nsandboxed: {:?} {} {}", r.status.code(), String::from_utf8_lossy(&r.stdout).trim(),
+                                String::from_utf8_lossy(&r.stderr).trim());
+            }
+            out
+        }
+
+        #[cfg(not(windows))]
+        fn windows_why(&self) -> String {
+            String::new()
         }
 
         fn loads(&self) -> Vec<String> {
