@@ -103,6 +103,29 @@ jobs:
       - run: cargo build --locked --release -p oarbank-agent -p oarbank-launcher
         working-directory: rust
 
+  windows-containers:
+    # the Windows container runtime against a real WSL containers session (docs/design/windows-containers.md): GitHub's
+    # x64 Windows runners have nested virtualization and WSL 2 (the arm64 ones have neither); WSL 3.0.1 comes from its
+    # release, pinned, and the agent's live tests create their own session
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: WSL 3.0.1, the live tests (a session, a registry in it, signed images through the broker) and the doctor's probe
+        shell: pwsh
+        run: scripts/verify-windows-containers.ps1 -InstallWsl
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: verify-windows-containers
+          path: dist/verify-windows-containers.log
+
   package:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [coordinator, agent]

@@ -2,14 +2,12 @@
 
 mod agent;
 mod api;
-#[cfg_attr(not(unix), path = "broker_stub.rs")]
 mod broker;
 #[cfg(target_os = "linux")]
 mod cgroup;
 mod checkpoints;
 mod clock;
 mod config;
-#[cfg(unix)]
 mod container_runtime;
 mod coordinstall;
 mod discover;
@@ -21,7 +19,6 @@ mod fsutil;
 mod gpuapi;
 mod host;
 mod identity;
-#[cfg(unix)]
 mod imageset;
 mod jobs;
 mod join;
@@ -49,6 +46,8 @@ mod staging;
 mod sys;
 mod tls;
 mod tuf;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod wslc;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -142,6 +141,11 @@ enum Cmd {
     },
     /// Run host protection locally for a few ticks and print the capacity, telemetry and guard.
     Status,
+    /// This node's container runtime: its report (facts `containers`), what is missing and how to fix it.
+    Containers {
+        #[command(subcommand)]
+        action: ContainersCmd,
+    },
     /// This node's sandbox backend and what it enforces, as JSON (the coordinator asks it on Linux and Windows).
     #[command(name = "sandbox-status", hide = true)]
     SandboxStatus,
@@ -154,6 +158,79 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ContainersCmd {
+    /// Print the runtime's report: exit 0 when it can run containers, 3 when something is missing (each with its fix).
+    Doctor {
+        /// Also run real containers through the runtime: mount, limits, no network, cleanup.
+        #[arg(long)]
+        probe: bool,
+        /// With --probe: also run a container with every GPU (`gpus = "all"`).
+        #[arg(long)]
+        gpu: bool,
+    },
+    /// Windows: install the WSL components the runtime needs (an administrator; exit 3010 when Windows must restart).
+    Install,
+    /// Windows: end the agent's WSL containers session and delete its storage (the WSL package stays).
+    Remove,
+}
+
+/// `oarbank-agent containers ...`.
+fn containers(layout: &paths::Layout, action: ContainersCmd) -> anyhow::Result<()> {
+    match action {
+        ContainersCmd::Doctor { probe, gpu } => {
+            let mut report = facts::collect(&layout.home)["containers"].clone();
+            #[cfg(windows)]
+            {
+                // the prerequisites as they are now, beside the running agent's last report
+                let now = wslc::check();
+                if !now.is_empty() {
+                    report["missing"] = serde_json::json!(now.iter().map(wslc::Missing::json).collect::<Vec<_>>());
+                    report["state"] = serde_json::json!("missing");
+                }
+            }
+            let mut ok = report["missing"].as_array().is_none_or(|m| m.is_empty());
+            if probe {
+                match container_runtime::for_node(layout) {
+                    Some(rt) => {
+                        let checks = container_runtime::probe(&rt, &layout.work(), gpu);
+                        ok = checks.iter().all(|c| c["ok"] == true);
+                        report["probe"] = serde_json::json!(checks);
+                        // the probe's own runtime's report (Windows: the session it used) is the current one
+                        if let Some(r) = rt.cpu.report() {
+                            let checks = report["probe"].take();
+                            report = r;
+                            report["probe"] = checks;
+                        }
+                    }
+                    None => {
+                        ok = false;
+                        report["probe"] = serde_json::json!([{"check": "runtime", "ok": false, "detail": "no container runtime on this node"}]);
+                    }
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            std::process::exit(if ok { 0 } else { 3 })
+        }
+        #[cfg(windows)]
+        ContainersCmd::Install => match wslc::install() {
+            Ok(true) => {
+                println!("installed; restart Windows to finish (the Virtual Machine Platform)");
+                std::process::exit(3010)
+            }
+            Ok(false) => {
+                println!("nothing to install");
+                Ok(())
+            }
+            Err(e) => anyhow::bail!(e),
+        },
+        #[cfg(windows)]
+        ContainersCmd::Remove => wslc::remove(&layout.home).map_err(anyhow::Error::msg),
+        #[cfg(not(windows))]
+        ContainersCmd::Install | ContainersCmd::Remove => anyhow::bail!("only on Windows: this node's runtime is the host's own"),
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -176,6 +253,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", sandbox::report());
             Ok(())
         }
+        Cmd::Containers { action } => containers(&layout, action),
         Cmd::SandboxCheck { pid } => std::process::exit(if sandbox::is_confined(pid) { 0 } else { 1 }),
         Cmd::Status => rt.block_on(async {
             let mut a = agent::Agent::open(layout, Some("https://127.0.0.1:7443"))?;
@@ -202,7 +280,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::GpuApis => {
             gpuapi::watchdog(gpuapi::limit());
-            let mut r = gpuapi::detect();
+            let mut r = gpuapi::detect(&layout.home);
             r["platform"] = serde_json::json!(facts::platform_token());
             r["agent_version"] = serde_json::json!(VERSION);
             println!("{}", serde_json::to_string_pretty(&r)?);

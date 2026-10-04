@@ -49,10 +49,8 @@ pub struct Agent {
     pub rescue: crate::rescue::RescueWatch,
     /// The coordinator's clock as of its last answer: moves' time locks and expiries are in its time (clock.rs).
     pub coord_clock: crate::clock::CoordClock,
-    #[cfg(unix)]
     pub containers: Option<crate::container_runtime::Containers>,
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
-    #[cfg(unix)]
     images: Option<Arc<crate::imageset::Verifier>>,
     /// The folder statement this node applies, and what it found for each folder (folders.rs).
     pub folders: crate::folders::Folders,
@@ -101,10 +99,7 @@ impl Agent {
                    last_release_error: None, need_hello: false, table: Table::default(), healthy: vec![],
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
-                   #[cfg(unix)]
-                   containers: None,
-                   #[cfg(unix)]
-                   images: None,
+                   containers: None, images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
@@ -680,9 +675,8 @@ impl Agent {
         Ok(true)
     }
 
-    /// The container runtimes, once a release has a module approved for containers and a runtime exists here (none on
-    /// Windows yet: an agent-owned WSL2 distribution comes later).
-    #[cfg(unix)]
+    /// The container runtimes, once a release has a module approved for containers and a runtime exists here (on
+    /// Windows it always does: it reports what is missing itself).
     fn container_runtime(&mut self) -> Option<crate::container_runtime::Containers> {
         let wants = self.release.as_ref().is_some_and(|r| r.modules.iter()
             .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))));
@@ -696,7 +690,6 @@ impl Agent {
     }
 
     /// The container set verifier, made once (its index seqs live in the agent's home).
-    #[cfg(unix)]
     fn image_verifier(&mut self) -> anyhow::Result<Arc<crate::imageset::Verifier>> {
         if self.images.is_none() {
             self.images = Some(Arc::new(crate::imageset::Verifier::new(self.layout.home.join("image-sets.json"))?));
@@ -706,7 +699,6 @@ impl Agent {
 
     /// At start no attempt is live, so a container still carrying the attempt label was left by an earlier run of the
     /// agent (one that crashed or was killed while a job ran a container): remove it before any new work starts.
-    #[cfg(unix)]
     async fn reap_containers(&mut self) {
         let Some(rts) = self.container_runtime() else { return };
         let _ = tokio::task::spawn_blocking(move || {
@@ -723,15 +715,19 @@ impl Agent {
             self.facts = facts::collect(&self.layout.home);
         }
         let l = Layout::new(self.layout.home.clone());
-        #[cfg(unix)]
-        // the runtime's `containers` pool, and the `gpu` pool where containers can get the node's GPUs (CDI on Linux, the
-        // krunkit VM on macOS)
-        let mut pools: std::collections::BTreeMap<String, i64> = self.container_runtime().map(|rts| {
-            [("containers".to_string(), rts.cpu.pool_tokens() as i64)].into_iter().chain(rts.gpu.is_some().then(|| ("gpu".to_string(), 1)))
-                .collect()
-        }).unwrap_or_default();
-        #[cfg(windows)]
-        let mut pools = std::collections::BTreeMap::<String, i64>::new();
+        // the runtime's `containers` pool (only while it can run containers), and the `gpu` pool where containers can get
+        // the node's GPUs (CDI on Linux and Windows, the krunkit VM on macOS)
+        let rts = self.container_runtime();
+        let mut pools = container_pools(rts.as_ref());
+        // a runtime that keeps its own report (Windows) changed state: the facts go out again, and the doctors (with the
+        // GPU APIs in containers) run again
+        if let Some(report) = rts.as_ref().and_then(|r| r.cpu.report()) {
+            if self.facts["containers"] != report && !self.facts.is_null() {
+                self.facts = facts::collect(&self.layout.home);
+                self.need_hello = true;
+                self.rerun_doctors = true;
+            }
+        }
         let (mut reserved, mut running) = (0.0, vec![]);
         if let Some(svc) = self.services.clone() {
             let (need, live) = self.service_demand();
@@ -859,9 +855,7 @@ impl Agent {
         let ctx = Arc::new(jobs::Ctx { api: self.api.clone().expect("connected"), layout: Layout::new(self.layout.home.clone()),
                                        runtime: rt, release: rel.clone(), policy: self.directives["policy"].clone(),
                                        table: self.table.clone(), registry: self.prot.as_ref().map(|p| p.registry.clone()),
-                                       #[cfg(unix)]
                                        containers: self.container_runtime(),
-                                       #[cfg(unix)]
                                        images: self.image_verifier().map_err(io_err)?,
                                        services: self.services.clone(), folders: self.folders.clone() });
         for g in &grants {
@@ -903,7 +897,6 @@ impl Agent {
     pub async fn run(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
         staging::sweep_partials(&self.layout);
         jobs::clear_workdirs(&self.layout);
-        #[cfg(unix)]
         self.reap_containers().await;
         self.probe_gpu_apis().await;                // before any service is offered: a GPU service waits for it
         let mut backoff = Duration::from_secs(2);
@@ -966,6 +959,10 @@ impl Agent {
                     }
                     self.drain_services().await;
                     if std::mem::take(&mut self.rerun_doctors) && self.release.is_some() {
+                        // the container runtime checks again too (Windows: what it missed may be installed by now)
+                        if let Some(rts) = self.container_runtime() {
+                            rts.all().iter().for_each(|rt| rt.recheck());
+                        }
                         let policy = self.directives["policy"].clone();
                         self.run_doctors(&policy).await;
                     }
@@ -1014,6 +1011,23 @@ impl Agent {
     }
 }
 
+/// The agent's own pools from its container runtimes: `containers` while the runtime can run containers (one that is not
+/// ready offers none: its node is not offered container work), and `gpu` (one token) where containers get the node's
+/// GPUs.
+fn container_pools(rts: Option<&crate::container_runtime::Containers>) -> std::collections::BTreeMap<String, i64> {
+    let mut pools = std::collections::BTreeMap::new();
+    if let Some(rts) = rts {
+        let tokens = rts.cpu.pool_tokens() as i64;
+        if tokens > 0 {
+            pools.insert("containers".to_string(), tokens);
+            if rts.gpu.as_ref().is_some_and(|g| g.gpu_device().is_some()) {
+                pools.insert("gpu".to_string(), 1);
+            }
+        }
+    }
+    pools
+}
+
 fn io_err(e: anyhow::Error) -> ApiError {
     ApiError::Http { status: 0, code: "local".into(), detail: e.to_string(), retry_after: None, body: Box::default() }
 }
@@ -1027,11 +1041,71 @@ fn merge(into: &mut Value, extra: Value) {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::rescue::tests::{key, rescue_file, serve};
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     use ed25519_dalek::Signer;
+
+    struct PoolRuntime {
+        tokens: u32,
+        gpu: Option<String>,
+    }
+
+    impl crate::container_runtime::ContainerRuntime for PoolRuntime {
+        fn status(&self) -> Result<crate::container_runtime::RuntimeStatus, String> {
+            Err("unused".into())
+        }
+        fn ensure_started(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn pull(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn run(&self, _: &crate::container_runtime::RunSpec, _: &std::sync::atomic::AtomicBool)
+               -> Result<crate::container_runtime::RunResult, String> {
+            Err("unused".into())
+        }
+        fn images(&self) -> Vec<String> {
+            vec![]
+        }
+        fn reap(&self) -> Vec<String> {
+            vec![]
+        }
+        fn remove_attempt(&self, _: i64) -> Vec<String> {
+            vec![]
+        }
+        fn pool_tokens(&self) -> u32 {
+            self.tokens
+        }
+        fn gpu_device(&self) -> Option<String> {
+            self.gpu.clone()
+        }
+    }
+
+    /// The pools a runtime gives the node, as the agent holds it (Windows: one runtime for both kinds of job; the live
+    /// GPU test checks its real runtime with it).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn pools_of(rt: Arc<dyn crate::container_runtime::ContainerRuntime>) -> std::collections::BTreeMap<String, i64> {
+        container_pools(Some(&crate::container_runtime::Containers { cpu: rt.clone(), gpu: Some(rt) }))
+    }
+
+    /// A runtime that cannot run containers yet (Windows: its session is missing a prerequisite or still starting)
+    /// offers no pool at all, so the node is not offered container work; a ready one offers `containers`, and `gpu`
+    /// beside it where containers get the GPU.
+    #[test]
+    fn container_pools_only_from_a_runtime_that_can_run_them() {
+        let both = |tokens, gpu: Option<&str>| {
+            let rt: Arc<dyn crate::container_runtime::ContainerRuntime> = Arc::new(PoolRuntime { tokens, gpu: gpu.map(str::to_string) });
+            container_pools(Some(&crate::container_runtime::Containers { cpu: rt.clone(), gpu: Some(rt) })).into_iter().collect::<Vec<_>>()
+        };
+        assert!(container_pools(None).is_empty());
+        assert!(both(0, Some("microsoft.com/wslc=gpu")).is_empty());
+        assert_eq!(both(4, None), [("containers".to_string(), 4)]);
+        assert_eq!(both(4, Some("microsoft.com/wslc=gpu")), [("containers".to_string(), 4), ("gpu".to_string(), 1)]);
+        let cpu: Arc<dyn crate::container_runtime::ContainerRuntime> = Arc::new(PoolRuntime { tokens: 4, gpu: None });
+        assert_eq!(container_pools(Some(&crate::container_runtime::Containers { cpu, gpu: None })).len(), 1);
+    }
 
     /// The owner key set a directive carries pins its rescue locations; a rescue move published there is recorded as
     /// The doctor report always names the node's capabilities, even before a release: the coordinator grants stages
