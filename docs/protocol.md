@@ -458,6 +458,10 @@ Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `d
   (`Golden.expected_by_platform`).
 - **Mismatches.** A golden mismatch revokes that module on that node and alerts. Repeated golden failures
   stop retrying and alert. Nondeterminism against another node's canonical result quarantines the node.
+- **Stages that do not compare.** A stage whose effective determinism is `none` (`stages[].determinism`, else
+  `results.determinism`) is never golden-tested, replicated or compared, and neither takes nor serves a result-cache hit:
+  its results depend on when it ran. Its jobs are otherwise ordinary (fenced, certified nodes only, stage retry,
+  placement). S21 checks it.
 - **Offers.** A node is granted only jobs of modules it is certified for.
 
 ## Staged jobs (stage chains)

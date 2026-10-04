@@ -160,6 +160,17 @@ def data_dir(db, name: str) -> Path:
     return modsandbox.data_dir(Path(db.path).parent, name)
 
 
+def compares(name: str, stage: str | None, version: str | None = None) -> bool:
+    """Whether the host compares results of this stage (replicas, disputes, the result cache, goldens): not when its
+    effective determinism is `none` (oarbank-sdk stages[].determinism), judged by the module version that produced the
+    result, else the current one."""
+    try:
+        i = info_for(name, version)
+    except KeyError:
+        i = CATALOG.get(name)
+    return i is None or i.manifest.compares(stage)
+
+
 def split_enabled(db, name: str) -> bool:
     return name in CATALOG and info(name).splittable and db.get_setting(f"pipeline:{name}", "single") == "split"
 
@@ -447,6 +458,9 @@ def goldens(db, name: str, node: dict | None = None, version: str | None = None)
             raise ModuleError(name, "golden.list", _rpc_error(f"golden {g['name']}: spec.build gave no single stage to run"))
         stage = st.get("stage") if st.get("stage") in i.stages else None
         stage = None if stage == i.single_stage else stage           # single-stage jobs carry no stage, as eval jobs
+        if not i.manifest.compares(stage):
+            raise ModuleError(name, "golden.list", _rpc_error(f"golden {g['name']}: stage {stage or i.single_stage!r} has "
+                                                               "determinism none, so its results are never golden-tested"))
         out.append({"name": g["name"], "stage": stage,
                     "key": job_key(name, g["key_inputs"], stage, version), "payload": st["payload"],
                     "spec_version": b.get("spec_version") or 1, "datasets": st.get("datasets") or g.get("datasets") or [],

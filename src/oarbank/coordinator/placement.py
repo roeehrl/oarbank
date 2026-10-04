@@ -328,11 +328,16 @@ def harden(db: DB, unit: str | None, platform: str | None):
 
 def cache_hit(db: DB, j: dict) -> int | None:
     """A canonical result of this module for the job's key that the job may reuse (the result cache): one produced on its
-    platforms, its datasets' platform and its unit's class (unbound: a feasible class, which the hit then binds, hard)."""
+    platforms, its datasets' platform and its unit's class (unbound: a feasible class, which the hit then binds, hard).
+    A stage that does not compare (determinism none) neither takes nor serves a hit: its result belongs to its run."""
+    if not modcalls.compares(j["module"], j["stage"]):
+        return None
     f = facts(db, j)
-    for r in db.q("SELECT r.result_id, r.platform, r.node_id, r.job_id FROM results r JOIN jobs cj ON cj.job_id=r.job_id "
-                  "WHERE r.job_key=? AND r.canonical=1 AND cj.module=? ORDER BY r.result_id DESC LIMIT 50",
-                  (j["job_key"], j["module"])):
+    for r in db.q("SELECT r.result_id, r.platform, r.node_id, r.job_id, r.module_version, cj.stage FROM results r "
+                  "JOIN jobs cj ON cj.job_id=r.job_id WHERE r.job_key=? AND r.canonical=1 AND cj.module=? "
+                  "ORDER BY r.result_id DESC LIMIT 50", (j["job_key"], j["module"])):
+        if not modcalls.compares(j["module"], r["stage"], r["module_version"]):
+            continue
         p = r["platform"]
         if f["platforms"] or f["dataset_platforms"] or f["units"]:
             if not p or not pf.matches(p, f["platforms"]) or any(d != p for d in f["dataset_platforms"]):

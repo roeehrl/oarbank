@@ -2,7 +2,8 @@
 # two-stage parameter search on purpose: a parameter set renders a scene dataset in one stage ("eval") or as the chain
 # render -> score, where only nodes with the "scorer" pool (from the "scorer" service) can score. Results carry a
 # score, a tile count and the rendered image's digest; goldens come from the module's settings, per node class. A
-# standalone "sync" stage stands for ingestion work that jobs.enqueue items name; "eval" is the default stage.
+# standalone "sync" stage stands for ingestion work: its results depend on when it ran (determinism none), so they are
+# never replicated, compared, cached or golden-tested; "eval" is the default stage.
 manifest = 1
 
 [module]
@@ -54,6 +55,7 @@ requires = { pools = { scorer = 1 }, resources = { cpu = 0.5, mem_gb = 1.0 } }
 
 [[stages]]
 name = "sync"
+determinism = "none"
 timeout_s = 600
 requires = { resources = { cpu = 0.5, mem_gb = 0.5 } }
 

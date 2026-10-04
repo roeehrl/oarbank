@@ -1,4 +1,4 @@
-"""Protocol invariants as pure checks over the coordinator database.
+"""Protocol invariants as pure checks over the coordinator database (S21 also reads the modules' manifests).
 
 One catalogue, reused by: the Hypothesis state machine (tests/test_stateful.py), the seeded
 fault-injecting simulator (oarbank.sim), the swarm load test (bench/), and `oarbank verify`
@@ -29,6 +29,8 @@ Safety (must hold after every committed transaction):
   S18 an active protection rule is enforced within enter_for_s + 2 samples (from the decision journal)
   S20 every live, leased or done job of a bound unit of work ran on, or got its canonical result from, a node of the
       unit's class (and of its parent unit's), result-cache hits included (D33; S19 is the agent's protection invariant)
+  S21 a job of a stage that does not compare (determinism none) never has a replica, a dispute or a golden, and never
+      shares a canonical result through the cache (reads the catalogue's manifests)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -288,12 +290,44 @@ def s20_units_stay_in_their_class(db: DB):
     return out
 
 
+def s21_unreplicated_never_compared(db: DB):
+    """S21: a job of a stage that does not compare (determinism none) never has a replica, a dispute or a golden, and
+    never shares a canonical result with another job through the cache. Each row is judged by the module version that
+    produced the result involved (the catalogue's manifests)."""
+    from . import modcalls
+    out = []
+    no = lambda r, stage, ver: not modcalls.compares(r["module"], stage, ver)
+    for r in db.q("SELECT j.job_id, j.module, j.stage, r.module_version FROM jobs j JOIN results r ON r.job_id=j.job_id "
+                  "WHERE j.kind='golden'"):
+        if no(r, r["stage"], r["module_version"]):
+            out.append(f"S21 golden job {r['job_id']} ({r['module']}) ran stage {r['stage']}, which does not compare")
+    for r in db.q("SELECT rj.job_id, rj.module, o.stage, cr.module_version FROM jobs rj "
+                  "JOIN jobs o ON o.job_id=json_extract(rj.dispute_json, '$.replica_of') "
+                  "JOIN results cr ON cr.result_id=o.canonical_result_id WHERE rj.kind='replica'"):
+        if no(r, r["stage"], r["module_version"]):
+            out.append(f"S21 replica job {r['job_id']} ({r['module']}) re-runs stage {r['stage']}, which does not compare")
+    for r in db.q("SELECT j.job_id, j.module, j.stage, j.dispute_json FROM jobs j WHERE j.kind!='replica' "
+                  "AND json_extract(j.dispute_json, '$.results') IS NOT NULL"):
+        ids = (json.loads(r["dispute_json"]) or {}).get("results") or []
+        vers = [x["module_version"] for x in db.q(f"SELECT module_version FROM results WHERE result_id IN "
+                                                  f"({','.join('?' * len(ids))})", ids)] if ids else []
+        if any(no(r, r["stage"], v) for v in vers):
+            out.append(f"S21 job {r['job_id']} ({r['module']}) is disputed, but its stage {r['stage']} does not compare")
+    for r in db.q("SELECT j.job_id, j.module, j.stage, cj.job_id cid, cj.stage cstage, rs.module_version FROM jobs j "
+                  "JOIN results rs ON rs.result_id=j.canonical_result_id JOIN jobs cj ON cj.job_id=rs.job_id "
+                  "WHERE j.state='done' AND cj.job_id!=j.job_id"):
+        if no(r, r["stage"], r["module_version"]) or no(r, r["cstage"], r["module_version"]):
+            out.append(f"S21 job {r['job_id']} shares job {r['cid']}'s canonical result through the cache, but a stage that "
+                       "does not compare is involved")
+    return out
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
-          s18_rules_enforced, s20_units_stay_in_their_class]
+          s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared]
 
 
 def check_all(db: DB) -> list[str]:
@@ -366,6 +400,8 @@ def report(db: DB, now: float | None = None) -> dict:
 
 if __name__ == "__main__":
     import sys
-    from . import config as C
-    print(json.dumps(report(DB(C.DB_PATH)), indent=1))
+    from . import config as C, modcalls
+    db = DB(C.DB_PATH)
+    modcalls.use(db)                             # S21 reads the modules' manifests
+    print(json.dumps(report(db), indent=1))
     sys.exit(0)

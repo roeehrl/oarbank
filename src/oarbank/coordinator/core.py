@@ -1168,9 +1168,12 @@ def _register_artifacts(db: DB, res: dict, module: str | None = None) -> str | N
     return None
 
 
-def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None):
+def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: str | None):
     """Adaptive replication: re-run a deterministic sample of completed jobs on a different node,
-    so a silently wrong node is caught statistically (a mismatch opens a quorum dispute)."""
+    so a silently wrong node is caught statistically (a mismatch opens a quorum dispute). Never a job of a stage that
+    does not compare (determinism none): two honest runs of it may differ."""
+    if not modcalls.compares(j["module"], j["stage"], version):
+        return
     rate = float(db.get_setting("replica_rate", 0.03))
     if rate <= 0 or int(j["job_key"][:8], 16) / 0xFFFFFFFF >= rate:
         return
@@ -1196,6 +1199,11 @@ def _check_replica(db: DB, rj: dict, rid: int, node_id: str, digest, value, post
     if not oj or oj["state"] != "done" or not oj["canonical_result_id"]:
         return
     can = db.one("SELECT * FROM results WHERE result_id=?", (oj["canonical_result_id"],))
+    mine = db.one("SELECT module_version FROM results WHERE result_id=?", (rid,))
+    if not (modcalls.compares(oj["module"], oj["stage"], can["module_version"])
+            and modcalls.compares(rj["module"], rj["stage"], mine["module_version"])):
+        db.event("replica_not_compared", job_id=oj["job_id"], node_id=node_id)   # the stage stopped comparing meanwhile
+        return
     if not _differs(oj, can, value, digest):
         db.event("replica_match", job_id=oj["job_id"], node_id=node_id)
         return
@@ -1390,7 +1398,10 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             can = db.one("SELECT * FROM results WHERE result_id=?", (j["canonical_result_id"],))
             accepted, reason = 0, "job_done"
             db.x("UPDATE results SET accepted=0, reason=? WHERE result_id=?", (reason, rid))
-            if can and can["node_id"] == node["node_id"] and _differs(j, can, value, ev.digest):
+            if not (modcalls.compares(j["module"], j["stage"], mine["module_version"])
+                    and (not can or modcalls.compares(j["module"], j["stage"], can["module_version"]))):
+                pass                                    # a stage that does not compare: a late result is never compared
+            elif can and can["node_id"] == node["node_id"] and _differs(j, can, value, ev.digest):
                 # the same node gave two different answers for one job: it convicts itself
                 reason = "self_inconsistent"
                 db.x("UPDATE results SET reason=? WHERE result_id=?", (reason, rid))
@@ -1465,7 +1476,7 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             db.x("UPDATE nodes SET breaker_failures=0 WHERE node_id=?", (node["node_id"],))
             placement.harden(db, j["placement_unit"], mine["platform"])        # the unit's first result fixes its class (D33)
             if j["kind"] == "call" or (j["kind"] == "eval" and not j["depends_on"]):
-                _maybe_replicate(db, j, node["node_id"], _cmp(mine))
+                _maybe_replicate(db, j, node["node_id"], _cmp(mine), mine["module_version"])
             elif j["kind"] == "replica":
                 _check_replica(db, j, rid, node["node_id"], ev.digest, value, post)
         elif a["state"] == "live":

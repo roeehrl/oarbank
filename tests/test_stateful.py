@@ -4,7 +4,8 @@ coordinator core, with the full invariant catalogue checked after every step.
 This is the "model-based" layer of the verification plan (docs/verification.md): the agent-side
 behaviours (outbox replays, late completions after sleep, restarts, hard-cap enforcement,
 nondeterministic nodes) are generated as actions; the coordinator is the real code. The fleet is mixed (darwin-arm64,
-linux-amd64, linux-arm64), and studies may keep their units of work on one platform class (placement, D33; S20).
+linux-amd64, linux-arm64), studies may keep their units of work on one platform class (placement, D33; S20), and
+ingestion jobs of a stage that does not compare run beside them (S21).
 """
 import json
 import tempfile
@@ -67,6 +68,15 @@ class CoordinatorMachine(RuleBasedStateMachine):
             try:
                 core.complete(self.db, self.node(i), aid, golden_result(
                     {"module": a["module"], "spec": {"payload": json.loads(a["spec_json"]), "stage": a["stage"]}}, self.db))
+            except core.ApiError:
+                pass
+            return
+        if a["stage"] == "sync":       # ingestion: what the feed held when this node ran it (honest runs differ)
+            items = [f"r{x}" for x in range(k % 3 + i)]
+            try:
+                core.complete(self.db, self.node(i), aid, {"result": {
+                    "envelope": 1, "schema": "relay/result@1", "module_version": "1.0.0", "protocol": 1,
+                    "payload": {"items": items, "feed_sha": f"feed-{i}-{len(items)}"}}})
             except core.ApiError:
                 pass
             return
@@ -161,6 +171,23 @@ class CoordinatorMachine(RuleBasedStateMachine):
         twins), which every invariant must accept."""
         create_study(self.db, f"dup{bq}", [{"label": "c1", "params": {**PARAMS, "samples": bq}}],
                              SCENES[:3], {"label": "base", "params": PARAMS})
+
+    @rule(cursor=st.integers(0, 3), campaign=st.integers(0, 10 ** 6))
+    def sync_job(self, cursor, campaign):
+        """An ingestion job (relay's sync stage, determinism none) named by jobs.enqueue `stage`, into any campaign: its
+        keys repeat across campaigns, so a result cache would be tempting, and its honest runs differ (S21)."""
+        from oarbank_sdk import effects as fx
+        from oarbank_sdk.keys import job_key
+        from oarbank.coordinator import effects
+        cids = [r["campaign_id"] for r in self.db.q("SELECT campaign_id FROM campaigns WHERE state!='cancelled' ORDER BY campaign_id")]
+        payload = {"task": "sync", "cursor": cursor}
+        key = job_key("dev.codonic.oarbank.relay", "relay1", payload, "sync")
+        try:
+            with self.db.tx():
+                effects.apply(self.db, "relay", {"jobs.enqueue"}, [fx.jobs_enqueue(cids[campaign % len(cids)], [
+                    fx.job(key, payload, stage="sync")]).model_dump()])
+        except effects.EffectError:
+            pass                                       # e.g. a pinned campaign's class where sync cannot run
 
     @rule(mix=st.sampled_from(["same-os", "same-arch", "same-platform"]), unit=st.sampled_from(["campaign", "group"]),
           bind=st.sampled_from(["first-claim", "capacity", "explicit"]), pin=st.booleans())
