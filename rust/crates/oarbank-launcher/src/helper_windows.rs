@@ -4,7 +4,9 @@
 //!
 //! - `{"op": "allow", "container": "Oarbank.<module>", "port": P}`: a loopback exemption for that AppContainer, and
 //!   Windows Filtering Platform filters that block its TCP connections to every loopback port but P;
-//! - `{"op": "release", "container": …, "port": P}`: the filters go, and the exemption when no job still needs it.
+//! - `{"op": "release", "container": …, "port": P}`: the filters go, and the exemption when no job still needs it;
+//! - `{"op": "sessions"}`: the sessions WTS lists (helper_sessions.rs), which host protection needs and the agent's
+//!   virtual account may not read itself.
 //!
 //! Only `Oarbank.*` containers are served. The pipe `\\.\pipe\oarbank-helper` admits SYSTEM, administrators, the
 //! agent's service account and interactive users. The filters live in a dynamic WFP session (they end with the
@@ -186,6 +188,9 @@ impl Helper {
     }
 
     fn handle(&mut self, req: &Value) -> Result<Value> {
+        if req["op"].as_str() == Some("sessions") {
+            return Ok(crate::helper_sessions::reply(crate::helper_sessions::read().as_deref()));
+        }
         let name = req["container"].as_str().context("no container")?;
         let port = req["port"].as_u64().filter(|p| (1024..=65535).contains(p)).context("no port in 1024-65535")? as u16;
         let sid = container_sid(name)?;
@@ -293,19 +298,12 @@ fn running(h: HANDLE) -> bool {
 /// Keep a session helper in every session a person is logged on to: started when the session appears and again
 /// when it exits (no sooner than a minute after the previous start), ended when the service stops.
 fn keep_session_helpers(agent: PathBuf) {
-    use windows_sys::Win32::System::RemoteDesktop::{WTSEnumerateSessionsW, WTSFreeMemory, WTSActive, WTS_CURRENT_SERVER_HANDLE,
-                                                    WTS_SESSION_INFOW};
+    use windows_sys::Win32::System::RemoteDesktop::WTSActive;
     use windows_sys::Win32::System::Threading::TerminateProcess;
     let mut helpers: HashMap<u32, SessionHelper> = HashMap::new();
     while !crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
-        let mut list: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
-        let mut n = 0u32;
-        let mut active = vec![];
-        if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut list, &mut n) } != 0 {
-            active = unsafe { std::slice::from_raw_parts(list, n as usize) }.iter()
-                .filter(|s| s.SessionId != 0 && s.State == WTSActive).map(|s| s.SessionId).collect();
-            unsafe { WTSFreeMemory(list.cast()) };
-        }
+        let active: Vec<u32> = crate::helper_sessions::read().unwrap_or_default().iter()
+            .filter(|s| s.id != 0 && s.state == WTSActive as u32).map(|s| s.id).collect();
         helpers.retain(|id, h| {
             let keep = active.contains(id) && (running(h.process) || h.started.elapsed().as_secs() < 60);
             if !keep {

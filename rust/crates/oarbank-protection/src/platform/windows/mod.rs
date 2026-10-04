@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 
 pub use front::{front, own_front};
 pub use pdh::{RawCounter, GPU_ENGINE_RUNNING_TIME};
-pub use presence::{own_idle_s, own_session, sessions, NativePresence};
+pub use presence::{
+    helper_sessions, own_idle_s, own_session, sessions, wts_sessions, NativePresence,
+};
 pub use procs::{command_line, processes, NativeProcessSource, ProcessCounters, Snapshots};
 pub use session::{pipe_name, run_helper, serve};
 

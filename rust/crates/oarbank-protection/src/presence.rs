@@ -180,6 +180,34 @@ pub mod wts {
         }
     }
 
+    /// The sessions in the elevated helper's reply to `{"op": "sessions"}` (oarbank-launcher, `helper_sessions.rs`):
+    /// `{"ok": true, "sessions": [{"id", "state", "user", "locked"}]}`. The helper reads WTS as LocalSystem for the
+    /// system service, whose virtual account WTS refuses. None for anything but a complete, well-formed list.
+    pub fn parse_helper_reply(line: &str) -> Option<Vec<Session>> {
+        use serde_json::Value;
+        let v: Value = serde_json::from_str(line).ok()?;
+        if v.get("ok")?.as_bool()? {
+            v.get("sessions")?
+                .as_array()?
+                .iter()
+                .map(|s| {
+                    Some(Session {
+                        id: u32::try_from(s.get("id")?.as_u64()?).ok()?,
+                        state: u32::try_from(s.get("state")?.as_u64()?).ok()?,
+                        user: s.get("user")?.as_str()?.to_string(),
+                        locked: match s.get("locked")? {
+                            Value::Null => None,
+                            Value::Bool(b) => Some(*b),
+                            _ => return None,
+                        },
+                    })
+                })
+                .collect()
+        } else {
+            None
+        }
+    }
+
     /// The session whose desktop is on the screen: the console session when a person is at it, else the first
     /// person's session (a Remote Desktop session).
     pub fn front_session(sessions: &[Session], console: u32) -> Option<&Session> {
@@ -391,6 +419,56 @@ mod tests {
         assert_eq!(
             wts::presence(&[services, away], none, none).idle_s,
             Some(f64::INFINITY)
+        );
+    }
+
+    /// The system service's virtual account may not ask WTS, so it asks the elevated helper, which reads WTS as
+    /// LocalSystem. The reply's format is shared with the helper through vectors/helper-sessions-reply.json (the
+    /// launcher's test holds its own serializer to the same file).
+    #[test]
+    fn windows_sessions_from_the_elevated_helper() {
+        use super::wts::{self, Session};
+        let line = include_str!("../vectors/helper-sessions-reply.json");
+        let s = wts::parse_helper_reply(line).expect("the helper's reply parses");
+        assert_eq!(
+            s,
+            [
+                Session {
+                    id: 0,
+                    state: 4,
+                    user: String::new(),
+                    locked: None
+                },
+                Session {
+                    id: 1,
+                    state: wts::ACTIVE,
+                    user: "ada".into(),
+                    locked: Some(false)
+                },
+                Session {
+                    id: 2,
+                    state: wts::ACTIVE,
+                    user: "bo".into(),
+                    locked: Some(true)
+                },
+            ]
+        );
+        assert_eq!(wts::front_session(&s, 1).map(|x| x.id), Some(1));
+        // a refusal, a partial list or a malformed entry is no list: the reading stays unknown
+        for bad in [
+            r#"{"ok": false, "error": "unknown op"}"#,
+            r#"{"ok": true}"#,
+            r#"{"ok": true, "sessions": [{"id": 1, "state": 0, "user": "ada"}]}"#,
+            r#"{"ok": true, "sessions": [{"id": -1, "state": 0, "user": "ada", "locked": null}]}"#,
+            r#"{"ok": true, "sessions": [{"id": 1, "state": 0, "user": "ada", "locked": "no"}]}"#,
+            r#"{"ok": true, "sessions": [{"id": 4294967296, "state": 0, "user": "", "locked": null}]}"#,
+            "not json",
+        ] {
+            assert_eq!(wts::parse_helper_reply(bad), None, "{bad}");
+        }
+        assert_eq!(
+            wts::parse_helper_reply(r#"{"ok": true, "sessions": []}"#),
+            Some(vec![])
         );
     }
 }

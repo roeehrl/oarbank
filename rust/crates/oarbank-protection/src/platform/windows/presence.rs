@@ -1,11 +1,15 @@
 //! User presence on Windows, from the sessions WTS lists. In the user's own session (the personal scope's
 //! logon task) the last input comes from GetLastInputInfo; the system service runs in session 0, where WTS tells
-//! who is logged on, connected and locked, but keeps no last-input time for the console.
+//! who is logged on, connected and locked, but keeps no last-input time for the console. The system service's
+//! virtual account may not ask WTS at all (the session manager refuses it), so the service asks the elevated helper,
+//! which reads the same list as LocalSystem.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::ptr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW,
@@ -51,8 +55,85 @@ fn utf16(s: &[u16]) -> String {
     String::from_utf16_lossy(&s[..n])
 }
 
-/// Every session with its user and lock state (None: WTS is unavailable).
+/// Every session with its user and lock state: from WTS, or where this process may not ask WTS (the system
+/// service's virtual account), from the elevated helper. None: neither can tell.
 pub fn sessions() -> Option<Vec<Session>> {
+    wts_sessions().or_else(helper_sessions)
+}
+
+/// The elevated helper's pipe (`OARBANK_HELPER_PIPE` overrides it).
+fn helper_pipe() -> String {
+    std::env::var("OARBANK_HELPER_PIPE").unwrap_or_else(|_| r"\\.\pipe\oarbank-helper".into())
+}
+
+/// How long a helper reply stays good: presence and the front each read the list on every tick.
+const HELPER_TTL: Duration = Duration::from_secs(1);
+/// The longest the protection tick waits for the helper.
+const HELPER_WAIT: Duration = Duration::from_secs(2);
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// The sessions as the elevated helper reads them (`{"op": "sessions"}`), kept for a second. A request is never
+/// waited on longer than two seconds, and none is sent while an earlier one is still out (a helper that does not
+/// answer costs one thread, not the tick).
+pub fn helper_sessions() -> Option<Vec<Session>> {
+    static LAST: Mutex<Option<(Instant, Option<Vec<Session>>)>> = Mutex::new(None);
+    static OUT: AtomicBool = AtomicBool::new(false);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, s)) = last.as_ref() {
+        if at.elapsed() < HELPER_TTL {
+            return s.clone();
+        }
+    }
+    if OUT.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let (tx, rx) = mpsc::channel();
+    let sent = std::thread::Builder::new()
+        .name("helper-sessions".into())
+        .spawn(move || {
+            let _ = tx.send(ask_helper());
+            OUT.store(false, Ordering::SeqCst);
+        });
+    if sent.is_err() {
+        OUT.store(false, Ordering::SeqCst);
+        return None;
+    }
+    let s = rx.recv_timeout(HELPER_WAIT).ok().flatten();
+    *last = Some((Instant::now(), s.clone()));
+    s
+}
+
+fn ask_helper() -> Option<Vec<Session>> {
+    let name = helper_pipe();
+    let mut pipe = None;
+    for _ in 0..10 {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+        {
+            Ok(p) => {
+                pipe = Some(p);
+                break;
+            }
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            Err(_) => return None, // no helper (the personal scope, where WTS answers anyway)
+        }
+    }
+    let mut pipe = pipe?;
+    pipe.write_all(b"{\"op\": \"sessions\"}\n").ok()?;
+    let mut line = String::new();
+    BufReader::new(&pipe)
+        .take(1 << 20)
+        .read_line(&mut line)
+        .ok()?;
+    wts::parse_helper_reply(&line)
+}
+
+/// Every session with its user and lock state, from WTS itself (None: WTS refuses this process).
+pub fn wts_sessions() -> Option<Vec<Session>> {
     let mut list: *mut WTS_SESSION_INFOW = ptr::null_mut();
     let mut n = 0u32;
     // SAFETY: WTS allocates the list, freed below.
@@ -123,7 +204,10 @@ impl NativePresence {
 impl Presence for NativePresence {
     fn read(&mut self) -> PresenceReading {
         let Some(sessions) = sessions() else {
-            return PresenceReading::new(None, "unknown: the session list (WTS) cannot be read");
+            return PresenceReading::new(
+                None,
+                "unknown: the session list cannot be read (from WTS, or from the elevated helper)",
+            );
         };
         let now = Instant::now();
         self.locked_since.retain(|id, _| {

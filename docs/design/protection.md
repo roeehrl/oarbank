@@ -78,7 +78,10 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   active window (EWMH `_NET_ACTIVE_WINDOW` and its `_NET_WM_PID`, read with the session's Xauthority cookie), a text
   console's foreground process group; a Wayland compositor tells no other program which window is in front, so there it
   is unknown. Windows takes the console's session from WTS (locked: nothing in front) and its foreground window, which
-  only a process in that session may ask for (a packaged app's frame is resolved to the app inside it).
+  only a process in that session may ask for (a packaged app's frame is resolved to the app inside it). The session
+  manager refuses WTS to the system service's virtual account, so the service asks the elevated helper, which reads
+  the same session list as LocalSystem (`{"op": "sessions"}` on its pipe); without either the front and presence are
+  unknown.
 - **GPU activity** is the group's GPU busy seconds per second over the last sample interval, summed over its processes
   and the GPU's engines (so two busy engines can pass 1); `min_busy` defaults to 0.05. Each OS reads accumulated GPU
   time per process: macOS from the AGX driver's user clients in the IORegistry, Linux from the DRM `fdinfo` of every GPU

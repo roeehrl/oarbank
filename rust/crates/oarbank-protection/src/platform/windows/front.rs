@@ -88,7 +88,7 @@ pub fn front(hub: Option<&SessionHub>) -> FrontReading {
     let Some(sessions) = sessions() else {
         return FrontReading::new(
             Front::Unknown,
-            "unknown: the session list (WTS) cannot be read",
+            "unknown: the session list cannot be read (from WTS, or from the elevated helper)",
         );
     };
     // SAFETY: no preconditions.

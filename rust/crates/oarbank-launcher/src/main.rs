@@ -13,6 +13,8 @@ mod setup;
 #[cfg_attr(windows, path = "svc_windows.rs")]
 #[cfg_attr(all(unix, not(target_os = "macos")), path = "svc_systemd.rs")]
 mod svc;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod helper_sessions;
 #[cfg(windows)]
 mod helper_windows;
 

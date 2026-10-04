@@ -74,6 +74,19 @@ fn presence_comes_from_the_session_list() {
     assert!(r.source.starts_with("wts") || r.source.starts_with("unknown: no idle time"), "{r:?}");
 }
 
+/// The system service's virtual account may not ask WTS, so it asks the elevated helper (installed by the MSI),
+/// which reads the same list as LocalSystem.
+#[test]
+#[ignore = "needs the elevated helper (OarbankHelper) running"]
+fn the_elevated_helper_lists_the_sessions() {
+    let theirs = windows::helper_sessions().expect("the helper answers {\"op\": \"sessions\"}");
+    assert!(theirs.iter().any(|s| s.id == 0), "{theirs:?}");
+    if let Some(ours) = windows::wts_sessions() {
+        let ids = |l: &[presence::wts::Session]| l.iter().map(|s| s.id).collect::<HashSet<_>>();
+        assert_eq!(ids(&theirs), ids(&ours));
+    }
+}
+
 /// The table lists the processes in people's sessions (1 and up) with their paths; session 0 (services, and the
 /// ssh session this test runs in) is not the owner's.
 #[test]

@@ -140,8 +140,9 @@ component (`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) or a standalone LLV
 `scripts\windows-clang.ps1`, which adds the Visual Studio component when run with `-Install`.
 
 The MSI installs `C:\Program Files\Oarbank`, the elevated helper service (`OarbankHelper`, which lets module sandboxes
-reach only their job's egress proxy, and keeps a session helper running in each person's session that tells host
-protection that session's foreground window, last input and command lines), and the agent as the service
+reach only their job's egress proxy, keeps a session helper running in each person's session that tells host
+protection that session's foreground window, last input and command lines, and lists the sessions for host protection,
+which the agent's account may not read), and the agent as the service
 `dev.codonic.oarbank.agent` run by its virtual account, with its home in `C:\ProgramData\Oarbank\agent`. Both services start automatically about two minutes after
 boot (Automatic, Delayed Start), and the service manager restarts either one that crashes or stops with an error.
 `JOINCODE=` or `COORDINATOR=` work instead of a file. Module
