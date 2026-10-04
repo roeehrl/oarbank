@@ -424,12 +424,12 @@ mod tests {
     const SHOW: &str = "Id=1\nUser=999\nName=oarbank\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=systemd-user\n\
         Scope=\nLeader=1596\nType=unspecified\nClass=manager-early\nActive=yes\nState=active\nIdleHint=no\n\
         IdleSinceHint=0\nLockedHint=no\n\n\
-        Id=2\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=systemd-user\nScope=\n\
+        Id=2\nUser=501\nName=alice\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=systemd-user\nScope=\n\
         Leader=1600\nType=unspecified\nClass=manager\nActive=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\n\
         LockedHint=no\n\n\
-        Id=5\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=sshd\nScope=session-5.scope\n\
+        Id=5\nUser=501\nName=alice\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=sshd\nScope=session-5.scope\n\
         Leader=2261\nType=tty\nClass=user\nActive=yes\nState=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n\n\
-        Id=10\nUser=501\nName=tnt\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=sshd\n\
+        Id=10\nUser=501\nName=alice\nSeat=\nTTY=\nDisplay=\nRemote=no\nRemoteHost=\nService=sshd\n\
         Scope=session-10.scope\nLeader=95009\nType=tty\nClass=user\nActive=yes\nState=active\nIdleHint=no\n\
         IdleSinceHint=0\nLockedHint=no\n\n\
         Id=7\nUser=1000\nName=ada\nSeat=seat0\nTTY=tty2\nDisplay=:0\nRemote=no\nRemoteHost=\nService=gdm-password\n\
@@ -438,7 +438,7 @@ mod tests {
         Id=3\nUser=1000\nName=ada\nSeat=seat0\nTTY=tty3\nDisplay=\nRemote=no\nRemoteHost=\nService=login\n\
         Scope=session-3.scope\nLeader=1412\nType=tty\nClass=user\nActive=no\nState=online\nIdleHint=no\n\
         IdleSinceHint=1790000060000000\nLockedHint=no\n\n\
-        Id=12\nUser=501\nName=tnt\nSeat=\nTTY=pts/1\nDisplay=\nRemote=yes\nRemoteHost=192.0.2.7\nService=sshd\n\
+        Id=12\nUser=501\nName=alice\nSeat=\nTTY=pts/1\nDisplay=\nRemote=yes\nRemoteHost=192.0.2.7\nService=sshd\n\
         Scope=session-12.scope\nLeader=3310\nType=tty\nClass=user\nActive=yes\nState=active\nIdleHint=no\n\
         IdleSinceHint=1789992900000000\nLockedHint=no\n";
 
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn parses_sessions_and_session_ids() {
         assert_eq!(
-            parse_list("1 999 oarbank - 1534 manager-early - no -\n5 501 tnt     - 2171 user          - no -\n"),
+            parse_list("1 999 oarbank - 1534 manager-early - no -\n5 501 alice   - 2171 user          - no -\n"),
             ["1", "5"]
         );
         let s = parse_show(SHOW);
@@ -510,7 +510,7 @@ mod tests {
         assert!(!get(&s, "1").is_person() && !get(&s, "2").is_person());
         // a systemd without some of the properties leaves them out of the block: nothing is misread
         let old = parse_show(
-            "Id=4\nUser=501\nName=tnt\nService=sshd\nType=tty\nClass=user\nActive=yes\n",
+            "Id=4\nUser=501\nName=alice\nService=sshd\nType=tty\nClass=user\nActive=yes\n",
         );
         assert_eq!(
             (
