@@ -41,7 +41,8 @@ under the agent's home, its own VM size, its own settings.
   (`oarbank-<12 hex of sha256(agent home)>`: session names are machine-wide keys, so two agents on one machine, a
   personal and a system one, never collide), storage at `<agent home>\containers\wslc` (the session's VHD: images,
   containers, volumes), the VM's CPUs and memory from the same budget the macOS VM gets (`sizing`: 8, 12 or 32 GB by
-  host RAM), and a VHD size cap (100 GB, as the Colima profile's disk). Nothing is read from or written to the user's
+  host RAM), within the host's processors and half its memory (a VM asked for more processors than the host has does
+  not start), and a VHD size cap (100 GB, as the Colima profile's disk). Nothing is read from or written to the user's
   WSL distributions or the user's own containers session.
 - **Isolation.** WSL distributions of one account share one utility VM and kernel; a WSLc session gets a VM of its own.
   A container escape lands in a VM that holds only the agent's images and the two directories it mounts.

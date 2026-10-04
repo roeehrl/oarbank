@@ -39,6 +39,14 @@ pub fn host_path(p: &Path) -> String {
     }
 }
 
+/// The session VM's memory and CPUs: the budget the other runtimes get (`sizing`), within what the host has. A VM asked
+/// for more processors than the host has does not start (`E_FAIL` on a 4-core runner asked for 6), and one taking more
+/// than half the host's memory starves it.
+pub fn session_size(ram_gb: f64, logical: u32) -> (f64, u32) {
+    let (mem_gb, cpus, _) = crate::container_runtime::sizing(ram_gb, None, None);
+    (mem_gb.min((ram_gb / 2.0).floor()).max(1.0), cpus.min(logical).max(1))
+}
+
 /// `wslc` memory: whole MiB (`2.5` GB is `2560m`).
 pub fn mem_arg(gb: f64) -> String {
     format!("{}m", (gb * 1024.0).round().max(1.0) as u64)
@@ -570,7 +578,8 @@ mod imp {
     impl WslcRuntime {
         /// The runtime for this agent, sized by the host's RAM, with its session host started.
         pub fn start(layout: &crate::paths::Layout, ram_gb: f64) -> WslcRuntime {
-            let (mem_gb, cpus, _) = crate::container_runtime::sizing(ram_gb, None, None);
+            let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
+            let (mem_gb, cpus) = session_size(ram_gb, logical);
             WslcRuntime::start_at(&layout.home, agent_dir().join(SDK_DLL), mem_gb, cpus)
         }
 
@@ -1107,6 +1116,14 @@ mod tests {
         assert!(!a[..image_at].iter().any(|x| x.contains("platform") || x.contains("privileged") || x == "--device"));
         assert_eq!(mem_arg(0.25), "256m");
         assert_eq!(mem_arg(8.0), "8192m");
+    }
+
+    #[test]
+    fn the_session_fits_the_host() {
+        assert_eq!(session_size(16.0, 4), (8.0, 4), "a 4-core runner with 16 GB");
+        assert_eq!(session_size(8.0, 8), (4.0, 6));
+        assert_eq!(session_size(128.0, 32), (32.0, 8));
+        assert_eq!(session_size(1.0, 1), (1.0, 1));
     }
 
     #[test]
