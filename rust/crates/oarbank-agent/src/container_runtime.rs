@@ -1043,8 +1043,7 @@ pub mod tests {
 
     /// Make `home` a rootless Podman home of its own: graph root, run root and temporary directory all inside it. A
     /// private HOME alone moves only the graph root: the run root and the temporary directory stay the account's
-    /// (`$XDG_RUNTIME_DIR/containers`, `$XDG_RUNTIME_DIR/libpod/tmp`), so a `system reset` of the private engine would
-    /// delete the run state of every other container the account runs, those of concurrent tests among them.
+    /// (`$XDG_RUNTIME_DIR/containers`, `$XDG_RUNTIME_DIR/libpod/tmp`).
     #[cfg(target_os = "linux")]
     pub fn private_engine(home: &Path) {
         let conf = home.join(".config/containers");
@@ -1054,10 +1053,23 @@ pub mod tests {
         std::fs::write(conf.join("containers.conf"), format!("[engine]\ntmp_dir = \"{}\"\n", home.join("tmp").display())).unwrap();
     }
 
-    /// The account's own engine state outlives a private engine's reset (the test above relies on it).
+    /// Delete a private engine's state. Its storage holds files of the user namespace's ids, which only a process in
+    /// that namespace may remove (`podman unshare rm`); never `podman system reset`, which also deletes the account's
+    /// own engine state under `$XDG_RUNTIME_DIR/libpod` whatever the configuration says (the run state of every other
+    /// container the account runs, those of concurrent tests among them).
+    #[cfg(target_os = "linux")]
+    pub fn remove_private_engine(cli: &Path, home: &Path) {
+        if cli.ends_with("podman") {
+            let _ = Command::new(cli).env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin").env("HOME", home)
+                .args(["unshare", "rm", "-rf"]).args(["storage", "run", "tmp"].map(|d| home.join(d))).output();
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A private engine works in its own roots, and removing it leaves the account's engine and its run state alone.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_private_engine_reset_leaves_the_accounts_run_state_alone() {
+    fn a_private_engine_keeps_its_state_to_itself() {
         let home = temp("private-engine");
         let layout = crate::paths::Layout::new(home.join("agent"));
         let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
@@ -1070,19 +1082,21 @@ pub mod tests {
         }
         let shared = rt.cli(&["info", "--format", "{{.Store.RunRoot}}"], 30).unwrap();
         let shared_run = PathBuf::from(String::from_utf8_lossy(&shared.stdout).trim());
-        // a marker in the account's run root (a reset of the account's engine removes everything there)
         let marker = shared_run.join(format!("oarbank-test-{}", std::process::id()));
         std::fs::write(&marker, "x").unwrap();
+        let account_home = rt.home.clone();
         rt.home = home.join("engine-home");
         private_engine(&rt.home);
         let own = rt.cli(&["info", "--format", "{{.Store.RunRoot}} {{.Store.GraphRoot}}"], 60).unwrap();
         assert_eq!(String::from_utf8_lossy(&own.stdout).trim(),
                    format!("{} {}", rt.home.join("run").display(), rt.home.join("storage").display()), "{}", own.stderr_tail(500));
-        let reset = rt.cli(&["system", "reset", "--force"], 120).unwrap();
-        assert!(reset.ok(), "{}", reset.stderr_tail(500));
+        remove_private_engine(&rt.cli, &rt.home);
         let kept = marker.exists();
         let _ = std::fs::remove_file(&marker);
         assert!(kept, "the account's run state ({}) was removed", shared_run.display());
+        assert!(!rt.home.exists(), "the private engine's files are gone");
+        rt.home = account_home;
+        assert!(rt.status().is_ok_and(|s| s.running), "the account's engine still answers");
         let _ = std::fs::remove_dir_all(&home);
     }
 

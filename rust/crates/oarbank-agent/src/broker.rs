@@ -1371,6 +1371,25 @@ print(json.dumps(out))
         (status, location)
     }
 
+    /// The TCP ports listening on any or the loopback address in `/proc/net/tcp` and `/proc/net/tcp6` text.
+    fn vm_listeners(text: &str) -> std::collections::HashSet<u16> {
+        text.lines().filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (local, state) = (f.get(1)?, f.get(3)?);
+            (*state == "0A").then_some(())?;
+            u16::from_str_radix(local.rsplit(':').next()?, 16).ok()
+        }).collect()
+    }
+
+    #[test]
+    fn vm_listeners_read_proc_net_tcp() {
+        let text = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                    0: 00000000:4E21 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1\n\
+                    1: 0100007F:1F90 0100007F:D3C2 01 00000000:00000000 00:00000000 00000000     0        0 2 1\n\
+                    0: 00000000000000000000000000000000:C350 00000000000000000000000000000000:0000 0A 0 0 0 0 0 3 1\n";
+        assert_eq!(vm_listeners(text), [20001, 50000].into_iter().collect());
+    }
+
     /// Push every blob and manifest of `store` into the real registry on `port` (the OCI distribution push: monolithic
     /// blob uploads, manifests by tag and by digest).
     #[cfg(any(windows, target_os = "linux"))]
@@ -1506,20 +1525,44 @@ print(json.dumps(out))
             let r = rt.clone();
             async move { tokio::task::spawn_blocking(move || r.cli(&args.iter().map(String::as_str).collect::<Vec<_>>(), 600)).await.unwrap().unwrap() }
         };
-        // the registry, inside the session
+        // the registry, inside the session. A published port reaches the session VM on a port of WSLc's choosing, and the
+        // session pulls from that one (its loopback is plain HTTP to the engine; WSLc has no host networking), so the
+        // images are named after it and the test forwards the same port on Windows to the published one: the broker
+        // verifies them on Windows and the session pulls them, both at one address
+        let listeners = || {
+            let r = rt.clone();
+            async move {
+                let out = tokio::task::spawn_blocking(move || r.cli(&["system", "session", "run", "/bin/sh", "-c", "cat /proc/net/tcp /proc/net/tcp6"], 120))
+                    .await.unwrap().unwrap();
+                vm_listeners(&decode(&out.stdout))
+            }
+        };
+        let before = listeners().await;
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let registry = "docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e";
-        let r = cli(vec!["container".into(), "run".into(), "-d".into(), "--rm".into(), "--network".into(), "host".into(),
-                         "-p".into(), format!("127.0.0.1:{port}:{port}"), "-e".into(), format!("REGISTRY_HTTP_ADDR=0.0.0.0:{port}"),
+        let r = cli(vec!["container".into(), "run".into(), "-d".into(), "--rm".into(), "-p".into(), format!("127.0.0.1:{port}:5000"),
                          "--label".into(), "oarbank.live-test=registry".into(), registry.into()]).await;
         assert!(r.ok(), "the registry: {}", decode(&r.stderr));
-        let reg = format!("127.0.0.1:{port}");
         for _ in 0..100 {
             if http(port, "GET", "/v2/", "text/plain", b"").await.0 == 200 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        let new: Vec<u16> = listeners().await.difference(&before).copied().collect();
+        let [vm_port] = new[..] else { panic!("the registry's port in the session VM: new listeners {new:?}") };
+        let forward = tokio::net::TcpListener::bind(("127.0.0.1", vm_port)).await
+            .unwrap_or_else(|e| panic!("127.0.0.1:{vm_port} on Windows (the session VM's port for the registry): {e}"));
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = forward.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(mut up) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
+                    }
+                });
+            }
+        });
+        let (port, reg) = (vm_port, format!("127.0.0.1:{vm_port}"));
         // busybox's root filesystem for this platform, as a signed image of the set, and an unsigned one beside it
         let hub = crate::imageset::Registry::new().unwrap();
         let (index, _) = hub.manifest("docker.io/library/busybox", PROBE_IMAGE.split_once('@').unwrap().1).await.unwrap().unwrap();
@@ -1636,8 +1679,15 @@ print(json.dumps(out))
         assert_eq!(r["error"], "image_not_approved", "{r}");
         assert_eq!(b.ran_images(), vec![json!({"set": "tasks", "image": signed})]);
         drop(b);
-        // the private storage holds files of the user namespace's ids: the engine removes them (its graph root, run
-        // root and temporary directory are all under the private home, so other tests' containers are untouched)
-        let _ = std::process::Command::new(cli).env("HOME", &engine_home).args(["system", "reset", "--force"]).output();
+        // the broker removes the attempt's containers on a thread of its own: wait for them before the storage goes
+        for _ in 0..100 {
+            let left = std::process::Command::new(&cli).env("HOME", &engine_home).args(["ps", "-aq", "--filter", "label=oarbank.attempt_id=42"])
+                .output().map(|o| o.stdout.is_empty()).unwrap_or(true);
+            if left {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        crate::container_runtime::tests::remove_private_engine(&cli, &engine_home);
     }
 }

@@ -235,18 +235,19 @@ pub fn with_host_loopback_off(settings: Option<&str>) -> Option<String> {
     Some(out.join("\n") + "\n")
 }
 
-/// What the session VM itself shows (`system session run`): its architecture, the GPU-PV device and the host driver
-/// libraries the guest's CDI spec mounts into GPU containers.
+/// What the session VM itself shows (`system session run`): its architecture, the GPU-PV device, the WSL libraries
+/// and the Linux user-mode drivers in the host's driver store, which the guest's CDI spec mounts into GPU containers.
 pub const PROBE: &str = "echo \"arch:$(uname -m)\"; test -e /dev/dxg && echo dxg; \
     for f in /usr/lib/wsl/lib/*; do [ -e \"$f\" ] && echo \"lib:${f##*/}\"; done; \
-    for f in /usr/lib/wsl/drivers/*; do [ -e \"$f\" ] && echo \"drv:${f##*/}\"; done; true";
+    for f in /usr/lib/wsl/drivers/*/*.so*; do [ -e \"$f\" ] && echo \"drv:${f#/usr/lib/wsl/drivers/}\"; done; true";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Probe {
     pub arch: Option<String>,
     pub dxg: bool,
     pub libs: Vec<String>,
-    pub drivers: usize,
+    /// `<driver store folder>/<library>`: the Linux user-mode drivers GPU drivers ship for WSL.
+    pub drivers: Vec<String>,
 }
 
 pub fn parse_probe(out: &str) -> Probe {
@@ -258,8 +259,8 @@ pub fn parse_probe(out: &str) -> Probe {
             p.dxg = true;
         } else if let Some(f) = l.strip_prefix("lib:") {
             p.libs.push(f.to_string());
-        } else if l.starts_with("drv:") {
-            p.drivers += 1;
+        } else if let Some(f) = l.strip_prefix("drv:") {
+            p.drivers.push(f.to_string());
         }
     }
     p
@@ -275,10 +276,10 @@ impl Probe {
         }
     }
 
-    /// GPU-PV with a host GPU behind it: the device, and a vendor driver in the host's driver store shared with the VM
-    /// (a host without a WSL-capable GPU driver shares none).
+    /// GPU-PV with a host GPU behind it: the device, and a vendor driver that ships a Linux user-mode driver for WSL
+    /// (`*.so` in its driver store folder). A VM's display adapter (Hyper-V Video) and the Basic Render Driver ship none.
     pub fn gpu(&self) -> bool {
-        self.dxg && self.drivers > 0
+        self.dxg && !self.drivers.is_empty()
     }
 
     /// The GPU APIs a `--gpus all` container gets from the host: D3D12 (DirectML) where WSL's D3D12 and DXCore are
@@ -1058,7 +1059,7 @@ mod imp {
             let listed = rt.cli(&["system", "session", "list"], 60).unwrap();
             assert!(decode(&listed.stdout).contains(&rt.session), "{}", decode(&listed.stdout));
             let proven = host.prove();
-            eprintln!("{:?}", proven.as_ref().map(|r| r.json()).unwrap_or_else(|r| r.json()));
+            eprintln!("{:?}", proven.as_ref().map(|r| (r.json(), r.probe.clone())).unwrap_or_else(|r| (r.json(), r.probe.clone())));
             match proven {
                 Ok(r) => assert!(r.ready() && !r.platforms.is_empty()),
                 Err(r) => {
@@ -1206,11 +1207,12 @@ mod tests {
     #[test]
     fn the_vm_probe_names_platform_gpu_and_apis() {
         let nvidia = "arch:x86_64\ndxg\nlib:libcuda.so\nlib:libcuda.so.1\nlib:libcuda.so.1.1\nlib:libd3d12.so\nlib:libd3d12core.so\nlib:libdxcore.so\n\
-                      lib:libnvidia-ml.so.1\nlib:nvidia-smi\ndrv:nv_dispi.inf_amd64_7ff3f9b2c2b3b0c1\n";
+                      lib:libnvidia-ml.so.1\nlib:nvidia-smi\ndrv:nv_dispi.inf_amd64_7ff3f9b2c2b3b0c1/libcuda.so.1.1\n\
+                      drv:nv_dispi.inf_amd64_7ff3f9b2c2b3b0c1/libnvwgf2umx.so\n";
         let p = parse_probe(nvidia);
         assert_eq!((p.platform().as_deref(), p.gpu()), (Some("linux/amd64"), true));
         assert_eq!(p.gpu_apis(), ["cuda", "directml"]);
-        let amd = parse_probe("arch:x86_64\ndxg\nlib:libd3d12.so\nlib:libd3d12core.so\nlib:libdxcore.so\ndrv:u0401234.inf_amd64_abc\n");
+        let amd = parse_probe("arch:x86_64\ndxg\nlib:libd3d12.so\nlib:libd3d12core.so\nlib:libdxcore.so\ndrv:u0401234.inf_amd64_abc/libamdxc64.so\n");
         assert_eq!(amd.gpu_apis(), ["directml"], "ROCm on WSL brings its runtime in the image: not attested");
         // a VM without a host GPU (a cloud runner): the device may exist, but no driver is shared
         let none = parse_probe("arch:aarch64\ndxg\nlib:libd3d12.so\nlib:libdxcore.so\n");
@@ -1220,7 +1222,7 @@ mod tests {
 
     #[test]
     fn the_report_offers_gpu_only_from_a_ready_session() {
-        let probe = parse_probe("arch:x86_64\ndxg\nlib:libcuda.so.1\nlib:libd3d12.so\nlib:libdxcore.so\ndrv:nv\n");
+        let probe = parse_probe("arch:x86_64\ndxg\nlib:libcuda.so.1\nlib:libd3d12.so\nlib:libdxcore.so\ndrv:nv/libcuda.so.1.1\n");
         let ready = Report { state: State::Ready, session: "oarbank-x".into(), platforms: vec!["linux/amd64".into()], probe: probe.clone(),
                              ..Default::default() };
         assert_eq!(ready.json(), json!({"runtime": "wslc", "state": "ready", "session": "oarbank-x", "platforms": ["linux/amd64"],
