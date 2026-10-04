@@ -1,6 +1,6 @@
 # GPU placement by API, and GPU in containers on macOS
 
-Status: design (PLAN D38) for **oarbank-sdk 1.5.0** and **core 2.5.0** (both still unreleased, so nothing here bumps a
+Status: built (PLAN D38) in **oarbank-sdk 1.5.0** and **core 2.5.0** (both still unreleased, so nothing here bumps a
 version); see Implementation status.
 
 ## The problem
@@ -236,3 +236,37 @@ with `gpus[].apis` removed (nothing is released). `GPU_API_MISSING` is a new rea
 - **Device counts and memory.** `min_vram_gb` is carried and still selects nothing; the `gpu` pool is one token for
   all devices. Both wait for a per-device inventory on Linux and Windows.
 - **Level Zero, SYCL, WebGPU** are not detected; a module may name them, and is placed nowhere until a core detects them.
+
+## Implementation status
+
+Built as designed, in oarbank-sdk 1.5.0 and core 2.5.0. Where the build adds to the design:
+
+- **One list of APIs, pinned.** The agent's probes and the SDK's `gpu.KNOWN_APIS` are held to one list by an agent test
+  that reads the SDK's source, and to one answer on each host by `tests/rust/test_gpu_apis.py`.
+- **The probe's limit is its own.** `oarbank-agent gpu-apis` arms a watchdog that `_exit`s (Windows: terminates) after
+  60 s, so the agent only waits for the child; a crash, a hang or garbage leaves every API absent with the reason.
+- **Windows' Basic Render Driver** showed up on the Windows test VM as an adapter without DXGI's software flag, so it
+  is excluded by its ids (vendor 0x1414, device 0x8C) and its name too, for DirectML, Vulkan (Dozen) and OpenCL
+  (OpenCLOn12) alike.
+- **The broker's `status`** answers `gpus: "all"` only to a job that reserved the `gpu` pool (it reported the node's
+  passthrough to every job before), since on macOS a job's containers reach the GPU only on the GPU VM.
+- **The facts' `gpus`** keep vendor, model, memory and `unified`; `apis` moved to the doctor report.
+
+**Verified on each OS.**
+
+- macOS (Apple M4 Max, macOS 27): the core suite, the SDK suite, the Rust workspace with clippy; detection reports
+  `metal` and `opencl`, identically from the agent and the SDK, and the gpuinfo example runs its golden sandboxed with
+  Metal reachable (the kit, and a real agent certifying it against a real oarbankd).
+- Linux (the Lima VM, aarch64, kernel 7.0): clippy and the Rust workspace; the core GPU tests and the end-to-end test,
+  where the agent reports no API (lavapipe is a CPU device), gpuinfo is `undetected` and explain says
+  `GPU_API_MISSING`; the Vulkan compute probe image built and run with rootless Podman (Fedora 44, Mesa 26.2 with the
+  Venus driver), its compute check passing on lavapipe.
+- Windows 11 arm64 (the QEMU VM): clippy and the Rust workspace; detection reports no API (no GPU adapter but the Basic
+  Render Driver), identically from the agent and the SDK; the SDK's GPU, manifest and conformance tests.
+
+**Not verified, for want of hardware.** No machine here has an NVIDIA, AMD or Intel GPU, so the CUDA, ROCm, DirectML
+and hardware Vulkan and OpenCL probes, and the CDI container APIs on a real spec, are covered by the probes running
+(and reporting absence) on all three OSes and by recorded specs, not by a device. The macOS GPU VM is built and its
+arguments, socket, device and selection are tested, but its live test
+(`live_colima_gpu_runs_vulkan_compute_on_the_apple_gpu`) has not run: krunkit comes from a third-party Homebrew tap,
+which Homebrew now installs only after `brew trust slp/krun`, an owner decision on this Mac.
