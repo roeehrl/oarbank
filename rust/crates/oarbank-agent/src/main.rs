@@ -18,6 +18,7 @@ mod endpoints;
 mod facts;
 mod folders;
 mod fsutil;
+mod gpuapi;
 mod host;
 mod identity;
 #[cfg(unix)]
@@ -129,6 +130,10 @@ enum Cmd {
     },
     /// Print this node's facts as JSON.
     Facts,
+    /// Print the GPU APIs this node provides, on the host and in its containers, with what was found for each (the
+    /// doctor report's `gpu_apis`), as JSON.
+    #[command(name = "gpu-apis")]
+    GpuApis,
     /// List coordinators announcing themselves on the local network (a hint: enrolling still needs the owner's approval).
     Discover {
         /// Seconds to listen.
@@ -193,6 +198,14 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Facts => {
             println!("{}", serde_json::to_string_pretty(&facts::collect(&layout.home))?);
+            Ok(())
+        }
+        Cmd::GpuApis => {
+            gpuapi::watchdog(gpuapi::limit());
+            let mut r = gpuapi::detect();
+            r["platform"] = serde_json::json!(facts::platform_token());
+            r["agent_version"] = serde_json::json!(VERSION);
+            println!("{}", serde_json::to_string_pretty(&r)?);
             Ok(())
         }
         Cmd::Enroll { coordinator, wait } => rt.block_on(async {

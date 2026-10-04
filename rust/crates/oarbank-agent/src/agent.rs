@@ -50,7 +50,7 @@ pub struct Agent {
     /// The coordinator's clock as of its last answer: moves' time locks and expiries are in its time (clock.rs).
     pub coord_clock: crate::clock::CoordClock,
     #[cfg(unix)]
-    pub containers: Option<Arc<dyn crate::container_runtime::ContainerRuntime>>,
+    pub containers: Option<crate::container_runtime::Containers>,
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
     #[cfg(unix)]
     images: Option<Arc<crate::imageset::Verifier>>,
@@ -63,6 +63,8 @@ pub struct Agent {
     /// Capabilities services and probes provide; a change re-runs the doctors (modules' `requires`).
     services_caps: Vec<String>,
     rerun_doctors: bool,
+    /// The GPU APIs this node provides, from the latest probe (gpuapi.rs): `{host, containers, evidence}`.
+    gpu_apis: Value,
     pub coord_install: crate::coordinstall::CoordInstall,
     /// Services were stopped because the node is not active and has no work (a drain); resumed when it is again.
     services_halted: bool,
@@ -103,7 +105,7 @@ impl Agent {
                    containers: None,
                    #[cfg(unix)]
                    images: None,
-                   services: None, services_seen: Default::default(), services_caps: vec![],
+                   services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
             services_halted: false, coord_install: Default::default(), layout };
@@ -374,6 +376,7 @@ impl Agent {
         }
         let svc = self.services.clone().expect("set above");
         let mut s = svc.lock().unwrap();
+        s.set_gpu_apis(crate::gpuapi::host(&self.gpu_apis));
         let limits = &self.directives["limits"];
         // a module the coordinator disabled (its kill switch) has every service disabled here: stopped, never offered
         let mut policy = self.directives["policy"].clone();
@@ -438,12 +441,31 @@ impl Agent {
         }
     }
 
+    /// Probe the node's GPU APIs again (in a child: gpuapi::probe) and hand the host's to the services.
+    async fn probe_gpu_apis(&mut self) {
+        let home = self.layout.home.clone();
+        match tokio::task::spawn_blocking(move || crate::gpuapi::probe(std::path::Path::new(&crate::sandbox::me()), &home)).await {
+            Ok(r) => {
+                if r != self.gpu_apis {
+                    info!(host = %r["host"], containers = %r["containers"], "GPU APIs");
+                }
+                self.gpu_apis = r;
+                if let Some(s) = &self.services {
+                    s.lock().unwrap().set_gpu_apis(crate::gpuapi::host(&self.gpu_apis));
+                }
+            }
+            Err(e) => warn!(error = %e, "GPU probe task failed"),
+        }
+    }
+
     async fn run_doctors(&mut self, policy: &Value) {
+        self.probe_gpu_apis().await;
         let (Some(rel), Ok(rt)) = (self.release.clone(), self.runtime()) else { return };
         let (l, p) = (Layout::new(self.layout.home.clone()), policy.clone());
         match tokio::task::spawn_blocking(move || doctor::run_all(&l, &rt, &rel, &p)).await {
             Ok(mut rep) => {
                 self.fold_requires(&mut rep);
+                self.fold_gpu_apis(&mut rep);
                 info!(report = %rep["modules"], "doctors ran");
                 self.healthy = rep["modules"].as_object().map(|m| m.iter().filter(|(_, v)| v["health"] == "healthy")
                     .map(|(k, _)| k.clone()).collect()).unwrap_or_default();
@@ -472,6 +494,30 @@ impl Agent {
             }
             let check = json!({"name": "requires", "ok": false, "detail": format!("no service or probe provides {}", missing.join(", "))});
             r["health"] = json!("unhealthy");
+            match r["checks"].as_array_mut() {
+                Some(c) => c.push(check),
+                None => r["checks"] = json!([check]),
+            }
+        }
+    }
+
+    /// The node's GPU APIs go into the report, where the coordinator checks stages' GPU needs; a module whose runner
+    /// (the release entry's, already for this platform) needs a GPU API the host lacks cannot run here: `undetected`.
+    fn fold_gpu_apis(&self, rep: &mut Value) {
+        rep["gpu_apis"] = if self.gpu_apis.is_null() { json!({"host": [], "containers": [], "evidence": {}}) } else { self.gpu_apis.clone() };
+        let host = crate::gpuapi::host(&self.gpu_apis);
+        let (Some(rel), Some(mods)) = (self.release.as_ref(), rep["modules"].as_object_mut()) else { return };
+        for m in &rel.modules {
+            let Some(r) = m["name"].as_str().and_then(|n| mods.get_mut(n)) else { continue };
+            let g = &m["runner"]["gpu"];
+            let apis: Vec<String> = g["apis_any"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+            if g["use"].as_str().is_none_or(|u| u == "none") || g["in_container"].as_bool() == Some(true) || crate::gpuapi::fits(&apis, &host) {
+                continue;
+            }
+            let have = if host.is_empty() { "no GPU API".to_string() } else { host.join(", ") };
+            let check = json!({"name": "gpu_apis", "ok": false,
+                               "detail": format!("needs one of {} on the host; this node provides {have}", apis.join(", "))});
+            r["health"] = json!("undetected");
             match r["checks"].as_array_mut() {
                 Some(c) => c.push(check),
                 None => r["checks"] = json!([check]),
@@ -634,10 +680,10 @@ impl Agent {
         Ok(true)
     }
 
-    /// The container runtime, once a release has a module approved for containers and the runtime exists here (none
-    /// on Windows yet: an agent-owned WSL2 distribution comes later).
+    /// The container runtimes, once a release has a module approved for containers and a runtime exists here (none on
+    /// Windows yet: an agent-owned WSL2 distribution comes later).
     #[cfg(unix)]
-    fn container_runtime(&mut self) -> Option<Arc<dyn crate::container_runtime::ContainerRuntime>> {
+    fn container_runtime(&mut self) -> Option<crate::container_runtime::Containers> {
         let wants = self.release.as_ref().is_some_and(|r| r.modules.iter()
             .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))));
         if !wants {
@@ -662,9 +708,9 @@ impl Agent {
     /// agent (one that crashed or was killed while a job ran a container): remove it before any new work starts.
     #[cfg(unix)]
     async fn reap_containers(&mut self) {
-        let Some(rt) = self.container_runtime() else { return };
+        let Some(rts) = self.container_runtime() else { return };
         let _ = tokio::task::spawn_blocking(move || {
-            let removed = rt.reap();
+            let removed: Vec<String> = rts.all().iter().flat_map(|rt| rt.reap()).collect();
             if !removed.is_empty() {
                 info!(containers = ?removed, "removed containers left by an earlier run");
             }
@@ -678,10 +724,10 @@ impl Agent {
         }
         let l = Layout::new(self.layout.home.clone());
         #[cfg(unix)]
-        // the runtime's `containers` pool, and the `gpu` pool where containers can get the node's GPUs (CDI)
-        let mut pools: std::collections::BTreeMap<String, i64> = self.container_runtime().map(|rt| {
-            let gpu = rt.gpu_device().is_some();
-            [("containers".to_string(), rt.pool_tokens() as i64)].into_iter().chain(gpu.then(|| ("gpu".to_string(), 1)))
+        // the runtime's `containers` pool, and the `gpu` pool where containers can get the node's GPUs (CDI on Linux, the
+        // krunkit VM on macOS)
+        let mut pools: std::collections::BTreeMap<String, i64> = self.container_runtime().map(|rts| {
+            [("containers".to_string(), rts.cpu.pool_tokens() as i64)].into_iter().chain(rts.gpu.is_some().then(|| ("gpu".to_string(), 1)))
                 .collect()
         }).unwrap_or_default();
         #[cfg(windows)]
@@ -859,6 +905,7 @@ impl Agent {
         jobs::clear_workdirs(&self.layout);
         #[cfg(unix)]
         self.reap_containers().await;
+        self.probe_gpu_apis().await;                // before any service is offered: a GPU service waits for it
         let mut backoff = Duration::from_secs(2);
         loop {
             if *stop.borrow() {
@@ -997,6 +1044,36 @@ mod tests {
         let mut rep = json!({"modules": {}});
         agent.fold_requires(&mut rep);
         assert_eq!(rep["capabilities"], json!([]));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The doctor report carries the GPU probe; a module whose runner needs an API this host lacks is `undetected`
+    /// (never offered or certified here), one that needs it in containers or names none is left to its own doctor.
+    #[test]
+    fn the_doctor_report_names_the_gpu_apis_and_a_module_needing_another_is_undetected() {
+        let home = std::env::temp_dir().join(format!("oarbank-agent-gpuapis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut agent = Agent::open(Layout::new(home.clone()), Some("https://127.0.0.1:9")).unwrap();
+        let mut rep = json!({"modules": {}});
+        agent.fold_gpu_apis(&mut rep);
+        assert_eq!(rep["gpu_apis"], json!({"host": [], "containers": [], "evidence": {}}), "not probed yet: nothing provided");
+        agent.gpu_apis = json!({"host": ["metal", "opencl"], "containers": ["vulkan"], "evidence": {"metal": "Apple M4 Max"}});
+        let entry = |name: &str, gpu: Value| json!({"name": name, "runner": {"gpu": gpu}});
+        agent.release = Some(crate::release::Release { id: "r1".into(), dir: home.clone(), modules: vec![
+            entry("cuda", json!({"use": "shared", "apis_any": ["cuda"]})),
+            entry("metal", json!({"use": "exclusive", "apis_any": ["metal", "cuda"]})),
+            entry("boxed", json!({"use": "exclusive", "apis_any": ["cuda"], "in_container": true})),
+            entry("cpu", json!({"use": "none", "apis_any": []}))] });
+        let ok = json!({"health": "healthy", "checks": []});
+        let mut rep = json!({"modules": {"cuda": ok, "metal": ok, "boxed": ok, "cpu": ok}});
+        agent.fold_gpu_apis(&mut rep);
+        assert_eq!(rep["gpu_apis"]["host"], json!(["metal", "opencl"]));
+        assert_eq!(rep["modules"]["cuda"]["health"], "undetected");
+        assert_eq!(rep["modules"]["cuda"]["checks"][0],
+                   json!({"name": "gpu_apis", "ok": false, "detail": "needs one of cuda on the host; this node provides metal, opencl"}));
+        for m in ["metal", "boxed", "cpu"] {
+            assert_eq!(rep["modules"][m], ok, "{m}");
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -1,7 +1,8 @@
 //! The agent's container runtime (spec/sandbox.md, "Containers"; docs/design/module-sandbox.md, decision 3). Modules
 //! never reach Docker: the broker validates their requests and hands this runtime a finished `RunSpec`. On macOS the
 //! runtime is an agent-owned Colima profile, `oarbank`, whose VM mounts only the agent's work and modules-data
-//! directories (Colima's default profile mounts `$HOME` writable, so its socket is the whole home).
+//! directories (Colima's default profile mounts `$HOME` writable, so its socket is the whole home), and GPU containers
+//! run in a second one, `oarbank-gpu`, on krunkit (docs/design/gpu-placement.md).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -56,7 +57,7 @@ pub struct RunSpec {
     /// The full output, opened by the broker inside the work directory (None: discarded).
     pub stdout: Option<std::fs::File>,
     pub stderr: Option<std::fs::File>,
-    /// Every GPU of the node, as the runtime's CDI device kind (`nvidia.com/gpu`): `--device <kind>=all`.
+    /// Every GPU of the node, as the `--device` value the runtime passes them with (`nvidia.com/gpu=all`, `/dev/dri`).
     pub gpu_device: Option<String>,
 }
 
@@ -68,7 +69,7 @@ pub fn fmt_num(v: f64) -> String {
 
 impl RunSpec {
     /// Exactly: `run --rm --platform P --network none|bridge --cpus C --memory Mg --label oarbank.attempt_id=<id>
-    /// --label oarbank.module=<name> [--device <cdi kind>=all] [-v src:dst[:ro]]... [--workdir W] [--entrypoint E]
+    /// --label oarbank.module=<name> [--device <gpu device>] [-v src:dst[:ro]]... [--workdir W] [--entrypoint E]
     /// [-e K=V]... image args...`.
     /// Nothing from the request reaches a flag position except through these fields.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -84,8 +85,8 @@ impl RunSpec {
             "--cpus".into(), fmt_num(self.cpus), "--memory".into(), format!("{}g", fmt_num(self.mem_gb)),
             "--label".into(), format!("{ATTEMPT_LABEL}={}", self.attempt_id), "--label".into(), format!("{MODULE_LABEL}={}", self.module),
         ];
-        if let Some(kind) = self.gpu_device.as_deref().filter(|k| !k.is_empty()) {
-            a.extend(["--device".into(), format!("{kind}=all")]);
+        if let Some(dev) = self.gpu_device.as_deref().filter(|k| !k.is_empty()) {
+            a.extend(["--device".into(), dev.to_string()]);
         }
         for m in &self.mounts {
             a.push("-v".into());
@@ -135,18 +136,64 @@ pub trait ContainerRuntime: Send + Sync {
     fn pool_tokens(&self) -> u32 {
         0
     }
-    /// The CDI device kind through which containers get every GPU of the node (None: no passthrough here).
+    /// The `--device` value through which containers get every GPU of the node (None: no passthrough here).
     fn gpu_device(&self) -> Option<String> {
         None
     }
 }
 
-/// The CDI device kind (`nvidia.com/gpu`, `amd.com/gpu`, ...) of the first spec in `dirs` that declares a device named
-/// `all`, as `nvidia-ctk cdi generate` writes. JSON specs are parsed; YAML specs are read by their top-level `kind:` line
-/// and a device `name: all` (the only facts needed), without a YAML parser.
+/// The node's container runtimes: `cpu` runs every container, `gpu` the containers of jobs that reserved the agent's
+/// `gpu` pool (the same runtime on Linux, the krunkit VM on macOS; None where containers cannot get the GPU).
+#[derive(Clone)]
+pub struct Containers {
+    pub cpu: std::sync::Arc<dyn ContainerRuntime>,
+    pub gpu: Option<std::sync::Arc<dyn ContainerRuntime>>,
+}
+
+impl Containers {
+    /// The runtime an attempt's broker uses: the GPU runtime for a job that reserved the `gpu` pool, when there is one.
+    pub fn for_job(&self, gpu: bool) -> std::sync::Arc<dyn ContainerRuntime> {
+        match (&self.gpu, gpu) {
+            (Some(g), true) => g.clone(),
+            _ => self.cpu.clone(),
+        }
+    }
+
+    /// Each distinct runtime once (on Linux `gpu` is `cpu`).
+    pub fn all(&self) -> Vec<std::sync::Arc<dyn ContainerRuntime>> {
+        let mut v = vec![self.cpu.clone()];
+        if let Some(g) = self.gpu.as_ref().filter(|g| !std::sync::Arc::ptr_eq(g, &self.cpu)) {
+            v.push(g.clone());
+        }
+        v
+    }
+}
+
+/// How containers on this node get the GPU (docs/design/gpu-placement.md): the facts' `containers.gpu`, the `--device`
+/// value, and the GPU APIs a container then has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Passthrough {
+    /// `cdi:<kind>` or `virtio-gpu:venus`.
+    pub kind: String,
+    pub device: String,
+    pub apis: Vec<String>,
+    /// What was found, for the doctor report's evidence.
+    pub evidence: String,
+}
+
+/// A CDI spec with an `all` device: its kind and the GPU APIs a container given that device has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CdiSpec {
+    pub kind: String,
+    pub apis: Vec<String>,
+}
+
+/// The first spec in `dirs` (the directories in order, each one's files by name) that declares a device named `all`, as
+/// `nvidia-ctk cdi generate` writes. JSON specs are parsed; YAML specs are read by their top-level `kind:` line, a device
+/// `name: all` and their `path:`, `hostPath:` and `containerPath:` values (the only facts needed), without a YAML parser.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn cdi_kind(dirs: &[&Path]) -> Option<String> {
-    let files = dirs.iter().flat_map(|d| {                 // the directories in order, each one's files sorted by name
+pub fn cdi_spec(dirs: &[&Path]) -> Option<CdiSpec> {
+    let files = dirs.iter().flat_map(|d| {
         let mut fs: Vec<PathBuf> = std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "json" || x == "yaml" || x == "yml")).collect();
         fs.sort();
@@ -158,21 +205,66 @@ pub fn cdi_kind(dirs: &[&Path]) -> Option<String> {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
             let all = v["devices"].as_array().is_some_and(|ds| ds.iter().any(|d| d["name"] == "all"));
             if let (true, Some(k)) = (all, v["kind"].as_str()) {
-                return Some(k.to_string());
+                let mut paths = vec![];
+                json_paths(&v, &mut paths);
+                return Some(CdiSpec { kind: k.to_string(), apis: cdi_apis(k, &paths) });
             }
             continue;
         }
         let unq = |s: &str| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
         let kind = text.lines().find_map(|l| l.strip_prefix("kind:")).map(unq);
-        let all = text.lines().any(|l| {
-            let t = l.trim().trim_start_matches("- ");
-            t.strip_prefix("name:").is_some_and(|v| unq(v) == "all")
-        });
+        let field = |l: &str, k: &str| l.trim().trim_start_matches("- ").strip_prefix(k).map(unq);
+        let all = text.lines().any(|l| field(l, "name:").is_some_and(|v| v == "all"));
         if let (true, Some(k)) = (all, kind.filter(|k| k.contains('/'))) {
-            return Some(k);
+            let paths: Vec<String> = text.lines()
+                .filter_map(|l| field(l, "path:").or_else(|| field(l, "hostPath:")).or_else(|| field(l, "containerPath:"))).collect();
+            return Some(CdiSpec { apis: cdi_apis(&k, &paths), kind: k });
         }
     }
     None
+}
+
+fn json_paths(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, x) in m {
+                match (k.as_str(), x.as_str()) {
+                    ("path" | "hostPath" | "containerPath", Some(p)) => out.push(p.to_string()),
+                    _ => json_paths(x, out),
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| json_paths(x, out)),
+        _ => {}
+    }
+}
+
+/// The GPU APIs a container given a CDI spec's devices has (docs/design/gpu-placement.md, "In containers"): an NVIDIA
+/// spec gives `cuda` when it mounts `libcuda.so` (also over WSL2's `/dev/dxg`), `vulkan` when it mounts the NVIDIA
+/// Vulkan ICD and `opencl` when it mounts `libnvidia-opencl`; another kind gives `rocm` with `/dev/kfd` and `vulkan`
+/// with a DRM render node (the image brings Mesa).
+pub fn cdi_apis(kind: &str, paths: &[String]) -> Vec<String> {
+    let any = |f: &dyn Fn(&str) -> bool| paths.iter().any(|p| f(p));
+    let mut apis = vec![];
+    if kind.starts_with("nvidia.com/") {
+        if any(&|p| p.contains("libcuda.so")) {
+            apis.push("cuda");
+        }
+        if any(&|p| p.contains("libnvidia-opencl")) {
+            apis.push("opencl");
+        }
+        if any(&|p| p.ends_with("nvidia_icd.json")) {
+            apis.push("vulkan");
+        }
+    } else {
+        if any(&|p| p == "/dev/kfd") {
+            apis.push("rocm");
+        }
+        if any(&|p| p.starts_with("/dev/dri/renderD")) {
+            apis.push("vulkan");
+        }
+    }
+    apis.into_iter().map(String::from).collect()
 }
 
 /// Where CDI specs live (the CDI specification's static and dynamic directories).
@@ -363,12 +455,33 @@ fn engine_home(account_home: Option<PathBuf>, agent_home: &Path) -> PathBuf {
 
 // MARK: Colima
 
+/// Which of the agent's two Colima profiles: `oarbank` runs every container on Virtualization.framework with Rosetta;
+/// `oarbank-gpu` runs the containers of GPU jobs on krunkit, whose virtio-gpu device gives them Vulkan on the Mac's GPU
+/// (Mesa's Venus driver in the container, MoltenVK on the host; docs/design/gpu-placement.md).
 #[cfg(target_os = "macos")]
-/// The agent-owned Colima profile `oarbank`. Only this profile is ever started or queried; the docker CLI
-/// is pointed at its socket through `DOCKER_HOST` with an empty `DOCKER_CONFIG` of the agent's own, so neither
-/// the user's current context nor `~/.docker` (contexts, credential helpers that reach the keychain) is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Cpu,
+    Gpu,
+}
+
+#[cfg(target_os = "macos")]
+impl Profile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Cpu => "oarbank",
+            Profile::Gpu => "oarbank-gpu",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// One of the agent-owned Colima profiles. Only these profiles are ever started or queried; the docker CLI is pointed at
+/// the profile's socket through `DOCKER_HOST` with an empty `DOCKER_CONFIG` of the agent's own, so neither the user's
+/// current context nor `~/.docker` (contexts, credential helpers that reach the keychain) is used.
 pub struct ColimaRuntime {
-    /// The user's home: Colima keeps the profile in `~/.colima/oarbank`.
+    pub profile: Profile,
+    /// The user's home: Colima keeps the profile in `~/.colima/<profile>`.
     pub home: PathBuf,
     pub colima: PathBuf,
     pub docker: PathBuf,
@@ -385,6 +498,10 @@ pub struct ColimaRuntime {
 #[cfg(target_os = "macos")]
 const HELPER_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// The DRM render node a krunkit guest's virtio-gpu device appears as.
+#[cfg(target_os = "macos")]
+const RENDER_NODE: &str = "/dev/dri/renderD128";
+
 #[cfg(target_os = "macos")]
 fn find_bin(name: &str) -> PathBuf {
     ["/opt/homebrew/bin", "/usr/local/bin"].iter().map(|d| Path::new(d).join(name)).find(|p| p.exists())
@@ -396,19 +513,27 @@ fn realpath(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// GPU passthrough on macOS: Colima, docker and krunkit installed (Colima finds krunkit on the helper `PATH`) on Apple
+/// silicon. The krunkit VM gives containers Vulkan through `/dev/dri`.
+#[cfg(target_os = "macos")]
+pub fn gpu_passthrough() -> Option<Passthrough> {
+    let krunkit = find_bin("krunkit");
+    let ok = cfg!(target_arch = "aarch64") && executable(&find_bin("colima")) && executable(&find_bin("docker")) && executable(&krunkit);
+    ok.then(|| Passthrough { kind: "virtio-gpu:venus".into(), device: "/dev/dri".into(), apis: vec!["vulkan".into()],
+                             evidence: format!("virtio-gpu:venus (krunkit at {})", krunkit.display()) })
+}
+
 #[cfg(target_os = "macos")]
 impl ColimaRuntime {
-    pub const PROFILE: &'static str = "oarbank";
-
-    /// The runtime for this agent's layout, sized by the host's RAM.
-    pub fn new(layout: &crate::paths::Layout) -> Self {
+    /// The runtime for this agent's layout and one of its profiles, sized by the host's RAM.
+    pub fn new(layout: &crate::paths::Layout, profile: Profile) -> Self {
         let ram = crate::facts::sysctl_u64("hw.memsize").unwrap_or(0) as f64 / 1073741824.0;
         let (mem, cpus, _) = sizing(ram, None, None);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
         ColimaRuntime {
-            home, colima: find_bin("colima"), docker: find_bin("docker"), work: layout.work(), modules_data: layout.module_data(),
-            docker_config: layout.run().join("docker"), log: layout.logs().join("colima-oarbank.log"), vm_cpus: cpus, vm_mem_gb: mem,
-            start_lock: Mutex::new(()),
+            profile, home, colima: find_bin("colima"), docker: find_bin("docker"), work: layout.work(), modules_data: layout.module_data(),
+            docker_config: layout.run().join("docker"), log: layout.logs().join(format!("colima-{}.log", profile.name())),
+            vm_cpus: cpus, vm_mem_gb: mem, start_lock: Mutex::new(()),
         }
     }
 
@@ -422,7 +547,7 @@ impl ColimaRuntime {
     }
 
     pub fn docker_socket(&self) -> PathBuf {
-        self.home.join(".colima").join(Self::PROFILE).join("docker.sock")
+        self.home.join(".colima").join(self.profile.name()).join("docker.sock")
     }
 
     fn base_env(&self) -> Vec<(String, String)> {
@@ -445,13 +570,20 @@ impl ColimaRuntime {
         if m == m.round() { format!("{}", m as i64) } else { format!("{m:.1}") }
     }
 
+    /// The CPU profile on Virtualization.framework with Rosetta for amd64 images; the GPU profile on krunkit (no
+    /// Rosetta). Both mount only the agent's work and modules-data directories.
     pub fn start_args(&self) -> Vec<String> {
         let c = self.colima.to_string_lossy().to_string();
-        vec![c, "start".into(), Self::PROFILE.into(), "--vm-type".into(), "vz".into(), "--vz-rosetta".into(),
-             "--arch".into(), "aarch64".into(), "--cpu".into(), self.vm_cpus.to_string(), "--memory".into(),
-             Self::fmt_gb(self.vm_mem_gb), "--disk".into(), "100".into(),
-             "--mount".into(), format!("{}:w", realpath(&self.work).to_string_lossy()),
-             "--mount".into(), format!("{}:w", realpath(&self.modules_data).to_string_lossy())]
+        let mut a = vec![c, "start".into(), self.profile.name().into()];
+        a.extend(match self.profile {
+            Profile::Cpu => ["--vm-type", "vz", "--vz-rosetta"].as_slice(),
+            Profile::Gpu => ["--vm-type", "krunkit"].as_slice(),
+        }.iter().map(|s| s.to_string()));
+        a.extend(["--arch".into(), "aarch64".into(), "--cpu".into(), self.vm_cpus.to_string(), "--memory".into(),
+                  Self::fmt_gb(self.vm_mem_gb), "--disk".into(), "100".into(),
+                  "--mount".into(), format!("{}:w", realpath(&self.work).to_string_lossy()),
+                  "--mount".into(), format!("{}:w", realpath(&self.modules_data).to_string_lossy())]);
+        a
     }
 
     fn colima_cmd(&self, args: &[&str]) -> Vec<String> {
@@ -477,6 +609,17 @@ impl ColimaRuntime {
         }
         std::fs::OpenOptions::new().create(true).append(true).open(&self.log).map(Out::File).unwrap_or(Out::Null)
     }
+
+    /// The GPU VM has its virtio-gpu device: the guest has a DRM render node.
+    fn has_render_node(&self) -> Result<(), String> {
+        let r = quick(&self.colima_cmd(&["--profile", self.profile.name(), "ssh", "--", "test", "-e", RENDER_NODE]),
+                      &self.colima_env(), 60)?;
+        if r.ok() {
+            Ok(())
+        } else {
+            Err(format!("the {} VM has no GPU device ({RENDER_NODE} is missing); see {}", self.profile.name(), self.log.display()))
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -485,13 +628,17 @@ impl ContainerRuntime for ColimaRuntime {
         ColimaRuntime::pool_tokens(self)
     }
 
-    /// `colima status oarbank --json`: running, and the VM's memory (colima 0.10 reports bytes).
+    /// `colima status <profile> --json`: running, and the VM's memory (colima 0.10 reports bytes). The GPU VM runs
+    /// arm64 images only: krunkit has no Rosetta.
     fn status(&self) -> Result<RuntimeStatus, String> {
         if !self.installed() {
             return Err(format!("{} or {} missing", self.colima.display(), self.docker.display()));
         }
-        let platforms = vec!["linux/arm64".to_string(), "linux/amd64".to_string()];
-        let r = quick(&self.colima_cmd(&["status", Self::PROFILE, "--json"]), &self.colima_env(), 20)?;
+        let platforms = match self.profile {
+            Profile::Cpu => vec!["linux/arm64".to_string(), "linux/amd64".to_string()],
+            Profile::Gpu => vec!["linux/arm64".to_string()],
+        };
+        let r = quick(&self.colima_cmd(&["status", self.profile.name(), "--json"]), &self.colima_env(), 20)?;
         if !r.ok() {
             return Ok(RuntimeStatus { running: false, mem_gb: None, platforms, detail: Some(r.stderr_tail(300)) });
         }
@@ -513,10 +660,13 @@ impl ContainerRuntime for ColimaRuntime {
         // the first start downloads the VM image
         let r = exec(&self.start_args(), &self.colima_env(), Duration::from_secs(600), o, e, &AtomicBool::new(false),
                      Duration::from_secs(10))?;
-        if r.ok() {
-            Ok(())
-        } else {
-            Err(format!("colima start failed ({}{}); see {}", r.code, if r.timed_out { ", timeout" } else { "" }, self.log.display()))
+        if !r.ok() {
+            return Err(format!("colima start {} failed ({}{}); see {}", self.profile.name(), r.code,
+                               if r.timed_out { ", timeout" } else { "" }, self.log.display()));
+        }
+        match self.profile {
+            Profile::Cpu => Ok(()),
+            Profile::Gpu => self.has_render_node(),
         }
     }
 
@@ -560,6 +710,11 @@ impl ContainerRuntime for ColimaRuntime {
         }
         remove_labelled(|a, t| self.cli(a, t), &format!("label={ATTEMPT_LABEL}={attempt_id}"))
     }
+
+    /// The GPU VM's guest passes its render node through.
+    fn gpu_device(&self) -> Option<String> {
+        (self.profile == Profile::Gpu).then(|| "/dev/dri".to_string())
+    }
 }
 
 // MARK: Linux: the host's own engine
@@ -574,8 +729,8 @@ pub struct NativeRuntime {
     pub home: PathBuf,
     pub docker_config: PathBuf,
     pub mem_gb: f64,
-    /// The CDI device kind for every GPU, when the host has a CDI spec for one (GPU passthrough).
-    pub gpu_kind: Option<String>,
+    /// The CDI spec through which containers get every GPU, when the host has one (GPU passthrough).
+    pub gpu: Option<CdiSpec>,
 }
 
 #[cfg(target_os = "linux")]
@@ -587,8 +742,8 @@ impl NativeRuntime {
         let home = engine_home(std::env::var_os("HOME").map(PathBuf::from), &layout.home);
         // the same budget a Mac's VM would get
         let (mem_gb, _, _) = sizing(ram_gb, None, None);
-        let gpu_kind = cdi_kind(&CDI_DIRS.map(Path::new));
-        Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb, gpu_kind })
+        let gpu = cdi_spec(&CDI_DIRS.map(Path::new));
+        Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb, gpu })
     }
 
     fn env(&self) -> Vec<(String, String)> {
@@ -701,21 +856,37 @@ impl ContainerRuntime for NativeRuntime {
     }
 
     fn gpu_device(&self) -> Option<String> {
-        self.gpu_kind.clone()
+        self.gpu.as_ref().map(|g| format!("{}=all", g.kind))
     }
 }
 
 
-/// This node's container runtime, if it has one: the agent's Colima profile on macOS, the host's engine on Linux.
+/// GPU passthrough on Linux: a container engine and a CDI spec with an `all` device.
+#[cfg(target_os = "linux")]
+pub fn gpu_passthrough() -> Option<Passthrough> {
+    let engine = ["/usr/bin", "/usr/local/bin", "/bin"].iter()
+        .find_map(|d| ["podman", "docker"].iter().map(|n| Path::new(d).join(n)).find(|p| executable(p)))?;
+    let spec = cdi_spec(&CDI_DIRS.map(Path::new))?;
+    Some(Passthrough { device: format!("{}=all", spec.kind), evidence: format!("cdi:{} ({})", spec.kind, engine.display()),
+                       kind: format!("cdi:{}", spec.kind), apis: spec.apis })
+}
+
+/// This node's container runtimes, if it has any: the agent's Colima profiles on macOS (the GPU one where krunkit is
+/// installed), the host's engine on Linux (also the GPU runtime where a CDI spec exists).
 #[cfg(target_os = "macos")]
-pub fn for_node(layout: &crate::paths::Layout) -> Option<std::sync::Arc<dyn ContainerRuntime>> {
-    let rt = ColimaRuntime::new(layout);
-    rt.installed().then(|| std::sync::Arc::new(rt) as std::sync::Arc<dyn ContainerRuntime>)
+pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
+    let cpu = ColimaRuntime::new(layout, Profile::Cpu);
+    cpu.installed().then(|| Containers {
+        cpu: std::sync::Arc::new(cpu),
+        gpu: gpu_passthrough().map(|_| std::sync::Arc::new(ColimaRuntime::new(layout, Profile::Gpu)) as std::sync::Arc<dyn ContainerRuntime>),
+    })
 }
 
 #[cfg(target_os = "linux")]
-pub fn for_node(layout: &crate::paths::Layout) -> Option<std::sync::Arc<dyn ContainerRuntime>> {
-    NativeRuntime::detect(layout, crate::host::memory().ram_gb).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn ContainerRuntime>)
+pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
+    let rt: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(NativeRuntime::detect(layout, crate::host::memory().ram_gb)?);
+    let gpu = rt.gpu_device().is_some().then(|| rt.clone());
+    Some(Containers { cpu: rt, gpu })
 }
 
 
@@ -830,9 +1001,9 @@ pub mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn colima_at(base: &Path) -> ColimaRuntime {
+    fn colima_at(base: &Path, profile: Profile) -> ColimaRuntime {
         let l = crate::paths::Layout::new(base.join("agent"));
-        let mut c = ColimaRuntime::new(&l);
+        let mut c = ColimaRuntime::new(&l, profile);
         c.home = PathBuf::from("/Users/u");
         c
     }
@@ -850,7 +1021,7 @@ pub mod tests {
     #[cfg(target_os = "macos")]
     fn start_mounts_only_the_agent_directories_and_docker_never_uses_the_user_context() {
         let base = temp("start");
-        let mut c = colima_at(&base);
+        let mut c = colima_at(&base, Profile::Cpu);
         (c.vm_cpus, c.vm_mem_gb) = (6, 10.0);
         std::fs::create_dir_all(&c.work).unwrap();
         std::fs::create_dir_all(&c.modules_data).unwrap();
@@ -866,7 +1037,42 @@ pub mod tests {
         assert_eq!(get("DOCKER_CONFIG"), Some(format!("{agent}/run/docker")));
         assert!(get("DOCKER_CONTEXT").is_none());
         assert!(c.colima_env().iter().any(|(k, v)| k == "DOCKER_CONFIG" && *v == format!("{agent}/run/docker")));
+        assert_eq!(c.gpu_device(), None);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The GPU profile is a VM of its own on krunkit (no Rosetta, arm64 images only), with the same two mounts and its own
+    /// socket and log, and its containers get `--device /dev/dri`. A CPU job's containers never go there.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_gpu_profile_is_a_krunkit_vm_of_its_own() {
+        let base = temp("gpu");
+        let mut g = colima_at(&base, Profile::Gpu);
+        (g.vm_cpus, g.vm_mem_gb) = (6, 10.0);
+        let agent = base.join("agent").to_string_lossy().to_string();
+        assert_eq!(g.start_args()[1..], ["start", "oarbank-gpu", "--vm-type", "krunkit", "--arch", "aarch64", "--cpu", "6", "--memory",
+                                          "10", "--disk", "100", "--mount", &format!("{agent}/work:w"),
+                                          "--mount", &format!("{agent}/modules-data:w")]);
+        assert_eq!(g.docker_socket(), PathBuf::from("/Users/u/.colima/oarbank-gpu/docker.sock"));
+        assert!(g.log.ends_with("logs/colima-oarbank-gpu.log"));
+        assert_eq!(g.gpu_device().as_deref(), Some("/dev/dri"));
+        let spec = RunSpec { gpu_device: g.gpu_device(), ..spec("x@sha256:00") };
+        assert!(spec.docker_args().windows(2).any(|w| w == ["--device", "/dev/dri"]));
+        let cpu: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(colima_at(&base, Profile::Cpu));
+        let both = Containers { cpu: cpu.clone(), gpu: Some(std::sync::Arc::new(g)) };
+        assert!(std::sync::Arc::ptr_eq(&both.for_job(false), &cpu) && both.for_job(true).gpu_device().is_some());
+        assert_eq!(both.all().len(), 2);
+        let none = Containers { cpu: cpu.clone(), gpu: None };
+        assert!(std::sync::Arc::ptr_eq(&none.for_job(true), &cpu) && none.all().len() == 1);
+        let same = Containers { cpu: cpu.clone(), gpu: Some(cpu.clone()) };
+        assert_eq!(same.all().len(), 1, "on Linux the GPU runtime is the CPU runtime: reaped once");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn spec(image: &str) -> RunSpec {
+        RunSpec { image: image.into(), platform: "linux/arm64".into(), args: vec![], entrypoint: None, mounts: vec![], env: vec![],
+                  workdir: None, network: false, cpus: 1.0, mem_gb: 1.0, attempt_id: 1, module: "m".into(), timeout_s: 1.0,
+                  stdout: None, stderr: None, gpu_device: None }
     }
 
     #[test]
@@ -880,7 +1086,7 @@ pub mod tests {
         assert_eq!(s.docker_args(), ["run", "--rm", "--platform", "linux/arm64", "--network", "none", "--cpus", "2", "--memory", "2.5g",
                                      "--label", "oarbank.attempt_id=7", "--label", "oarbank.module=toy", "-v", "/w/in:/in:ro",
                                      "--workdir", "/in", "-e", "A=1", "x@sha256:00", "--privileged"]);
-        let g = RunSpec { gpu_device: Some("nvidia.com/gpu".into()), ..s };
+        let g = RunSpec { gpu_device: Some("nvidia.com/gpu=all".into()), ..s };
         assert_eq!(g.docker_args()[14..16], ["--device", "nvidia.com/gpu=all"]);
         assert_eq!(fmt_num(0.1), "0.1");
         assert_eq!(fmt_num(0.25), "0.25");
@@ -910,19 +1116,49 @@ pub mod tests {
 
     #[test]
     fn cdi_specs_name_the_gpu_device_kind() {
+        let kind = |dirs: &[&Path]| cdi_spec(dirs).map(|s| s.kind);
         let d = temp("cdi");
-        assert_eq!(cdi_kind(&[d.as_path()]), None);
+        assert_eq!(kind(&[d.as_path()]), None);
         std::fs::write(d.join("readme.txt"), "kind: x/y\n- name: all\n").unwrap();
-        assert_eq!(cdi_kind(&[d.as_path()]), None, "only .json, .yaml and .yml files are specs");
+        assert_eq!(kind(&[d.as_path()]), None, "only .json, .yaml and .yml files are specs");
         std::fs::write(d.join("nvidia.yaml"), "---\ncdiVersion: 0.5.0\ncontainerEdits:\n  deviceNodes:\n  - path: /dev/nvidiactl\n\
             devices:\n- containerEdits:\n    deviceNodes:\n    - path: /dev/nvidia0\n  name: \"0\"\n- containerEdits:\n\
                 deviceNodes:\n    - path: /dev/nvidia0\n  name: all\nkind: nvidia.com/gpu\n").unwrap();
-        assert_eq!(cdi_kind(&[d.as_path()]).as_deref(), Some("nvidia.com/gpu"));
+        assert_eq!(kind(&[d.as_path()]).as_deref(), Some("nvidia.com/gpu"));
         let j = temp("cdi-json");
         std::fs::write(j.join("amd.json"), r#"{"cdiVersion": "0.6.0", "kind": "amd.com/gpu", "devices": [{"name": "0"}]}"#).unwrap();
-        assert_eq!(cdi_kind(&[j.as_path()]), None, "no `all` device");
+        assert_eq!(kind(&[j.as_path()]), None, "no `all` device");
         std::fs::write(j.join("amd.json"), r#"{"kind": "amd.com/gpu", "devices": [{"name": "0"}, {"name": "all"}]}"#).unwrap();
-        assert_eq!(cdi_kind(&[j.as_path(), d.as_path()]).as_deref(), Some("amd.com/gpu"));
+        assert_eq!(kind(&[j.as_path(), d.as_path()]).as_deref(), Some("amd.com/gpu"));
+    }
+
+    /// The APIs a container gets come from what the spec passes: recorded specs of `nvidia-ctk cdi generate` (a Linux
+    /// host, and `--mode=wsl` over GPU-PV), and AMD's (`amd-ctk cdi generate`).
+    #[test]
+    fn cdi_specs_name_the_apis_a_container_gets() {
+        let d = temp("cdi-apis");
+        std::fs::write(d.join("nvidia.yaml"), "---\ncdiVersion: 0.5.0\ncontainerEdits:\n  deviceNodes:\n  - path: /dev/nvidiactl\n\
+            \x20 - path: /dev/nvidia-uvm\n  mounts:\n  - containerPath: /usr/lib/x86_64-linux-gnu/libcuda.so.570.86.15\n\
+            \x20   hostPath: /usr/lib/x86_64-linux-gnu/libcuda.so.570.86.15\n    options: [ro, nosuid, nodev, bind]\n\
+            \x20 - containerPath: /usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.570.86.15\n\
+            \x20   hostPath: /usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.570.86.15\n\
+            \x20 - containerPath: /etc/vulkan/icd.d/nvidia_icd.json\n    hostPath: /etc/vulkan/icd.d/nvidia_icd.json\n\
+            devices:\n- containerEdits:\n    deviceNodes:\n    - path: /dev/nvidia0\n  name: all\nkind: nvidia.com/gpu\n").unwrap();
+        assert_eq!(cdi_spec(&[d.as_path()]).unwrap().apis, ["cuda", "opencl", "vulkan"]);
+        let w = temp("cdi-wsl");
+        std::fs::write(w.join("nvidia.json"), r#"{"cdiVersion": "0.5.0", "kind": "nvidia.com/gpu",
+            "devices": [{"name": "all", "containerEdits": {"deviceNodes": [{"path": "/dev/dxg"}]}}],
+            "containerEdits": {"mounts": [{"hostPath": "/usr/lib/wsl/lib/libcuda.so.1.1", "containerPath": "/usr/lib/wsl/lib/libcuda.so.1.1"},
+                                          {"hostPath": "/usr/lib/wsl/lib/libd3d12.so", "containerPath": "/usr/lib/wsl/lib/libd3d12.so"}]}}"#).unwrap();
+        assert_eq!(cdi_spec(&[w.as_path()]).unwrap().apis, ["cuda"]);
+        let a = temp("cdi-amd");
+        std::fs::write(a.join("amd.json"), r#"{"cdiVersion": "0.6.0", "kind": "amd.com/gpu", "devices": [
+            {"name": "0", "containerEdits": {"deviceNodes": [{"path": "/dev/dri/card1"}, {"path": "/dev/dri/renderD128"}]}},
+            {"name": "all", "containerEdits": {"deviceNodes": [{"path": "/dev/kfd"}, {"path": "/dev/dri/card1"},
+                                                                {"path": "/dev/dri/renderD128"}]}}]}"#).unwrap();
+        assert_eq!(cdi_spec(&[a.as_path()]).unwrap().apis, ["rocm", "vulkan"]);
+        assert!(cdi_apis("nvidia.com/gpu", &["/dev/dri/renderD128".into()]).is_empty(), "NVIDIA's Vulkan is its ICD, not Mesa");
+        assert_eq!(cdi_apis("intel.com/gpu", &["/dev/dri/renderD129".into()]), ["vulkan"]);
     }
 
     #[test]
@@ -962,12 +1198,62 @@ pub mod tests {
     #[cfg(target_os = "macos")]
     fn a_missing_runtime_is_an_error_not_a_stopped_vm() {
         let base = temp("missing");
-        let mut c = colima_at(&base);
+        let mut c = colima_at(&base, Profile::Cpu);
         c.colima = "/nonexistent/colima".into();
         assert!(c.status().unwrap_err().contains("missing"));
         assert!(c.ensure_started().is_err());
         assert!(c.remove_attempt(1).is_empty());
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A Mac with krunkit: starts (never stops) the agent's own `oarbank-gpu` profile, builds the Vulkan compute probe
+    /// (tests/fixtures/vulkan-compute) in it and runs it as a GPU job's container runs (`--device /dev/dri`): the
+    /// container sees the Mac's GPU through Venus and a compute shader's result is right. Opt-in twice: `--ignored` and
+    /// OARBANK_LIVE_COLIMA=1.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn live_colima_gpu_runs_vulkan_compute_on_the_apple_gpu() {
+        if std::env::var("OARBANK_LIVE_COLIMA").as_deref() != Ok("1") {
+            eprintln!("set OARBANK_LIVE_COLIMA=1 to start the oarbank-gpu Colima profile");
+            return;
+        }
+        let Some(pass) = gpu_passthrough() else {
+            eprintln!("krunkit (or Colima or docker) is not installed: brew tap slp/krun && brew install krunkit");
+            return;
+        };
+        assert_eq!((pass.kind.as_str(), pass.device.as_str(), pass.apis.as_slice()), ("virtio-gpu:venus", "/dev/dri", ["vulkan".to_string()].as_slice()));
+        let layout = crate::paths::Layout::new(crate::paths::agent_home());
+        let containers = for_node(&layout).expect("Colima is installed");
+        let rt = containers.for_job(true);
+        assert_eq!(rt.gpu_device().as_deref(), Some("/dev/dri"));
+        let mut g = ColimaRuntime::new(&layout, Profile::Gpu);
+        (g.vm_cpus, g.vm_mem_gb) = (4, 4.0);
+        g.ensure_started().unwrap();
+        let image = "localhost/oarbank-vkcompute-test:1";
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vulkan-compute");
+        let built = g.cli(&["build", "-q", "-t", image, &fixture.to_string_lossy()], 1800).unwrap();
+        assert!(built.ok(), "{}", built.stderr_tail(2000));
+        let ws = layout.work().join(format!("livegpu-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let out = ws.join("stdout");
+        let spec = RunSpec {
+            image: image.into(), platform: "linux/arm64".into(),
+            args: vec!["sh".into(), "-c".into(), "vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|driverName'; vkcompute".into()],
+            entrypoint: None, mounts: vec![], env: vec![], workdir: None, network: false, cpus: 2.0, mem_gb: 2.0,
+            attempt_id: -4243, module: "livetest".into(), timeout_s: 600.0, stdout: Some(std::fs::File::create(&out).unwrap()),
+            stderr: Some(std::fs::File::create(ws.join("stderr")).unwrap()), gpu_device: g.gpu_device(),
+        };
+        let r = g.run(&spec, &AtomicBool::new(false)).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        let err = std::fs::read_to_string(ws.join("stderr")).unwrap_or_default();
+        eprintln!("{text}{err}");
+        assert_eq!(r.exit_code, 0, "{text}{err}");
+        let device = text.lines().find(|l| l.starts_with("device: ")).expect("vkcompute names its device");
+        assert!(device.contains("Venus") && device.contains("Apple"), "not the Mac's GPU through Venus: {device}");
+        assert!(text.contains("compute: ok 65536"), "{text}");
+        g.remove_attempt(-4243);
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     /// Starts (never stops) the agent's own `oarbank` profile with this agent's real directories and runs a tiny
@@ -981,7 +1267,7 @@ pub mod tests {
             return;
         }
         let layout = crate::paths::Layout::new(crate::paths::agent_home());
-        let mut c = ColimaRuntime::new(&layout);
+        let mut c = ColimaRuntime::new(&layout, Profile::Cpu);
         (c.vm_cpus, c.vm_mem_gb) = (2, 2.0);
         c.ensure_started().unwrap();
         let image = "docker.io/library/alpine:3.20";

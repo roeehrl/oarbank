@@ -99,6 +99,8 @@ struct ServiceDecl {
     endpoint: bool,
     /// `gpu.use` is not none: GPU-resident fleet work while it runs.
     gpu: bool,
+    /// `gpu.apis_any` of a GPU service: offered and started only where the host provides one of them.
+    apis_any: Vec<String>,
 }
 
 fn secs(v: &Value, default: f64, min: f64) -> f64 {
@@ -145,6 +147,7 @@ impl ServiceDecl {
             yieldable: v["yieldable"].as_bool() != Some(false),
             endpoint: v["endpoint"].as_bool() == Some(true),
             gpu: v["gpu"]["use"].as_str().is_some_and(|u| u != "none"),
+            apis_any: if v["gpu"]["use"].as_str().is_some_and(|u| u != "none") { strings(&v["gpu"]["apis_any"]) } else { vec![] },
         })
     }
 
@@ -530,6 +533,8 @@ struct Svc {
     held: Option<String>,
     /// Unix time this agent started it (0: adopted).
     started_at: f64,
+    /// The host provides none of its `gpu.apis_any`: why, and it is neither offered nor started (stopped if running).
+    gpu_api_missing: Option<String>,
 }
 
 impl Svc {
@@ -537,12 +542,18 @@ impl Svc {
         Svc { module: module.into(), decl, health: Health::Unknown, running: false, ready: false, pools: BTreeMap::new(),
               reserve_mem_gb: 0.0, disabled: false, busy: false, reaping: false, failures: 0, next_try: None,
               last_fingerprint: None, idle_since: None, users: 0, withdrawn: false, last_error: None, pgid: None,
-              last_reap: None, channel: None, held: None, started_at: 0.0 }
+              last_reap: None, channel: None, held: None, started_at: 0.0, gpu_api_missing: None }
     }
 
-    /// Offered to the coordinator: healthy, enabled, not withdrawn.
+    /// Offered to the coordinator: healthy, enabled, not withdrawn, and the host provides one of its GPU APIs.
     fn offered(&self) -> bool {
-        self.health == Health::Healthy && !self.disabled && !self.withdrawn
+        self.health == Health::Healthy && !self.disabled && !self.withdrawn && self.gpu_api_missing.is_none()
+    }
+
+    /// Why the host's GPU APIs `host` do not meet its `gpu.apis_any`, or None.
+    fn gpu_shortfall(&self, host: &[String]) -> Option<String> {
+        (!crate::gpuapi::fits(&self.decl.apis_any, host)).then(|| format!("needs one of {} on the host; this node provides {}",
+            self.decl.apis_any.join(", "), if host.is_empty() { "no GPU API".to_string() } else { host.join(", ") }))
     }
 
     /// An endpoint service has said hello on its channel (any other service: always).
@@ -662,6 +673,8 @@ pub struct ServiceManager {
     last_live: BTreeSet<i64>,
     fingerprint_every: Duration,
     reap_every: Duration,
+    /// The GPU APIs the host provides (the agent's latest probe, gpuapi.rs).
+    gpu_apis: Vec<String>,
 }
 
 impl ServiceManager {
@@ -669,7 +682,30 @@ impl ServiceManager {
         ServiceManager { layout, runtime, registry, manage: manage_services, node_id: String::new(), limits: json!({}),
                          modules: BTreeMap::new(), proxies: HashMap::new(), shared: SharedRef::default(),
                          last_live: BTreeSet::new(), fingerprint_every: Duration::from_secs(20),
-                         reap_every: Duration::from_secs(60) }
+                         reap_every: Duration::from_secs(60), gpu_apis: vec![] }
+    }
+
+    /// The GPU APIs the host provides (a new probe): a service whose `gpu.apis_any` they no longer meet is withdrawn and
+    /// stopped, one they now meet is offered again.
+    pub fn set_gpu_apis(&mut self, host: Vec<String>) {
+        if host == self.gpu_apis {
+            return;
+        }
+        self.gpu_apis = host;
+        let mut sh = lock(&self.shared);
+        for (k, st) in sh.services.iter_mut() {
+            let why = st.gpu_shortfall(&self.gpu_apis);
+            if why != st.gpu_api_missing {
+                match &why {
+                    Some(w) => info!(service = %k, "not offered: it {w}"),
+                    None => info!(service = %k, "offered: this node provides one of its GPU APIs"),
+                }
+            }
+            st.gpu_api_missing = why;
+        }
+        let c = sh.changed.clone();
+        drop(sh);
+        c.bump();
     }
 
     /// The owner's caps (the directives' `limits`), passed to services as OARBANK_LIMITS_FILE.
@@ -766,6 +802,7 @@ impl ServiceManager {
                     let mut st = old_services.remove(&key).unwrap_or_else(|| Svc::new(&name, d.clone()));
                     st.decl = d;
                     st.disabled = disabled.contains(&key);
+                    st.gpu_api_missing = st.gpu_shortfall(&self.gpu_apis);
                     sh.services.insert(key, st);
                 }
                 for d in pd {
@@ -889,7 +926,7 @@ impl ServiceManager {
                 _ => {
                     // the readiness gate for one already up (adopted, started elsewhere, or not ready in time)
                     let wanted = s.users > 0 || (self.manage && s.decl.lifecycle == Lifecycle::Always);
-                    if s.running && !s.ready && !s.disabled && !halted && wanted && may_try {
+                    if s.running && !s.ready && !s.disabled && s.gpu_api_missing.is_none() && !halted && wanted && may_try {
                         s.busy = true;
                         todo.push((k.clone(), Job::Ready));
                     }
@@ -1065,6 +1102,7 @@ impl ServiceManager {
             "service": k, "health": s.health.as_str(), "running": s.running, "ready": s.ready, "pools": s.pools,
             "reserve_mem_gb": (s.reserve_mem_gb * 100.0).round() / 100.0, "disabled": s.disabled, "users": s.users,
             "failures": s.failures, "withdrawn": s.withdrawn, "error": s.last_error, "held": s.held, "busy": s.busy,
+            "gpu_api_missing": s.gpu_api_missing,
             "accepting": s.decl.endpoint && s.accepting(),
             "lifecycle": match s.decl.lifecycle { Lifecycle::OnDemand => "on_demand", Lifecycle::Always => "always",
                                                   Lifecycle::Manual => "manual" }})).collect();
@@ -1135,7 +1173,7 @@ fn want(s: &Svc, now: Instant, memory_soft: bool, halted: bool) -> Option<bool> 
         return Some(false);                // found running without a channel (an earlier agent's): stopped, then started anew
     }
     let mut w = None;
-    if s.disabled {
+    if s.disabled || s.gpu_api_missing.is_some() {
         if s.running && s.users == 0 {
             w = Some(false);
         }
@@ -1717,6 +1755,32 @@ mod tests {
         assert!(destroyed.lines().all(|l| l == "c1"), "{destroyed}");  // never the live, unlabelled or foreign ones
         assert!(fx.calls("vm", "destroy c1 --force") >= 1);
         m.stop_all();
+    }
+
+    #[test]
+    fn a_gpu_service_runs_only_where_the_host_provides_one_of_its_apis() {
+        // gpu-placement.md: a service naming CUDA on a node whose host provides Metal is neither offered nor started; once
+        // a probe finds CUDA it is offered and starts on demand, and when the API goes it is withdrawn and stopped
+        let fx = Fx::new("gpuapi", json!([svc("vm", json!({"gpu": {"use": "shared", "apis_any": ["cuda", "rocm"]}}))]), json!([]));
+        let mut m = fx.manager(json!({}), true);
+        m.set_gpu_apis(vec!["metal".into()]);
+        let one = need(&[("vmpool", 1)]);
+        tick_for(&mut m, &one, &[], false, 2.0);
+        assert_eq!(fx.calls("vm", "start"), 0);
+        assert_eq!(m.pools(), need(&[("vmpool", 0)]));
+        assert!(!m.capabilities().contains(&"amd64".to_string()));
+        assert_eq!(m.report()["services"][0]["gpu_api_missing"], "needs one of cuda, rocm on the host; this node provides metal");
+        m.set_gpu_apis(vec!["cuda".into(), "vulkan".into()]);
+        assert!(tick_until(&mut m, &one, &[], false, 25.0, |m| m.ready_for(&["vmpool".to_string()])), "{}", m.report());
+        assert_eq!(m.report()["services"][0]["gpu_api_missing"], Value::Null);
+        m.set_gpu_apis(vec![]);                                  // the driver is gone: withdrawn and stopped once idle
+        assert!(tick_until(&mut m, &need(&[]), &[], false, 20.0, |m| m.running().is_empty()));
+        assert_eq!(m.report()["services"][0]["gpu_api_missing"], "needs one of cuda, rocm on the host; this node provides no GPU API");
+        // a service without apis_any (or not using a GPU) needs nothing
+        let fx = Fx::new("gpuapi-any", json!([svc("vm", json!({"gpu": {"use": "shared"}}))]), json!([]));
+        let mut m = fx.manager(json!({}), true);
+        m.set_gpu_apis(vec![]);
+        assert!(tick_until(&mut m, &one, &[], false, 25.0, |m| m.ready_for(&["vmpool".to_string()])), "{}", m.report());
     }
 
     #[test]
