@@ -272,6 +272,17 @@ fn executable(p: &Path) -> bool {
     std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0)
 }
 
+/// Where a Linux container engine keeps its configuration and (rootless Podman) its storage: the account's own home
+/// when this process may write it (the personal scope), else the agent's home. A system install's `oarbank` account has
+/// the home /var/lib/oarbank, which is root's: rootless Podman cannot create its configuration there and every command
+/// fails ("stat /var/lib/oarbank/.config: no such file or directory").
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn engine_home(account_home: Option<PathBuf>, agent_home: &Path) -> PathBuf {
+    let writable = |p: &Path| p.is_dir() && std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
+        .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0);
+    account_home.filter(|h| writable(h)).unwrap_or_else(|| agent_home.to_path_buf())
+}
+
 // MARK: Colima
 
 #[cfg(target_os = "macos")]
@@ -493,7 +504,7 @@ impl NativeRuntime {
     pub fn detect(layout: &crate::paths::Layout, ram_gb: f64) -> Option<NativeRuntime> {
         let find = |n: &str| ["/usr/bin", "/usr/local/bin", "/bin"].iter().map(|d| Path::new(d).join(n)).find(|p| executable(p));
         let cli = find("podman").or_else(|| find("docker"))?;
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| layout.home.clone());
+        let home = engine_home(std::env::var_os("HOME").map(PathBuf::from), &layout.home);
         // the same budget a Mac's VM would get
         let (mem_gb, _, _) = sizing(ram_gb, None, None);
         Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb })
@@ -626,6 +637,22 @@ pub fn for_node(layout: &crate::paths::Layout) -> Option<std::sync::Arc<dyn Cont
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine's home: the account's own when it may write it, else the agent's (a system install's account home is
+    /// root's), and the agent's when there is no HOME at all.
+    #[test]
+    fn the_engine_keeps_its_state_where_the_agent_may_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mine, agent, roots) = (temp("eh-mine"), temp("eh-agent"), temp("eh-root"));
+        std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(engine_home(Some(mine.clone()), &agent), mine);
+        assert_eq!(engine_home(None, &agent), agent);
+        assert_eq!(engine_home(Some(mine.join("missing")), &agent), agent);
+        if unsafe { libc::geteuid() } != 0 {                                    // root may write anything
+            assert_eq!(engine_home(Some(roots.clone()), &agent), agent);
+        }
+        std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     /// A foreign platform runs wherever binfmt has an enabled handler for its executables, whatever the handler is
     /// called: Rosetta in a Lima VM registers as `rosetta`, so looking only for `qemu-x86_64` offered amd64 images to no
