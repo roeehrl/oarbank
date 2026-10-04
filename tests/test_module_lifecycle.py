@@ -98,7 +98,7 @@ def test_install_refusals(db, tmp_path):
         modstore.install(db, bundle_of(relay_version("1.2.0", fields_type="number")), self_test=False)
     modstore.install(db, bundle_of(relay_version("2.0.0", fields_type="number")), self_test=False)   # a major may
     d = relay_version("1.3.0")
-    m = (d / "oarbank-module.toml").read_text().replace('core = ">=2.0,<3"', 'core = ">=3.0"')
+    m = (d / "oarbank-module.toml").read_text().replace('core = ">=2.3,<3"', 'core = ">=3.0"')
     (d / "oarbank-module.toml").write_text(m)
     with pytest.raises(modstore.InstallError, match="needs core >=3.0"):
         modstore.install(db, bundle_of(d), self_test=False)
@@ -115,17 +115,17 @@ def test_install_refusals(db, tmp_path):
 
 
 def relay_declaring(version: str, requires: str = "", tail: str = "") -> Path:
-    """The relay fixture at `version` with per-platform declarations (core >= 2.2): lines added to [requires], and
+    """The relay fixture at `version` with per-platform declarations: lines added to [requires], and
     tables appended to the manifest."""
     d = relay_version(version)
-    m = (d / "oarbank-module.toml").read_text().replace('core = ">=2.0,<3"', 'core = ">=2.2,<3"\n' + requires)
+    m = (d / "oarbank-module.toml").read_text().replace('core = ">=2.3,<3"', 'core = ">=2.3,<3"\n' + requires)
     (d / "oarbank-module.toml").write_text(m + tail)
     return d
 
 
 @pytest.mark.parametrize("requires, edit, tail", [
     ("", None, '\n[placement]\nmix = "same-os"\nunit = "group"\nrebind = "if-stranded"\n'),
-    ("", None, '\n[[stages]]\nname = "tally"\nafter = "eval"\nplacement = { mix = "same-platform" }\n'),
+    ("", None, '\n[[stages]]\nname = "tally"\nafter = "render"\nplacement = { mix = "same-platform" }\n'),
     ('features = ["placement"]', None, ""),
     ("", ('kinds = ["scene", "demo"]', 'kinds = ["scene", "demo"]\nplatform_bound = ["scene"]'), ""),
     ("", ('determinism = "exact"', 'determinism = "exact"\ndeterminism_scope = "os"'), ""),
@@ -142,7 +142,7 @@ def test_install_accepts_placement_declarations(db, requires, edit, tail):
 def test_install_refuses_a_feature_this_core_does_not_implement(db, monkeypatch):
     """requires.features is must-understand: an SDK may know a feature before this core implements it."""
     monkeypatch.setattr(modstore, "FEATURES", ())
-    with pytest.raises(modstore.InstallError, match=r"requires features \['placement'\], which core 2.2.0 does not implement"):
+    with pytest.raises(modstore.InstallError, match=rf"requires features \['placement'\], which core {modstore.CORE_VERSION} does not implement"):
         modstore.install(db, bundle_of(relay_declaring("1.6.0", 'features = ["placement"]')), self_test=False)
 
 

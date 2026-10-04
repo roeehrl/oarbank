@@ -92,6 +92,22 @@ def check_item(module: str, item: dict) -> tuple[str | None, list[str]]:
     return group, list(plats)
 
 
+def check_stage(module: str, item: dict) -> str | None:
+    """A jobs.enqueue item's `stage` (host capability jobs.stage): a standalone stage of the module, whose platforms
+    leave one of the item's `platforms`. None: the item names no stage (the default stage, or the chain when split)."""
+    stage = item.get("stage")
+    if stage is None:
+        return None
+    man = modcalls.info(module).manifest
+    if not isinstance(stage, str) or stage not in man.standalone_stages():
+        raise PlacementError(422, "bad_stage", f"stage {stage!r}: one of the standalone stages {man.standalone_stages()} "
+                             "(a chain stage cannot run alone)")
+    plats = man.stage(stage).requires.platforms or man.requires.platforms
+    if item.get("platforms") and not any(pf.matches(p, item["platforms"]) for p in plats):
+        raise PlacementError(422, "placement_infeasible", f"platforms {item['platforms']}: stage {stage!r} runs on {plats}")
+    return stage
+
+
 def dataset_platform(module: str, kind: str | None, platform) -> str | None:
     """datasets.create `platform`: a token the module runs on; kinds in [datasets].platform_bound must give one."""
     man = modcalls.info(module).manifest

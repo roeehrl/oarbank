@@ -40,7 +40,7 @@ def test_module_coordinator_and_cli_learn_the_coordinators_platform(db, tmp_path
 
 def test_the_coordinator_side_runs_its_variant_for_the_coordinators_platform(tmp_path, monkeypatch):
     doc = tomllib.loads((RELAY_DIR / "oarbank-module.toml").read_text())
-    doc["requires"]["core"] = ">=2.2,<3"
+    doc["requires"]["core"] = ">=2.3,<3"
     doc["coordinator"].update(timeouts_s={"default": 10.0, "job.plan": 30.0}, concurrency=1, env={"OMP_NUM_THREADS": "4", "A": "base"},
                               variants={"linux": {"exec": ["python", "-I", "{bundle}/relay_linux.py"], "concurrency": 2,
                                                   "timeouts_s": {"job.plan": 60.0}, "env": {"OMP_NUM_THREADS": "1"}},

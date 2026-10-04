@@ -695,7 +695,7 @@ def _register_dataset(db, req):
 
 @handler("modules.set_pipeline", target_type="module", snapshot=lambda db, r: {"pipeline": db.get_setting(f"pipeline:{r.target}", "single")},
          impact=lambda db, r: {"pending_eval_jobs": db.one("SELECT COUNT(*) n FROM jobs WHERE module=? AND kind='eval' "
-                                                           "AND state='pending' AND depends_on IS NULL", (r.target,))["n"]})
+                                                           "AND state='pending' AND depends_on IS NULL AND stage IS NULL", (r.target,))["n"]})
 def _pipeline(db, req):
     return core.set_pipeline(db, req.target, req.params["mode"], req.actor)
 

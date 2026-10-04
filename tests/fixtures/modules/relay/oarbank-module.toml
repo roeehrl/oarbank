@@ -1,7 +1,8 @@
 # relay: the core test suite's fixture module (not shipped), a cut-down copy of the SDK's invented render example and a
 # two-stage parameter search on purpose: a parameter set renders a scene dataset in one stage ("eval") or as the chain
 # render -> score, where only nodes with the "scorer" pool (from the "scorer" service) can score. Results carry a
-# score, a tile count and the rendered image's digest; goldens come from the module's settings, per node class.
+# score, a tile count and the rendered image's digest; goldens come from the module's settings, per node class. A
+# standalone "sync" stage stands for ingestion work that jobs.enqueue items name; "eval" is the default stage.
 manifest = 1
 
 [module]
@@ -15,7 +16,7 @@ stability = "experimental"
 description = "Core test fixture: eval, or render then score on a scorer pool"
 
 [requires]
-core = ">=2.0,<3"
+core = ">=2.3,<3"
 module_protocol = [1]
 runner_protocol = [1]
 service_protocol = [1]
@@ -35,6 +36,7 @@ capabilities = ["cancellable", "deterministic_output", "freeze_ok"]
 
 [[stages]]
 name = "eval"
+default = true
 timeout_s = 1800
 requires = { needs_pools = ["scorer"], resources = { cpu = 1, mem_gb = 1.5 } }
 retry = { max_attempts = 3 }
@@ -49,6 +51,11 @@ name = "score"
 after = "render"
 timeout_s = 600
 requires = { pools = { scorer = 1 }, resources = { cpu = 0.5, mem_gb = 1.0 } }
+
+[[stages]]
+name = "sync"
+timeout_s = 600
+requires = { resources = { cpu = 0.5, mem_gb = 0.5 } }
 
 [[services]]
 name = "scorer"

@@ -671,8 +671,9 @@ def expand_pipeline(db: DB, job_id: int) -> int | None:
     split. The eval job keeps its key, spec, campaign and labels (so caches and module views are unchanged);
     it becomes the tail stage and waits for a head job (kind 'call', key `<key>:<head>`) that produces its input."""
     j = db.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
-    if not j or j["kind"] != "eval" or j["state"] != "pending" or j["depends_on"] or not modcalls.split_enabled(db, j["module"]):
-        return None
+    if not j or j["kind"] != "eval" or j["state"] != "pending" or j["depends_on"] or j["stage"] \
+            or not modcalls.split_enabled(db, j["module"]):
+        return None                              # a job that names its stage runs exactly that stage, never the chain
     mi = modcalls.info(j["module"])
     head, tail = mi.chain
     cid = db.x("INSERT INTO jobs(job_key,campaign_id,labels_json,dataset_id,kind,priority,subpriority,state,spec_json,"
@@ -702,7 +703,7 @@ def set_pipeline(db: DB, module: str, mode: str, actor: str) -> dict:
         db.set_setting(f"pipeline:{module}", mode)
         if mode == "split":
             for j in db.q("SELECT job_id FROM jobs WHERE module=? AND kind='eval' AND state='pending' AND depends_on IS NULL "
-                          "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.job_id=jobs.job_id)", (module,)):
+                          "AND stage IS NULL AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.job_id=jobs.job_id)", (module,)):
                 if expand_pipeline(db, j["job_id"]):
                     out["expanded"] += 1
     db.event("pipeline_changed", actor=actor, reason=f"{module}: {mode} ({out['expanded']} queued jobs split)")
@@ -801,6 +802,12 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
             "placement": placement.facts(db, j, cache)}
 
 
+def sent_stage(mi, stage: str | None) -> str | None:
+    """The stage a job's envelope and result.evaluate name: the default stage stays absent, whether the job named it or
+    not, so a runner sees one form for it."""
+    return None if stage == mi.single_stage else stage
+
+
 # spec keys that belong to the envelope (or the host) rather than the module's payload
 ENVELOPE_KEYS = ("envelope", "schema", "module", "module_id", "module_version", "job_key", "protocol", "resources",
                  "datasets", "mounts", "inputs", "timeout_s", "stage")
@@ -827,7 +834,7 @@ def envelope(db: DB, j: dict, version: str | None, resources: dict | None = None
     res = resources if resources is not None else \
         modcalls.resources_on(jl(j["resources_json"], {}) or mi.stage_resources(j["stage"]), platform)
     return {"envelope": 1, "schema": f"{j['module']}/spec@{j['spec_version']}", "module_id": mi.manifest.module.id,
-            "module_version": mi.version or mi.manifest.module.version, "job_key": j["job_key"], "stage": j["stage"],
+            "module_version": mi.version or mi.manifest.module.version, "job_key": j["job_key"], "stage": sent_stage(mi, j["stage"]),
             "protocol": 1, "datasets": datasets, "mounts": mounts, "platform": platform, "inputs": inputs, "resources": res,
             "timeout_s": spec.get("timeout_s") or mi.stage_timeout(j["stage"], platform),
             "payload": {k: v for k, v in spec.items() if k not in ENVELOPE_KEYS + HOST_KEYS}}
@@ -1261,7 +1268,7 @@ def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
         head = modcalls.info_for(j["module"], ver).chain
         merged = modcalls.merge(db, j["module"], {head[0] if head else "head": dres, j["stage"]: res}, ver)
     spec = envelope(db, j, ver, None, arts, platform=a["platform"])
-    v = modcalls.evaluate(db, j["module"], spec, merged, j["stage"], ver)
+    v = modcalls.evaluate(db, j["module"], spec, merged, spec["stage"], ver)
     gok = None
     if j["kind"] == "golden":
         gok = modcalls.golden_ok(db, j["module"], (jl(j["spec_json"], {}) or {}).get("expected") or {}, merged, v.digest, ver)

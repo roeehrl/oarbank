@@ -37,8 +37,9 @@ def settings_key(module: str) -> str:
 def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
     """Insert a module's planned jobs into its campaign. Same (key, labels) twice is a no-op; each job joins its unit
     of work (placement.assign); a canonical result for the key the job may reuse makes it done at once (the result
-    cache, filtered by the unit's class); split pipelines expand. Raises PlacementError for a job no class can run
-    with its unit."""
+    cache, filtered by the unit's class); a job that names no stage expands into the chain when the pipeline is split,
+    one that names a stage runs exactly that stage. Raises PlacementError for a job no class can run with its unit, or a
+    stage that is not a standalone stage."""
     created = cached = skipped = 0
     for j in jobs:
         key, spec = j["job_key"], dict(j["spec"] or {})
@@ -47,8 +48,9 @@ def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
             if j.get(k) is not None:
                 spec[k] = j[k]
         datasets = j.get("datasets") or spec.get("datasets") or []
-        # what the job reserves: the item's, else the manifest's for its (single) stage
-        resources = j.get("resources") or spec.get("resources") or modcalls.info(module).stage_resources(None)
+        stage = placement.check_stage(module, j)
+        # what the job reserves: the item's, else the manifest's for its stage (none named: the default stage)
+        resources = j.get("resources") or spec.get("resources") or modcalls.info(module).stage_resources(stage)
         labels = json.dumps(j.get("labels") or {}, sort_keys=True)
         if db.one("SELECT 1 FROM jobs WHERE campaign_id=? AND job_key=? AND labels_json=? AND state!='cancelled'",
                   (campaign["campaign_id"], key, labels)):
@@ -57,12 +59,12 @@ def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
         target = j.get("target_node")
         group, plats = placement.check_item(module, j)
         jid = db.x("INSERT INTO jobs(job_key,campaign_id,labels_json,dataset_id,kind,target_node,priority,subpriority,state,"
-                   "spec_json,datasets_json,created_at,module,resources_json,name,spec_version,platforms_json,group_key)"
-                   " VALUES(?,?,?,?,'eval',?,?,?,'pending',?,?,?,?,?,?,?,?,?)",
+                   "spec_json,datasets_json,created_at,module,resources_json,name,spec_version,platforms_json,group_key,stage)"
+                   " VALUES(?,?,?,?,'eval',?,?,?,'pending',?,?,?,?,?,?,?,?,?,?)",
                    (key, campaign["campaign_id"], labels, j.get("dataset_id"), target,
                     int(campaign["priority"] or 0) + int(j.get("priority") or 0), int(j.get("subpriority") or 0),
                     json.dumps(spec), json.dumps(datasets), clock.now(), module, json.dumps(resources), j.get("name"),
-                    int(j.get("spec_version") or 1), json.dumps(plats) if plats else None, group))
+                    int(j.get("spec_version") or 1), json.dumps(plats) if plats else None, group, stage))
         placement.assign(db, jid)
         # the result cache is scoped to the module (another module's key never satisfies this one) and to the job's unit
         hit = None if target else placement.cache_hit(db, db.one("SELECT * FROM jobs WHERE job_id=?", (jid,)))

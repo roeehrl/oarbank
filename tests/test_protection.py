@@ -115,12 +115,12 @@ def test_release_stage_entries_carry_their_platforms(tmp_path):
 
 
 def relay_per_platform(tmp_path) -> Path:
-    """The relay fixture with per-platform files, wheels for several platforms and runner env (core >= 2.2)."""
+    """The relay fixture with per-platform files, wheels for several platforms and runner env."""
     import shutil
     d = tmp_path / "relay"
     shutil.copytree(Path(__file__).parent / "fixtures" / "modules" / "relay", d, ignore=shutil.ignore_patterns("__pycache__"))
     toml = d / "oarbank-module.toml"
-    toml.write_text(toml.read_text().replace('core = ">=2.0,<3"', 'core = ">=2.2,<3"').replace(
+    toml.write_text(toml.read_text().replace(
         'capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\n',
         'capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\nenv = { OMP_NUM_THREADS = "1", MKL_CBWR = "AUTO" }\n'
         '[runner.variants.windows]\nenv = { MKL_CBWR = "COMPATIBLE" }\n'

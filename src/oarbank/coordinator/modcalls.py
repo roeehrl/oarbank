@@ -46,10 +46,8 @@ class ModuleInfo:
 
     @property
     def single_stage(self) -> str | None:
-        """The stage that runs a job in one go: neither after another stage nor depended on."""
-        ch = self.chain
-        names = [s.name for s in self.manifest.stages if not ch or s.name not in ch]
-        return names[0] if names else None
+        """The default stage: what a job that names no stage runs in one go (oarbank_sdk Manifest.default_stage)."""
+        return self.manifest.default_stage()
 
     @property
     def splittable(self) -> bool:

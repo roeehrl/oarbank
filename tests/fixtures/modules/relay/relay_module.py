@@ -82,6 +82,11 @@ def result_evaluate(p: mp.ResultEvaluateParams, ctx):
     digest = pl.get("image_sha256")
     if want and got != want:
         return mp.ResultEvaluateResult(verdict="reject", reason="mode_mismatch", digest=digest, digest_version=1)
+    if p.stage == "sync":                       # ingestion: what the feed held when it ran
+        if "items" not in pl:
+            return mp.ResultEvaluateResult(verdict="reject", reason="relay/no_items")
+        return mp.ResultEvaluateResult(verdict="accept", digest=pl.get("feed_sha"), digest_version=1,
+                                       summary={"tiles": len(pl["items"])})
     if p.stage == "render":
         if not digest or not res.get("artifacts"):
             return mp.ResultEvaluateResult(verdict="reject", reason="relay/no_artifact", digest=digest, digest_version=1)
