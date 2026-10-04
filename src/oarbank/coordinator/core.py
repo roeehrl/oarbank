@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases
+from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -1395,8 +1395,7 @@ def _register_pinned(db: DB, module: str, pins, node_id: str, job_id: int, post:
                   p.platform))
             db.event("dataset_imported", actor="bootstrap", node_id=node_id, job_id=job_id, reason=p.dataset_id)
             continue
-        have = [{k: f.get(k) for k in ("path", "digest", "size")} for f in jl(ex["files_json"], [])]
-        if (ex["module"], ex["kind"], sorted(have, key=lambda f: f["path"]), ex["platform"]) != (module, p.kind, files, p.platform):
+        if not datasets.holds_pin(ex, module, p):
             post.append(lambda p=p, ex=ex: _alert(
                 db, f"pinned_dataset_conflict:{p.dataset_id}", f"module:{module}",
                 f"{module}: bootstrap job {job_id} brought pinned dataset {p.dataset_id}, but a dataset of "

@@ -49,14 +49,22 @@ def _job_on_node(db: DB, j: dict, nv: predicates.NodeView, now: float) -> list:
         gpu=modcalls.job_uses_gpu(j["module"], res, nv.node.get("platform")))
 
 
+REMEDY_TARGET = {"nodes": "node", "jobs": "job_id", "campaigns": "campaign_id"}      # operation area -> the subject id it targets
+
+
 def _remedies(codes, params) -> list[X.Remedy]:
+    """The operations that remedy these codes, each with its target when the subject names it (a node operation on a
+    node, a job operation on a job, a campaign operation on the job's campaign, a fleet operation on the fleet)."""
     out, seen = [], set()
     for c in codes:
         rc = RC.REGISTRY.get(c)
         for op in (rc.remedies if rc else ()):
             if op not in seen:
                 seen.add(op)
-                out.append(X.Remedy(op=op, params=params, label=op.split(".", 1)[1].replace("_", " ").capitalize()))
+                area = op.split(".", 1)[0]
+                target = "fleet" if area == "fleet" else params.get(REMEDY_TARGET.get(area, ""))
+                out.append(X.Remedy(op=op, target=None if target is None else str(target), params=params,
+                                    label=op.split(".", 1)[1].replace("_", " ").capitalize()))
     return out
 
 
@@ -75,6 +83,10 @@ def _checkpoint_actions(db: DB, j: dict) -> list[str]:
         out.append(f"Attempt {a['attempt_id']} resumed from attempt {r['from_attempt']}'s checkpoint (written on {r['node_id']}); "
                    "a result that resumed from another node's checkpoint is always replicated on a third node")
     return out
+
+
+def _job_ids(j: dict) -> dict:
+    return {"job_id": j["job_id"], "module": j["module"], **({"campaign_id": j["campaign_id"]} if j["campaign_id"] else {})}
 
 
 def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None = None) -> X.ExplainDocument | None:
@@ -107,7 +119,7 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
             head = X.Headline(code=code, text=f"{j['state']}: last attempt ended {(a or {}).get('end_reason')}")
         return X.ExplainDocument(subject=subj, as_of=as_of, verdict=j["state"], headline=head, evidence=evidence,
                                  system_actions=actions, remedies=_remedies([head.code, "JOB_QUARANTINED" if j["state"] in ("failed", "quarantined") else ""],
-                                                    {"job_id": job_id}))
+                                                    _job_ids(j)))
     nodes = db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
     matrix, by_code, eligible_nodes = [], collections.defaultdict(list), []
     clause = collections.defaultdict(lambda: [0, 0])
@@ -138,7 +150,7 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
         subject=subj, as_of=as_of, verdict="pending", headline=head, summary=summary,
         clauses=[X.Clause(predicate=p, matched=m, of=o) for p, (m, o) in clause.items()], matrix=matrix,
         next_trigger="Re-evaluated on every claim (agents claim each heartbeat)", system_actions=actions,
-        remedies=_remedies([s.code for s in summary], {"job_id": job_id, **({"campaign_id": j["campaign_id"]} if j["campaign_id"] else {})}), evidence=evidence)
+        remedies=_remedies([s.code for s in summary], _job_ids(j)), evidence=evidence)
 
 
 def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None = None) -> X.ExplainDocument | None:

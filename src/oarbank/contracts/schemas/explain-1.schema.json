@@ -172,8 +172,22 @@
         },
         "params": {
           "additionalProperties": true,
+          "description": "The subject's ids (node, job_id, campaign_id, module).",
           "title": "Params",
           "type": "object"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The operation's target, when the subject names it: the node, the job, the job's campaign, or `fleet`.",
+          "title": "Target"
         }
       },
       "required": [

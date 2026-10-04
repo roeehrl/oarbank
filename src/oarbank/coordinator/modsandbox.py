@@ -136,8 +136,8 @@ def bootstrap_enforced(node: dict) -> bool:
     agent would give them the module's full grants, so it never gets one."""
     if not REQUIRE_SANDBOXED_AGENTS:
         return True
-    enf = ((json.loads(node.get("facts_json") or "{}").get("sandbox") or {}).get("enforcement") or {})
-    return enf.get(BOOTSTRAP_GRANTS) == "enforced"
+    from . import platforms
+    return platforms.enforcement(json.loads(node.get("facts_json") or "{}")).get(BOOTSTRAP_GRANTS) == "enforced"
 
 
 def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
