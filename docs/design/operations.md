@@ -8,9 +8,9 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `fleet.pause` — Stop granting new leases fleet-wide; running attempts continue | T0 | optional | – | operator | declarative | fleet.resume | `POST /api/v1/ops/{op}` (op=fleet.pause)<br>`POST /do/{op}` (op=fleet.pause) | oarbank op fleet.pause |
-| `fleet.halt` — Pause pausable attempts and evict the rest gracefully | T1 | prompted | – | operator | declarative | fleet.resume | `POST /api/v1/ops/{op}` (op=fleet.halt)<br>`POST /do/{op}` (op=fleet.halt) | oarbank op fleet.halt |
-| `fleet.resume` — Resume leasing (rollouts stay frozen until resumed separately) | T1 | required | – | operator | declarative | fleet.pause | `POST /api/v1/ops/{op}` (op=fleet.resume)<br>`POST /do/{op}` (op=fleet.resume) | oarbank op fleet.resume |
+| `fleet.pause` — Stop granting new leases fleet-wide; running attempts continue | T0 | optional | – | operator | declarative | fleet.resume | `POST /api/v1/ops/{op}` (op=fleet.pause)<br>`POST /do/{op}` (op=fleet.pause) | oarbank pause --all |
+| `fleet.halt` — Pause pausable attempts and evict the rest gracefully | T1 | prompted | – | operator | declarative | fleet.resume | `POST /api/v1/ops/{op}` (op=fleet.halt)<br>`POST /do/{op}` (op=fleet.halt) | oarbank halt --all |
+| `fleet.resume` — Resume leasing (rollouts stay frozen until resumed separately) | T1 | required | – | operator | declarative | fleet.pause | `POST /api/v1/ops/{op}` (op=fleet.resume)<br>`POST /do/{op}` (op=fleet.resume) | oarbank resume --all |
 
 ## nodes
 
@@ -36,8 +36,8 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `jobs.retry` — Requeue a failed or quarantined job | T0 · bulk | optional | – | operator | key | – | `POST /api/v1/ops/{op}` (op=jobs.retry)<br>`POST /do/{op}` (op=jobs.retry) | – |
-| `jobs.cancel` — Cancel a job and revoke its live attempts (shows compute lost) | T1 · bulk | prompted | – | operator | natural | jobs.retry | `POST /api/v1/ops/{op}` (op=jobs.cancel)<br>`POST /do/{op}` (op=jobs.cancel) | – |
+| `jobs.retry` — Requeue a failed or quarantined job | T0 · bulk | optional | – | operator | key | – | `POST /api/v1/ops/{op}` (op=jobs.retry)<br>`POST /do/{op}` (op=jobs.retry) | oarbank job retry <jid> |
+| `jobs.cancel` — Cancel a job and revoke its live attempts (shows compute lost) | T1 · bulk | prompted | – | operator | natural | jobs.retry | `POST /api/v1/ops/{op}` (op=jobs.cancel)<br>`POST /do/{op}` (op=jobs.cancel) | oarbank job cancel <jid> |
 | `jobs.set_priority` — Change a job's priority | T0 · bulk | optional | – | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=jobs.set_priority)<br>`POST /do/{op}` (op=jobs.set_priority) | – |
 
 ## campaigns
@@ -64,7 +64,7 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `modules.set_pipeline` — Run a module single-stage or split | T2 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=modules.set_pipeline)<br>`POST /do/{op}` (op=modules.set_pipeline) | oarbank pipeline <module> single|split |
+| `modules.set_pipeline` — Run a module single-stage or split | T2 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=modules.set_pipeline)<br>`POST /do/{op}` (op=modules.set_pipeline) | oarbank pipeline single|split --module <module> |
 | `modules.install` — Install a module bundle: verify every file hash and the digest, check compatibility, self-test (enables nothing) | T2 | required | yes | admin | natural | modules.uninstall | `POST /api/v1/ops/{op}` (op=modules.install)<br>`POST /api/v1/modules/bundles`<br>`POST /do/{op}` (op=modules.install) | oarbank module install <bundle.mfb> |
 | `modules.uninstall` — Remove an installed module version that no channel or pin uses | T2 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=modules.uninstall)<br>`POST /do/{op}` (op=modules.uninstall) | oarbank module uninstall <name>@<version> |
 | `modules.verify` — Re-verify installed bundles against their recorded digests | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=modules.verify)<br>`POST /do/{op}` (op=modules.verify) | oarbank module verify [name] |
@@ -119,7 +119,7 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `protection.rules.update` — Edit a node's protected-process rules (immutable versions) | T2 | required | yes | operator | declarative · versioned | protection.rules.restore | `POST /api/v1/ops/{op}` (op=protection.rules.update)<br>`POST /do/{op}` (op=protection.rules.update) | oarbank protection set <nid> <file> |
+| `protection.rules.update` — Edit a node's protected-process rules (immutable versions) | T2 | required | yes | operator | declarative · versioned | protection.rules.restore | `POST /api/v1/ops/{op}` (op=protection.rules.update)<br>`POST /do/{op}` (op=protection.rules.update) | oarbank protection set <nid> <file><br>oarbank protection preview <nid> <file> |
 | `protection.rules.restore` — Restore a previous rule-set version (writes a new version) | T2 | required | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=protection.rules.restore)<br>`POST /do/{op}` (op=protection.rules.restore) | oarbank protection restore <nid> <version> |
 | `protection.rules.canary` — Apply a rule set to one node first, then promote it to the rest | T2 | required | yes | operator | declarative | – | `POST /api/v1/ops/{op}` (op=protection.rules.canary)<br>`POST /do/{op}` (op=protection.rules.canary) | oarbank protection canary <nid> <file><br>oarbank protection promote |
 | `protection.probe_now` — Run a pause probe now | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.probe_now)<br>`POST /do/{op}` (op=protection.probe_now) | oarbank protection probe <nid> |

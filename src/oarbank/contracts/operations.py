@@ -92,13 +92,13 @@ OPS: list[Operation] = [
     # ------------------------------------------------------------------ fleet
     Operation(id="fleet.pause", area="fleet", summary="Stop granting new leases fleet-wide; running attempts continue",
               tier="T0", category="modify", reverses="fleet.resume", idempotency="declarative", 
-              routes=OPR("fleet.pause"), cli=["oarbank op fleet.pause"], gui=CON("fleet.pause")),
+              routes=OPR("fleet.pause"), cli=["oarbank pause --all"], gui=CON("fleet.pause")),
     Operation(id="fleet.halt", area="fleet", summary="Pause pausable attempts and evict the rest gracefully",
               tier="T1", category="modify", reverses="fleet.resume", idempotency="declarative", 
-              routes=OPR("fleet.halt"), cli=["oarbank op fleet.halt"], gui=CON("fleet.halt")),
+              routes=OPR("fleet.halt"), cli=["oarbank halt --all"], gui=CON("fleet.halt")),
     Operation(id="fleet.resume", area="fleet", summary="Resume leasing (rollouts stay frozen until resumed separately)",
               tier="T1", reason="required", category="modify", reverses="fleet.pause", idempotency="declarative",
-              routes=OPR("fleet.resume"), cli=["oarbank op fleet.resume"], gui=CON("fleet.resume")),
+              routes=OPR("fleet.resume"), cli=["oarbank resume --all"], gui=CON("fleet.resume")),
 
     # ------------------------------------------------------------------ nodes
     Operation(id="nodes.admit", area="nodes", summary="Approve an enrollment request (the node gets its client certificate)",
@@ -144,9 +144,11 @@ OPS: list[Operation] = [
 
     # ------------------------------------------------------------------ jobs
     Operation(id="jobs.retry", area="jobs", summary="Requeue a failed or quarantined job",
-              tier="T0", category="create", idempotency="key", bulk=True, gui=CON("jobs.retry"), routes=OPR("jobs.retry")),
+              tier="T0", category="create", idempotency="key", bulk=True, gui=CON("jobs.retry"), routes=OPR("jobs.retry"),
+              cli=["oarbank job retry <jid>"]),
     Operation(id="jobs.cancel", area="jobs", summary="Cancel a job and revoke its live attempts (shows compute lost)",
-              tier="T1", category="remove", reverses="jobs.retry", idempotency="natural", bulk=True, gui=CON("jobs.cancel"), routes=OPR("jobs.cancel")),
+              tier="T1", category="remove", reverses="jobs.retry", idempotency="natural", bulk=True, gui=CON("jobs.cancel"), routes=OPR("jobs.cancel"),
+              cli=["oarbank job cancel <jid>"]),
     Operation(id="jobs.set_priority", area="jobs", summary="Change a job's priority",
               tier="T0", category="modify", idempotency="declarative", versioned=True, bulk=True, routes=OPR("jobs.set_priority"), gui=CON("jobs.set_priority")),
 
@@ -198,7 +200,7 @@ OPS: list[Operation] = [
     # ------------------------------------------------------------------ modules
     Operation(id="modules.set_pipeline", area="modules", summary="Run a module single-stage or split",
               tier="T2", preview=True, min_role="admin", category="modify", idempotency="declarative",
-              routes=OPR("modules.set_pipeline"), cli=["oarbank pipeline <module> single|split"], gui=CON("modules.set_pipeline")),
+              routes=OPR("modules.set_pipeline"), cli=["oarbank pipeline single|split --module <module>"], gui=CON("modules.set_pipeline")),
     Operation(id="modules.install", area="modules", summary="Install a module bundle: verify every file hash and the digest, check compatibility, self-test (enables nothing)",
               tier="T2", preview=True, min_role="admin", category="create", reverses="modules.uninstall", idempotency="natural",
               routes=[*OPR("modules.install"), R("POST", "/api/v1/modules/bundles")], cli=["oarbank module install <bundle.mfb>"],
@@ -309,7 +311,7 @@ OPS: list[Operation] = [
     # ------------------------------------------------------------------ protection
     Operation(id="protection.rules.update", area="protection", summary="Edit a node's protected-process rules (immutable versions)",
               tier="T2", preview=True, category="modify", reverses="protection.rules.restore", idempotency="declarative",
-              versioned=True, routes=OPR("protection.rules.update"), cli=["oarbank protection set <nid> <file>"],
+              versioned=True, routes=OPR("protection.rules.update"), cli=["oarbank protection set <nid> <file>", "oarbank protection preview <nid> <file>"],
               gui=CON("protection.rules.update")),
     Operation(id="protection.rules.restore", area="protection", summary="Restore a previous rule-set version (writes a new version)",
               tier="T2", preview=True, category="modify", idempotency="declarative", versioned=True,
@@ -487,3 +489,13 @@ def register_module_operations(module_name: str, decls) -> list[Operation]:
 
 
 MODULE_OPS: dict[str, tuple] = {}         # op id -> (module name, OperationDecl)
+
+
+def command(op_id: str, target: str | None = None) -> str:
+    """The `oarbank` command that runs an operation (on `target`): its own command with the first placeholder filled in,
+    else `oarbank op <op> [target]`. Explain's remedies name it."""
+    import re
+    cli = next((c for c in REGISTRY[op_id].cli if c.startswith("oarbank ")), None) if op_id in REGISTRY else None
+    if cli and not cli.startswith("oarbank op "):
+        return re.sub(r"<[^>]+>", target, cli, count=1) if target else cli
+    return f"oarbank op {op_id}" + (f" {target}" if target else "")

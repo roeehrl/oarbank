@@ -14,12 +14,53 @@ def _templates() -> str:
     return "\n".join(p.read_text() for p in (SRC / "console" / "templates").glob("*.html"))
 
 
-def _cli_source() -> str:
-    return (SRC / "cli" / "main.py").read_text()
+def _subcommands() -> dict:
+    """{name: its argparse parser} for every `oarbank` command, from the CLI's own parser."""
+    import argparse
+    from ..cli.main import parser
+    return next(a for a in parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+
+
+def cli_exists(cmd: str, subs: dict | None = None) -> bool:
+    """Whether an `oarbank ...` command the registry names exists: its subcommand, the literal words it gives each
+    positional that takes choices (`pin|unpin`: each alternative), and every flag it names. Placeholders (`<node>`,
+    `[name]`), values and `...` are not checked. Prose that is not an `oarbank` command is not a command to check."""
+    import argparse
+    import re
+    if not cmd.startswith("oarbank "):
+        return True
+    subs = subs if subs is not None else _subcommands()
+    words = re.sub(r"<[^>]*>", "<p>", cmd).split()[1:]
+    sp = subs.get(words[0])
+    if sp is None:
+        return False
+    flags = {o: a for a in sp._actions for o in a.option_strings}
+    slots = [a for a in sp._actions if not a.option_strings]
+    skip_value, i = False, 0
+    for w in (x.strip("[]") for x in words[1:]):
+        if skip_value:
+            skip_value = False
+            continue
+        if not w or w.startswith("...") or w.endswith("..."):
+            continue
+        if w.startswith("-"):
+            alts = [x.split("=", 1)[0] for x in w.split("|")]
+            if any(x not in flags for x in alts):
+                return False
+            skip_value = flags[alts[0]].nargs != 0 and "=" not in w
+            continue
+        if i >= len(slots):
+            return False
+        slot = slots[i]
+        if "<" not in w and slot.choices is not None and any(x not in slot.choices for x in w.split("|")):
+            return False
+        if slot.nargs not in ("*", argparse.REMAINDER):
+            i += 1
+    return True
 
 
 def op_rows() -> list[dict]:
-    t, cli_src = _templates(), _cli_source()
+    t, subs = _templates(), _subcommands()
     out = []
     for o in ops.OPS:
         if o.id.startswith("mod."):
@@ -27,17 +68,20 @@ def op_rows() -> list[dict]:
         api = [f"{r.method} {r.path}" for r in o.routes] or []
         generic_api = any(r.path == ops.OPS_ROUTE_PATH for r in o.routes)
         gui_form = f'op_form("{o.id}"' in t
+        missing = [c for c in o.cli if not cli_exists(c, subs)]
         out.append({"id": o.id, "tier": o.tier, "api": api, "api_ok": bool(api) or generic_api,
-                    "cli": list(o.cli), "cli_ok": bool(o.cli) or "\"op\"" in cli_src,    # `oarbank op <id>` reaches all
+                    "cli": list(o.cli), "cli_missing": missing,
+                    "cli_ok": not missing and (bool(o.cli) or "op" in subs),      # `oarbank op <id>` reaches all
                     "gui": [f"{r.method} {r.path}" for r in o.gui], "gui_ok": bool(o.gui) and gui_form})
     return out
 
 
 def explain_rows() -> list[dict]:
-    t, cli_src = _templates(), _cli_source()
+    t, subs = _templates(), _subcommands()
     console = (SRC / "console" / "app.py").read_text()
     app = (SRC / "coordinator" / "app.py").read_text()
-    return [{"kind": k, "api_ok": "/api/v1/explain/{kind}/{ident}" in app, "cli_ok": "def cmd_explain" in cli_src,
+    kinds = next((a.choices for a in subs["explain"]._actions if a.dest == "kind"), ()) if "explain" in subs else ()
+    return [{"kind": k, "api_ok": "/api/v1/explain/{kind}/{ident}" in app, "cli_ok": k in kinds,
              "gui_ok": "/explain/{kind}/{ident}" in console and f"/explain/{k}/" in t} for k in EXPLAIN_KINDS]
 
 
@@ -53,8 +97,9 @@ def gaps() -> list[str]:
     g = []
     for r in op_rows():
         for side in ("api", "cli", "gui"):
-            if not r[f"{side}_ok"]:
+            if not r[f"{side}_ok"] and not (side == "cli" and r["cli_missing"]):
                 g.append(f"operation {r['id']}: no {side.upper()} path")
+        g += [f"operation {r['id']}: the registry's CLI command `{c}` does not exist" for c in r["cli_missing"]]
     for r in explain_rows():
         for side in ("api", "cli", "gui"):
             if not r[f"{side}_ok"]:
