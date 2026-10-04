@@ -154,4 +154,11 @@ which the agent's account may not read), and the agent as the service
 `dev.codonic.oarbank.agent` run by its virtual account, with its home in `C:\ProgramData\Oarbank\agent`. Both services start automatically about two minutes after
 boot (Automatic, Delayed Start), and the service manager restarts either one that crashes or stops with an error.
 `JOINCODE=` or `COORDINATOR=` work instead of a file. Module
-processes run in AppContainers; containers are not available on Windows yet.
+processes run in AppContainers.
+
+Containers run in a WSL containers session the agent creates and owns (a VM of its own, [design/windows-containers.md](design/windows-containers.md)):
+they need Windows 10 2004 or later, WSL 2.9.3 or later and the Virtual Machine Platform, on a machine with hardware virtualization (nested
+virtualization in a VM). `CONTAINERS=1` on the `msiexec` command line installs both unattended (restart Windows if the
+Virtual Machine Platform was new); `oarbank-agent containers install` does the same later. `oarbank-agent containers
+doctor` prints the runtime's state and each missing piece with its fix, and `--probe` runs a container through it.
+The node offers the `containers` pool only while its session is ready.

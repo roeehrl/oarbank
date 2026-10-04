@@ -181,18 +181,24 @@ pub fn collect(home: &std::path::Path) -> Value {
         "memory_gb": mem.map(|b| (b as f64 / 1073741824.0 * 10.0).round() / 10.0),
         "gpus": gpus,
         "sandbox": sandbox_report(),
-        "containers": {"gpu": container_gpu()},
+        "containers": containers(home),
         "disk_free_gb": disk_free_gb(home),
     })
 }
 
-/// GPU passthrough to containers (container_runtime::gpu_passthrough): `cdi:<kind>` on Linux with a container engine
-/// and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with krunkit; `undetected` elsewhere (Windows has no
-/// agent container runtime yet).
-fn container_gpu() -> String {
-    #[cfg(unix)]
-    if let Some(p) = crate::container_runtime::gpu_passthrough() {
-        return p.kind;
+/// The node's container report: `gpu` is how containers get the node's GPUs (container_runtime::gpu_passthrough):
+/// `cdi:<kind>` on Linux with a container engine and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with
+/// krunkit, `cdi:microsoft.com/wslc` on Windows from a ready WSL containers session whose VM has a GPU, else
+/// `undetected`. Windows adds its session's state (wslc.rs writes it on every change; docs/design/windows-containers.md,
+/// "The node's report"). The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs).
+fn containers(home: &std::path::Path) -> Value {
+    #[cfg(windows)]
+    {
+        crate::wslc::facts(home)
     }
-    "undetected".into()
+    #[cfg(unix)]
+    {
+        let _ = home;
+        json!({"gpu": crate::container_runtime::gpu_passthrough().map(|p| p.kind).unwrap_or_else(|| "undetected".into())})
+    }
 }

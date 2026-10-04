@@ -189,3 +189,98 @@ open(out, "w").write(json.dumps(r))
     assert_eq!(std::fs::read_to_string(outbox.join("ferried.txt")).unwrap(), "done");
     assert!(!inbox.join("planted.txt").exists() && outbox.join("earlier.txt").exists());
 }
+
+/// A SID as a string.
+fn sid_string(sid: windows_sys::Win32::Security::PSID) -> String {
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    let mut w: *mut u16 = std::ptr::null_mut();
+    unsafe {
+        assert_ne!(ConvertSidToStringSidW(sid, &mut w), 0);
+        let n = (0..).take_while(|&i| *w.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, n));
+        windows_sys::Win32::Foundation::LocalFree(w as _);
+        s
+    }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
+/// A pipe with the broker's security descriptor for `module` (oarbank-core's `broker_pipe_sddl`), answering each
+/// connection's first line with `pong`; the thread ends after `clients` connections.
+fn broker_pipe(name: &str, module: &str, clients: usize) -> std::thread::JoinHandle<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let (owner, container) = unsafe {
+        let mut tok = std::ptr::null_mut();
+        assert_ne!(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok), 0);
+        let mut buf = vec![0u8; 256];
+        let mut n = 0;
+        assert_ne!(GetTokenInformation(tok, TokenUser, buf.as_mut_ptr() as _, buf.len() as u32, &mut n), 0);
+        CloseHandle(tok);
+        let owner = sid_string((*(buf.as_ptr() as *const TOKEN_USER)).User.Sid);
+        let mut sid = std::ptr::null_mut();
+        assert!(DeriveAppContainerSidFromAppContainerName(wide(&format!("Oarbank.{module}")).as_ptr(), &mut sid) >= 0);
+        (owner, sid_string(sid))
+    };
+    let sddl = wide(&oarbank_core::sandbox::broker_pipe_sddl(&owner, &container));
+    let path = wide(&format!(r"\\.\pipe\{name}"));
+    let mut sd = std::ptr::null_mut();
+    assert_ne!(unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, std::ptr::null_mut()) }, 0);
+    let sd = sd as usize;
+    let instance = move |first: bool| unsafe {
+        let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd as _, bInheritHandle: 0 };
+        let h = CreateNamedPipeW(path.as_ptr(), PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
+                                 PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 255, 4096, 4096, 0, &sa);
+        assert_ne!(h, INVALID_HANDLE_VALUE, "{}", std::io::Error::last_os_error());
+        h as usize
+    };
+    let mut next = instance(true);
+    std::thread::spawn(move || unsafe {
+        for _ in 0..clients {
+            let h = next as windows_sys::Win32::Foundation::HANDLE;
+            ConnectNamedPipe(h, std::ptr::null_mut());
+            next = instance(false);
+            let mut buf = [0u8; 64];
+            let mut got = 0u32;
+            ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut got, std::ptr::null_mut());
+            let mut put = 0u32;
+            WriteFile(h, b"pong\n".as_ptr(), 5, &mut put, std::ptr::null_mut());
+            windows_sys::Win32::System::Pipes::DisconnectNamedPipe(h);
+            CloseHandle(h);
+        }
+    })
+}
+
+/// The broker's pipe on Windows (broker.rs, spec/sandbox/backends/windows.md): the runner of the module it was made for
+/// opens it from inside its AppContainer (low integrity) and talks, as the SDK's `broker` client does (`open` of the
+/// pipe's name); a runner of another module, in another AppContainer, is refused.
+#[test]
+fn only_its_modules_appcontainer_opens_a_broker_pipe() {
+    let name = format!("oarbank-test-broker-{}", std::process::id());
+    let server = broker_pipe(&name, "dev.test.brokerpipe", 1);
+    let (py, roots) = python();
+    let client = format!("import sys\ntry:\n    f = open(r'\\\\.\\pipe\\{name}', 'r+b', buffering=0)\nexcept OSError as e:\n    \
+                          print('refused', e.errno); sys.exit(0)\nf.write(b'ping\\n')\nprint(f.read(64).decode().strip())\n");
+    let run = |module: &str, tag: &str| {
+        let d = scratch(tag);
+        let policy = serde_json::json!({"module": module, "ro": roots, "rw": [d.display().to_string()], "net": "none",
+                                        "proxy_port": null, "broker_socket": format!("npipe://./pipe/{name}"), "gpu": false,
+                                        "exec_rw": false, "kind": "runner", "exe": py});
+        let p = d.join("policy.json");
+        std::fs::write(&p, policy.to_string()).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_oarbank-agent")).arg("sandbox-exec").arg(&p).arg("--").args([py.as_str(), "-I", "-c", &client])
+            .output().unwrap();
+        assert!(out.status.success(), "{module}: {:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(run("dev.test.other", "brokerpipe-other"), "refused 13", "another module's AppContainer must be refused");
+    assert_eq!(run("dev.test.brokerpipe", "brokerpipe-own"), "pong");
+    server.join().unwrap();
+}

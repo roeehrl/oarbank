@@ -124,14 +124,16 @@ console never calls the module.
 | Query | New fields |
 |---|---|
 | `attempts` | `resumed_from_attempt`, `resumed_from_node`, `resume_digest`, `module_version`, `rss_gb` |
-| `nodes` | `platform`, `os`, `arch`, `os_version`, `gpu_apis_host`, `gpu_apis_containers`, `container_gpu`, `container_runtime`, `container_state`, `container_missing` (`[{what, detail, fix}]`), `container_fixes` (the fixes as text), `services` (this module's, as in `services`), `service_health` (one line), `folders` (`{id: {access, status}}`, this module's folders only), `folders_ok`, `enforcement` (`{capability: state}` for the capabilities this module's sandbox needs), `sandbox_gaps` |
+| `nodes` | `platform`, `os`, `arch`, `os_version`, `gpu_apis_host`, `gpu_apis_containers`, `container_gpu`, `container_runtime`, `container_state`, `container_platforms`, `container_detail`, `container_missing` (`[{what, detail, fix}]`), `container_fixes` (the fixes as text), `services` (this module's, as in `services`), `service_health` (one line), `folders` (`{id: {access, status}}`, this module's folders only), `folders_ok`, `enforcement` (`{capability: state}` for the capabilities this module's sandbox needs), `sandbox_gaps` |
 | `campaigns` | `placement_mix`, `placement_unit`, `placement_pin`, `bound_class`, `binding_state`, `binding_source`, `stranded_since` |
 | `datasets` | `owner` (`module`, `operator`), `module`, `platform`, `files`, `size`, `origins` (the distinct origin hosts), `pinned` (one of the module's `[[datasets.pinned]]`) |
 
 Notes:
-- Container runtime state (`container_runtime`, `container_state`, `container_missing`) is what a node reports in its
-  facts' `containers` object; a Windows node reports its WSL containers session there (docs/protocol.md, Containers).
-  Where a node reports none, these are null and `container_missing` is empty.
+- Container runtime state (`container_runtime`, `container_state`, `container_platforms`, `container_detail`,
+  `container_missing`) is the node's facts' `containers` report (D39, [windows-containers.md](windows-containers.md),
+  "The node's report"): a Windows node's WSL containers session (`wslc`: `ready`, `starting`, `missing`, `failed`,
+  `absent`, with what is missing and its fix). Nodes whose agent reports no runtime state there (macOS and Linux report
+  only `gpu`) have these null and `container_missing` empty.
 - `enforcement` lists the capabilities `platforms.sandbox_needs(manifest)` names for this module (the same list
   placement checks), each with the node's reported state (`enforced`, `unavailable`, or `unreported`).
 - A row's dataset `meta` keys are merged under the core fields: a module cannot shadow `owner` or `size` with meta.

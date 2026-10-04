@@ -347,8 +347,10 @@ def test_nodes_and_services_sources(env):
     db = env["db"]
     _, n = enrolled_node(db, "studio")
     facts = {**json.loads(fresh(db, n)["facts_json"] or "{}"),
-             "containers": {"gpu": "undetected", "runtime": "wslc", "state": "missing",
-                            "missing": [{"what": "wsl", "detail": "WSL is not installed", "fix": "wsl --install"}]},
+             "containers": {"runtime": "wslc", "state": "missing", "session": "oarbank-3f2a9c0b71de", "platforms": ["linux/amd64"],
+                            "gpu": "undetected",
+                            "missing": [{"what": "wsl_package", "detail": "WSL 2.9.3 or later is not installed",
+                                         "fix": "oarbank-agent containers install"}]},
              "sandbox": {"enforcement": {"filesystem": "enforced", "ipc": "enforced", "net.none": "enforced",
                                          "endpoints": "unavailable"}}}
     doctor = {"gpu_apis": {"host": ["cuda", "vulkan"], "containers": []}, "modules": {}}
@@ -360,7 +362,8 @@ def test_nodes_and_services_sources(env):
     node = next(r for r in rows(db, "modelserver", "nodes") if r["node_id"] == n["node_id"])
     assert node["platform"] == "windows-amd64" and node["gpu_apis_host"] == ["cuda", "vulkan"]
     assert node["container_runtime"] == "wslc" and node["container_state"] == "missing"
-    assert node["container_fixes"] == ["wsl --install"] and node["container_missing"][0]["what"] == "wsl"
+    assert node["container_fixes"] == ["oarbank-agent containers install"] and node["container_missing"][0]["what"] == "wsl_package"
+    assert node["container_platforms"] == ["linux/amd64"] and node["container_gpu"] is None
     assert [s["service"] for s in node["services"]] == ["model"] and node["service_health"] == "model: stopped (held: preempt_memory)"
     assert node["enforcement"]["endpoints"] == "unavailable" and "endpoints" in node["sandbox_gaps"]
     svc = rows(db, "modelserver", "services", node_id=n["node_id"])

@@ -226,6 +226,26 @@ def test_oarbank_fleet_shows_each_nodes_gpu_apis(monkeypatch, capsys):
     assert "gpu metal,opencl containers vulkan" in out[0] and "gpu - containers -" in out[1]
 
 
+def test_oarbank_fleet_shows_a_windows_nodes_container_runtime_and_what_it_misses(monkeypatch, capsys):
+    """docs/design/windows-containers.md, "The node's report": the runtime's state, and each missing piece with its fix."""
+    from oarbank.cli import main as cli
+    node = {"hostname": "win", "node_id": "n_2", "lifecycle": "ready", "desired_state": "active", "online": True, "live": 0,
+            "cap": {}, "limits": {}, "mods": {}, "tel": {}, "doctor": None,
+            "facts": {"containers": {"runtime": "wslc", "state": "missing", "gpu": "undetected",
+                                     "missing": [{"what": "virtual_machine_platform", "detail": "not installed",
+                                                  "fix": "run `oarbank-agent containers install` as an administrator"}]}}}
+    failed = {**node, "hostname": "win2", "facts": {"containers": {"runtime": "wslc", "state": "failed", "missing": [],
+                                                                    "detail": "wslc failed (1): E_FAIL"}}}
+    linux = {**node, "hostname": "box", "facts": {"containers": {"gpu": "cdi:nvidia.com/gpu"}}}
+    monkeypatch.setattr(cli, "api", lambda *a, **k: {"nodes": [node, failed, linux], "enrollments": [], "campaigns": [], "alerts": []})
+    cli.cmd_fleet(None)
+    out = capsys.readouterr().out.splitlines()
+    assert "runtime wslc missing" in out[0]
+    assert out[1] == "  containers missing virtual_machine_platform: not installed  -> run `oarbank-agent containers install` as an administrator"
+    assert "runtime wslc failed" in out[2] and out[3] == "  containers failed: wslc failed (1): E_FAIL"
+    assert "runtime" not in out[4] and len(out) == 5
+
+
 def test_golden_lists_see_the_nodes_gpu_apis(db, fleet):
     assert modcalls.node_class(fresh(db, fleet["mini"]), "relay")["gpu_apis"] == METAL
     assert modcalls.node_class(None, "relay")["gpu_apis"] == NONE

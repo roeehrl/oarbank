@@ -73,7 +73,9 @@ def _node_row(n: dict, module: str, man: mf.Manifest, now: float) -> dict:
             "module_state": (jl(n["modules_json"], {}) or {}).get(module, {}).get("state"),
             "platform": n["platform"], "os": n["os"], "arch": n["arch"], "os_version": n["os_version"],
             "gpu_apis_host": gpu["host"], "gpu_apis_containers": gpu["containers"], "container_gpu": gpu["mechanism"],
-            "container_runtime": cont.get("runtime"), "container_state": cont.get("state"), "container_missing": missing,
+            "container_runtime": cont.get("runtime"), "container_state": cont.get("state"),
+            "container_platforms": list(cont.get("platforms") or []), "container_detail": cont.get("detail"),
+            "container_missing": missing,
             "container_fixes": [m.get("fix") for m in missing if m.get("fix")],
             "services": svcs, "service_health": ", ".join(f"{s['service']}: {s['state']}" + (f" ({s['stopped_reason']})"
                                                                                             if s["stopped_reason"] else "")

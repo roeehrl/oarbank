@@ -194,6 +194,89 @@ pub fn container_name(module: &str) -> String {
     n
 }
 
+/// A string SID (`S-1-...`) of a binary one.
+fn sid_string(sid: windows_sys::Win32::Security::PSID) -> Result<String, String> {
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    let mut w: *mut u16 = std::ptr::null_mut();
+    unsafe {
+        if ConvertSidToStringSidW(sid, &mut w) == 0 {
+            return Err(format!("SID to string: {}", std::io::Error::last_os_error()));
+        }
+        let n = (0..).take_while(|&i| *w.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, n));
+        LocalFree(w as _);
+        Ok(s)
+    }
+}
+
+/// This process's account SID (the token's user), as a string.
+fn own_sid() -> Result<String, String> {
+    use windows_sys::Win32::Security::{TokenUser, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let mut tok: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+            return Err(format!("own token: {}", std::io::Error::last_os_error()));
+        }
+        let mut buf = vec![0u8; 256];
+        let mut n = 0u32;
+        let ok = GetTokenInformation(tok, TokenUser, buf.as_mut_ptr() as _, buf.len() as u32, &mut n);
+        CloseHandle(tok);
+        if ok == 0 {
+            return Err(format!("own token user: {}", std::io::Error::last_os_error()));
+        }
+        sid_string((*(buf.as_ptr() as *const TOKEN_USER)).User.Sid)
+    }
+}
+
+/// The SID string of a module's AppContainer (its profile need not exist yet).
+pub fn container_sid_string(module_id: &str) -> Result<String, String> {
+    use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+    let name = wide(&container_name(module_id));
+    let mut sid: windows_sys::Win32::Security::PSID = std::ptr::null_mut();
+    if unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) } < 0 {
+        return Err(format!("the AppContainer SID of {module_id}"));
+    }
+    let s = sid_string(sid);
+    unsafe { windows_sys::Win32::Security::FreeSid(sid) };
+    s
+}
+
+/// A security descriptor for a module's broker pipe (oarbank-core's `broker_pipe_sddl`: the agent's account and the
+/// module's AppContainer only), owned (LocalFree on drop). Remote clients are refused by the pipe itself.
+pub struct PipeSecurity(usize);
+
+// the descriptor is immutable once built and only read by CreateNamedPipe
+unsafe impl Send for PipeSecurity {}
+unsafe impl Sync for PipeSecurity {}
+
+impl PipeSecurity {
+    pub fn for_module(module_id: &str) -> Result<PipeSecurity, String> {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        let sddl = wide(&oarbank_core::sandbox::broker_pipe_sddl(&own_sid()?, &container_sid_string(module_id)?));
+        let mut sd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SDDL_REVISION_1
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, std::ptr::null_mut()) } == 0 {
+            return Err(format!("the broker pipe's security descriptor: {}", std::io::Error::last_os_error()));
+        }
+        Ok(PipeSecurity(sd as usize))
+    }
+
+    /// Security attributes naming the descriptor (valid while `self` lives), not inheritable.
+    pub fn attributes(&self) -> windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+        windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: self.0 as _, bInheritHandle: 0,
+        }
+    }
+}
+
+impl Drop for PipeSecurity {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0 as _) };
+    }
+}
+
 /// One argument quoted the way CommandLineToArgvW and the C runtime read it back.
 pub fn quote_arg(a: &str) -> String {
     if !a.is_empty() && !a.contains([' ', '\t', '\n', '"']) {

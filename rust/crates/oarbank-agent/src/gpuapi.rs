@@ -384,7 +384,7 @@ const PROBES: [(&str, Probe); 6] = [("cuda", cuda), ("directml", directml), ("me
 
 /// How this node's containers get the GPU: (the API list, the evidence), from the container runtime.
 #[cfg(unix)]
-fn containers() -> (Vec<String>, String) {
+fn containers(_home: &Path) -> (Vec<String>, String) {
     match crate::container_runtime::gpu_passthrough() {
         Some(p) => (p.apis, p.evidence),
         None if cfg!(target_os = "macos") => (vec![], "no GPU in containers: krunkit is not installed".into()),
@@ -392,14 +392,15 @@ fn containers() -> (Vec<String>, String) {
     }
 }
 
+/// Windows: what the agent's WSL containers session last found (wslc.rs; the APIs of a GPU container on its VM).
 #[cfg(windows)]
-fn containers() -> (Vec<String>, String) {
-    (vec![], "no GPU in containers: no agent container runtime on Windows yet".into())
+fn containers(home: &Path) -> (Vec<String>, String) {
+    crate::wslc::container_apis(home)
 }
 
 /// Every probe, in this process: `{host, containers, evidence}` (sorted lists; per API the devices found or why not, and
 /// `containers` for the container mechanism).
-pub fn detect() -> Value {
+pub fn detect(home: &Path) -> Value {
     let (mut host, mut evidence) = (vec![], BTreeMap::new());
     for (api, probe) in PROBES {
         match probe() {
@@ -412,7 +413,7 @@ pub fn detect() -> Value {
             }
         }
     }
-    let (mut cont, why) = containers();
+    let (mut cont, why) = containers(home);
     cont.sort();
     evidence.insert("containers".into(), why);
     json!({"host": host, "containers": cont, "evidence": evidence})
@@ -484,7 +485,7 @@ mod tests {
     /// Every known API is probed and has evidence; a Mac with Apple silicon always has Metal, and nothing else does.
     #[test]
     fn detection_names_every_api_with_its_evidence() {
-        let r = detect();
+        let r = detect(&std::env::temp_dir().join(format!("oarbank-gpuapi-{}", std::process::id())));
         let host = host(&r);
         let mut sorted = host.clone();
         sorted.sort();

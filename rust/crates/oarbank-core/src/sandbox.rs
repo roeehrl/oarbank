@@ -363,6 +363,15 @@ fn split(p: &str) -> (String, String) {
 }
 
 /// `posixpath.normpath(p)` (lexical: `..` removes the previous component).
+/// The security descriptor (SDDL) of a job's broker pipe on Windows (spec/sandbox/backends/windows.md): the agent's own
+/// account (`owner`, its SID) gets everything (it creates the instances), the module's AppContainer (`container`, its
+/// package SID) may read and write; an AppContainer token passes an access check only when both its user and its package
+/// SID are allowed, so the module's runner gets in and no other AppContainer does. The low mandatory label lets the
+/// AppContainer's low-integrity token write; the protected DACL takes nothing from a parent.
+pub fn broker_pipe_sddl(owner: &str, container: &str) -> String {
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;{owner})(A;;GRGW;;;{container})S:(ML;;NW;;;LW)")
+}
+
 pub fn normpath(p: &str) -> String {
     if p.is_empty() {
         return ".".into();

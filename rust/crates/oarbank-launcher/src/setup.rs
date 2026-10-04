@@ -230,6 +230,20 @@ pub fn remove(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
         svc.push("--dry-run".into());
     }
     crate::service(&crate::Home(home.clone()), &svc)?;
+    // Windows: the agent's WSL containers session and its storage (up to the session's disk cap) go with the node; its
+    // images are a cache, never the node's identity (docs/design/windows-containers.md, "Packaging")
+    if cfg!(windows) {
+        let agent = crate::Home(home.clone()).current_bin();
+        if agent.exists() || st.dry {
+            st.run(&format!("{} --home {} containers remove", agent.display(), home.display()), || {
+                let out = std::process::Command::new(&agent).arg("--home").arg(&home).args(["containers", "remove"]).output()?;
+                if !out.status.success() {
+                    eprintln!("containers remove: {}", String::from_utf8_lossy(&out.stderr).trim());
+                }
+                Ok(())
+            })?;
+        }
+    }
     if opts.iter().any(|o| o == "--purge") {
         for rel in p["purge"].as_array().cloned().unwrap_or_default() {
             let path = home.join(rel.as_str().unwrap_or("-"));
