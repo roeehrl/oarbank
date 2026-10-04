@@ -7,6 +7,7 @@ import json
 import pytest
 
 from oarbank.coordinator import clock, core, effects, explain, invariants, modcalls, placement
+from oarbank_sdk.keys import job_key
 
 from helpers import (PARAMS, READY, SCENES, certify, create_study, enrolled_node, facts_for, fresh, make_db, relay_result,
                      render_artifacts, run_op)
@@ -347,7 +348,7 @@ def test_jobs_enqueue_refuses_bad_groups_and_platforms(db, item, code):
     sid = study(db, SCENES[:1])
     with db.tx(), pytest.raises(effects.EffectError) as e:
         effects.apply(db, "relay", {"jobs.enqueue"}, [{"kind": "jobs.enqueue", "args": {"campaign_id": sid, "jobs": [
-            {"job_key": "k1", "spec": {}, **item}]}}])
+            {"job_key": job_key("dev.codonic.oarbank.relay", "relay1", {"k": 1}), "spec": {}, **item}]}}])
     assert (e.value.status, e.value.code) == (422, code)
 
 

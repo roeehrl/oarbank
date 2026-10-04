@@ -125,6 +125,7 @@ def enqueue(db, sid, *items):
 
 
 SYNC_KEY = job_key("dev.codonic.oarbank.relay", "relay1", {"task": "sync", "cursor": 7}, "sync")
+DEFAULT_KEY = job_key("dev.codonic.oarbank.relay", "relay1", {"params": PARAMS}, "eval")
 
 
 def sync_item(key=SYNC_KEY, **kw):
@@ -142,11 +143,11 @@ def test_a_staged_job_runs_its_stage_and_never_the_chain(db):
     db.set_setting("pipeline:relay", "split")
     sid = study(db)
     assert db.one("SELECT COUNT(*) n FROM jobs WHERE campaign_id=? AND kind='call'", (sid,))["n"] == 1   # evaluations split
-    enqueue(db, sid, sync_item(), {**sync_item("explicit-default"), "stage": "eval", "spec": {"params": PARAMS}})
+    enqueue(db, sid, sync_item(), {**sync_item(DEFAULT_KEY), "stage": "eval", "spec": {"params": PARAMS}})
     sync = db.one("SELECT * FROM jobs WHERE job_key=?", (SYNC_KEY,))
     assert (sync["kind"], sync["stage"], sync["depends_on"]) == ("eval", "sync", None)
     assert json.loads(sync["resources_json"]) == {"cpu": 0.5, "mem_gb": 0.5}      # the sync stage's own reservation
-    dflt = db.one("SELECT * FROM jobs WHERE job_key='explicit-default'")
+    dflt = db.one("SELECT * FROM jobs WHERE job_key=?", (DEFAULT_KEY,))
     assert (dflt["stage"], dflt["depends_on"]) == ("eval", None)                  # named: not split either
     assert core.set_pipeline(db, "relay", "split", "test")["expanded"] == 0
     g = {x["job_id"]: x for x in grants(db, n1, free=8)}
@@ -154,6 +155,41 @@ def test_a_staged_job_runs_its_stage_and_never_the_chain(db):
     assert g[dflt["job_id"]]["spec"]["stage"] is None                             # the default stage stays absent
     r = core.complete(db, fresh(db, n1), g[sync["job_id"]]["attempt_id"], sync_result())
     assert r["canonical"], r
+    assert ok(db)
+
+
+@pytest.mark.parametrize("key", ["k1", SYNC_KEY.upper(), SYNC_KEY[:63], SYNC_KEY.split(":")[0] + ":Sync", SYNC_KEY + ":", None, 7])
+def test_jobs_enqueue_refuses_a_key_that_keys_job_key_did_not_make(db, key):
+    """A job key is oarbank_sdk.keys.job_key's (spec/envelopes.md): 64 lowercase hex digits, then :<stage>. Replica
+    sampling reads its first 8 digits as a number and the result cache matches it exactly, so anything else is refused
+    at enqueue, before any of the effect's jobs exist."""
+    from oarbank.coordinator import effects
+    sid = study(db)
+    before = db.one("SELECT COUNT(*) n FROM jobs")["n"]
+    with pytest.raises(effects.EffectError) as e:
+        enqueue(db, sid, sync_item(), {**sync_item(), "job_key": key})
+    assert (e.value.status, e.value.code) == (422, "bad_job_key") and repr(key) in e.value.detail
+    assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == before
+
+
+def test_every_enqueued_job_can_be_sampled_for_a_replica(db):
+    """At replica rate 1 every comparing job a node finishes is sampled by its key's digits: an enqueued staged key
+    (`<digest>:<stage>`) and an unstaged one both sample, so no key that passed enqueue can break completion."""
+    n1, n2 = certified_fleet(db, ("n1", "n2"))
+    db.set_setting("replica_rate", 1.0)
+    sid = study(db)
+    enqueue(db, sid, {**sync_item(DEFAULT_KEY), "stage": "eval", "spec": {"params": PARAMS}},
+            {**sync_item(DEFAULT_KEY.split(":")[0]), "stage": "eval", "spec": {"params": {**PARAMS, "samples": 11}},
+             "labels": {"unstaged": 1}})
+    mine = {r["job_id"] for r in db.q("SELECT job_id FROM jobs WHERE job_key IN (?, ?)", (DEFAULT_KEY, DEFAULT_KEY.split(":")[0]))}
+    done = 0
+    for g in grants(db, n1, free=16):
+        if g["job_id"] in mine:
+            assert core.complete(db, fresh(db, n1), g["attempt_id"], relay_result())["accepted"]
+            done += 1
+    assert done == 2
+    assert db.one("SELECT COUNT(*) n FROM jobs WHERE kind='replica' AND json_extract(dispute_json,'$.replica_of') IN (%s)"
+                  % ",".join(map(str, mine)))["n"] == 2
     assert ok(db)
 
 

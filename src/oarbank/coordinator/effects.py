@@ -7,10 +7,16 @@ single writer inside the caller's transaction, together with the audit row. Noth
 import json
 import re
 
+from oarbank_sdk import effects as fx
+
 from . import modcalls, clock, core, placement
 from .db import DB, jl
 
 CAMPAIGN_ID = re.compile(r"^[a-z][a-z0-9_]{3,40}$")
+# a job key is what oarbank_sdk.keys.job_key returns (spec/envelopes.md `job_key`): the sha256 hex digest of the canonical
+# {module, compat, inputs}, then `:<stage>` for a staged job; the result cache, replica sampling and chain stage keys
+# (`<key>:<stage>`) rely on it
+JOB_KEY = re.compile(rf"[0-9a-f]{{64}}(:{fx.STAGE.pattern})?")
 STORE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 MAX_JOBS_PER_EFFECT = 5000
 
@@ -143,6 +149,10 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
         jobs = a.get("jobs") or []
         if len(jobs) > MAX_JOBS_PER_EFFECT:
             raise EffectError(422, "too_many_jobs", f"{len(jobs)} > {MAX_JOBS_PER_EFFECT}")
+        for j in jobs:
+            if not (isinstance(j.get("job_key"), str) and JOB_KEY.fullmatch(j["job_key"])):
+                raise EffectError(422, "bad_job_key", f"{j.get('job_key')!r} is not a job key: keys.job_key(module_id, compat, "
+                                                      "key_inputs[, stage]) gives 64 lowercase hex digits, then :<stage>")
         if c["state"] in ("cancelled",):
             raise EffectError(409, "campaign_cancelled", c["campaign_id"])
         if c["state"] == "done":
