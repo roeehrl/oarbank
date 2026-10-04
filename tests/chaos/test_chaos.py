@@ -89,6 +89,22 @@ class Fleet:
         from oarbank.coordinator.db import DB
         return DB(self.db_path)
 
+    def module_pids(self, script: str) -> list[int]:
+        """This oarbankd's module processes running `script`: its descendants only. Matching the name machine-wide would
+        also kill the module processes of every other suite running on the machine (a Hypothesis run then sees a module
+        fault mid-example and reports FlakyStrategyDefinition), and race their exits (ProcessLookupError)."""
+        children: dict[int, list[int]] = {}
+        for line in subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, check=True).stdout.splitlines():
+            pid, ppid = map(int, line.split())
+            children.setdefault(ppid, []).append(pid)
+        mine, todo = set(), [self.proc.pid]
+        while todo:
+            for c in children.get(todo.pop(), []):
+                mine.add(c)
+                todo.append(c)
+        named = subprocess.run(["pgrep", "-f", script], capture_output=True, text=True).stdout.split()
+        return sorted(int(p) for p in named if int(p) in mine)
+
 
 def toy_result(n):
     return {"result": {"envelope": 1, "schema": "toy/result@1", "module_version": "0.1.0", "payload": {"sum": str(n * (n - 1) // 2)}}}
@@ -172,8 +188,8 @@ def test_killing_the_module_process_during_completions_is_a_module_fault_never_c
     queue(fleet, 3, 1000)
     grants = fleet.call("POST", "/v1/agent/claim", {"free_cpu": 4, "free_mem_gb": 8, "modules": ["toy"], "ready_datasets": []}).json()["grants"]
     assert grants
-    out = subprocess.run(["pgrep", "-f", "toy_module.py"], capture_output=True, text=True).stdout.split()
-    pids = [int(p) for p in out if p]
+    pids = fleet.module_pids("toy_module.py")
+    assert pids
     for p in pids:                                                   # the coordinator-side module dies
         os.kill(p, signal.SIGKILL)
     codes = []
