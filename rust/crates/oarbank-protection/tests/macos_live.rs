@@ -125,20 +125,32 @@ fn strict_yield_stops_a_real_job_within_two_seconds() {
     assert!(reg.set_background(job.pid(), false, "restore").is_ok());
 }
 
+/// A lone busy process is runnable the whole time, on a core or waiting for one, so its stall is the share of the
+/// time it waited: zero on a quiet machine, and whatever the neighbours take on a loaded one (a CI runner's VM, a
+/// machine with a build running). Measured on a child process, which nothing else in this test binary shares.
 #[test]
-fn a_lone_busy_thread_reads_near_zero_stall() {
-    // SAFETY: getpid cannot fail.
-    let me = unsafe { libc::getpid() };
-    let a = macos::proc_counters(me).unwrap();
-    let end = Instant::now() + Duration::from_millis(300);
-    let mut x = 0.0f64;
-    while Instant::now() < end {
-        x += 1e-9;
-        std::hint::black_box(x);
-    }
-    let b = macos::proc_counters(me).unwrap();
-    let m = GroupMetrics::from_delta(b - a, 0.3);
-    assert!(x > 0.0 && m.cpu_stall.unwrap_or(1.0) < 0.3); // the old formula read >= 0.5 here
+fn a_lone_busy_process_stalls_only_for_the_time_it_waits() {
+    let job = Spawned::new(&["/bin/sh", "-c", "while :; do :; done"]);
+    sleep(Duration::from_millis(100));
+    let t0 = Instant::now();
+    let a = macos::proc_counters(job.pid()).unwrap();
+    sleep(Duration::from_secs(1));
+    let b = macos::proc_counters(job.pid()).unwrap();
+    let wall = t0.elapsed().as_secs_f64();
+    let m = GroupMetrics::from_delta(b - a, wall);
+    let runnable = (b.runnable_s - a.runnable_s) / wall;
+    assert!(
+        (0.8..1.2).contains(&runnable),
+        "runnable {runnable:.2} of the time"
+    );
+    // runnable time includes the time on a core: the old formula, which counted it as waiting, read 0.5 or more
+    // on a quiet machine, where the time on a core is nearly all of it
+    let stall = m.cpu_stall.unwrap();
+    assert!(
+        (stall - (1.0 - m.cpu_cores)).abs() < 0.2,
+        "stall {stall:.2} with {:.2} cores",
+        m.cpu_cores
+    );
     assert!(b.instructions > a.instructions && b.cycles > a.cycles);
 }
 
@@ -191,20 +203,38 @@ fn presence_reads_the_hid_idle_time() {
     assert!(macos::hid_idle_s().is_some());
 }
 
+/// Whether this Mac has an Apple GPU (the AGX driver's accelerator): a virtual machine's paravirtualized GPU does
+/// not, and has no AGX user clients to read.
+fn apple_gpu() -> bool {
+    Command::new("/usr/sbin/ioreg")
+        .args(["-r", "-d", "1", "-c", "AGXAccelerator"])
+        .output()
+        .is_ok_and(|o| !o.stdout.is_empty())
+}
+
+/// The AGX user clients are not matchable services; the registry walk must find them where an Apple GPU and a
+/// window server (which holds one) run. Without an Apple GPU the source is unavailable, never an empty reading,
+/// so GPU use counts as unknown there.
 #[test]
-fn gpu_time_is_found_when_a_window_server_runs() {
-    // AGX user clients are not matchable services; the registry walk must find them (WindowServer has one)
+fn gpu_time_is_read_from_the_agx_user_clients() {
+    assert_eq!(macos::creator_pid("pid 1234, WindowServer"), Some(1234));
+    assert_eq!(macos::creator_pid("WindowServer"), None);
+    if !apple_gpu() {
+        assert_eq!(macos::gpu_time_by_pid(), None);
+        eprintln!("skipped: no Apple GPU here (a virtual machine's GPU has no AGX user clients)");
+        return;
+    }
     let ws = Command::new("/usr/bin/pgrep")
         .args(["-x", "WindowServer"])
         .stdout(Stdio::null())
         .status()
         .unwrap();
     if !ws.success() {
-        return; // headless: nothing to find
+        eprintln!("skipped: no window server, so possibly no AGX user client");
+        return;
     }
     let by_pid = macos::gpu_time_by_pid().expect("AGX user clients found");
     assert!(!by_pid.is_empty());
-    assert_eq!(macos::creator_pid("pid 1234, WindowServer"), Some(1234));
 }
 
 /// The process picker's summary: same-user processes with the identity rules match on, excluding the agent's
