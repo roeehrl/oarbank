@@ -75,8 +75,10 @@ a certified node with room for it and records who ran what.
 </picture>
 
 Host protection is set by the owner, per node, and modules can never loosen it. It only ever acts on the fleet's own
-jobs (reserve, cap, lower, pause, evict); nothing in it can signal one of your processes. The rules engine and presence
-detection run on macOS today; Linux and Windows nodes have the memory guard and caps.
+jobs (reserve, cap, lower, pause, evict); nothing in it can signal one of your processes. It runs on macOS, Linux and
+Windows: rules match your processes by path, name or arguments (and on macOS by code-signing identity or app bundle),
+trigger on their CPU, memory or GPU use or on the app in front, and step fleet work aside while someone uses the
+machine.
 
 ### Install a module, approve its grants, certify it on one node, then promote
 
@@ -172,8 +174,8 @@ packages from this repository. [Get started](https://docs.codonic.dev/oarbank/ge
 (it can be a node too), and Macs, Linux machines or Windows PCs as nodes.
 
 **Will it slow my computer down?** It is built not to: the memory guard stops taking jobs when free memory runs low and
-evicts the fleet's jobs if it keeps falling, and caps limit cores, memory, jobs and hours. On macOS it also yields to
-the person at the Mac and to the apps you name.
+evicts the fleet's jobs if it keeps falling, and caps limit cores, memory, jobs and hours. It also yields to the person
+at the computer and to the apps you name, on macOS, Linux and Windows.
 
 **Can a job read my files?** No. Every job runs in the operating system's sandbox and reads only its inputs and its
 module, and writes only its own folders. Network hosts, host tools, the GPU and containers are grants you approve per
