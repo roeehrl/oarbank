@@ -10,8 +10,9 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
   or arm64 ([Windows nodes](#windows-nodes)).
 - For the coordinator: a Mac or a Linux machine that stays on, reachable by the nodes on one address (port 7443/tcp).
 - Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
-  agent's own Colima, and so on). On a Mac with Apple silicon, krunkit (`brew tap slp/krun && brew install krunkit`)
-  gives GPU containers Vulkan on the Mac's GPU, in a second agent-owned Colima VM.
+  agent's own Colima, and so on). On a Mac with Apple silicon, krunkit gives GPU containers Vulkan on the Mac's GPU,
+  in a second agent-owned Colima VM: `brew tap slp/krun && brew trust slp/krun && brew install krunkit` (Homebrew asks
+  you to trust a third-party tap).
 
 ## The packages
 

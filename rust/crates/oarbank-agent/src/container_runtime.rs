@@ -1105,11 +1105,7 @@ pub mod tests {
         for r in [format!("genonet/hap-py@{d}"), format!("alpine@{d}"), format!("ghcr.io/o/t:2@{d}")] {
             assert_eq!(image_key(&qualified(&r)), image_key(&r), "the broker's comparison is unchanged");
         }
-        let s = RunSpec {
-            image: format!("genonet/hap-py@{d}"), platform: "linux/amd64".into(), args: vec![], entrypoint: None, mounts: vec![],
-            env: vec![], workdir: None, network: false, cpus: 1.0, mem_gb: 1.0, attempt_id: 1, module: "m".into(), timeout_s: 1.0,
-            stdout: None, stderr: None, gpu_device: None,
-        };
+        let s = RunSpec { platform: "linux/amd64".into(), ..spec(&format!("genonet/hap-py@{d}")) };
         assert_eq!(s.docker_args_with(&qualified(&s.image)).last().unwrap(), &format!("docker.io/genonet/hap-py@{d}"));
         assert_eq!(s.docker_args().last().unwrap(), &s.image);
     }
@@ -1219,7 +1215,7 @@ pub mod tests {
             return;
         }
         let Some(pass) = gpu_passthrough() else {
-            eprintln!("krunkit (or Colima or docker) is not installed: brew tap slp/krun && brew install krunkit");
+            eprintln!("krunkit (or Colima or docker) is not installed: brew tap slp/krun && brew trust slp/krun && brew install krunkit");
             return;
         };
         assert_eq!((pass.kind.as_str(), pass.device.as_str(), pass.apis.as_slice()), ("virtio-gpu:venus", "/dev/dri", ["vulkan".to_string()].as_slice()));

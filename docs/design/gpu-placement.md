@@ -54,8 +54,8 @@ one device that is a GPU (software rasterisers, CPU devices and Windows' Basic R
 Detection runs as the agent's own account, which is what jobs run as: a Linux system install whose `oarbank` account
 is not in the `render` or `video` group cannot open `/dev/dri` or `/dev/kfd`, and the report then honestly lacks those
 APIs (docs/install.md says which groups to add). It runs in a child process (`oarbank-agent gpu-apis`) with a 60 s
-limit, so a driver that crashes or hangs while loading never takes the agent with it; a probe that fails names the API
-as absent with the error as its evidence.
+limit (the child ends itself, so the agent only waits for it), so a driver that crashes or hangs while loading never
+takes the agent with it; a probe that fails names the API as absent with the error as its evidence.
 
 **In containers** the APIs come from how the runtime passes the GPU through, never from running an image (the agent
 runs only images a module was approved for):
@@ -159,7 +159,8 @@ are often amd64-only) and never share a kernel with a VM that has a GPU device.
   GPU VM's only workload.
 - The GPU VM starts on its first GPU job (as the CPU VM starts on its first container job) and is never stopped by
   the agent. After a start the runtime checks that the guest has a DRM render node (`/dev/dri/renderD128`); without
-  one the run is refused with `gpu_unavailable` and the start's log is named.
+  one the start fails, the broker refuses the run with `runtime_unavailable`, and the reason names the start's log.
+  It runs arm64 images only (krunkit has no Rosetta); an amd64 image is refused with `platform_unavailable`.
 - `remove_attempt` and the start-of-day `reap` cover both profiles (only containers carrying the attempt label).
 - The node reports `containers.gpu = "virtio-gpu:venus"`, `gpu_apis.containers = ["vulkan"]` and the `gpu` pool. The
   broker's `status` answers `gpus: "all"` to a job that reserved the pool on a node that passes GPUs through, else
@@ -226,7 +227,7 @@ with `gpus[].apis` removed (nothing is released). `GPU_API_MISSING` is a new rea
 | Detection per OS | agent `gpuapi.rs`: the CDI rules on recorded specs (NVIDIA, AMD, WSL), the evidence format, the probe's child process and its time limit; live on each OS: the report matches `oarbank_sdk.gpu.detect()` on the same host (core `tests/rust/test_gpu_apis.py`), and on macOS includes `metal` |
 | The SDK | `tests/test_gpu.py`: rule 21, the floor, the lint, `fits`, `NodeClass.gpu_apis`, the kit's skip and pass on a fake host |
 | GPU in a macOS container | agent `container_runtime.rs`: the GPU profile's start arguments, the broker choosing it for a gpu-pool job, `--device /dev/dri`; live (gated on krunkit and `OARBANK_LIVE_COLIMA=1`): a container job with `gpus = "all"` reports a Venus device on the Apple GPU and a compute shader's output is right |
-| Console and CLI | `tests/test_console.py`, `tests/test_cli.py`: the node page and `oarbank fleet` show the node's GPU APIs |
+| Console and CLI | `tests/test_console.py` (the node page: the APIs with their evidence, how containers get the GPU), `tests/test_gpu_placement.py` (`oarbank fleet`) |
 
 ## Open questions
 

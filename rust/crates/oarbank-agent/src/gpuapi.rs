@@ -60,7 +60,7 @@ mod os {
     pub fn open(name: &str) -> Option<*mut c_void> {
         let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let h = unsafe { LoadLibraryExW(w.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) };
-        (!h.is_null()).then_some(h as *mut c_void)
+        (!h.is_null()).then_some(h)
     }
 
     pub fn sym(lib: *mut c_void, name: &str) -> Option<*mut c_void> {
@@ -164,8 +164,8 @@ fn vk_type(t: u32) -> String {
     }
 }
 
-/// The loader lists a physical device that is not a CPU device and has a compute queue. MoltenVK is a portability driver,
-/// listed only when the instance asks for portability enumeration.
+/// The loader lists a physical device that is not a CPU device (nor WARP behind Dozen) and has a compute queue. MoltenVK is
+/// a portability driver, listed only when the instance asks for portability enumeration.
 fn vulkan() -> Result<Vec<String>, String> {
     type EnumExt = extern "system" fn(*const c_char, *mut u32, *mut u8) -> i32;
     type Create = extern "system" fn(*const VkInstanceInfo, *const c_void, *mut *mut c_void) -> i32;
@@ -209,7 +209,7 @@ fn vulkan() -> Result<Vec<String>, String> {
             let mut fams = vec![0u32; 6 * q.max(1) as usize];  // VkQueueFamilyProperties: 6 words, queueFlags first
             queues(*h, &mut q, fams.as_mut_ptr());
             let compute = (0..q as usize).any(|k| fams[6 * k] & VK_COMPUTE != 0);
-            if kind == VK_CPU || !compute {
+            if kind == VK_CPU || !compute || software(&name) {
                 skipped.push(format!("{name} ({}{})", vk_type(kind), if compute { "" } else { ", no compute queue" }));
             } else {
                 out.push(format!("{name} ({})", vk_type(kind)));
@@ -355,9 +355,11 @@ fn directml() -> Result<Vec<String>, String> {
             method::<GetDesc1>(adapter, 10)(adapter, desc.as_mut_ptr());
             let wide: Vec<u16> = desc[..256].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|c| *c != 0).collect();
             let name = String::from_utf16_lossy(&wide);
-            let off = 256 + 16 + 3 * std::mem::size_of::<usize>() + 8;
-            let flags = u32::from_le_bytes(desc[off..off + 4].try_into().expect("4 bytes"));
-            let ok = flags & 2 == 0 && create(adapter, 0xB000, &IID_DEVICE, std::ptr::null_mut()) >= 0;   // not SOFTWARE; 11_0
+            let word = |at: usize| u32::from_le_bytes(desc[at..at + 4].try_into().expect("4 bytes"));
+            let (vendor, device, flags) = (word(256), word(260), word(256 + 16 + 3 * std::mem::size_of::<usize>() + 8));
+            // not a software adapter: the SOFTWARE flag, or the Basic Render Driver by its ids (a VM's shows no flag)
+            let warp = flags & 2 != 0 || (vendor, device) == (0x1414, 0x8C) || software(&name);
+            let ok = !warp && create(adapter, 0xB000, &IID_DEVICE, std::ptr::null_mut()) >= 0;      // feature level 11_0
             if ok { out.push(name) } else { skipped.push(name) }
             method::<Release>(adapter, 2)(adapter);
         }
