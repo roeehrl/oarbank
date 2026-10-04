@@ -124,6 +124,11 @@ their process groups, deletes their workspaces, and does not report them.
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
+ "services": [{"service": "example/model", "health": "healthy", "running": false, "ready": false, "held": "preempt_memory",
+               "disabled": false, "withdrawn": false, "failures": 0, "error": null, "gpu_api_missing": null, "users": 0,
+               "pools": {"model": 1}, "reserve_mem_gb": 0.0, "busy": false, "endpoint": true, "accepting": false,
+               "lifecycle": "on_demand"}],
+ "probes": [{"probe": "example/java17", "health": "healthy", "attrs": {"version": "17"}}],
  "journal": [{"t": 1790000000.1, "seq": 41, "kind": "rule_active", "reason": "PROTECTION_ACTIVE", "rule": "zoom"}],
  "processes": [{"pid": 812, "ppid": 1, "start_us": 1790000000000000, "path": "/Applications/…", "comm": "…",
                 "argv": ["…"], "team_id": "ABCDE12345", "signing_id": "…", "bundle_id": "…", "cpu_cores": 1.2,
@@ -135,6 +140,12 @@ their process groups, deletes their workspaces, and does not report them.
   offset from it (see Clocks).
 - **`doctor`**, when present, is the latest doctor report (see Doctor).
 - **`folders`** is the outcome, per folder id, of the folder statement the agent applied (see Folders).
+- **`services`** and **`probes`** are the agent's service report, sent on every heartbeat: each module service
+  (`<module>/<name>`) with its health, whether it runs and has answered `ready`, why it is down (`held` by host protection
+  with the release reason, `disabled` by the kill switch, `withdrawn` after failures, `gpu_api_missing`), its last
+  `error`, the jobs using it (`users`) and its lifecycle; each probe with its health and attributes. oarbankd keeps the
+  latest in `nodes.services_json`; the node page, `oarbank node show` and module pages (the `services` and `nodes` host
+  queries) show it.
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
   `journal_ack`, the highest seq it stored.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
