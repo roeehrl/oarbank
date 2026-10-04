@@ -5,9 +5,11 @@
 # admin or MDM writes these before installing):
 #   join-code     an Oarbank join code (OB1-…); deleted once copied into the agent's home
 #   coordinator   or a coordinator URL (the owner then approves the node)
-#   system        present: install as a system service run as _oarbank (default: the console user's LaunchAgent)
+#   system        present: install as a system service run as _oarbank (default: the console user's LaunchAgent),
+#                 with the session helper in every GUI login (/Library/LaunchAgents)
 # Without them it only installs the programs and says how to finish. An upgrade restarts the service on the new
-# launcher; the agent's own version is the coordinator's to change (self-update).
+# launcher, and a system install's session helpers on the new agent binary; the agent's own version is the
+# coordinator's to change (self-update).
 set -eu
 BIN=/Library/Oarbank/bin
 ETC=/Library/Oarbank/etc
@@ -27,6 +29,11 @@ fi
 
 if [ -f "$home/agent.json" ]; then
     /bin/launchctl kickstart -k "$target" 2>/dev/null || true
+    if [ "$scope" = system ]; then
+        for u in $(/usr/bin/who | /usr/bin/awk '$2 == "console" {print $1}' | /usr/bin/sort -u); do
+            /bin/launchctl kickstart -k "gui/$(/usr/bin/id -u "$u")/$LABEL.session" 2>/dev/null || true
+        done
+    fi
     echo "Oarbank: upgraded; the service restarted on the new launcher"
     exit 0
 fi

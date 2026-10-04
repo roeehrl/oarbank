@@ -25,6 +25,18 @@ fn esc(s: &str) -> String {
 /// A launchd property list. Jobs run at the default QoS (`ProcessType` Standard): Background QoS made module tools
 /// many times slower.
 pub fn launchd_plist(s: &ServiceSpec) -> String {
+    launchd_plist_with(s, "")
+}
+
+/// The LaunchAgent that runs the session helper in every GUI login (`LimitLoadToSessionType` Aqua), installed in
+/// /Library/LaunchAgents by a system install: `agent` is the agent binary installed beside the launcher (root's,
+/// never the service account's current version).
+pub fn session_helper_plist(label: &str, agent: &str) -> String {
+    let spec = ServiceSpec { label: label.into(), program: vec![agent.into(), "session-helper".into()], keep_alive: true, ..Default::default() };
+    launchd_plist_with(&spec, "  <key>LimitLoadToSessionType</key><string>Aqua</string>\n")
+}
+
+fn launchd_plist_with(s: &ServiceSpec, extra: &str) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n");
     out += &format!("  <key>Label</key><string>{}</string>\n", esc(&s.label));
@@ -57,6 +69,7 @@ pub fn launchd_plist(s: &ServiceSpec) -> String {
         "<dict><key>SuccessfulExit</key><false/></dict>" } else { "<false/>" });
     out += "  <key>ThrottleInterval</key><integer>10</integer>\n";
     out += "  <key>ProcessType</key><string>Standard</string>\n";
+    out += extra;
     out += "</dict></plist>\n";
     out
 }
@@ -125,6 +138,11 @@ mod tests {
             env: vec![("OARBANK_LOG".into(), "info".into())], keep_alive: true, ..Default::default() });
         assert!(p.contains("<string>/a b/&lt;home&gt;</string>") && p.contains("<key>KeepAlive</key><true/>"));
         assert!(p.contains("<key>ProcessType</key><string>Standard</string>") && !p.contains("UserName"));
+        let h = session_helper_plist("dev.codonic.oarbank.agent.session", "/Library/Oarbank/bin/oarbank-agent");
+        assert!(h.contains("<key>Label</key><string>dev.codonic.oarbank.agent.session</string>"));
+        assert!(h.contains("<array>\n    <string>/Library/Oarbank/bin/oarbank-agent</string>\n    <string>session-helper</string>\n  </array>"));
+        assert!(h.contains("<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>") && h.contains("<key>KeepAlive</key><true/>"));
+        assert!(!h.contains("UserName") && !h.contains("StandardOutPath"));
     }
 
     #[test]

@@ -68,8 +68,11 @@ sudo installer -pkg oarbank-agent-<v>-macos.pkg -target /
 ```
 The postinstall sets the node up for the console user (a LaunchAgent) and deletes the code file. Add an empty
 `/Library/Oarbank/etc/system` file first to install it as a system service run by a dedicated `_oarbank` account
-instead (it starts at boot, before anyone logs in). A `coordinator` file with a URL works instead of a code; the
-owner then approves the node on the Fleet page.
+instead (it starts at boot, before anyone logs in). A system install also puts the session helper
+`dev.codonic.oarbank.agent.session` in `/Library/LaunchAgents`: launchd starts it in every GUI login (and the install
+in the sessions open now), and it tells host protection what the `_oarbank` account may not read about that person's
+processes and the app in front, over a socket in `/Library/Application Support/Oarbank/run`. A `coordinator` file
+with a URL works instead of a code; the owner then approves the node on the Fleet page.
 
 **By hand.** Install the pkg without those files, then:
 ```bash

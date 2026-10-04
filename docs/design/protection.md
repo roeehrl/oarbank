@@ -20,20 +20,29 @@ one (S16). Unknown processes are never signalled; their memory always counts.
 
 ## Whose processes
 
-The owner's processes are, on macOS, those of the agent's own account; on Linux, those of the agent's account and of
-every person logged in (systemd-logind's user sessions) or reporting through a session helper; on Windows, those of
-the agent's account in the personal scope, and for the system service each person's own processes in their session.
-A system install's agent runs as a service account that may not read everything about another account's processes:
-on Linux their executable path and open files (ptrace access), on Windows their command line (a process handle), and
-on both their display and input. A **session helper**, the agent's binary run as the person in their session
-(`oarbank-agent session-helper`: a global systemd user unit on Linux, started by the elevated helper service on
-Windows), reports those facts every two seconds over a local endpoint the agent serves (`/run/oarbank/session.sock`,
-`\\.\pipe\oarbank-session`): the person's processes with their paths and arguments, their GPU use (Linux), the front
-window and the last input (Windows). The endpoint names the account or session that sent a report, the agent accepts
-claims only about processes of that account or session that started when the claim says, and it forgets a helper ten
-seconds after its last report. A helper can only describe its own person's work, and that only ever restricts the
-fleet. Without one, those facts are unreadable and the fail-safe rules apply; on Windows the system's own processes
-in that person's session then count as the owner's too.
+The owner's processes are those of the agent's own account (the personal scope runs as the person) and, for a system
+install, of the people using the machine: on macOS every account a session helper reports for (each GUI login runs
+one); on Linux every person logged in (systemd-logind's user sessions) or reporting through a session helper; on
+Windows each person's own processes in their session. A system install's agent runs as a service account that may not
+read everything about another account's processes: on macOS their arguments, CPU time, footprint and scheduler
+counters (rusage) and the app in front of their session; on Linux their executable path and open files (ptrace
+access); on Windows their command line (a process handle); and on Linux and Windows their display and input. A
+**session helper**, the agent's binary run as the person in their session (`oarbank-agent session-helper`: a
+LaunchAgent loaded in every GUI login on macOS, a global systemd user unit on Linux, started by the elevated helper
+service on Windows), reports those facts every two seconds over a local endpoint the agent serves
+(`/Library/Application Support/Oarbank/run/session.sock`, `/run/oarbank/session.sock`, `\\.\pipe\oarbank-session`):
+the person's processes with their paths and arguments, their resource use (macOS, read back as of one report ago and
+interpolated between reports, so rates never jump with the reports' timing), their GPU use (Linux), the front app or
+window (macOS, Windows) and the last input (Windows). The endpoint names the account or session that sent a report
+(the Unix socket's peer credentials, the pipe client's session), the agent accepts claims only about processes of that
+account or session that started when the claim says, and it forgets a helper ten seconds after its last report. A
+process of a person whose helper reports is listed once the helper has described it, at most one report after it
+started; until then it would match every rule whose facts only the helper can read. A helper can only describe its own
+person's work. Without one, those facts are unreadable and the fail-safe rules apply; on Windows the system's own
+processes in that person's session then count as the owner's too. On macOS a person without a helper (logged in only
+over ssh, or before their helper's first report) is not seen; when that is the console's account, the front app reads
+as unknown, which counts as in front and shows as a node condition. The macOS service reads the rest itself: every
+account's processes and paths (`sysctl kern.proc`, libproc), code-signing identity, GPU time and the HID idle time.
 
 ## Modes
 
@@ -63,12 +72,13 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
 - **Activity:** `present`, or thresholds on CPU cores (`cpu_cores_gt`), footprint (`footprint_gb_gt`) or GPU activity
   (`gpu_active = { min_busy = 0.05 }`), or `frontmost` (true: the app in front is one of the group's processes; false:
   the group runs but is not in front), held `for_s`; any one that holds activates the rule. A front app that cannot be
-  read counts as in front either way, never looser; with nothing in front (nobody at the machine's desktop) no group
-  is in front. macOS asks `lsappinfo`; Linux takes the session logind has in front on the seat: an X11 session's
+  read counts as in front either way, never looser; with nothing in front (nobody at the machine's desktop) no group is
+  in front. macOS asks `lsappinfo` in the console's session (the system service through that account's session helper;
+  at the login window nothing is in front); Linux takes the session logind has in front on the seat: an X11 session's
   active window (EWMH `_NET_ACTIVE_WINDOW` and its `_NET_WM_PID`, read with the session's Xauthority cookie), a text
-  console's foreground process group; a Wayland compositor tells no other program which window is in front, so there
-  it is unknown. Windows takes the console's session from WTS (locked: nothing in front) and its foreground window,
-  which only a process in that session may ask for (a packaged app's frame is resolved to the app inside it).
+  console's foreground process group; a Wayland compositor tells no other program which window is in front, so there it
+  is unknown. Windows takes the console's session from WTS (locked: nothing in front) and its foreground window, which
+  only a process in that session may ask for (a packaged app's frame is resolved to the app inside it).
 - **GPU activity** is the group's GPU busy seconds per second over the last sample interval, summed over its processes
   and the GPU's engines (so two busy engines can pass 1); `min_busy` defaults to 0.05. Each OS reads accumulated GPU
   time per process: macOS from the AGX driver's user clients in the IORegistry, Linux from the DRM `fdinfo` of every
