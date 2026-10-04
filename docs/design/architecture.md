@@ -226,9 +226,9 @@ distribution running Podman, with GPU-PV through the same CDI path).
   `deploy/windows/oarbank-agent.wxs`; `JOINCODEFILE`, `JOINCODE` or `COORDINATOR`). The coordinator is installed from a
   build by `deploy/oarbankd/install-oarbankd.sh --build`, or by a move.
 - **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the Rust workspace with the agent
-  end-to-end tests on macOS, the Rust workspace on Linux and Windows (x64 and arm64 each), and unsigned packages on
-  tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64 and arm64, and an x64 and an
-  arm64 MSI.
+  end-to-end tests and the oarbank-core parity tests on macOS, the Rust workspace on Linux and Windows (x64 and arm64
+  each), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
+  and arm64, and an x64 and an arm64 MSI.
 
 ## Not built yet
 

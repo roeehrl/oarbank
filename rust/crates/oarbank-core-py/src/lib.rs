@@ -1,6 +1,8 @@
 //! Python bindings for oarbank-core (module `oarbank_core`), so the SDK's own tests can check the Rust rules against
 //! the Python reference. Every refusal raises ValueError.
 
+use std::collections::BTreeSet;
+
 use ::oarbank_core::{bundle, canonical, deps, egress, images, portable, sandbox};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -88,10 +90,11 @@ fn wheel_fits(filename: &str, platform: &str) -> bool {
     deps::wheel_fits(filename, platform)
 }
 
-/// `[(name, version, sorted hashes)]` of a hash-pinned requirements file.
+/// `[(name, version, sorted hashes)]` of a hash-pinned requirements file; `host_provided` as the SDK's
+/// `deps.host_provided()`.
 #[pyfunction]
-fn parse_requirements(text: &str) -> PyResult<Vec<(String, String, Vec<String>)>> {
-    let reqs = deps::parse_requirements(text).map_err(value_error)?;
+fn parse_requirements(text: &str, host_provided: BTreeSet<String>) -> PyResult<Vec<(String, String, Vec<String>)>> {
+    let reqs = deps::parse_requirements(text, &host_provided).map_err(value_error)?;
     Ok(reqs.into_iter().map(|r| (r.name, r.version, r.hashes.into_iter().collect())).collect())
 }
 
