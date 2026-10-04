@@ -60,6 +60,8 @@ CODES: list[ReasonCode] = [
       remedies=["campaigns.rebind_platform"]),
     C("PLACEMENT_UNPINNED", "job_pending", "Its unit of work binds only to a pinned class (bind = explicit) and none is pinned yet",
       remedies=["campaigns.rebind_platform"]),
+    C("STAGE_CAPABILITY_MISSING", "job_pending", "Its stage needs {capabilities}; this node's services, probes and module doctor "
+      "do not provide {missing}", remedies=["nodes.run_doctor"]),
     C("DATASET_PLATFORM_MISMATCH", "job_pending", "Its dataset is bound to {platforms}; this node is {platform}", remedies=["jobs.cancel"]),
     C("OS_VERSION_UNSUPPORTED", "job_pending", "Module {module} needs another OS version than {os_version} (requires.os)"),
     C("TOOL_UNAVAILABLE", "job_pending", "Module {module} needs host tools the tool registry has no {os} paths for",

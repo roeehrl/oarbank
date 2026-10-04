@@ -763,12 +763,14 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
     f = _job_facts(db, j)
     disputed = set(f["dispute"].get("nodes", []))
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json FROM nodes WHERE lifecycle='ready' AND node_id!=?", (nid,)):
+    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
+                  "WHERE lifecycle='ready' AND node_id!=?", (nid,)):
         if n["node_id"] in failed or n["node_id"] in disputed or not predicates.platform_fits(f, n["platform"]) \
                 or predicates.retry_max(f, n["platform"]) <= j["exec_failures"]:
             continue
         # it must be able to run it at all: a call-only worker cannot take a score job (sim finding)
-        if (jl(n["modules_json"], {}) or {}).get(j["module"], {}).get("state") == "certified" and _pools_fit(n, res):
+        if (jl(n["modules_json"], {}) or {}).get(j["module"], {}).get("state") == "certified" and _pools_fit(n, res) \
+                and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"])):
             return True
     return False
 
@@ -782,6 +784,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
     return predicates.NodeView(
         node=node, states=node_modules(node), offered=set(offered) - set(excluded), excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
+        capabilities={m: predicates.node_capabilities(node, m) for m in set(offered) - set(excluded)},
         disabled=modstore.disabled_names(db),
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
         live=db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"],
@@ -799,6 +802,7 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
     d = jl(j.get("dispute_json"), {}) or {}
     return {**j, "dispute": {**d, "scope": (cmp or {}).get("scope"), "class": (cmp or {}).get("class")} if cmp is not None else d,
             "stage_platforms": modcalls.stage_platforms(j["module"], j["stage"]), "retry": modcalls.stage_retry(j["module"], j["stage"]),
+            "stage_capabilities": modcalls.stage_capabilities(j["module"], j["stage"]),
             "placement": placement.facts(db, j, cache)}
 
 
@@ -1111,13 +1115,16 @@ def _pools_fit(node: dict, resources: dict | None) -> bool:
 
 
 def _eligible_nodes(db: DB, j: dict, exclude: set, cmp: dict | None = None) -> int:
-    """Ready nodes that can serve the job's module (see _can_serve), fit its pools and run it where it may run
-    (predicates.platform_fits: its stage, platforms, unit class and comparison class), outside `exclude`. `cmp`: the
-    comparison class {scope, class} to use instead of the job's own dispute's (a replica about to be queued)."""
+    """Ready nodes that can serve the job's module (see _can_serve), fit its pools, hold its stage's capabilities and run
+    it where it may run (predicates.platform_fits: its stage, platforms, unit class and comparison class), outside
+    `exclude`. `cmp`: the comparison class {scope, class} to use instead of the job's own dispute's (a replica about to
+    be queued)."""
     res, f = jl(j["resources_json"], {}), _job_facts(db, j, cmp=cmp)
-    return sum(1 for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json FROM nodes WHERE lifecycle='ready'")
+    return sum(1 for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
+                               "WHERE lifecycle='ready'")
                if n["node_id"] not in exclude and _can_serve((jl(n["modules_json"], {}) or {}).get(j["module"], {}))
-               and _pools_fit(n, res) and predicates.platform_fits(f, n["platform"]))
+               and _pools_fit(n, res) and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"]))
+               and predicates.platform_fits(f, n["platform"]))
 
 
 def _scope_mix(module: str, version: str | None) -> str:

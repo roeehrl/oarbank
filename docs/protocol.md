@@ -169,7 +169,9 @@ oarbankd grants jobs:
 - whose resources fit `free_cpu` and `free_mem_gb`;
 - whose module is offered in `modules` (its doctor reported healthy) and certified on this node;
 - whose datasets are all in `ready_datasets`;
-- whose pool needs fit the node's pools.
+- whose pool needs fit the node's pools;
+- whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor);
+  otherwise the job waits with `STAGE_CAPABILITY_MISSING`.
 
 With `pool_jobs_only`, only jobs reserving pools are granted. `gpu_jobs` is how many more GPU jobs the node
 may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`; it waits
@@ -440,9 +442,14 @@ prints a `DoctorOutput`, whose `health` decides: `healthy`, `unhealthy` (it shou
 broken) or `undetected` (this node cannot run it). The agent folds in its own capability checks (the module's
 `requires`, from probes and services) and reports:
 ```json
-"doctor": {"at": 1790000000.0, "release_id": "r_…", "modules": {"example": {"health": "healthy", "checks": [...]},
-                                                              "toy": {"health": "undetected", "checks": [...]}}}
+"doctor": {"at": 1790000000.0, "release_id": "r_…", "capabilities": ["java17"],
+           "modules": {"example": {"health": "healthy", "checks": [...], "capabilities": ["gatk4"]},
+                       "toy": {"health": "undetected", "checks": [...]}}}
 ```
+`capabilities` are what the node's offered services and healthy probes provide when the doctors ran (the agent runs
+them again when that set changes); a module's `capabilities` are its own doctor's. Together they are the node's
+capabilities for that module: a job is granted only where they hold every capability its stage requires
+(`stages[].requires.capabilities`), and a unit of work binds only to a class with such a node.
 Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `doctor_failed` and alerts;
 `undetected` is recorded as such and never alerts. Release-install refusals appear as `release_install`.
 

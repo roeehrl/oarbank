@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 82 operations, 2 explain kinds, 114 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 82 operations, 2 explain kinds, 115 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -113,6 +113,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `STAGE_PLATFORM_UNSUPPORTED` | `jobs.cancel` |
 | `PLATFORM_BOUND_ELSEWHERE` | `campaigns.rebind_platform` |
 | `PLACEMENT_UNPINNED` | `campaigns.rebind_platform` |
+| `STAGE_CAPABILITY_MISSING` | `nodes.run_doctor` |
 | `DATASET_PLATFORM_MISMATCH` | `jobs.cancel` |
 | `TOOL_UNAVAILABLE` | `settings.tools.update` |
 | `AGENT_TOO_OLD` | `agent.promote` |

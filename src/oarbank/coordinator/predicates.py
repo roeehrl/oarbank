@@ -7,6 +7,7 @@ PredicateResults carrying a reason code, pass/fail/unknown and the observed and 
 claim() runs them in first-fail mode on the hot path; explain runs them in full over every node. A
 property test (tests/test_explain.py) asserts that explain's verdict equals claim's decision.
 """
+import json
 from dataclasses import dataclass, field
 
 from oarbank_sdk import platform as pf
@@ -43,6 +44,7 @@ class NodeView:
     gpu_use: int = 0                  # live GPU attempts on the node
     excluded: dict = field(default_factory=dict)   # {module: reason}: platform, OS version, sandbox, agent (modsandbox)
     excluded_why: dict = field(default_factory=dict)   # {module: the module's own words}: requires.unsupported.runner
+    capabilities: dict = field(default_factory=dict)   # {module: node_capabilities(node, module)} for the offered modules
 
     @property
     def certified(self) -> set:
@@ -55,6 +57,18 @@ class NodeView:
     @property
     def max_new(self) -> int:
         return int(self.limits["jobs"]) - self.live if self.limits.get("jobs") is not None else 10 ** 6
+
+
+def node_capabilities(node: dict, module: str) -> set:
+    """The capabilities a node has for `module`, from its latest doctor report (docs/protocol.md "Doctor"): those its
+    offered services and healthy probes provide, and the ones the module's own doctor reported."""
+    doc = json.loads(node.get("doctor_json") or "null") or {}
+    return set(doc.get("capabilities") or []) | set(((doc.get("modules") or {}).get(module) or {}).get("capabilities") or [])
+
+
+def capabilities_fit(job: dict, have: set) -> bool:
+    """Does a node with capabilities `have` (for the job's module) hold every one the job's stage needs?"""
+    return set(job["stage_capabilities"]) <= have
 
 
 def _no_module_code(nv: NodeView) -> str:
@@ -118,6 +132,7 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
     dispute_nodes = set((job.get("dispute") or {}).get("nodes", []))
     cmp = job.get("dispute") or {}                         # replicas and tie-breaks compare within {scope, class}
     stage_platforms = job["stage_platforms"]               # stages[].requires.platforms (empty: every platform)
+    stage_caps = job["stage_capabilities"]                 # stages[].requires.capabilities
     plat, pl = nv.node.get("platform"), job["placement"]   # the job's platforms, its datasets' and its unit chain (D33)
     units = pl["units"]
     mod = job["module"]
@@ -162,6 +177,8 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
         module_check,
         lambda: R("stage platform", "STAGE_PLATFORM_UNSUPPORTED",
                   not stage_platforms or nv.node.get("platform") in stage_platforms, nv.node.get("platform"), stage_platforms),
+        lambda: (lambda have: R("stage capabilities", "STAGE_CAPABILITY_MISSING", capabilities_fit(job, have),
+                                sorted(have & set(stage_caps)), stage_caps))(nv.capabilities.get(mod, set())),
         lambda: R("job platforms", "STAGE_PLATFORM_UNSUPPORTED", bool(plat) and pf.matches(plat, pl["platforms"]) if pl["platforms"]
                   else True, plat, pl["platforms"]),
         lambda: R("a feasible class of its unit", "STAGE_PLATFORM_UNSUPPORTED",

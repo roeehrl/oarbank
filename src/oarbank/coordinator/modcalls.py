@@ -537,6 +537,14 @@ def stage_platforms(name: str, stage: str | None) -> list[str]:
     return list(st.requires.platforms) if st else []
 
 
+def stage_capabilities(name: str, stage: str | None) -> list[str]:
+    """The node capabilities a job's stage needs (stages[].requires.capabilities: healthy services or probes of the node,
+    or the module doctor's own)."""
+    i = CATALOG.get(name)
+    st = next((s for s in i.manifest.stages if s.name == (stage or i.single_stage)), None) if i else None
+    return sorted(st.requires.capabilities) if st else []
+
+
 def stage_retry(name: str, stage: str | None) -> dict:
     """How many execution attempts a job's stage allows before it is quarantined (stages[].retry.max_attempts): `max`, and
     `by_platform` from its variants (keyed by token or OS; predicates.retry_max resolves them for a node)."""

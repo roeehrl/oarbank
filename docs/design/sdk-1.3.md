@@ -18,8 +18,10 @@ resolves them all: **oarbank-sdk 1.3.0** and **core 2.3.0**.
 - Core, found on the way: capacity binding and the stranded check use the claim path's per-stage test (a unit no longer
   binds where a later stage's pool is missing, and is stranded when its class loses it), and `campaigns.set_placement`
   fences pending jobs' late results.
-- The coordinator tracks no per-node stage capabilities (probes and services report them to the agent), so neither
-  the claim path nor capacity binding checks `stages[].requires.capabilities`, as before.
+- `stages[].requires.capabilities` is enforced per stage: the agent's doctor report carries the capabilities its
+  offered services and healthy probes provide (docs/protocol.md "Doctor"), and the claim path, explain
+  (`STAGE_CAPABILITY_MISSING`), capacity binding, the stranded check, replica runners and failure anti-affinity check
+  them against the job's stage, as they check its pools.
 
 ## Versioning, for all six
 

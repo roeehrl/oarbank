@@ -23,7 +23,7 @@ import json
 from oarbank_sdk import manifest as mf
 from oarbank_sdk import platform as pf
 
-from . import clock, config as C, modcalls
+from . import clock, config as C, modcalls, predicates
 from .db import DB, jl
 
 UNIT_RANK = {"campaign": 2, "group": 1, "dataset": 1, "pipeline": 0}     # what a campaign may tighten (never loosen)
@@ -174,25 +174,29 @@ def _ahead(j: dict) -> list[str]:
 
 def classes_running(db: DB, module: str, stages, mix: str, online: bool = False, cache: dict | None = None) -> set:
     """The classes under `mix` where, for every one of `stages`, a ready node that can serve the module (certified, or
-    certifying recently: core._can_serve) runs that stage (its platforms) and holds its pools. `online`: only active
-    nodes that heartbeat recently (a unit's class able to take its work now). Binding, the capacity choice and the
-    stranded check all use this one test, so a unit never binds where a stage of its work can never run."""
+    certifying recently: core._can_serve) runs that stage (its platforms) and holds its pools and capabilities. `online`:
+    only active nodes that heartbeat recently (a unit's class able to take its work now). Binding, the capacity choice and
+    the stranded check all use this one test, so a unit never binds where a stage of its work can never run."""
     from . import core
     stages = tuple(sorted(set(stages)))
     key = ("running", module, mix, stages, online)
     if cache is not None and key in cache:
         return cache[key]
     mi = modcalls.info(module)
-    sql = "SELECT node_id, platform, modules_json, capacity_json, policy_json FROM nodes WHERE lifecycle='ready' AND platform IS NOT NULL"
+    sql = ("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
+           "WHERE lifecycle='ready' AND platform IS NOT NULL")
     args: tuple = ()
     if online:
         sql += " AND desired_state='active' AND last_heartbeat_at>?"
         args = (clock.now() - C.OFFLINE_AFTER,)
-    nodes = [n for n in db.q(sql, args) if core._can_serve((jl(n["modules_json"], {}) or {}).get(module, {}))]
+    nodes = [(n, predicates.node_capabilities(n, module)) for n in db.q(sql, args)
+             if core._can_serve((jl(n["modules_json"], {}) or {}).get(module, {}))]
     out = None
     for st in stages:
         res, plats = mi.stage_resources(st), modcalls.stage_platforms(module, st)
-        here = {pf.class_key(n["platform"], mix) for n in nodes if (not plats or n["platform"] in plats) and core._pools_fit(n, res)}
+        caps = set(modcalls.stage_capabilities(module, st))
+        here = {pf.class_key(n["platform"], mix) for n, have in nodes
+                if (not plats or n["platform"] in plats) and core._pools_fit(n, res) and caps <= have}
         out = here if out is None else out & here
     out = out or set()
     if cache is not None:

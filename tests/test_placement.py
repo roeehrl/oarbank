@@ -434,3 +434,94 @@ def test_a_stricter_mix_fences_a_late_result_from_an_attempt_that_already_ended(
     r = core.complete(db, fresh(db, fleet["box"]), g["attempt_id"], RIGHT)
     assert (r["canonical"], r["reason"]) == (False, "stale_generation")
     assert ok(db)
+
+
+# ---------------------------------------------------------------------------- stages[].requires.capabilities
+
+def needs_capabilities(monkeypatch, stage, caps):
+    """relay's `stage` requires node capabilities `caps` (stages[].requires.capabilities)."""
+    info = modcalls.info("relay")
+    relay_with(monkeypatch, stages=[s.model_copy(update={"requires": s.requires.model_copy(update={"capabilities": caps})})
+                                    if s.name == stage else s for s in info.manifest.stages])
+
+
+def report(db, node, services=(), relay=(), toy=()):
+    """The node's doctor report (docs/protocol.md "Doctor"): what its offered services and healthy probes provide, and
+    each module doctor's own capabilities."""
+    doc = {"modules": {"relay": {"health": "healthy", "checks": [], "capabilities": list(relay)},
+                       "toy": {"health": "healthy", "checks": [], "capabilities": list(toy)}}, "capabilities": list(services)}
+    n = fresh(db, node)
+    core.heartbeat(db, n, {"doctor": doc, "attempts": [], "ready_datasets": READY, "capacity": json.loads(n["capacity_json"])})
+
+
+def test_a_stage_needing_a_capability_runs_only_where_the_node_reports_it(db, fleet, monkeypatch):
+    """eval needs `java17`: mini has it from a probe, box from relay's own doctor; arm has it only for another module, which
+    does not count. claim and explain agree, and a node that stops reporting it stops getting the work."""
+    needs_capabilities(monkeypatch, "eval", ["java17"])
+    report(db, fleet["mini"], services=["java17"])
+    report(db, fleet["box"], relay=["java17"])
+    report(db, fleet["arm"], toy=["java17"])
+    sid = study(db, SCENES[:1], configs=2)
+    jobs = pending(db, sid)
+    assert len(jobs) == 3
+    j = jobs[0]
+    assert "STAGE_CAPABILITY_MISSING" in codes(db, j["job_id"], fleet["arm"]), "explain names the missing capability"
+    assert "STAGE_CAPABILITY_MISSING" not in codes(db, j["job_id"], fleet["mini"]) | codes(db, j["job_id"], fleet["box"])
+    row = next(r for m in explain.job_doc(db, j["job_id"], bodies={fleet["arm"]["node_id"]: BODY}, now=clock.now()).matrix
+               if m.node == "arm" for r in m.results if r.code == "STAGE_CAPABILITY_MISSING")
+    assert (row.outcome, row.observed, row.required) == ("fail", [], ["java17"])
+    assert not grants(db, fleet["arm"])
+    assert len(grants(db, fleet["mini"], free=1)) == 1 and len(grants(db, fleet["box"], free=1)) == 1
+    report(db, fleet["box"])                                             # box's doctor no longer reports it
+    assert "STAGE_CAPABILITY_MISSING" in codes(db, pending(db, sid)[0]["job_id"], fleet["box"]) and not grants(db, fleet["box"])
+    assert grants(db, fleet["mini"], free=1)
+    assert ok(db)
+
+
+def test_capacity_binds_a_unit_only_where_a_node_has_its_stages_capabilities(db, fleet, monkeypatch):
+    """box (linux-amd64) has the most free CPU, but only arm (linux-arm64) reports the capability eval needs: the campaign
+    binds by capacity to arm, and once the capability goes away there the unit's class has no node for its work."""
+    needs_capabilities(monkeypatch, "eval", ["java17"])
+    report(db, fleet["arm"], services=["java17"])
+    sid = study(db, SCENES[:1], placement={"mix": "same-platform"})
+    b = unit(db, f"c:{sid}")
+    assert (b["class"], b["state"], b["source"]) == ("linux-arm64", "soft", "capacity")
+    assert placement.class_has_node(db, b)
+    assert not grants(db, fleet["box"]) and grants(db, fleet["arm"], free=1)
+    report(db, fleet["arm"])
+    assert not placement.class_has_node(db, unit(db, f"c:{sid}"))
+    assert ok(db)
+
+
+def test_first_claim_never_binds_a_pipeline_where_its_tail_lacks_a_capability(db, fleet, monkeypatch):
+    """Split pipeline, unit = pipeline, same-arch: the score stage needs `scorer-gpu`, which only arm reports. A render head
+    claimed on box would bind the pipeline to amd64, where its tail can never run, so box is not offered it."""
+    from oarbank_sdk import manifest as mf
+    needs_capabilities(monkeypatch, "score", ["scorer-gpu"])
+    relay_with(monkeypatch, placement=mf.Placement(mix="same-arch", unit="pipeline"))
+    assert modcalls.stage_capabilities("relay", "score") == ["scorer-gpu"]
+    db.set_setting("pipeline:relay", "split")
+    report(db, fleet["arm"], services=["scorer-gpu"])
+    sid = study(db, SCENES[:1])
+    head = db.one("SELECT * FROM jobs WHERE campaign_id=? AND kind='call' ORDER BY job_id LIMIT 1", (sid,))
+    assert "STAGE_PLATFORM_UNSUPPORTED" in codes(db, head["job_id"], fleet["box"])        # no feasible class for its unit
+    assert not [g for g in grants(db, fleet["box"]) if g["job_id"] == head["job_id"]]
+    assert [g for g in grants(db, fleet["arm"]) if g["job_id"] == head["job_id"]]
+    assert unit(db, head["placement_unit"])["class"] == "arm64"
+    assert ok(db)
+
+
+def test_a_replica_needs_another_node_with_the_stages_capabilities(db, fleet, monkeypatch):
+    """Adaptive replication queues a replica only when another node could run it: with the capability on mini alone,
+    nobody could (it would sit pending forever, TLA+ F3); once box reports it too, the replica is queued."""
+    needs_capabilities(monkeypatch, "eval", ["java17"])
+    db.set_setting("replica_rate", 1.0)
+    report(db, fleet["mini"], services=["java17"])
+    sid = study(db, SCENES[:2])
+    first, second = grants(db, fleet["mini"], free=2)
+    assert core.complete(db, fresh(db, fleet["mini"]), first["attempt_id"], RIGHT)["canonical"]
+    assert not db.q("SELECT 1 FROM jobs WHERE kind='replica'")
+    report(db, fleet["box"], services=["java17"])
+    assert core.complete(db, fresh(db, fleet["mini"]), second["attempt_id"], relay_result(score="0.850000", image="B"))["canonical"]
+    assert db.one("SELECT json_extract(dispute_json,'$.replica_of') o FROM jobs WHERE kind='replica'")["o"] == second["job_id"]
+    assert ok(db)
