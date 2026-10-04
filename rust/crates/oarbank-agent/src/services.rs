@@ -8,8 +8,14 @@
 //! capabilities admitted jobs need, gated on `ready`, and stopped after `idle_timeout_s`; failures back off and then
 //! withdraw the service; a service found running is adopted, never started twice; objects owned by attempts that no
 //! longer exist are reaped through `list_owned` and `destroy`.
+//!
+//! An endpoint service (`endpoint = true`) gets its endpoint channel at `start` (endpoints.rs); it is ready only once it
+//! has said hello on it, it is never adopted (a channel ends with the agent that made it, so one found running is stopped
+//! and started again), and a channel the service closes is its failure. Host protection may hold a yieldable service
+//! down (`set_held`). Every change of state wakes the waiters on `changed`, so nothing that waits for a service polls.
 
 use crate::doctor::{base_env, grant_files, resolve_exec};
+use crate::endpoints::{self, Channel, Connector, Refusal};
 use crate::paths::Layout;
 use crate::procs;
 use crate::release::Release;
@@ -19,7 +25,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -89,6 +95,10 @@ struct ServiceDecl {
     pools: Vec<String>,
     reserves_host_memory: bool,
     yieldable: bool,
+    /// Jobs reach it through the agent (spec/service-protocol.md, "Endpoints").
+    endpoint: bool,
+    /// `gpu.use` is not none: GPU-resident fleet work while it runs.
+    gpu: bool,
 }
 
 fn secs(v: &Value, default: f64, min: f64) -> f64 {
@@ -133,6 +143,8 @@ impl ServiceDecl {
             pools: strings(&v["provides"]["pools"]),
             reserves_host_memory: v["reserves_host_memory"].as_bool() == Some(true),
             yieldable: v["yieldable"].as_bool() != Some(false),
+            endpoint: v["endpoint"].as_bool() == Some(true),
+            gpu: v["gpu"]["use"].as_str().is_some_and(|u| u != "none"),
         })
     }
 
@@ -350,6 +362,11 @@ impl Exec {
     /// Run `<exec> <args...>` and wait for it (killing its group after `timeout`). `keep_group`: processes the op
     /// leaves behind are the service itself (`start`), so its group is kept and returned; any other op leaves nothing.
     fn run(&self, args: &[&str], timeout: Duration, keep_group: bool) -> OpOut {
+        self.run_with(args, timeout, keep_group, None)
+    }
+
+    /// `run`, handing `channel`'s service end to the op (`start` of an endpoint service) and to what it leaves running.
+    fn run_with(&self, args: &[&str], timeout: Duration, keep_group: bool, channel: Option<&Channel>) -> OpOut {
         let c = &self.ctx;
         let mut argv = resolve_exec(&self.exec, &c.bundle, &c.python);
         if argv.is_empty() || !Path::new(&argv[0]).is_absolute() {
@@ -367,6 +384,9 @@ impl Exec {
                     ("OARBANK_SETTINGS_FILE".into(), c.settings_file.display().to_string()),
                     ("OARBANK_TOOLS_FILE".into(), c.tools_file.display().to_string()),
                     ("OARBANK_LIMITS_FILE".into(), c.limits_file.display().to_string())]);
+        if let Some(ch) = channel {
+            env.push((endpoints::CHANNEL_ENV.into(), ch.child_value()));
+        }
         if let Some(p) = port {
             let url = format!("http://127.0.0.1:{p}");
             for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy"] {
@@ -390,11 +410,22 @@ impl Exec {
         if let Some(s) = &signal {
             s.prepare(&mut cmd);
         }
+        if let Some(ch) = channel {
+            ch.prepare(&mut cmd);
+        }
         let mut child = match crate::sys::spawn_contained(&mut cmd, keep_group) {
             Ok(ch) => ch,
-            Err(e) => return OpOut::failed(format!("spawn: {e}")),
+            Err(e) => {
+                if let Some(ch) = channel {
+                    ch.spawned(None);
+                }
+                return OpOut::failed(format!("spawn: {e}"));
+            }
         };
         let pid = child.id() as i32;
+        if let Some(ch) = channel {
+            ch.spawned(Some(pid));
+        }
         if let Some(r) = &self.registry {
             r.register(pid, None, Some(&self.label()));          // only registered groups may ever be signalled (S16)
         }
@@ -493,6 +524,12 @@ struct Svc {
     /// The process group `start` left the service in (signalled after `stop` so nothing outlives it).
     pgid: Option<i32>,
     last_reap: Option<Instant>,
+    /// An endpoint service's channel, from its `start` until it stops.
+    channel: Option<Arc<Channel>>,
+    /// Host protection holds it down, with the release reason (`set_held`).
+    held: Option<String>,
+    /// Unix time this agent started it (0: adopted).
+    started_at: f64,
 }
 
 impl Svc {
@@ -500,12 +537,17 @@ impl Svc {
         Svc { module: module.into(), decl, health: Health::Unknown, running: false, ready: false, pools: BTreeMap::new(),
               reserve_mem_gb: 0.0, disabled: false, busy: false, reaping: false, failures: 0, next_try: None,
               last_fingerprint: None, idle_since: None, users: 0, withdrawn: false, last_error: None, pgid: None,
-              last_reap: None }
+              last_reap: None, channel: None, held: None, started_at: 0.0 }
     }
 
     /// Offered to the coordinator: healthy, enabled, not withdrawn.
     fn offered(&self) -> bool {
         self.health == Health::Healthy && !self.disabled && !self.withdrawn
+    }
+
+    /// An endpoint service has said hello on its channel (any other service: always).
+    fn accepting(&self) -> bool {
+        !self.decl.endpoint || self.channel.as_ref().is_some_and(|c| c.accepting())
     }
 
     /// A failed op: back off exponentially, withdraw after `max_failures`.
@@ -541,6 +583,47 @@ struct Shared {
     probes: BTreeMap<String, ProbeSt>,
     /// After `stop_all`: nothing starts until `resume`.
     halted: bool,
+    changed: Arc<Changed>,
+}
+
+/// Wakes everything that waits on the services' state: the readiness gate (async, `notify`) and connectors (threads).
+#[derive(Default)]
+pub struct Changed {
+    seq: Mutex<u64>,
+    cv: Condvar,
+    pub notify: tokio::sync::Notify,
+}
+
+impl Changed {
+    pub fn bump(&self) {
+        *lock(&self.seq) += 1;
+        self.cv.notify_all();
+        self.notify.notify_waiters();
+    }
+
+    /// `f` once it answers, waiting for changes in between (never past `deadline`).
+    fn wait_for<T>(&self, deadline: Instant, mut f: impl FnMut() -> Option<T>) -> Option<T> {
+        loop {
+            let seen = *lock(&self.seq);
+            if let Some(v) = f() {
+                return Some(v);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let g = lock(&self.seq);
+            if *g == seen {
+                let _ = self.cv.wait_timeout(g, deadline - now);
+            }
+        }
+    }
+}
+
+impl endpoints::Waker for Changed {
+    fn changed(&self) {
+        self.bump();
+    }
 }
 
 type SharedRef = Arc<Mutex<Shared>>;
@@ -552,6 +635,18 @@ enum Job {
     Ready,
     Reap(BTreeSet<i64>),
     Probe,
+}
+
+/// A running service for host protection: its process group, whether it uses a GPU, whether protection may stop it,
+/// and the pools it provides (the jobs reserving them are its users, released with it).
+pub struct ServiceView {
+    pub key: String,
+    pub module: String,
+    pub pgid: Option<i32>,
+    pub started_at: f64,
+    pub gpu: bool,
+    pub yieldable: bool,
+    pub pools: Vec<String>,
 }
 
 pub struct ServiceManager {
@@ -693,9 +788,12 @@ impl ServiceManager {
                 info!(service = %key, "stopping a service the release no longer has");
                 let x = Exec { ctx: ctx.clone(), name: s.decl.name.clone(), kind: "service", exec: s.decl.exec.clone(),
                                registry: self.registry.clone() };
-                let (timeout, pgid, reg) = (s.decl.stop_timeout, s.pgid, self.registry.clone());
+                let (timeout, pgid, reg, channel) = (s.decl.stop_timeout, s.pgid, self.registry.clone(), s.channel);
                 std::thread::spawn(move || {
                     let _ = x.run(&["stop"], timeout, false);
+                    if let Some(c) = channel {
+                        c.close();
+                    }
                     if let Some(g) = pgid {
                         end_group(g);
                         if let Some(r) = reg {
@@ -886,8 +984,66 @@ impl ServiceManager {
         let sh = lock(&self.shared);
         needs.iter().all(|n| {
             let mut providers = sh.services.values().filter(|s| s.decl.provides(n)).peekable();
-            providers.peek().is_none() || providers.any(|s| s.offered() && s.running && s.ready)
+            providers.peek().is_none() || providers.any(|s| s.offered() && s.running && s.ready && s.accepting())
         })
+    }
+
+    /// What wakes a waiter when any service changes (the readiness gate waits on it, never on a timer).
+    pub fn changed(&self) -> Arc<Changed> {
+        lock(&self.shared).changed.clone()
+    }
+
+    /// The connectors an attempt of `module` gets: one per endpoint service of the module that provides a pool the
+    /// attempt reserves (`requires.pools`; `needs_pools` gives none). Each connect waits up to the service's
+    /// `start_timeout_s` for a service that is (re)starting.
+    pub fn connectors(&self, module: &str, reserved: &[String], attempt: i64) -> std::io::Result<Vec<Connector>> {
+        let wanted: Vec<(String, String, Duration)> = lock(&self.shared).services.iter()
+            .filter(|(_, s)| s.module == module && s.decl.endpoint && s.decl.pools.iter().any(|p| reserved.contains(p)))
+            .map(|(k, s)| (k.clone(), s.decl.name.clone(), s.decl.start_timeout)).collect();
+        let mut out = Vec::new();
+        for (key, name, wait) in wanted {
+            let (sh, k2) = (self.shared.clone(), key.clone());
+            let lookup: endpoints::Lookup = Arc::new(move |limit| channel_for(&sh, &k2, limit));
+            out.push(Connector::new(&name, attempt, lookup, wait)?);
+        }
+        Ok(out)
+    }
+
+    /// The services host protection holds down this tick (`module/service` → release reason); every other service is
+    /// free again. A held service is stopped and not started while the hold lasts.
+    pub fn set_held(&mut self, held: &BTreeMap<String, String>) {
+        let changed = {
+            let mut sh = lock(&self.shared);
+            for (k, s) in sh.services.iter_mut() {
+                let h = held.get(k).cloned();
+                if h != s.held {
+                    if let Some(r) = &h {
+                        info!(service = %k, reason = %r, "held down by host protection");
+                    }
+                    s.held = h;
+                }
+            }
+            sh.changed.clone()
+        };
+        changed.bump();
+    }
+
+    /// Running services as host protection sees them.
+    pub fn fleet_view(&self) -> Vec<ServiceView> {
+        lock(&self.shared).services.iter().filter(|(_, s)| s.running)
+            .map(|(k, s)| ServiceView { key: k.clone(), module: s.module.clone(), pgid: s.pgid, started_at: s.started_at,
+                                        gpu: s.decl.gpu, yieldable: s.decl.yieldable, pools: s.decl.pools.clone() }).collect()
+    }
+
+    /// The pools GPU services provide, by module (a job reserving one is a GPU job).
+    pub fn gpu_pools(&self, module: &str) -> Vec<String> {
+        lock(&self.shared).services.values().filter(|s| s.module == module && s.decl.gpu)
+            .flat_map(|s| s.decl.pools.iter().cloned()).collect()
+    }
+
+    /// For the heartbeat telemetry: the services held down, with why.
+    pub fn held(&self) -> BTreeMap<String, String> {
+        lock(&self.shared).services.iter().filter_map(|(k, s)| s.held.clone().map(|r| (k.clone(), r))).collect()
     }
 
     /// Host memory reserved by running services (reserves_host_memory), for capacity.
@@ -902,13 +1058,14 @@ impl ServiceManager {
     }
 
     /// Every service's and probe's state (what the tests assert on).
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub fn report(&self) -> Value {
         let sh = lock(&self.shared);
         let services: Vec<Value> = sh.services.iter().map(|(k, s)| json!({
             "service": k, "health": s.health.as_str(), "running": s.running, "ready": s.ready, "pools": s.pools,
             "reserve_mem_gb": (s.reserve_mem_gb * 100.0).round() / 100.0, "disabled": s.disabled, "users": s.users,
-            "failures": s.failures, "withdrawn": s.withdrawn, "error": s.last_error,
+            "failures": s.failures, "withdrawn": s.withdrawn, "error": s.last_error, "held": s.held, "busy": s.busy,
+            "accepting": s.decl.endpoint && s.accepting(),
             "lifecycle": match s.decl.lifecycle { Lifecycle::OnDemand => "on_demand", Lifecycle::Always => "always",
                                                   Lifecycle::Manual => "manual" }})).collect();
         let probes: Vec<Value> = sh.probes.iter().map(|(k, p)| json!({"probe": k, "health": p.health.as_str(), "attrs": p.attrs}))
@@ -971,8 +1128,11 @@ fn want(s: &Svc, now: Instant, memory_soft: bool, halted: bool) -> Option<bool> 
     if d.lifecycle == Lifecycle::Manual {
         return None;
     }
-    if halted {
-        return Some(false);
+    if halted || s.held.is_some() {
+        return s.running.then_some(false);                         // down, and not started while it lasts
+    }
+    if d.endpoint && s.running && s.channel.is_none() {
+        return Some(false);                // found running without a channel (an earlier agent's): stopped, then started anew
     }
     let mut w = None;
     if s.disabled {
@@ -991,9 +1151,14 @@ fn want(s: &Svc, now: Instant, memory_soft: bool, halted: bool) -> Option<bool> 
 }
 
 fn with_svc(sh: &SharedRef, key: &str, f: impl FnOnce(&mut Svc)) {
-    if let Some(s) = lock(sh).services.get_mut(key) {
-        f(s);
-    }
+    let changed = {
+        let mut g = lock(sh);
+        if let Some(s) = g.services.get_mut(key) {
+            f(s);
+        }
+        g.changed.clone()
+    };
+    changed.bump();
 }
 
 fn probe_job(x: &Exec, sh: &SharedRef, key: &str) {
@@ -1052,6 +1217,31 @@ fn fingerprint_job(x: &Exec, sh: &SharedRef, key: &str) {
     });
 }
 
+/// The channel of a service that accepts connections, waiting for one that is (re)starting until `limit`; refused at once
+/// when it will not come (gone, disabled, withdrawn, held down, the agent halted).
+fn channel_for(sh: &SharedRef, key: &str, limit: Duration) -> Result<Arc<Channel>, Refusal> {
+    let changed = lock(sh).changed.clone();
+    let mut why = String::new();
+    changed.wait_for(Instant::now() + limit, || {
+        let g = lock(sh);
+        let Some(s) = g.services.get(key) else {
+            why = format!("{key} is not in this node's release");
+            return Some(None);
+        };
+        if g.halted || !s.offered() || s.held.is_some() {
+            why = format!("{key} is not offered here now");
+            return Some(None);
+        }
+        match &s.channel {
+            Some(c) if s.running && s.ready && c.accepting() => Some(Some(c.clone())),
+            _ => {
+                why = format!("{key} did not come up within its start timeout");
+                None
+            }
+        }
+    }).flatten().ok_or_else(|| Refusal::new("service_unavailable", why))
+}
+
 /// Whether the job should keep waiting for this service (still wanted, not halted, still configured).
 fn still_wanted(sh: &SharedRef, key: &str) -> bool {
     let g = lock(sh);
@@ -1069,8 +1259,26 @@ fn start_job(x: &Exec, sh: &SharedRef, key: &str) {
     }
     let deadline = Instant::now() + timeout;
     info!(service = key, "starting");
-    let r = x.run(&["start"], timeout, true);
+    let endpoint = lock(sh).services.get(key).is_some_and(|s| s.decl.endpoint);
+    let channel = if endpoint {
+        match new_channel(x, sh, key) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                with_svc(sh, key, |s| {
+                    s.busy = false;
+                    s.failed(key, "start", &format!("endpoint channel: {e}"));
+                });
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let r = x.run_with(&["start"], timeout, true, channel.as_deref());
     if !r.ok {
+        if let Some(c) = &channel {
+            c.close();
+        }
         with_svc(sh, key, |s| {
             s.busy = false;
             s.failed(key, "start", &r.detail);
@@ -1081,8 +1289,41 @@ fn start_job(x: &Exec, sh: &SharedRef, key: &str) {
         s.running = true;
         s.ready = false;
         s.pgid = r.pgid;
+        s.channel = channel;
+        s.started_at = crate::doctor::now();
     });
     wait_ready(x, sh, key, deadline);
+}
+
+/// An endpoint service's channel for its next run. If the service closes it first (it died, or exited), that is its
+/// failure: whatever is left of its process group is ended and the restart policy applies.
+fn new_channel(x: &Exec, sh: &SharedRef, key: &str) -> std::io::Result<Arc<Channel>> {
+    let changed = lock(sh).changed.clone();
+    let slot: Arc<Mutex<Option<std::sync::Weak<Channel>>>> = Arc::default();
+    let (sh2, key2, slot2, reg) = (sh.clone(), key.to_string(), slot.clone(), x.registry.clone());
+    let lost = Box::new(move || {
+        let Some(me) = lock(&slot2).as_ref().and_then(|w| w.upgrade()) else { return };
+        let mut ended = None;
+        with_svc(&sh2, &key2, |s| {
+            if !s.channel.as_ref().is_some_and(|c| Arc::ptr_eq(c, &me)) {
+                return;                                           // not this run's (it is stopping, or already gone)
+            }
+            s.channel = None;
+            s.running = false;
+            s.ready = false;
+            ended = s.pgid.take();
+            s.failed(&key2, "endpoint", "the service closed its endpoint channel");
+        });
+        if let Some(g) = ended {
+            end_group(g);
+            if let Some(r) = reg {
+                r.unregister(g);
+            }
+        }
+    });
+    let ch = Channel::new(key, changed, lost)?;
+    *lock(&slot) = Some(Arc::downgrade(&ch));
+    Ok(ch)
 }
 
 /// Poll `ready` until it answers true or the deadline passes (a failure, with backoff).
@@ -1125,6 +1366,10 @@ fn stop_job(x: &Exec, sh: &SharedRef, key: &str, pgid: Option<i32>, reg: Option<
     info!(service = key, "stopping");
     let r = x.run(&["stop"], timeout, false);
     if r.ok {
+        let channel = lock(sh).services.get_mut(key).and_then(|s| s.channel.take());
+        if let Some(c) = channel {
+            c.close();                                            // the service exits on the end of its channel
+        }
         if let Some(g) = pgid {
             end_group(g);
             if let Some(reg) = reg {
@@ -1135,10 +1380,10 @@ fn stop_job(x: &Exec, sh: &SharedRef, key: &str, pgid: Option<i32>, reg: Option<
     with_svc(sh, key, |s| {
         s.busy = false;
         if r.ok {
+            // failures and the last error stay: only a service that becomes ready again is past them, so one that
+            // fails after every start backs off and is withdrawn instead of being stopped and started for ever
             s.running = false;
             s.ready = false;
-            s.failures = 0;
-            s.last_error = None;
             s.idle_since = None;
             if s.pgid == pgid {
                 s.pgid = None;
@@ -1404,6 +1649,22 @@ mod tests {
         let r = m.report();
         assert_eq!(r["services"][0]["failures"], 3);
         assert!(r["services"][0]["error"].as_str().unwrap().contains("start refused"), "{r}");
+    }
+
+    #[test]
+    fn a_start_that_fails_halfway_backs_off_and_keeps_its_error() {
+        // an endpoint service whose start marks it up and then fails is fingerprinted running without a channel, so
+        // it is stopped; that stop must not wipe the failure, or it is started and stopped for ever with nothing in
+        // its report
+        let fx = Fx::new("halfway", json!([svc("vm", json!({"endpoint": true,
+            "restart": {"backoff_initial_s": 0.2, "backoff_max_s": 0.4, "max_failures": 3}}))]), json!([]));
+        fx.touch("vm.fail_after_up", "");
+        let mut m = fx.manager(json!({}), true);
+        let one = need(&[("vmpool", 1)]);
+        assert!(tick_until(&mut m, &one, &[], false, 30.0, |m| lock(&m.shared).services["mod/vm"].withdrawn), "{}", m.report());
+        let r = m.report();
+        assert!(r["services"][0]["error"].as_str().unwrap().contains("start broke halfway"), "{r}");
+        assert_eq!(fx.calls("vm", "start"), 3);
     }
 
     #[test]

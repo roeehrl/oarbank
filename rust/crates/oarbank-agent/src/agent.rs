@@ -364,11 +364,23 @@ impl Agent {
         }
         let svc = self.services.clone().expect("set above");
         let mut s = svc.lock().unwrap();
-        let (policy, limits) = (&self.directives["policy"], &self.directives["limits"]);
-        if self.services_seen.0 != rel.id || self.services_seen.1 != *policy {
-            s.configure(&rel, policy, self.node_id.as_deref());
+        let limits = &self.directives["limits"];
+        // a module the coordinator disabled (its kill switch) has every service disabled here: stopped, never offered
+        let mut policy = self.directives["policy"].clone();
+        let off: Vec<&str> = self.directives["modules_disabled"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).collect();
+        if !off.is_empty() {
+            let mut disabled: Vec<Value> = policy["disabled_services"].as_array().cloned().unwrap_or_default();
+            for e in rel.modules.iter().filter(|e| e["name"].as_str().is_some_and(|n| off.contains(&n))) {
+                for sv in e["services"].as_array().into_iter().flatten() {
+                    disabled.push(json!(format!("{}/{}", e["name"].as_str().unwrap_or(""), sv["name"].as_str().unwrap_or(""))));
+                }
+            }
+            policy["disabled_services"] = Value::Array(disabled);
+        }
+        if self.services_seen.0 != rel.id || self.services_seen.1 != policy {
+            s.configure(&rel, &policy, self.node_id.as_deref());
             self.services_seen.0 = rel.id.clone();
-            self.services_seen.1 = policy.clone();
+            self.services_seen.1 = policy;
         }
         if self.services_seen.2 != *limits {
             s.set_limits(limits);
@@ -639,14 +651,7 @@ impl Agent {
         let mut pools = std::collections::BTreeMap::<String, i64>::new();
         let (mut reserved, mut running) = (0.0, vec![]);
         if let Some(svc) = self.services.clone() {
-            let (need, live) = {
-                let t = self.table.lock().unwrap();
-                let mut need = std::collections::BTreeMap::<String, i64>::new();
-                for n in t.values().flat_map(|j| j.needs.iter()) {
-                    *need.entry(n.clone()).or_default() += 1;
-                }
-                (need, t.keys().copied().collect::<Vec<_>>())
-            };
+            let (need, live) = self.service_demand();
             let soft = self.prot.as_ref().and_then(|p| p.telemetry["guard"].as_str()).is_some_and(|g| g != "clear");
             let mut s = svc.lock().unwrap();
             s.tick(&need, &live, soft);
@@ -665,9 +670,36 @@ impl Agent {
         let p = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&l, hub));
         p.service_pools = pools;
         p.service_reserved_mem_gb = reserved;
+        p.services = self.services.as_ref().map(|s| s.lock().unwrap().fleet_view()).unwrap_or_default();
         p.tick(&self.directives, &self.table, &self.facts);
+        // the services protection stops are held down until it lets them go (their users were released by the tick)
+        let stops: std::collections::BTreeMap<String, String> = p.last.as_ref()
+            .map(|r| r.service_stops.iter().map(|s| (s.key.clone(), s.reason.clone())).collect()).unwrap_or_default();
+        let mut held = std::collections::BTreeMap::new();
+        let demand = self.service_demand();
+        let p = self.prot.as_mut().expect("made above");
+        if let Some(svc) = self.services.clone() {
+            let mut s = svc.lock().unwrap();
+            if s.held() != stops {
+                s.set_held(&stops);
+                let soft = p.telemetry["guard"].as_str().is_some_and(|g| g != "clear");
+                s.tick(&demand.0, &demand.1, soft);                          // stopped now, not on the next tick
+            }
+            held = s.held();
+        }
         p.telemetry["services_running"] = json!(running);
         p.telemetry["services_reserved_gb"] = json!((reserved * 10.0).round() / 10.0);
+        p.telemetry["services_held"] = json!(held);
+    }
+
+    /// What the services' tick needs: the jobs needing each pool, and the live attempts.
+    fn service_demand(&self) -> (std::collections::BTreeMap<String, i64>, Vec<i64>) {
+        let t = self.table.lock().unwrap();
+        let mut need = std::collections::BTreeMap::<String, i64>::new();
+        for n in t.values().flat_map(|j| j.needs.iter()) {
+            *need.entry(n.clone()).or_default() += 1;
+        }
+        (need, t.keys().copied().collect())
     }
 
     /// Services stop when the node is not active and has no work left (a drain), and may start again once it is.
@@ -754,13 +786,17 @@ impl Agent {
             let res = &g["spec"]["resources"];
             let module = g["module"].as_str().unwrap_or("");
             let runner = rel.module(module).map(|e| e["runner"].clone()).unwrap_or(Value::Null);
+            let needs = jobs::needs_of(res);
+            // a GPU job: its runner uses a GPU, or it uses a service that does
+            let gpu_pools = self.services.as_ref().map(|s| s.lock().unwrap().gpu_pools(module)).unwrap_or_default();
+            let gpu = runner["gpu"]["use"].as_str().is_some_and(|u| u != "none") || needs.iter().any(|n| gpu_pools.contains(n));
             self.table.lock().unwrap().insert(aid, JobState {
-                attempt_id: aid, phase: "staging".into(), cpu: res["cpu"].as_f64().unwrap_or(1.0), mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0),
-                gpu: runner["gpu"]["use"].as_str().is_some_and(|u| u != "none"), pgid: None, stop: None, pause: false,
+                attempt_id: aid, module: module.to_string(), phase: "staging".into(), cpu: res["cpu"].as_f64().unwrap_or(1.0),
+                mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0), gpu, pgid: None, stop: None, pause: false,
                 usage: Default::default(), log_bytes: 0, started_at: doctor::now(),
                 caps: runner["capabilities"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
                 bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None,
-                needs: jobs::needs_of(res), wake: Default::default() });
+                needs, wake: Default::default() });
             info!(attempt = aid, kind = g["kind"].as_str().unwrap_or(""), module = g["module"].as_str().unwrap_or(""), "granted");
             tokio::spawn(jobs::run(ctx.clone(), g.clone(), crate::clock::local_deadline(g, received)));
         }

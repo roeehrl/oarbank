@@ -74,6 +74,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `MEMORY_SOFT` | Memory soft floor: free {free_pct}%; admitting no new work | P2 | – | – | – |
 | `MEMORY_HARD` | Memory hard floor: free {free_pct}%; evicting fleet jobs | P2 | – | – | – |
 | `MEMORY_HARD_FLOOR` | Attempt {attempt} evicted by the memory hard floor ({why}) | P2 | – | – | – |
+| `MEMORY_HARD_FLOOR_SERVICE` | Service {service} stopped by the memory hard floor ({why}); its jobs requeued | P2 | no / no | – | – |
+| `PROTECTION_SERVICE_STOP` | Service {service} stopped by host protection ({reason}); its jobs requeued | P1 | no / no | – | – |
 | `RUNG_0` | Dynamic rung 0: no constraint ({why}) | P1 | – | – | – |
 | `RUNG_1` | Dynamic rung 1: admitting no new work ({why}) | P1 | – | – | – |
 | `RUNG_2` | Dynamic rung 2: the fleet CPU budget is under the allocatable cores ({why}) | P1 | – | – | – |

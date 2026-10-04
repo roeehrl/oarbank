@@ -304,11 +304,13 @@ pub fn exec(args: &[String]) -> ! {
 
 /// The facts' `sandbox`: the backend and, per capability, `enforced`, `cooperative` or `unavailable`. With a backend,
 /// `grants.bootstrap` is enforced too: the agent itself runs a bootstrap stage's jobs with the bootstrap grants
-/// (jobs::bootstrap_entry), so the coordinator may grant it one.
+/// (jobs::bootstrap_entry), so the coordinator may grant it one. So are `endpoints`: service endpoints are handles the
+/// agent hands out (endpoints.rs), which no backend has to allow.
 pub fn report() -> Value {
     let mut r = backend_report();
     if !r["backend"].is_null() {
         r["enforcement"]["grants.bootstrap"] = json!("enforced");
+        r["enforcement"]["endpoints"] = json!("enforced");
     }
     r
 }

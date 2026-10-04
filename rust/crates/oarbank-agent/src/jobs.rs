@@ -32,6 +32,7 @@ pub enum Stop {
 #[derive(Debug, Clone)]
 pub struct JobState {
     pub attempt_id: i64,
+    pub module: String,
     pub phase: String,
     pub cpu: f64,
     pub mem_gb: f64,
@@ -48,7 +49,7 @@ pub struct JobState {
     pub bandwidth: Option<String>,
     /// Cooperative throttle: the thread ceiling protection set (written into control.json).
     pub threads: Option<i64>,
-    /// Pools the job reserves or needs (services start on demand for them).
+    /// Pools the job reserves or needs (services start on demand for them; the job uses the services providing them).
     pub needs: Vec<String>,
     /// Wakes the job's monitor when `stop`, `pause` or `threads` change, so control.json follows at once.
     pub wake: Arc<Notify>,
@@ -293,19 +294,38 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     let needs = needs_of(&spec["resources"]);
     if let (false, Some(svc)) = (needs.is_empty(), &ctx.services) {
-        // the agent's tick starts the services this job counts towards; the runner waits for their readiness
-        let deadline = Instant::now() + std::time::Duration::from_secs(SERVICE_WAIT_S);
-        while !svc.lock().unwrap().ready_for(&needs) {
+        // the agent's tick starts the services this job counts towards; the runner waits for their readiness, woken by
+        // every change of the services' state and by a stop of the job, never by a timer
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(SERVICE_WAIT_S);
+        let changed = svc.lock().unwrap().changed();
+        let wake = ctx.table.lock().unwrap().get(&aid).map(|j| j.wake.clone()).unwrap_or_default();
+        loop {
+            let notified = changed.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if svc.lock().unwrap().ready_for(&needs) {
+                break;
+            }
             if let Some(s) = stop_of(&ctx.table, aid) {
                 return Ok(Outcome::Stopped(s));
             }
-            if Instant::now() > deadline {
+            if tokio::time::Instant::now() >= deadline {
                 return Ok(Outcome::Failed { reason: "exit_nonzero".into(), exit_code: None, fault: Some("host".into()),
                                             stderr_tail: format!("the services providing {needs:?} did not become ready") });
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::select! {
+                _ = notified => {}
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
         }
     }
+    // an endpoint service's connector for each one this job reserves a pool of (spec/service-protocol.md, "Endpoints")
+    let reserved: Vec<String> = spec["resources"]["pools"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let mut connectors = match (&ctx.services, bootstrap || reserved.is_empty()) {
+        (Some(svc), false) => svc.lock().unwrap().connectors(module, &reserved, aid)?,
+        _ => vec![],
+    };
     std::fs::write(ws.join("spec.json"), serde_json::to_vec(spec)?)?;
     let mut control = ControlFile::create(ws)?;
     let bundle = ctx.release.bundle(&entry);
@@ -390,6 +410,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     if let Some(b) = &broker {
         env.push(("OARBANK_BROKER".into(), b.endpoint()));
     }
+    env.extend(connectors.iter().map(|c| c.env()));
     if let Some(off) = ctx.policy["disabled_services"].as_array() {
         let mine: Vec<String> = off.iter().filter_map(|s| s.as_str()).filter_map(|s| s.strip_prefix(&format!("{module}/")))
             .map(str::to_string).collect();
@@ -425,7 +446,15 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     if let Some(s) = &signal {
         s.prepare(cmd.as_std_mut());
     }
-    let mut child = crate::sys::spawn_contained_async(&mut cmd, false).context("starting the runner")?;
+    for c in &connectors {
+        c.prepare(cmd.as_std_mut());
+    }
+    let spawned = crate::sys::spawn_contained_async(&mut cmd, false);
+    let pgid = spawned.as_ref().ok().and_then(|c| c.id()).map(|p| p as i32);
+    for c in connectors.iter_mut() {
+        c.spawned(pgid);
+    }
+    let mut child = spawned.context("starting the runner")?;
     let pid = child.id().unwrap_or(0) as i32;
     control.started(pid);
     // the node's policy may turn the job's reservation into hard limits where the OS has them (spec/sandbox.md,
@@ -560,6 +589,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     #[cfg(unix)]
     drop(broker);                                              // stops serving and removes this attempt's containers
+    drop(connectors);                                          // closes them and tells each service the attempt ended
     if let Some(e) = escaped {
         return Ok(Outcome::Failed { reason: "sandbox_escape".into(), exit_code: status.code(), fault: Some("job".into()),
                                     stderr_tail: format!("{e}\n{}", tail(&ws.join(".runner.log"), 2000)) });

@@ -115,6 +115,7 @@ their process groups, deletes their workspaces, and does not report them.
  "telemetry": {"mem_used_gb": 14.1, "mem_free_pct": 31.0, "mem_pressure": 0, "swap_used_gb": 0.4,
                "thermal": 0, "on_battery": false, "user_idle_s": 912.0, "presence": "hid", "fleet_rss_gb": 6.4,
                "disk_free_gb": 350.2, "services_running": ["example/vm"], "services_reserved_gb": 8.0,
+               "services_held": {"example/model": "preempt_memory"},
                "guard": "clear", "protection": {"mode": "moderate", "active": ["…"], "rules": [{"id": "…", "active": true,
                "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
                "budget_cores": 6, "front": "app 812 (lsappinfo)", "source_error": null, "lowering": true}},
@@ -127,6 +128,8 @@ their process groups, deletes their workspaces, and does not report them.
                 "argv": ["…"], "team_id": "ABCDE12345", "signing_id": "…", "bundle_id": "…", "cpu_cores": 1.2,
                 "footprint_gb": 2.3}]}
 ```
+- **`services_held`** names the services host protection stopped and holds down, with the release reason their jobs
+  got (see Capacity and host protection).
 - **`clock`** (hello and heartbeat) is the agent's wall clock when it sent the request. oarbankd records the node's clock
   offset from it (see Clocks).
 - **`doctor`**, when present, is the latest doctor report (see Doctor).
@@ -147,7 +150,8 @@ their process groups, deletes their workspaces, and does not report them.
  "limits": {…Limits…}, "policy": {…Policy…}, "heartbeat_s": 10,
  "release": {"release_id": "r_…", "url": "/v1/releases/r_….tar.gz", "sha256": "…", "statement": "…", "signature": "…"},
  "release_pubkey": null, "prefetch": ["tool:example-1.0", "scene:atrium"], "run_doctor": false, "recertify": false,
- "cancel": [125], "revoke": [126], "run_probe": false, "send_processes": false, "journal_ack": 41}
+ "cancel": [125], "revoke": [126], "run_probe": false, "send_processes": false, "journal_ack": 41,
+ "modules_disabled": ["example"]}
 ```
 | Directive | Meaning |
 |---|---|
@@ -158,6 +162,7 @@ their process groups, deletes their workspaces, and does not report them.
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
+| `modules_disabled` | Modules the owner disabled (the kill switch, `modules.disable`): every service of theirs is disabled on the node (stopped, never offered) until they are enabled again. |
 
 ## Work
 
@@ -179,8 +184,8 @@ oarbankd grants jobs:
   the module's); otherwise the job waits with `SECRETS_NOT_SET` (docs/design/secrets-and-signed-images.md).
 
 With `pool_jobs_only`, only jobs reserving pools are granted. `gpu_jobs` is how many more GPU jobs the node
-may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`; it waits
-with `GPU_BLOCKED` while the node's live GPU jobs reach that number.
+may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`, or that reserves a pool
+of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while the node's live GPU jobs reach that number.
 
 → `{"grants": [Grant, …]}`, possibly empty. A **Grant** carries a SpecEnvelope:
 ```json
@@ -226,7 +231,8 @@ console and in the node's explain.
    exactly the environment of runner protocol 1 (spec/runner-protocol.md, "Environment"): `OARBANK_WORKDIR`,
    `OARBANK_TMP`, `OARBANK_MODULE_DATA`, `OARBANK_PLATFORM`, `OARBANK_MODULE`, `OARBANK_ATTEMPT_ID`,
    `OARBANK_PROTOCOL`, `OARBANK_SETTINGS_FILE`, `OARBANK_TOOLS_FILE`, `OARBANK_POOL_<NAME>_TOKENS`,
-   `OARBANK_DISABLED_SERVICES`, `OARBANK_BROKER` (container modules), the proxy variables (egress-allowlist) and the
+   `OARBANK_DISABLED_SERVICES`, `OARBANK_BROKER` (container modules), `OARBANK_SERVICE_<NAME>` (a connector to each
+   endpoint service of the module providing a pool the stage reserves), the proxy variables (egress-allowlist) and the
    OS's conventional variables, then the module entry's `runner.env`. Nothing is inherited. An entry whose env names
    a reserved variable (`OARBANK_*` or the SDK's `RESERVED_ENV`, compared case-insensitively) is refused: the job
    fails and the doctor reports unhealthy.
@@ -320,13 +326,14 @@ interpreter and `{bundle}` with the module's bundle directory (`modules/<name>` 
             "gpu": {"use": "none", "apis_any": [], "min_vram_gb": null, "in_container": false}, "bandwidth_class": "medium",
             "env": {"OMP_NUM_THREADS": "1"}},
  "services": [{"name": "…", "exec": ["{bundle}/node/svc"], "lifecycle": "on_demand", "provides": {"pools": ["…"]},
-               "freeze_ok": false, …}],
+               "freeze_ok": false, "endpoint": true, "gpu": {"use": "shared", "apis_any": ["metal"]}, …}],
  "probes": [{"name": "java17", "exec": ["{bundle}/node/probes/java17"], "period_s": 3600}],
  "sandbox": {"contract": 1, "net": {"mode": "egress-allowlist", "allow": ["api.example.org"]},
              "tools": [{"id": "java17", "trust": "code-exec", "paths": ["/opt/homebrew/opt/openjdk@17"]}],
              "devices": {"gpu": "none"}, "exec_writable": false, "containers": []}}
 ```
-A stage's `platforms` limits where its jobs are granted (empty: every platform of the module). `runner.env` is
+A stage's `platforms` limits where its jobs are granted (empty: every platform of the module). A service's `endpoint`
+and `gpu` are present only when the manifest sets them (docs/design/service-endpoints.md). `runner.env` is
 `[runner].env` with the platform's variant merged, present only when the manifest declares one.
 `runner.bandwidth_class` (`low`, `medium` or `high`) is present only when the manifest declares it. Host
 protection uses it to pick rungs when the harm is to a GPU-bound protected group (docs/design/protection.md).
@@ -452,8 +459,16 @@ A module's services, such as a VM, follow service protocol 1 (the SDK's spec/ser
   check.
 - **Stopping.** It stops after its idle timeout, under a memory floor if it is yieldable, or after a drain.
 - **Failures** back off, then withdraw the service.
-- **Restarts and cleanup.** A running service is adopted after an agent restart. Objects a service created
-  for attempts that no longer exist are reaped through its label-scoped `list_owned` and `destroy`.
+- **Restarts and cleanup.** A running service is adopted after an agent restart (an endpoint service is stopped and
+  started again instead: its channel ended with the old agent). Objects a service created for attempts that no longer
+  exist are reaped through its label-scoped `list_owned` and `destroy`.
+- **Endpoints** (docs/design/service-endpoints.md). An endpoint service gets its endpoint channel at `start` and is
+  ready once it has said hello on it; each attempt reserving one of its pools gets a connector, and every connection it
+  opens is a fresh connected pair whose ends the agent hands to the job and to the service (SCM_RIGHTS on macOS and
+  Linux, handles duplicated into a member of the right Job Object on Windows). When the attempt ends, its container is
+  killed, its connectors close and the service gets `ended`. The facts report `endpoints` enforced in the sandbox
+  enforcement map; a module with an endpoint service is placed only there.
+- **Kill switch.** The services of a module in `modules_disabled` are disabled: stopped once no attempt uses them.
 - **Probes** provide capabilities, such as `java17`, on a period.
 
 ## Doctor
@@ -566,6 +581,12 @@ Host protection's combined constraint includes:
   reserve, cap, lower, pause or evict fleet work;
 - the memory guard: soft floor at 12 % free, hard floor at 8 %;
 - in `moderate` and `strict_yield`, the dynamic controller.
+
+Running services are fleet work: their processes are never matched as the owner's, and host protection may stop a
+`yieldable` one, releasing the attempts that use it with the same reason: the memory guard's victim at the hard floor
+(`MEMORY_HARD_FLOOR_SERVICE`, `preempt_memory`), every one on a rule's `evict` and, for a GPU service, while GPU work may
+not run (`PROTECTION_SERVICE_STOP`, `preempt_protection`). The agent holds a stopped service down while the stop holds
+and reports it in `services_held`.
 
 Every actuation goes through the agent's spawn registry, so only the agent's own jobs and services can be
 signalled (S16). The decisions are journaled and shipped in heartbeats.

@@ -374,6 +374,17 @@ def test_a_guarded_node_says_why_it_takes_no_jobs(env):
     assert "services running none" in page and "binding" not in page.split("Controls")[0]
 
 
+def test_services_host_protection_stopped_are_shown_with_why(env):
+    import json as _json
+    db, n = env["db"], env["node"]
+    tel = {"services_running": [], "services_held": {"modelserver/model": "preempt_memory"}, "guard": "hard"}
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (_json.dumps(tel), n["node_id"]))
+    card, page = node_html(env)
+    assert_clean(card, page)
+    assert "service stopped: modelserver/model" in card
+    assert "services stopped by protection modelserver/model (preempt_memory)" in page
+
+
 def test_slots_show_the_automatic_count_and_what_binds(env):
     import json as _json
     db, n = env["db"], env["node"]

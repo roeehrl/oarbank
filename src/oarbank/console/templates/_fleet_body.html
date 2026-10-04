@@ -68,6 +68,7 @@
       {% if n.tel.on_battery %}<span class="chip warn">battery</span>{% endif %}
       {% if n.tel.user_idle_s is known and n.tel.user_idle_s < (n.policy.user_idle_s or 300) %}<span class="chip">user present</span>{% endif %}
       {% if n.tel.services_running %}<span>services {{ n.tel.services_running | join(', ') }}</span>{% endif %}
+      {% if n.tel.services_held %}<span class="chip warn">service stopped: {{ n.tel.services_held | list | join(', ') }}</span>{% endif %}
       <span>heartbeat {{ n.hb_age | secs if n.hb_age is not none else 'never' }}</span>
     </div>
     <div class="row" style="margin-top:6px">

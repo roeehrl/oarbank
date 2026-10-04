@@ -59,6 +59,28 @@ impl FleetJobView {
     }
 }
 
+/// A running module service as protection sees it: fleet work like a job, which protection may stop (only when
+/// `yieldable`), releasing the attempts that use it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FleetServiceView {
+    /// `module/service`.
+    pub key: String,
+    pub footprint_gb: f64,
+    pub started_at: f64,
+    /// `gpu.use` is not none: GPU-resident.
+    pub gpu: bool,
+    pub yieldable: bool,
+    /// The attempts that use it (released with it).
+    pub users: Vec<i64>,
+}
+
+/// A service to stop now and keep down while this holds, with the release reason for its users.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceStop {
+    pub key: String,
+    pub reason: String,
+}
+
 /// An attempt to release now, with the release reason (`preempt_memory`, `limit_mem`, `preempt_protection`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Eviction {
@@ -82,6 +104,9 @@ pub struct ProtectionTickResult {
     pub rung: i32,
     pub dynamic_reason: String,
     pub budget_cores: Option<f64>,
+    /// Services to stop and hold down (yieldable ones only): the memory guard's victim, a rule's evict, GPU work
+    /// that may not run.
+    pub service_stops: Vec<ServiceStop>,
 }
 
 impl ProtectionTickResult {
@@ -101,6 +126,8 @@ pub struct TickInputs {
     pub on_battery: bool,
     pub run_on_battery: bool,
     pub jobs: Vec<FleetJobView>,
+    /// Running module services (their processes are in `fleet_pids` too).
+    pub services: Vec<FleetServiceView>,
     /// Seconds since the last user input (0 while someone is present).
     pub user_idle_s: f64,
     /// perf + eff/2 cores; the dynamic budget's ceiling before reservations.
@@ -119,6 +146,7 @@ impl TickInputs {
             on_battery: false,
             run_on_battery: false,
             jobs: vec![],
+            services: vec![],
             user_idle_s: 1e9,
             allocatable_cores: 0.0,
             lowering: true,
@@ -222,6 +250,27 @@ pub struct ProtectionController {
     /// told by a sample with enough CPU time.
     instruction_counters: BTreeMap<String, bool>,
     last_inputs: Option<CachedInputs>,
+    /// Services stopped on the last tick (journaled when that changes).
+    last_service_stops: BTreeSet<String>,
+}
+
+/// Stop `svc` (once) and release every attempt using it with the same reason.
+fn stop_service(svc: &FleetServiceView, reason: &str, stops: &mut Vec<ServiceStop>, evictions: &mut Vec<Eviction>) {
+    if stops.iter().any(|s| s.key == svc.key) {
+        return;
+    }
+    stops.push(ServiceStop {
+        key: svc.key.clone(),
+        reason: reason.into(),
+    });
+    for &a in &svc.users {
+        if !evictions.iter().any(|e| e.attempt_id == a) {
+            evictions.push(Eviction {
+                attempt_id: a,
+                reason: reason.into(),
+            });
+        }
+    }
 }
 
 /// Parse one part of the config and refuse what cannot work on the host's OS (support.rs).
@@ -271,6 +320,7 @@ impl ProtectionController {
             lowering: true,
             instruction_counters: BTreeMap::new(),
             last_inputs: None,
+            last_service_stops: BTreeSet::new(),
         }
     }
 
@@ -474,6 +524,9 @@ impl ProtectionController {
             i.run_on_battery,
         ));
         let mut evictions: Vec<Eviction> = vec![];
+        let mut service_stops: Vec<ServiceStop> = vec![];
+        // jobs and yieldable services compete as the memory guard's victim; a service stands as -(its index + 1)
+        let yieldable: Vec<&FleetServiceView> = i.services.iter().filter(|s| s.yieldable).collect();
         let candidates: Vec<VictimCandidate> = i
             .jobs
             .iter()
@@ -482,23 +535,32 @@ impl ProtectionController {
                 footprint_gb: j.footprint_gb,
                 started_at: j.started_at,
             })
+            .chain(yieldable.iter().enumerate().map(|(n, s)| VictimCandidate {
+                attempt_id: -(n as i64) - 1,
+                footprint_gb: s.footprint_gb,
+                started_at: s.started_at,
+            }))
             .collect();
         if evict_now {
             if let Some(victim) = MemoryGuard::victim(&candidates) {
-                evictions.push(Eviction {
-                    attempt_id: victim,
-                    reason: "preempt_memory".into(),
-                });
-                self.journal(
-                    "guard_fired",
-                    "MEMORY_HARD_FLOOR",
-                    None,
-                    obj([
-                        ("attempt", Value::from(victim)),
-                        ("why", Value::from(self.memory_guard.reason.as_str())),
-                        ("free_pct", rounded(i.memory.free_pct(), 1)),
-                    ]),
-                );
+                let mut detail = vec![
+                    ("why", Value::from(self.memory_guard.reason.as_str())),
+                    ("free_pct", rounded(i.memory.free_pct(), 1)),
+                ];
+                let code = if victim < 0 {
+                    let svc = yieldable[(-victim - 1) as usize];
+                    stop_service(svc, "preempt_memory", &mut service_stops, &mut evictions);
+                    detail.push(("service", Value::from(svc.key.as_str())));
+                    "MEMORY_HARD_FLOOR_SERVICE"
+                } else {
+                    evictions.push(Eviction {
+                        attempt_id: victim,
+                        reason: "preempt_memory".into(),
+                    });
+                    detail.push(("attempt", Value::from(victim)));
+                    "MEMORY_HARD_FLOOR"
+                };
+                self.journal("guard_fired", code, None, obj(detail));
             }
         }
         // Borg's overage rule: a job over 1.25x its declared memory is evicted first under a floor
@@ -540,6 +602,9 @@ impl ProtectionController {
                     obj([("attempts", Value::Array(ids))]),
                 );
             }
+            for svc in &yieldable {
+                stop_service(svc, "preempt_protection", &mut service_stops, &mut evictions);
+            }
         }
         if lvl != self.last_guard {
             let kind = if lvl == GuardLevel::Clear {
@@ -577,6 +642,7 @@ impl ProtectionController {
             rung: 0,
             dynamic_reason: String::new(),
             budget_cores: None,
+            service_stops,
         };
         match metrics {
             Some(m) => {
@@ -872,6 +938,18 @@ impl ProtectionController {
         }
         self.journal_fleet_action(true, &r.paused, pause_rules, &out.reason);
         self.journal_fleet_action(false, &r.lowered, lower_rules, &out.reason);
+        // GPU work may not run: GPU-resident services go too (yieldable ones; the others hold their GPU)
+        if r.constraint.gpu_jobs == Some(0) {
+            for svc in i.services.iter().filter(|s| s.gpu && s.yieldable) {
+                stop_service(svc, "preempt_protection", &mut r.service_stops, &mut r.evictions);
+            }
+        }
+        let stopped: BTreeSet<String> = r.service_stops.iter().map(|s| s.key.clone()).collect();
+        for st in r.service_stops.iter().filter(|s| !self.last_service_stops.contains(&s.key)) {
+            self.journal("service_stopped", "PROTECTION_SERVICE_STOP", None,
+                         obj([("service", Value::from(st.key.as_str())), ("reason", Value::from(st.reason.as_str()))]));
+        }
+        self.last_service_stops = stopped;
         if out.rung != self.last_rung {
             self.journal(
                 "rung_change",

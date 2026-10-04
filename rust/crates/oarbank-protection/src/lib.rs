@@ -46,8 +46,8 @@ pub use config::{
     TreeScope, DEFAULT_GPU_MIN_BUSY,
 };
 pub use controller::{
-    Eviction, FleetJobView, Host, LocalProtection, ProtectionController, ProtectionTickResult,
-    TickInputs,
+    Eviction, FleetJobView, FleetServiceView, Host, LocalProtection, ProtectionController,
+    ProtectionTickResult, ServiceStop, TickInputs,
 };
 pub use dynamic::{
     DynInputs, DynJob, DynOutputs, DynamicController, ProtectedSignal, ProxyValidation, ThrottleDoc,

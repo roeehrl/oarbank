@@ -539,7 +539,12 @@ def runner_gpu(name: str, platform: str | None) -> str:
 
 
 def job_uses_gpu(module: str, resources: dict | None, platform: str | None) -> bool:
-    return bool((resources or {}).get("gpu")) or runner_gpu(module, platform) != "none"
+    """A GPU job: its resources say so, its runner uses a GPU, or it reserves a pool of a service that uses one (a warm
+    model server: oarbank-sdk 1.5 `services[].gpu`)."""
+    if bool((resources or {}).get("gpu")) or runner_gpu(module, platform) != "none":
+        return True
+    i = CATALOG.get(module)
+    return bool(i and set((resources or {}).get("pools") or {}) & i.manifest.gpu_pools())
 
 
 def stage_platforms(name: str, stage: str | None) -> list[str]:
