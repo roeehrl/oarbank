@@ -8,6 +8,7 @@ linux-amd64, linux-arm64), studies may keep their units of work on one platform 
 ingestion jobs of a stage that does not compare run beside them (S21).
 """
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -15,9 +16,11 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
+from oarbank.common import sha256_hex
 from oarbank.coordinator import clock, core, invariants, modcalls, placement
 from oarbank.sim import _cfg
 
+import helpers
 from helpers import (create_study, SCENES, MODE, PARAMS, READY, certify, enrolled_node, facts_for, fresh, golden_result,
                      make_db, relay_result)
 
@@ -48,6 +51,12 @@ class CoordinatorMachine(RuleBasedStateMachine):
 
     def node(self, i):
         return fresh(self.db, self.nodes[i % len(self.nodes)])
+
+    def campaigns(self, where: str) -> list[str]:
+        """Campaign ids in creation order. The relay module names a study `s_<random hex>`, so an order by id would
+        differ between two runs of the same steps: Hypothesis replays (and shrinks) a step sequence only if every rule
+        draws the same way each time."""
+        return [r["campaign_id"] for r in self.db.q(f"SELECT campaign_id FROM campaigns WHERE {where} ORDER BY rowid")]
 
     # ------------------------------------------------------------------ agent actions
     @rule(i=st.integers(0, 2), free=st.integers(1, 6))
@@ -82,7 +91,7 @@ class CoordinatorMachine(RuleBasedStateMachine):
             return
         # deterministic per (config, dataset): a healthy node always reproduces the same result
         a["config_key"] = _cfg(a["spec_json"])
-        score = f"0.{800000 + hash((a['config_key'], a['dataset_id'])) % 99999:06d}"
+        score = f"0.{800000 + int(sha256_hex(a['config_key'] + a['dataset_id'])[:8], 16) % 99999:06d}"
         image = f"frame-{a['config_key'][:8]}-{a['dataset_id']}"
         n = self.node(i)
         try:
@@ -113,7 +122,8 @@ class CoordinatorMachine(RuleBasedStateMachine):
     @rule(i=st.integers(0, 2), progress=st.booleans())
     def heartbeat(self, i, progress):
         n = self.node(i)
-        live = self.db.q("SELECT attempt_id FROM attempts WHERE node_id=? AND state='live'", (n["node_id"],))
+        live = self.db.q("SELECT attempt_id FROM attempts WHERE node_id=? AND state='live' ORDER BY attempt_id",
+                         (n["node_id"],))
         rep = []
         for a in live:
             self.cpu[a["attempt_id"]] = self.cpu.get(a["attempt_id"], 0.0) + (5.0 if progress else 0.0)
@@ -130,7 +140,7 @@ class CoordinatorMachine(RuleBasedStateMachine):
         """User sets a hard jobs cap; the agent releases youngest attempts to fit (its contract)."""
         n = self.node(i)
         core.set_limits(self.db, n["node_id"], {"jobs": cap, "enforce": "hard"}, "prop")
-        live = self.db.q("SELECT attempt_id FROM attempts WHERE node_id=? AND state='live' ORDER BY granted_at DESC",
+        live = self.db.q("SELECT attempt_id FROM attempts WHERE node_id=? AND state='live' ORDER BY granted_at DESC, attempt_id DESC",
                          (n["node_id"],))
         for a in live[:max(0, len(live) - cap)]:
             core.release(self.db, n, a["attempt_id"], "limit_cpu")
@@ -154,14 +164,15 @@ class CoordinatorMachine(RuleBasedStateMachine):
     # ------------------------------------------------------------------ user actions
     @rule(k=st.integers(0, 10 ** 6))
     def retry(self, k):
-        jobs = self.db.q("SELECT job_id FROM jobs WHERE campaign_id=? AND state IN ('done','failed','quarantined','cancelled')",
-                         (self.sid,))
+        jobs = self.db.q("SELECT job_id FROM jobs WHERE campaign_id=? AND state IN ('done','failed','quarantined','cancelled') "
+                         "ORDER BY job_id", (self.sid,))
         if jobs:
             core.retry_job(self.db, jobs[k % len(jobs)]["job_id"], "prop")
 
     @rule(k=st.integers(0, 10 ** 6))
     def cancel(self, k):
-        jobs = self.db.q("SELECT job_id FROM jobs WHERE campaign_id=? AND state IN ('pending','leased')", (self.sid,))
+        jobs = self.db.q("SELECT job_id FROM jobs WHERE campaign_id=? AND state IN ('pending','leased') ORDER BY job_id",
+                         (self.sid,))
         if jobs:
             core.cancel_job(self.db, jobs[k % len(jobs)]["job_id"], "prop")
 
@@ -179,7 +190,7 @@ class CoordinatorMachine(RuleBasedStateMachine):
         from oarbank_sdk import effects as fx
         from oarbank_sdk.keys import job_key
         from oarbank.coordinator import effects
-        cids = [r["campaign_id"] for r in self.db.q("SELECT campaign_id FROM campaigns WHERE state!='cancelled' ORDER BY campaign_id")]
+        cids = self.campaigns("state!='cancelled'")
         payload = {"task": "sync", "cursor": cursor}
         key = job_key("dev.codonic.oarbank.relay", "relay1", payload, "sync")
         try:
@@ -202,7 +213,7 @@ class CoordinatorMachine(RuleBasedStateMachine):
     @rule(k=st.integers(0, 10 ** 6), platform=st.sampled_from(["darwin-arm64", "linux-amd64", "linux-arm64"]))
     def rebind(self, k, platform):
         """campaigns.rebind_platform: a campaign's units move; their finished jobs run again in the new class."""
-        cids = [r["campaign_id"] for r in self.db.q("SELECT DISTINCT campaign_id FROM placement_bindings ORDER BY campaign_id")]
+        cids = self.campaigns("campaign_id IN (SELECT campaign_id FROM placement_bindings)")
         if cids:
             try:
                 with self.db.tx():
@@ -231,6 +242,41 @@ class CoordinatorMachine(RuleBasedStateMachine):
         if hasattr(self, "db"):
             v = invariants.check_all(self.db)
             assert not v, "\n".join(v)
+
+
+# The machine once failed about 1 run in 16 with FlakyStrategyDefinition: it picked campaigns by id, and the relay module
+# names a study `s_<random hex>`, so one step sequence acted on another campaign when replayed, a different claim
+# followed, and a rule's precondition flipped. Found as these four steps (shrunk by replaying each candidate 10 times):
+# whether the sync job joins the pinned linux-amd64 study or the first one decides what mini can claim.
+COUNTEREXAMPLE = [("placement_study", {"mix": "same-platform", "unit": "group", "bind": "first-claim", "pin": True}),
+                  ("sync_job", {"cursor": 0, "campaign": 810109}), ("heartbeat", {"i": 0, "progress": True}),
+                  ("claim", {"i": 0, "free": 2})]
+
+
+def _replay(monkeypatch, steps, ids):
+    """Run `steps` on a fresh machine whose studies get the campaign ids `ids`, in creation order; the attempts after
+    each step."""
+    names = iter(ids)
+    monkeypatch.setattr(sys.modules[__name__], "create_study",
+                        lambda db, name, *a, **kw: helpers.create_study(db, name, *a, campaign_id=next(names), **kw))
+    m = CoordinatorMachine()
+    m.setup()
+    try:
+        out = []
+        for rule_name, args in steps:
+            getattr(m, rule_name)(**args)
+            m.safety()
+            out.append(list(m.attempts))
+        return out
+    finally:
+        m.teardown()
+
+
+def test_a_step_sequence_replays_the_same_whatever_the_campaign_ids(monkeypatch):
+    """Hypothesis replays and shrinks a step sequence only if every rule draws and acts the same way each time: the
+    counterexample's steps, with study ids ascending and then descending in creation order, end the same."""
+    rising = _replay(monkeypatch, COUNTEREXAMPLE, ["s_00000001", "s_00000002"])
+    assert _replay(monkeypatch, COUNTEREXAMPLE, ["s_ffffffff", "s_00000000"]) == rising
 
 
 import os
