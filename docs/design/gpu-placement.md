@@ -65,7 +65,7 @@ runs only images a module was approved for):
 | Linux CDI, an NVIDIA spec (`nvidia.com/gpu`) | `cdi:nvidia.com/gpu` | `cuda` when the spec mounts `libcuda.so`, `vulkan` when it mounts the NVIDIA Vulkan ICD (`nvidia_icd.json`), `opencl` when it mounts `libnvidia-opencl` |
 | Linux CDI, any other kind (AMD, Intel) | `cdi:<kind>` | `rocm` when it passes `/dev/kfd`, `vulkan` when it passes a DRM render node (the image brings Mesa) |
 | Linux CDI over WSL2 GPU-PV (`/dev/dxg`; the Windows container runtime's path) | `cdi:<kind>` | `cuda` when the spec mounts `libcuda.so` |
-| macOS, krunkit (below) | `virtio-gpu:venus` | `vulkan` (the image brings Mesa with the Venus driver, 25.2 or newer) |
+| macOS, krunkit (below) | `virtio-gpu:venus` | `vulkan` (the image brings the libkrun build of Mesa's Venus driver) |
 | none | `undetected` | none |
 
 The image's user space is the module's part: a CDI spec gives the device and the driver's libraries, Venus and Mesa's
@@ -148,7 +148,8 @@ are often amd64-only) and never share a kernel with a VM that has a GPU device.
 
 - `ColimaRuntime` gains a `Profile`: `oarbank` (`--vm-type vz --vz-rosetta`, as today) and `oarbank-gpu`
   (`--vm-type krunkit`, `--arch aarch64`, the same CPU, memory and disk sizing, the same two mounts of the agent's
-  work and modules-data directories, virtiofs). The agent never starts, stops or queries any other profile (the
+  work and modules-data directories, over `sshfs`: Lima's krunkit driver accepts only virtiofs or reverse-sshfs, and
+  Colima 0.10.3 turns every type but reverse-sshfs into 9p off `vz`, abiosoft/colima#1607). The agent never starts, stops or queries any other profile (the
   user's `default`, or anyone's).
 - `container_runtime::for_node` returns `Containers { cpu, gpu }`: on macOS `gpu` is the `oarbank-gpu` runtime when
   Colima, docker and `krunkit` are installed (Colima looks krunkit up on `PATH`; the agent's helper `PATH` holds
@@ -168,7 +169,9 @@ are often amd64-only) and never share a kernel with a VM that has a GPU device.
 
 ### What an image needs
 
-Mesa's Venus Vulkan driver (`mesa-vulkan-drivers` 25.2 or newer; Fedora 42 and later ship it) and the Vulkan loader.
+Mesa's Venus Vulkan driver in its libkrun build and the Vulkan loader. Stock Mesa (Fedora 44's 26.2) fails
+`vkCreateInstance` with `ERROR_OUT_OF_HOST_MEMORY` under krunkit; the build in the `slp/mesa-libkrun-vulkan` COPR
+(25.3.6-102.fc44, pinned with `dnf versionlock`, as RamaLama's images do) works.
 The agent's live test builds one from Fedora with `vulkan-tools`, `glslc` and a small compute program, and checks the
 device is `Virtio-GPU Venus (Apple …)` and that a compute shader's output is right.
 
@@ -267,6 +270,8 @@ Built as designed, in oarbank-sdk 1.5.0 and core 2.5.0. Where the build adds to 
 **Not verified, for want of hardware.** No machine here has an NVIDIA, AMD or Intel GPU, so the CUDA, ROCm, DirectML
 and hardware Vulkan and OpenCL probes, and the CDI container APIs on a real spec, are covered by the probes running
 (and reporting absence) on all three OSes and by recorded specs, not by a device. The macOS GPU VM is built and its
-arguments, socket, device and selection are tested, but its live test
-(`live_colima_gpu_runs_vulkan_compute_on_the_apple_gpu`) has not run: krunkit comes from a third-party Homebrew tap,
-which Homebrew now installs only after `brew trust slp/krun`, an owner decision on this Mac.
+arguments, socket, device and selection are tested, and its live test
+(`live_colima_gpu_runs_vulkan_compute_on_the_apple_gpu`, krunkit 1.3.2, Colima 0.10.3, Lima 2.2.0, M4 Max) passes: the
+container sees `Virtio-GPU Venus (Apple M4 Max)` and the compute shader's output is right. The live run found two
+things the unit tests could not: the GPU VM's mounts must be `sshfs` (above), and the image needs the libkrun build of
+Mesa (What an image needs).

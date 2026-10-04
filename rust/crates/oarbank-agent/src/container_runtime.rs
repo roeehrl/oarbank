@@ -571,13 +571,14 @@ impl ColimaRuntime {
     }
 
     /// The CPU profile on Virtualization.framework with Rosetta for amd64 images; the GPU profile on krunkit (no
-    /// Rosetta). Both mount only the agent's work and modules-data directories.
+    /// Rosetta; `sshfs`, Colima's name for reverse-sshfs: Lima's krunkit driver refuses 9p, which Colima 0.10.3 picks off
+    /// `vz` for any other type, abiosoft/colima#1607). Both mount only the agent's work and modules-data directories.
     pub fn start_args(&self) -> Vec<String> {
         let c = self.colima.to_string_lossy().to_string();
         let mut a = vec![c, "start".into(), self.profile.name().into()];
         a.extend(match self.profile {
             Profile::Cpu => ["--vm-type", "vz", "--vz-rosetta"].as_slice(),
-            Profile::Gpu => ["--vm-type", "krunkit"].as_slice(),
+            Profile::Gpu => ["--vm-type", "krunkit", "--mount-type", "sshfs"].as_slice(),
         }.iter().map(|s| s.to_string()));
         a.extend(["--arch".into(), "aarch64".into(), "--cpu".into(), self.vm_cpus.to_string(), "--memory".into(),
                   Self::fmt_gb(self.vm_mem_gb), "--disk".into(), "100".into(),
@@ -1050,7 +1051,7 @@ pub mod tests {
         let mut g = colima_at(&base, Profile::Gpu);
         (g.vm_cpus, g.vm_mem_gb) = (6, 10.0);
         let agent = base.join("agent").to_string_lossy().to_string();
-        assert_eq!(g.start_args()[1..], ["start", "oarbank-gpu", "--vm-type", "krunkit", "--arch", "aarch64", "--cpu", "6", "--memory",
+        assert_eq!(g.start_args()[1..], ["start", "oarbank-gpu", "--vm-type", "krunkit", "--mount-type", "sshfs", "--arch", "aarch64", "--cpu", "6", "--memory",
                                           "10", "--disk", "100", "--mount", &format!("{agent}/work:w"),
                                           "--mount", &format!("{agent}/modules-data:w")]);
         assert_eq!(g.docker_socket(), PathBuf::from("/Users/u/.colima/oarbank-gpu/docker.sock"));
