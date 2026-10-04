@@ -44,7 +44,9 @@ can do nothing the API cannot; the generated [operations.md](operations.md) list
 - **Module operations** (`mod.<module>.<verb>`) are registered from the module's manifest at install, with tiers raised
   by the effects they declare; the host draws their preview, confirmation and audit (D23).
 - **Parity** is a test: every operation is reachable from the API, the CLI and a console form, every explain kind from
-  all three, and every reason code's remedies are operations ([parity.md](parity.md), generated).
+  all three, every `oarbank` command the registry names exists in the CLI's parser, and every reason code's remedies
+  are operations ([parity.md](parity.md), generated). What an operator reads on a node or job page, `oarbank node show`
+  and `oarbank job show` print from the same detail document (D42, [console-parity.md](console-parity.md)).
 
 ## The audit log is hash-chained
 
@@ -59,7 +61,8 @@ an owner-signed rescue move names it.
 
 `oarbank explain job|node <id>` and the console's explain panels read one document (D16,
 `oarbank.contracts.explain`): a verdict, a headline, a per-node matrix of predicate results with what was observed
-and required, a summary by reason code, evidence and remedies (operations). Explain has its own limiter (two at a
+and required, a summary by reason code, evidence and remedies (operations, with their target when the subject names
+it: the console offers them as buttons, the CLI prints the command). Explain has its own limiter (two at a
 time) so it never competes with the agent path.
 
 ### The claim path and the explainer share one pure predicate function
