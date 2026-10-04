@@ -208,6 +208,11 @@ def test_console_pages_show_state_and_fingerprints_never_the_value(tmp_path):
                 body = c.get(p).text
                 assert KEY not in body and NODE_KEY not in body, p
             assert fp in c.get("/modules/vault/secrets").text and "api_key" in c.get(f"/nodes/{n['node_id']}").text
+            # the node reports GPU passthrough to containers (#13): a Mac cannot
+            d.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (json.dumps({**FACTS, "containers": {"gpu": "undetected"}}),
+                                                                   n["node_id"]))
+            assert "GPU in containers</span><span>undetected: macOS container runtimes have no GPU passthrough" in \
+                c.get(f"/nodes/{n['node_id']}").text
     assert KEY.encode() not in everything_stored(d)
 
 
