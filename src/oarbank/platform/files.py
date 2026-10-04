@@ -210,11 +210,12 @@ def running_interpreter() -> Path:
     return Path(sys.executable if POSIX else getattr(sys, "_base_executable", sys.executable)).resolve()
 
 
-def remove_tree(p, within: float = 5.0):
+def remove_tree(p, within: float = 60.0):
     """Delete a directory tree that must be gone before the next step (a module environment rebuilt in its place).
-    Windows refuses to delete an executable an antivirus scanner is reading, for some tens of milliseconds after it was
-    written or run, and offers nothing to wait on; each refused entry is retried until `within` seconds have passed,
-    then the error is raised. POSIX has no such hold."""
+    Windows refuses to delete an executable, or rename its directory, while the antivirus scanner holds it after it was
+    written or run: a tenth of a second on an idle machine, half a minute when every core is busy (Defender, measured on
+    a 4-core VM), and nothing to wait on; each refused entry is retried until `within` seconds have passed, then the
+    error is raised. POSIX has no such hold."""
     import shutil
     import time
     if not os.path.lexists(p):

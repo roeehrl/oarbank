@@ -259,9 +259,11 @@ Built as designed, with these additions found on the way:
 - **A managed Python's real prefix**: uv names its interpreters through junctions, and copying a junction left a "copy"
   whose installs landed in the shared interpreter; the build copies `realpath(sys.base_prefix)` and refuses a link.
 - **Releases and moves** were made OS-independent (decision 13); the move's database install uses the backup API
-  (decision 14). A module environment rebuilt in place is deleted with `files.remove_tree`, which retries for a few
-  seconds an executable Windows will not delete while an antivirus scanner reads it (tens of milliseconds after it
-  was written, with nothing to wait on); before, the rebuild found half an environment and failed.
+  (decision 14). A module environment rebuilt in place is deleted with `files.remove_tree`, which retries for up to a
+  minute an executable Windows will not delete (nor its directory rename) while Defender scans it after it was written
+  or run: a tenth of a second on an idle machine, 29 to 38 s with every core of a 4-core VM busy, with nothing to wait
+  on. Before, the rebuild found half an environment and failed; it matters after a move, which writes the environment
+  just before oarbankd rebuilds it.
 - **The sandbox's environment** keeps the host account's `LOCALAPPDATA` (decision 5): with the module's own, uv found
   no temporary directory inside an AppContainer.
 - **Tests and the suite**: module hosts a test file opened end with it (their processes held files open on Windows);
@@ -273,17 +275,18 @@ Built as designed, with these additions found on the way:
   time it takes depends upon available system resources"). CI splits the suite with pytest-xdist.
 
 **Verified.**
-- Windows 11 arm64 VM (x64 CPython under emulation): the core suite 633 passed, 8 skipped (below); `-m chaos` 6 passed;
-  `tests/rust` 22 passed, 5 skipped (below); the coordinator build (`scripts\build-coordinator.ps1`, 59 MB) built,
+- Windows 11 arm64 VM (x64 CPython under emulation): the core suite 646 passed, 8 skipped (below); `-m chaos` 6 passed;
+  `tests/rust` 24 passed, 5 skipped (below); the Rust workspace's tests; the coordinator build (`scripts\build-coordinator.ps1`, 59 MB) built,
   installed with `install-oarbankd.ps1` as two services under their virtual accounts with the home's DACL, enrolled a
   Windows agent and a macOS agent, ran toy campaigns on each and on both, survived a service restart and two upgrades
   (2.5.0 to 2.5.1 to 2.5.2, side by side, `current` moved), and reported its services from the service account
   (`oarbank coordinator status`). A move from a macOS coordinator to the Windows service (installed with `-Pair`) and
   back to macOS committed at epochs 2 and 3, both agents following each time, with the campaigns' history intact.
   The signed move installed the real compiled Windows build through the agent's process host.
-- macOS: the core suite 631 passed, 10 skipped; chaos 6 passed; `tests/rust` 25 passed, 2 skipped.
-- Linux (Lima, arm64): the core suite 629 passed, 12 skipped; chaos 6 passed; clippy and the agent's and launcher's
-  tests.
+- macOS: the core suite 644 passed, 10 skipped; chaos 6 passed; `tests/rust` 27 passed, 2 skipped; the Rust workspace
+  (clippy and tests); the SDK's suite 435 passed, 4 skipped.
+- Linux (Lima, arm64): the core suite 629 passed, 12 skipped and chaos 6 passed (before the rebase on main); clippy
+  and the Rust workspace's tests (323 passed, 16 ignored).
 
 **Skipped on Windows, and why.**
 - `test_packaging`: three tests of `install-oarbankd.sh` (Windows has `install-oarbankd.ps1`, tested by its own test)
