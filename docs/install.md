@@ -10,7 +10,8 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
   or arm64 ([Windows nodes](#windows-nodes)).
 - For the coordinator: a Mac or a Linux machine that stays on, reachable by the nodes on one address (port 7443/tcp).
 - Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
-  agent's own Colima, and so on).
+  agent's own Colima, and so on). On a Mac with Apple silicon, krunkit (`brew tap slp/krun && brew install krunkit`)
+  gives GPU containers Vulkan on the Mac's GPU, in a second agent-owned Colima VM.
 
 ## The packages
 
@@ -123,6 +124,11 @@ dev.codonic.oarbank.agent.session.service`).
 Without a code: `sudo oarbank-launcher setup --scope system --join-code 'OB1-…'`. Containers use rootless Podman when
 it is installed (the `oarbank` account needs subordinate ids: `sudo usermod --add-subuids 100000-165535
 --add-subgids 100000-165535 oarbank`), else Docker Engine.
+
+GPU jobs need the GPU's device files: add the `oarbank` account to the groups that own them (`sudo usermod -aG
+render,video oarbank`, then restart the agent). `oarbank-agent gpu-apis` (run as `oarbank`: `sudo -u oarbank
+oarbank-agent gpu-apis`) prints the GPU APIs the node provides and why any is missing; the node's doctor reports the
+same list, and work is placed by it ([gpu-placement.md](design/gpu-placement.md)).
 
 A Linux coordinator works too: `scripts/build-coordinator.sh` on Linux, then `deploy/oarbankd/install-oarbankd.sh
 --build … --agent-bind …` writes systemd user units (run `loginctl enable-linger` once so they start at boot).

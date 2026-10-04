@@ -62,6 +62,8 @@ CODES: list[ReasonCode] = [
       remedies=["campaigns.rebind_platform"]),
     C("STAGE_CAPABILITY_MISSING", "job_pending", "Its stage needs {capabilities}; this node's services, probes and module doctor "
       "do not provide {missing}", remedies=["nodes.run_doctor"]),
+    C("GPU_API_MISSING", "job_pending", "Needs {need}; this node provides {have} (its doctor's GPU APIs)",
+      remedies=["nodes.run_doctor"]),
     C("SECRETS_NOT_SET", "job_pending", "Its stage receives secrets {missing}, which have no value for this node",
       remedies=["secrets.set"]),
     C("DATASET_PLATFORM_MISMATCH", "job_pending", "Its dataset is bound to {platforms}; this node is {platform}", remedies=["jobs.cancel"]),

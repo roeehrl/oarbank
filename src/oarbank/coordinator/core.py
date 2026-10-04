@@ -780,7 +780,8 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
             continue
         # it must be able to run it at all: a call-only worker cannot take a score job (sim finding)
         if _module_serves(n, f) and _pools_fit(n, res) \
-                and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"])):
+                and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"])) \
+                and predicates.gpu_apis_fit(f, n["platform"], predicates.node_gpu_apis(n)):
             return True
     return False
 
@@ -809,6 +810,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         node=node, states=node_modules(node), offered=set(offered) - set(excluded), excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in set(offered) - set(excluded)},
+        gpu_apis=predicates.node_gpu_apis(node),
         bootstrap_grants=modsandbox.bootstrap_enforced(node),
         disabled=modstore.disabled_names(db),
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
@@ -828,6 +830,7 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
     return {**j, "dispute": {**d, "scope": (cmp or {}).get("scope"), "class": (cmp or {}).get("class")} if cmp is not None else d,
             "stage_platforms": modcalls.stage_platforms(j["module"], j["stage"]), "retry": modcalls.stage_retry(j["module"], j["stage"]),
             "stage_capabilities": modcalls.stage_capabilities(j["module"], j["stage"]),
+            "gpu_apis": modcalls.stage_gpu_apis(j["module"], j["stage"]),
             "secrets": modcalls.stage_secrets(j["module"], j["stage"]),
             "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]), "placement": placement.facts(db, j, cache)}
 
@@ -1159,15 +1162,16 @@ def _pools_fit(node: dict, resources: dict | None) -> bool:
 
 
 def _eligible_nodes(db: DB, j: dict, exclude: set, cmp: dict | None = None) -> int:
-    """Ready nodes that can serve the job's module (see _can_serve), fit its pools, hold its stage's capabilities and run
-    it where it may run (predicates.platform_fits: its stage, platforms, unit class and comparison class), outside
-    `exclude`. `cmp`: the comparison class {scope, class} to use instead of the job's own dispute's (a replica about to
-    be queued)."""
+    """Ready nodes that can serve the job's module (see _can_serve), fit its pools, hold its stage's capabilities and GPU
+    APIs and run it where it may run (predicates.platform_fits: its stage, platforms, unit class and comparison class),
+    outside `exclude`. `cmp`: the comparison class {scope, class} to use instead of the job's own dispute's (a replica
+    about to be queued)."""
     res, f = jl(j["resources_json"], {}), _job_facts(db, j, cmp=cmp)
     return sum(1 for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
                                "WHERE lifecycle='ready'")
                if n["node_id"] not in exclude and _can_serve((jl(n["modules_json"], {}) or {}).get(j["module"], {}))
                and _pools_fit(n, res) and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"]))
+               and predicates.gpu_apis_fit(f, n["platform"], predicates.node_gpu_apis(n))
                and predicates.platform_fits(f, n["platform"]))
 
 

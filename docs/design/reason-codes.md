@@ -25,6 +25,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `PLATFORM_BOUND_ELSEWHERE` | Its unit of work is bound to {class_}; this node is {platform} | P1 | – | `campaigns.rebind_platform` | – |
 | `PLACEMENT_UNPINNED` | Its unit of work binds only to a pinned class (bind = explicit) and none is pinned yet | P1 | – | `campaigns.rebind_platform` | – |
 | `STAGE_CAPABILITY_MISSING` | Its stage needs {capabilities}; this node's services, probes and module doctor do not provide {missing} | P1 | – | `nodes.run_doctor` | – |
+| `GPU_API_MISSING` | Needs {need}; this node provides {have} (its doctor's GPU APIs) | P1 | – | `nodes.run_doctor` | – |
 | `SECRETS_NOT_SET` | Its stage receives secrets {missing}, which have no value for this node | P1 | – | `secrets.set` | – |
 | `DATASET_PLATFORM_MISMATCH` | Its dataset is bound to {platforms}; this node is {platform} | P1 | – | `jobs.cancel` | – |
 | `OS_VERSION_UNSUPPORTED` | Module {module} needs another OS version than {os_version} (requires.os) | P1 | – | – | – |

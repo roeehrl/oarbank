@@ -17,6 +17,7 @@
   <div class="kv small" style="margin-top:6px">
     {% if hw.cpu or hw.cores %}<span class="mut">CPU</span><span>{{ [hw.cpu, ('(' ~ hw.cores ~ ')' if hw.cpu else hw.cores) if hw.cores] | select | join(' ') }}</span>{% endif %}
     {% if hw.gpus %}<span class="mut">GPU</span><span>{{ hw.gpus | join(', ') }}</span>{% endif %}
+    {% if n.gpu.reported %}<span class="mut">GPU APIs</span><span title="{% for a, e in n.gpu.evidence | dictsort %}{{ a }}: {{ e }}&#10;{% endfor %}">{{ n.gpu.host | join(', ') or 'none' }}</span>{% endif %}
     {% if hw.memory_gb is known %}<span class="mut">memory</span><span>{{ hw.memory_gb | num(1) }} GB</span>{% endif %}
     {% if hw.os %}<span class="mut">system</span><span>{{ hw.os }}{% if hw.arch %} · {{ hw.arch }}{% endif %}</span>{% endif %}
     {% if T0.disk_free_gb is known %}<span class="mut">disk free</span><span>{{ T0.disk_free_gb | num(0) }} GB</span>{% endif %}
@@ -33,7 +34,7 @@
       {%- else %}{{ n.live }} running / {{ s.slots }} CPU slots{% if s.auto is not none %} (auto {{ s.auto }}){% endif %} · binding: <b>{{ s.binding or 'automatic capacity' }}</b>{% endif %}</span>
     {% if n.cap.mem_gb_free is known %}<span class="mut">memory for jobs</span><span>{{ n.cap.mem_gb_free | num(1) }} GB free</span>{% endif %}
     {% if n.cap.pools %}<span class="mut">pools</span><span>{% for p, k in n.cap.pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
-    {% if n.facts.containers %}<span class="mut">GPU in containers</span><span>{% if (n.facts.containers.gpu or '').startswith('cdi:') %}{{ n.facts.containers.gpu[4:] }} (CDI){% else %}undetected{% if n.platform and n.platform.startswith('darwin') %}: macOS container runtimes have no GPU passthrough{% elif n.platform and n.platform.startswith('windows') %}: no container runtime on Windows yet{% endif %}{% endif %}</span>{% endif %}
+    {% if n.facts.containers %}<span class="mut">GPU in containers</span><span>{% if n.gpu.mechanism %}{{ n.gpu.mechanism }}{% if n.gpu.containers %}: {{ n.gpu.containers | join(', ') }}{% endif %}{% else %}undetected{% if n.platform and n.platform.startswith('darwin') %}: krunkit is not installed{% elif n.platform and n.platform.startswith('windows') %}: no container runtime on Windows yet{% endif %}{% endif %}</span>{% endif %}
     {% if T0.services_reserved_gb %}<span class="mut">services hold</span><span>{{ T0.services_reserved_gb | num(1) }} GB</span>{% endif %}
     {% if T0.services_held %}<span class="mut">services stopped by protection</span><span>{% for k, why in T0.services_held | dictsort %}{{ k }} ({{ why }}){% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
     {% set mem = [(T0.mem_used_gb | num(1)) ~ ' GB used' if T0.mem_used_gb is known, (T0.mem_free_pct | num(0)) ~ '% free' if T0.mem_free_pct is known,

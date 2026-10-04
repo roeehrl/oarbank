@@ -18,7 +18,7 @@ SEATBELT = {"filesystem": "enforced", "ipc": "enforced", "net.none": "enforced",
             "no_link_local": "unavailable"}
 FACTS = {"facts": 2, "platform": {"os": "darwin", "arch": "arm64", "os_version": "27.0", "os_build": "27A100"},
          "cpu": {"model": "Apple M5 Pro", "perf_cores": 5, "eff_cores": 10, "logical": 15}, "memory_gb": 24.0,
-         "gpus": [{"vendor": "apple", "model": "Apple M5 Pro", "apis": ["metal"], "unified": True}],
+         "gpus": [{"vendor": "apple", "model": "Apple M5 Pro", "unified": True}],
          "sandbox": {"backend": "seatbelt", "enforcement": SEATBELT}}
 
 
