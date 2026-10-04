@@ -6,8 +6,8 @@
 #
 # Layout: oarbank-coordinator.json, python\ (a relocatable CPython with the coordinator's dependencies and the SDK;
 # modules run on this interpreter), bin\oarbank-sandbox.exe (the agent's module launcher: AppContainers), bin\uv.exe
-# (module environments), and bin\oarbankd.cmd, bin\oarbank.cmd and bin\oarbank-console.cmd for people. The services run
-# python\python.exe directly (the manifest's exec): a service needs a program, not a script. The core is compiled with
+# (module environments), and per program a launcher (bin\oarbankd.py, …) and a .cmd for people. The services run
+# python\python.exe with the launcher (the manifest's exec): a service needs a program, not a script. The core is compiled with
 # Nuitka into one native extension module (D7: its source is not shipped); its templates, static files and schemas sit
 # beside it. Needs Rust, uv and the MSVC build tools for x64 (Nuitka compiles for the interpreter); on arm64 also clang
 # (scripts\windows-clang.ps1). OARBANK_SIGNTOOL_ARGS signs the executables, as for the agent's package.
@@ -20,7 +20,9 @@ $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
 if (-not $Version) { $Version = (Select-String -Path "$Repo\pyproject.toml" -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value }
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$') { throw "bad version $Version" }
-$Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
+# the machine's architecture (an x64 PowerShell under Windows on Arm's emulation says AMD64 everywhere else)
+$native = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment").PROCESSOR_ARCHITECTURE
+$Arch = if ($native -eq "ARM64") { "arm64" } else { "amd64" }
 $Platform = "windows-$Arch"
 $Out = "$Repo\dist"
 $Work = Join-Path $env:TEMP "oarbank-coord-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -34,8 +36,10 @@ try {
   # 1. the interpreter: uv's managed CPython (python-build-standalone) is relocatable; named in full, x64 (see above)
   $Request = "cpython-$(if ($env:OARBANK_PYTHON) { $env:OARBANK_PYTHON } else { '3.12' })-windows-x86_64-none"
   uv python install -q $Request; Check "uv python install $Request"
-  # its real prefix: uv names a managed Python through a junction, and copying a junction copies no directories
-  $PyHome = (& (uv python find --managed-python $Request).Trim() -I -c "import sys; print(sys.base_prefix)").Trim()
+  # its real prefix: uv names a managed Python through a junction, and copying a junction leaves a copy whose
+  # installs land in the shared interpreter
+  $PyHome = (& (uv python find --managed-python $Request).Trim() -I -c "import os, sys; print(os.path.realpath(sys.base_prefix))").Trim()
+  if ((Get-Item $PyHome).LinkType) { throw "$PyHome is still a link" }
   Copy-Item -Recurse $PyHome "$Root\python"
   Get-ChildItem "$Root\python" -Recurse -Filter EXTERNALLY-MANAGED | Remove-Item -Force
   $Py = "$Root\python\python.exe"
@@ -76,16 +80,19 @@ try {
   Copy-Item "$Repo\rust\target\release\oarbank-agent.exe" "$Root\bin\oarbank-sandbox.exe"
   Copy-Item (Get-Command uv).Source "$Root\bin\uv.exe"
 
-  # 4. entry points for people, relative to the build so it runs from wherever it is unpacked
-  foreach ($e in @(@("oarbankd", "oarbank.coordinator"), @("oarbank", "oarbank.cli.main"), @("oarbank-console", "oarbank.console"))) {
-    Set-Content -Encoding ascii "$Root\bin\$($e[0]).cmd" "@`"%~dp0..\python\python.exe`" -I -m $($e[1]) %*"
+  # 4. entry points, relative to the build so it runs from wherever it is unpacked: a two-line launcher per program
+  #    (the compiled core cannot run as `python -m`: its loader has no code objects), and a .cmd for people
+  foreach ($e in @(@("oarbankd", "oarbank.coordinator.__main__"), @("oarbank", "oarbank.cli.main"),
+                   @("oarbank-console", "oarbank.console.__main__"))) {
+    Set-Content -Encoding ascii "$Root\bin\$($e[0]).py" "import sys`nfrom $($e[1]) import main`nsys.argv[0] = `"$($e[0])`"`nsys.exit(main())"
+    Set-Content -Encoding ascii "$Root\bin\$($e[0]).cmd" "@`"%~dp0..\python\python.exe`" -I `"%~dp0$($e[0]).py`" %*"
   }
   # uv's launchers (python\Scripts\*.exe) name the build path as their interpreter: point them at ..\python.exe, then
   # check every launcher the build ships
   & $Py -I "$Repo\scripts\relocate_shebangs.py" "$Root\python\Scripts" $Root; Check "relocating the launchers"
   $Manifest = [ordered]@{format = 1; version = $Version; platform = $Platform
-                         exec = @("python/python.exe", "-I", "-m", "oarbank.coordinator")
-                         console = @("python/python.exe", "-I", "-m", "oarbank.console")}
+                         exec = @("python/python.exe", "-I", "bin/oarbankd.py")
+                         console = @("python/python.exe", "-I", "bin/oarbank-console.py")}
   Set-Content -Encoding ascii "$Root\oarbank-coordinator.json" ($Manifest | ConvertTo-Json -Compress)
 
   # 5. signatures, then the archive

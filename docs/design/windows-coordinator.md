@@ -58,7 +58,11 @@ worse, pass while doing something else:
 
 4. **The module sandbox on a Windows coordinator** is the agent's AppContainer launcher, as Linux uses the agent's
    Landlock launcher (`bin/oarbank-sandbox` in a coordinator build, `sandboxexec.py`): a per-module AppContainer
-   (`Oarbank.<module id>`), started by the `sandbox-exec` shim inside the coordinator's Job Object. What it enforces for
+   (`Oarbank.coordinator.<module id>`, never the node's `Oarbank.<module id>`: a container's named objects live in one
+   directory per session, owned by the account that first started it, and on a coordinator that is also a node the
+   agent's and the coordinator's services both run in session 0, so sharing a container would refuse whichever came
+   second; module CLIs use `Oarbank.cli.<module id>`), started by the `sandbox-exec` shim inside the coordinator's Job
+   Object. What it enforces for
    a coordinator process (policy `kind = "coordinator"`, `net = "none"`): files through ACL entries for the container's
    SID (read and execute on the bundle, the interpreter and the import roots; full access to
    `<home>\modules\data\<name>` and `<home>\tmp\modules\<name>`; anything else only where Windows grants every
@@ -97,8 +101,9 @@ worse, pass while doing something else:
    (`NT SERVICE\<name>`, as the agent's service is), started at boot (Automatic, Delayed Start) and restarted by the
    recovery actions 10 s after a crash or a failed exit (`sc failure … restart/10000/restart/10000/restart/60000`,
    `sc failureflag 1`), as launchd's `KeepAlive.SuccessfulExit = false` and systemd's `Restart=on-failure` do. They run
-   `python.exe -I -m oarbank.coordinator --service` (and `oarbank.console --service`): `--service` hands the process
-   to the service control dispatcher (ctypes; no pywin32), reports running, turns stop and shutdown controls into
+   `python.exe -I bin\oarbankd.py --service` (and `bin\oarbank-console.py --service`; two-line launchers, as the
+   POSIX builds' `bin/oarbankd` is a shell script, since the compiled core cannot run as `python -m`): `--service`
+   hands the process to the service control dispatcher (ctypes; no pywin32), reports running, turns stop and shutdown controls into
    uvicorn's graceful exit, sends the output to `<home>\logs\oarbankd.log` (`console.log`), and reports the exit code
    when the process ends. Every deliberate exit goes through `service.exit_now(code)`, which reports the code first:
    75 (a standby restarting on the copy a move installed) is a service-specific error the recovery actions answer with
@@ -114,8 +119,8 @@ worse, pass while doing something else:
 10. **The coordinator build is the package on every OS.** `scripts/build-coordinator.ps1` builds
     `oarbank-coordinator-<v>-windows-<arch>.tar.gz` with the same layout and manifest as the POSIX builds (x64 CPython,
     the locked dependencies, the SDK, the core compiled with Nuitka into one `.pyd`, `bin\oarbank-sandbox.exe`,
-    `bin\uv.exe` for module environments, and `.cmd` entry points for people; the manifest's `exec` is
-    `python/python.exe -I -m oarbank.coordinator`, since a service needs a program). `deploy/oarbankd/install-oarbankd.ps1`
+    `bin\uv.exe` for module environments, and per program a launcher and a `.cmd` for people; the manifest's `exec`
+    is `python/python.exe -I bin/oarbankd.py`, since a service needs a program). `deploy/oarbankd/install-oarbankd.ps1`
     installs it, as `install-oarbankd.sh` does on macOS and Linux: unpack, move `current`, (re)create the services with
     their environment (`OARBANKD_HOME`, `OARBANK_RELEASE_SIGNING`, a `PATH` with the build's `bin`), the home's DACL,
     and an inbound firewall rule for the agent port scoped to the oarbankd service; running it again with a newer
@@ -162,6 +167,15 @@ worse, pass while doing something else:
 17. **SQLite** runs in WAL mode on Windows as elsewhere (its Windows VFS locks with `LockFileEx`); the coordinator's
     one-writer lock and the read-only connections are unchanged. Paths stay well under 260 characters in the default
     layout (the deepest, a module environment's extension modules, is about 140), so long paths are not required.
+
+18. **The coordinator says where and how it runs** (`coordinator/hostinfo.py`): its platform, what its service
+    manager reports about the coordinator's two services (launchd's `launchctl print`, systemd's `systemctl --user
+    show`, the service control manager's status and configuration: installed, state, start type, account, process),
+    whether this process is the one the manager runs, and its module sandbox; on Windows also the elevated helper's
+    service and whether module CLIs' allowlists are enforced. oarbankd takes it at start and at every
+    `GET /api/v1/coordinator` (no polling: nothing else changes it), keeps the last one in the setting
+    `coordinator_host`, and `oarbank coordinator status` and the console's Coordinator page show it (the console, a
+    read-only process, shows the time it was taken).
 
 ## Per OS, after this change
 

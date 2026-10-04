@@ -21,8 +21,10 @@ def launcher() -> str | None:
     if env:
         return env if Path(env).is_file() else None
     exe = ".exe" if sys.platform == "win32" else ""
-    here = Path(sys.executable).resolve().parent                     # a coordinator build: python/bin/ beside bin/
-    for cand in (here.parent.parent / "bin" / f"oarbank-sandbox{exe}", here / f"oarbank-sandbox{exe}"):
+    # a coordinator build: bin/ beside python/, whose interpreter is python/bin/python3.x (POSIX) or python\python.exe
+    here = Path(sys.executable).resolve().parent
+    for cand in (here.parent.parent / "bin" / f"oarbank-sandbox{exe}", here.parent / "bin" / f"oarbank-sandbox{exe}",
+                 here / f"oarbank-sandbox{exe}"):
         if cand.is_file():
             return str(cand)
     return shutil.which("oarbank-agent")

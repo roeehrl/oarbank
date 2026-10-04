@@ -186,10 +186,20 @@ pub fn holds(pid: i32) -> bool {
     escape(pid).is_none()
 }
 
-/// The AppContainer name for a module: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most).
-pub fn container_name(module: &str) -> String {
+/// The AppContainer for a module process: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most) for
+/// the agent's processes (runners, doctors, services, probes); the coordinator's own (its module process and dependency
+/// installs) run in `Oarbank.coordinator.<id>` and module CLIs in `Oarbank.cli.<id>`. A container's named objects
+/// live in one directory per session, which the account that first starts the container there owns, so two accounts
+/// never share a container: the agent's and the coordinator's services both run in session 0, on a coordinator that
+/// is also a node, and a person may run a module CLI in the same session as a personal agent of another account.
+pub fn container_name(module: &str, kind: &str) -> String {
+    let role = match kind {
+        "coordinator" | "install" => "coordinator.",
+        "cli" => "cli.",
+        _ => "",
+    };
     let clean: String = module.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' }).collect();
-    let mut n = format!("Oarbank.{clean}");
+    let mut n = format!("Oarbank.{role}{clean}");
     n.truncate(64);
     n
 }
@@ -658,7 +668,7 @@ pub fn exec(args: &[String]) -> ! {
         Ok(p) => p,
         Err(e) => die(70, &format!("policy {}: {e}", args[0])),
     };
-    let name = container_name(&pol.module);
+    let name = container_name(&pol.module, &pol.kind);
     let sid = match ffi::container_sid(&name) {
         Ok(s) => s,
         Err(e) => die(70, &e),
@@ -785,7 +795,11 @@ mod tests {
 
     #[test]
     fn names_and_quoting() {
-        assert_eq!(container_name("dev.example.render frames"), "Oarbank.dev.example.render-frames");
+        assert_eq!(container_name("dev.example.render frames", "runner"), "Oarbank.dev.example.render-frames");
+        assert_eq!(container_name("dev.example.render", "doctor"), "Oarbank.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "coordinator"), "Oarbank.coordinator.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "install"), "Oarbank.coordinator.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "cli"), "Oarbank.cli.dev.example.render");
         assert_eq!(quote_arg("plain"), "plain");
         assert_eq!(quote_arg(r"C:\Program Files\x"), r#""C:\Program Files\x""#);
         assert_eq!(quote_arg(r#"a "b" c\"#), r#""a \"b\" c\\""#);
@@ -826,7 +840,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let exe = d.join("python.exe");
         std::fs::write(&exe, b"x").unwrap();
-        let sid = ffi::container_sid(&container_name("dev.test.acl")).unwrap();
+        let sid = ffi::container_sid(&container_name("dev.test.acl", "runner")).unwrap();
         let ro = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
         ffi::grant(&d.display().to_string(), sid, ro).unwrap();
         assert_eq!(entries(&d, sid), (1, 0));

@@ -27,6 +27,20 @@ def test_linux_and_windows_wrap_with_the_agent_launcher(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "p.json").read_text(encoding="utf-8"))["module"] == "m"
 
 
+@pytest.mark.parametrize("interpreter", ["python/bin/python3.12", "python/python.exe"])
+def test_a_coordinator_build_finds_its_own_launcher(tmp_path, monkeypatch, interpreter):
+    """bin/oarbank-sandbox beside python/, whose interpreter is python/bin/python3.x on POSIX and python\\python.exe on
+    Windows (a Windows build once looked for it in the wrong place and refused every module process)."""
+    exe = ".exe" if sys.platform == "win32" else ""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / f"oarbank-sandbox{exe}").write_text("")
+    (tmp_path / interpreter).parent.mkdir(parents=True)
+    (tmp_path / interpreter).write_text("")
+    monkeypatch.delenv("OARBANK_SANDBOX_EXEC", raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / interpreter))
+    assert sandboxexec.launcher() == str((tmp_path / "bin" / f"oarbank-sandbox{exe}").resolve())
+
+
 def test_no_launcher_is_no_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("OARBANK_SANDBOX_EXEC", str(tmp_path / "missing"))

@@ -229,6 +229,16 @@ def cmd_coordinator(a):
     if a.action == "status":
         s = api("GET", "/api/v1/coordinator")
         print(f"role {s['role']}  epoch {s['epoch']}  phase {s['phase']}  fleet {s['fleet_id']}  key {s['cik_fingerprint'][:16]}")
+        h = s["host"]
+        print(f"platform {h['platform']}  {h['manager']}  pid {h['pid']}" + ("" if h["managed"] else " (not run by the service manager)")
+              + f"  sandbox {h['sandbox']['backend'] or 'none'}")
+        for v in h["services"]:
+            print(f"  {v['name']:<30} " + (f"{v['state']}  start {v['start']}  as {v['account']}" + (f"  pid {v['pid']}" if v["pid"] else "")
+                                           if v["installed"] else "not installed"))
+        if "helper" in h["sandbox"]:
+            hp = h["sandbox"]["helper"]
+            print(f"  {hp['name']:<30} " + (f"{hp['state']}  start {hp['start']}" if hp["installed"] else "not installed")
+                  + f"  (module CLI allowlist {hp['allowlist']})")
         if s.get("plan"):
             p = s["plan"]
             print(f"plan {p['plan_id']} -> {p.get('target_url')} ({p['state']})")

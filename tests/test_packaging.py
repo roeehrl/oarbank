@@ -164,13 +164,13 @@ def test_the_windows_installer_sets_up_two_services_under_virtual_accounts(tmp_p
     accounts with the recovery actions that keep exit 0 down and restart a failed exit, the home's DACL naming the two
     accounts by the SIDs the coordinator computes, the firewall rule and the standby arguments."""
     import hashlib
-    import platform as pf
     from oarbank.platform import files
     r = _ps_installer("-Help")
     assert r.returncode == 0 and r.stdout.startswith("usage: install-oarbankd.ps1"), r.stderr
     for opt in ("-Build", "-AgentBind", "-Url", "-Pair", "-From", "-FromCa", "-ArchiveHome", "-Uninstall", "-DryRun"):
         assert opt in r.stdout, opt
-    want = "windows-arm64" if pf.machine().upper() == "ARM64" or os.environ.get("PROCESSOR_ARCHITECTURE") == "ARM64" else "windows-amd64"
+    from oarbank_sdk import portable
+    want = portable.host_platform()                               # the machine's, whatever this interpreter emulates
     r = _ps_installer("-Build", str(_coordinator_build(tmp_path, "plan9-mips")), "-AgentBind", "10.0.0.1", "-DryRun")
     assert r.returncode != 0 and f"the build is for plan9-mips, this machine is {want}" in r.stderr, r.stderr
     build = _coordinator_build(tmp_path, want)
@@ -180,11 +180,11 @@ def test_the_windows_installer_sets_up_two_services_under_virtual_accounts(tmp_p
     sha = hashlib.sha256(build.read_bytes()).hexdigest()[:12]
     assert f"Coordinator\\1.2.3-{sha}" in out and "junction" in out
     for name in files.COORDINATOR_SERVICES:
-        assert f"sc.exe create {name} binPath= " in out and f"obj= NT SERVICE\\{name}" in out
+        assert f"New-Service {name} -BinaryPathName " in out and f"sc.exe config {name} start= delayed-auto obj= NT SERVICE\\{name}" in out
         assert f"sc.exe failure {name} reset= 86400 actions= restart/10000/restart/10000/restart/60000" in out
         assert f"sc.exe failureflag {name} 1" in out and f"*{files.service_sid(name)}:(OI)(CI)F" in out
-    assert "-m oarbank.coordinator --service --agent-bind 10.0.0.1 --agent-port 7443 --url https://10.0.0.1:7443" in out
-    assert "-m oarbank.console --service" in out and "/inheritance:r" in out
+    assert 'current\\bin\\oarbankd.py" --service --agent-bind 10.0.0.1 --agent-port 7443 --url https://10.0.0.1:7443' in out
+    assert 'current\\bin\\oarbank-console.py" --service' in out and "/inheritance:r" in out
     assert "OARBANKD_HOME=" in out and "inbound TCP 7443 for dev.codonic.oarbank.oarbankd" in out
     r = _ps_installer("-Build", str(build), "-AgentBind", "10.0.0.1", "-Pair", "OBP-1", "-From", "https://a:7443",
                       "-FromCa", "abc", "-ArchiveHome", "-DryRun")

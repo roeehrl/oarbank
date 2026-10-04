@@ -14,6 +14,26 @@ coordinator again. Running work continues through the move; dispatch pauses for 
     <span class="chip mono">{{ s.fleet_id }}</span></div>
 </div>
 
+{% set h = s.host %}
+{% if h %}
+<h2>Where it runs <span class="small mut">(as of {{ h.at | ts }})</span></h2>
+<div class="card">
+  <div class="row"><span class="chip">{{ h.platform }}</span><span class="chip">{{ h.manager }}</span>
+    <span class="chip {{ 'ok' if h.managed else 'warn' }}">pid {{ h.pid }}{% if not h.managed %} · not run by the service manager{% endif %}</span>
+    <span class="chip {{ 'ok' if h.sandbox.backend else 'bad' }}">module sandbox {{ h.sandbox.backend or 'none' }}</span></div>
+  <table class="small">
+    <tr><th>service</th><th>state</th><th>start</th><th>account</th><th>process</th></tr>
+    {% for v in h.services + ([h.sandbox.helper] if h.sandbox.helper else []) %}<tr>
+      <td class="mono">{{ v.name }}</td>
+      {% if v.installed %}<td><span class="chip {{ 'ok' if v.state and v.state.startswith(('running', 'active')) else 'warn' }}">{{ v.state }}</span></td>
+      <td>{{ v.start or '–' }}</td><td class="mono">{{ v.account or '–' }}</td><td>{{ v.pid or '–' }}</td>
+      {% else %}<td colspan="4" class="mut">not installed</td>{% endif %}
+    </tr>{% endfor %}
+  </table>
+  {% if h.sandbox.helper %}<div class="small mut">The elevated helper (installed with the Windows agent) limits a module's own CLI to the admin API: {{ h.sandbox.helper.allowlist }}.</div>{% endif %}
+</div>
+{% endif %}
+
 {% set mv = s.move %}
 {% if mv and mv.state in ('pending', 'cutover') %}
 <div class="card" style="margin-top:8px" role="status">

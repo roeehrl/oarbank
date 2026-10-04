@@ -70,7 +70,10 @@ if ($Pair -and -not ($From -and $FromCa)) { Fail "a standby (-Pair) also needs -
 # the build: its manifest names this machine's platform
 $manifest = (tar -xzOf $Build oarbank-coordinator.json) | ConvertFrom-Json
 if ($LASTEXITCODE -or $manifest.format -ne 1) { Fail "$Build is not a coordinator build" }
-$want = "windows-$(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' })"
+# the machine's architecture, not this PowerShell's (an x64 one runs under emulation on Windows on Arm, and then
+# PROCESSOR_ARCHITECTURE and .NET both say AMD64): the system's own environment says
+$native = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment").PROCESSOR_ARCHITECTURE
+$want = "windows-$(if ($native -eq 'ARM64') { 'arm64' } else { 'amd64' })"
 if ($manifest.platform -ne $want) { Fail "the build is for $($manifest.platform), this machine is $want" }
 $sha = (Get-FileHash -Algorithm SHA256 $Build).Hash.ToLower().Substring(0, 12)
 $dir = "$App\$($manifest.version)-$sha"
@@ -88,25 +91,14 @@ if ($DryRun) { "junction $App\current -> $dir" } else {
   New-Item -ItemType Junction -Path "$App\current" -Target $dir | Out-Null
 }
 
-# the home: created before the services so its entries name their accounts by SID (they exist once the services do,
-# but a SID needs no lookup); nothing inherited from ProgramData, which lets every user read and create files
-$sid = @{}
-foreach ($k in $Services.Keys) {
-  $sha1 = [Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes($Services[$k].ToUpper()))
-  $sid[$k] = "S-1-5-80-" + ((0..4 | ForEach-Object { [BitConverter]::ToUInt32($sha1, $_ * 4) }) -join "-")
-}
-if (-not $DryRun) { New-Item -ItemType Directory -Force $Home_ | Out-Null }
-Run "icacls.exe" @($Home_, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F",
-                   "/grant:r", "*$($sid.oarbankd):(OI)(CI)F", "/grant:r", "*$($sid.console):(OI)(CI)F")
-
 $py = "$App\current\python\python.exe"
 $signing = if ($env:OARBANK_RELEASE_SIGNING) { $env:OARBANK_RELEASE_SIGNING } else { "1" }
 $env_ = @("OARBANKD_HOME=$Home_", "OARBANK_RELEASE_SIGNING=$signing",
           "PATH=$App\current\bin;$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem")
 if (-not $Url) { $Url = "https://${AgentBind}:$AgentPort" }
 $args_ = @{
-  oarbankd = @("-I", "-m", "oarbank.coordinator", "--service", "--agent-bind", $AgentBind, "--agent-port", "$AgentPort", "--url", $Url)
-  console = @("-I", "-m", "oarbank.console", "--service")
+  oarbankd = @("-I", "$App\current\bin\oarbankd.py", "--service", "--agent-bind", $AgentBind, "--agent-port", "$AgentPort", "--url", $Url)
+  console = @("-I", "$App\current\bin\oarbank-console.py", "--service")
 }
 if ($Pair) {
   $args_.oarbankd += @("--standby", "--pair", $Pair, "--from", $From, "--from-ca", $FromCa)
@@ -118,7 +110,11 @@ $about = @{oarbankd = "Runs this fleet's coordinator: the agent API, the admin A
 foreach ($k in "oarbankd", "console") {
   $name = $Services[$k]
   $bin = "`"$py`" " + (($args_[$k] | ForEach-Object { if ($_ -match '[\s"]') { "`"$($_ -replace '"', '\"')`"" } else { $_ } }) -join " ")
-  Run "sc.exe" @("create", $name, "binPath=", $bin, "start=", "delayed-auto", "obj=", "NT SERVICE\$name", "DisplayName=", $display[$k])
+  # New-Service takes the command line as it is (sc.exe's own quoting of embedded quotes is unreliable from PowerShell)
+  if ($DryRun) { "New-Service $name -BinaryPathName $bin" } else {
+    New-Service -Name $name -BinaryPathName $bin -DisplayName $display[$k] -StartupType Automatic | Out-Null
+  }
+  Run "sc.exe" @("config", $name, "start=", "delayed-auto", "obj=", "NT SERVICE\$name")
   Run "sc.exe" @("description", $name, $about[$k])
   # restarted 10 s after a crash or a failed exit (a standby exits 75 to start again on the copy a move installed), as
   # launchd and systemd do; exit 0 (a finalized old coordinator) leaves it stopped
@@ -129,6 +125,17 @@ foreach ($k in "oarbankd", "console") {
     New-ItemProperty -Path $key -Name Environment -PropertyType MultiString -Value $env_ -Force | Out-Null
   }
 }
+# the home, once the services (and with them their virtual accounts, which icacls looks up) exist and before they
+# start: nothing inherited from ProgramData, which lets every user read and create files
+$sid = @{}
+foreach ($k in $Services.Keys) {
+  $sha1 = [Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes($Services[$k].ToUpper()))
+  $sid[$k] = "S-1-5-80-" + ((0..4 | ForEach-Object { [BitConverter]::ToUInt32($sha1, $_ * 4) }) -join "-")
+}
+if (-not $DryRun) { New-Item -ItemType Directory -Force $Home_ | Out-Null }
+Run "icacls.exe" @($Home_, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F",
+                   "/grant:r", "*$($sid.oarbankd):(OI)(CI)F", "/grant:r", "*$($sid.console):(OI)(CI)F")
+
 # agents connect in; nothing else does (the admin API and the console answer on loopback only)
 if ($DryRun) { "firewall rule '$Rule': inbound TCP $AgentPort for $($Services.oarbankd)" } else {
   Get-NetFirewallRule -DisplayName $Rule -ErrorAction SilentlyContinue | Remove-NetFirewallRule

@@ -285,9 +285,10 @@ fn start_services(root: &Path, args: Vec<String>, console: Option<Vec<String>>, 
     std::fs::create_dir_all(&logs)?;
     if std::env::var("OARBANK_SERVICE_HOST").as_deref() == Ok("process") {
         for (k, v) in std::env::vars() {
-            let knob = k.starts_with("OARBANKD_") || k == "OARBANK_RELEASE_SIGNING" || k == "OARBANK_SECRET_STORE";
+            let knob = k.starts_with("OARBANKD_") || ["OARBANK_RELEASE_SIGNING", "OARBANK_SECRET_STORE", "OARBANK_SANDBOX_EXEC"]
+                .contains(&k.as_str());
             if knob && !env.iter().any(|(e, _)| *e == k) {
-                env.push((k, v));                                 // test knobs such as the move time lock
+                env.push((k, v));                                 // test knobs: the move time lock, the module launcher
             }
         }
         return supervise(root, args, env, &logs.join("oarbankd.log"));

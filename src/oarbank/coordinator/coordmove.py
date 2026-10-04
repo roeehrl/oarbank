@@ -676,7 +676,9 @@ def _notify(db: DB, message: str, priority: str = "default"):
 
 
 def status(db: DB) -> dict:
-    """For the console, oarbank and the API: the plan, the move, the phase, which agents followed."""
+    """For the console, oarbank and the API: the plan, the move, the phase, which agents followed, and where and how
+    this coordinator runs (hostinfo.py, taken now)."""
+    from . import hostinfo
     p = plan(db) or db.one("SELECT * FROM coordinator_plans ORDER BY created_at DESC LIMIT 1")
     m = move(db)
     nodes = db.q("SELECT hostname, node_id, json_extract(agent_update_json,'$.state') u, coordinator_move_json, last_heartbeat_at "
@@ -687,4 +689,4 @@ def status(db: DB) -> dict:
             "move": {k: v for k, v in (m or {}).items() if k not in ("statement",)} if m else None,
             "agents": [{"hostname": n["hostname"], "node_id": n["node_id"], "move": jl(n["coordinator_move_json"]),
                         "last_heartbeat_at": n["last_heartbeat_at"]} for n in nodes],
-            "min_timelock_s": MIN_TIMELOCK_S, "default_timelock_s": DEFAULT_TIMELOCK_S}
+            "min_timelock_s": MIN_TIMELOCK_S, "default_timelock_s": DEFAULT_TIMELOCK_S, "host": hostinfo.refresh(db)}

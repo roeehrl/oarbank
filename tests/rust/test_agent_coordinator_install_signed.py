@@ -66,9 +66,11 @@ def test_signed_build_and_owner_signed_move(agent_bin, tmp_path):
             # OARBANK_TEST_COORDINATOR_BUILD: a real build from scripts/build-coordinator.sh instead of the stand-in
             real = os.environ.get("OARBANK_TEST_COORDINATOR_BUILD")
             data = open(real, "rb").read() if real else synthetic_build("0.1.0", platform)
+            with tarfile.open(fileobj=io.BytesIO(data)) as t:
+                version = json.load(t.extractfile("oarbank-coordinator.json"))["version"]
             sha = a.api("POST", "/api/v1/coordinator/builds", content=data)["sha256"]
             t3(a, "coordinator.builds.upload", params={"sha256": sha})
-            stmt = signing.coordinator_statement(sha, "0.1.0", platform, 1)
+            stmt = signing.coordinator_statement(sha, version, platform, 1)
             # a T1 operation applied by its plan: the plan's target and params, as previewed
             t3(a, "coordinator.builds.sign", target=sha, params={"statement": stmt, "signature": signing.sign(stmt, pk)})
             with sqlite3.connect(a_home / "oarbank.sqlite3") as db:

@@ -69,6 +69,8 @@ def run(a):
         raise SystemExit(f"oarbankd: {C.HOME} holds a coordinator; a standby starts empty (add --archive-home)")
     db = DB(C.DB_PATH)
     identity.ensure(db)
+    from . import hostinfo
+    hostinfo.refresh(db)
     completed_move = movepull.finish_install(db, C.HOME)
     puller = None
     if not completed_move and (a.standby or mstate.get("phase") in ("paired", "seeding", "seeded", "ready", "promoting")):
