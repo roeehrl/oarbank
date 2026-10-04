@@ -41,7 +41,7 @@ proved in one layer means the same thing in every other.
 
 | layer | what it drives | where | default run | thorough run |
 |-------|----------------|-------|-------------|--------------|
-| unit tests | one behaviour per test, real core | `tests/test_core.py`, `tests/test_robustness.py`, and one file per area (console, HTTP, operations, campaigns, modules, protection, alerting, rescue) | every run | same |
+| unit tests | one behaviour per test, real core | `tests/test_core.py`, `tests/test_robustness.py`, and one file per area (console, HTTP, operations, campaigns, modules, protection, alerting, rescue, the Windows backends in `tests/test_windows_coordinator.py`) | every run, on macOS and Windows (x64 and arm64) in CI | same |
 | HTTP | mTLS auth (a test client stands in for the TLS layer; `tests/test_mtls.py` runs the real listener), cross-node fencing, idempotent replay, 503 with Retry-After, admin identity, CSRF | `tests/test_http.py`, `tests/test_mtls.py` | every run | same |
 | model-based (Hypothesis) | random interleavings of every agent, user and coordinator action on a mixed fleet (darwin-arm64, linux-amd64, linux-arm64), including placement studies, rebinds and placement changes; S1–S18 and S20–S22 after every step | `tests/test_stateful.py` | 150 × 60 steps | `OARBANK_THOROUGH=1`: 1000 × 100 |
 | seeded fleet simulation | whole mixed-platform fleets over simulated hours with injected faults (including module process kills and outages), with and without placement; S1–S18 and S20–S22 during, L1/I1/I2 at the end, and a 1000-job mixed-fleet run whose `oarbank verify` report is clean. Runs the SDK's toy module and the core's relay fixture module | `src/oarbank/sim.py`, `tests/test_simulation.py` | 67 runs | `scripts/sim-sweep.sh` (seeds × 7 shapes) |
@@ -49,9 +49,9 @@ proved in one layer means the same thing in every other.
 | contracts and parity | every mutating route is an operation, every operation reachable from the API, CLI and console, every end reason has a code, generated docs and schemas fresh | `tests/test_contracts.py`, `oarbank.contracts.parity` | every run | — |
 | agent (Rust) | protection (controller, evaluator, matcher on the shared vectors, spawn registry, memory guard, soaks), services, staging, jobs, sandbox backends, self-update, moves and rescue | `rust/` (`cargo test --workspace`) | every CI run, on macOS, Linux and Windows | — |
 | core parity | `oarbank-core` (Rust) against the SDK's Python, the reference: the shared vectors and sandbox goldens, then seeded random inputs for canonical JSON, job keys, portable paths, platform tokens, bundle digests, sandbox profiles, the egress allow list, wheels and requirements | `rust/crates/oarbank-core-py/tests/test_parity.py` (through the `oarbank_core` extension) | every CI run on macOS, 4000 cases per test | `OCORE_PARITY_N`, `OCORE_PARITY_SEED` |
-| end-to-end, real agent | the `oarbank-agent` binary against a real oarbankd: identity, enrollment by CSR and mTLS, releases and module environments, jobs and goldens, services, self-update through the launcher, TUF, coordinator moves (developer and signing mode), the install plan, discovery and the local admin socket | `tests/rust/` (`pytest tests/rust`) | every CI run on macOS | — |
+| end-to-end, real agent | the `oarbank-agent` binary against a real oarbankd: identity, enrollment by CSR and mTLS, releases and module environments, jobs and goldens, services, self-update through the launcher, TUF, coordinator moves (developer and signing mode), the install plan, discovery and the local admin channel | `tests/rust/` (`pytest tests/rust`) | every CI run on macOS and Windows (x64 and arm64) | — |
 | load | a swarm of simulated mTLS agents against an instrumented oarbankd; exactly-once checks after every run | `bench/` (`tests/test_swarm_smoke.py` in the suite) | 10 agents | `bench/swarm.py sweep` |
-| chaos | real oarbankd processes: `kill -9` mid-write, an external SQLite write lock, the module process killed during completions, ntfy down, an audit row edited by hand, the console killed | `tests/chaos/` (`pytest -m chaos`) | nightly | — |
+| chaos | real oarbankd processes: `kill -9` mid-write, an external SQLite write lock, the module process killed during completions, ntfy down, an audit row edited by hand, the console killed | `tests/chaos/` (`pytest -m chaos`) | every CI run on macOS and Windows; nightly | — |
 | module conformance | a module's manifest, bundle, protocol (purity, goldens through `spec.build`) and real runner (envelopes, golden match, determinism, stop) | `oarbank-sdk conform <dir>` | toy and the relay fixture in the suite; each module in its repository | — |
 | accessibility | axe-core (WCAG 2.0/2.1 A and AA) on every console page; AA contrast of every colour pair in both schemes | `tests/test_accessibility.py` | contrast every run; axe with `OARBANK_A11Y_NODE_MODULES` | nightly |
 | nightly | all of the above in one report | `scripts/nightly.sh` (a LaunchAgent example in `deploy/nightly/`) | — | when installed |
@@ -126,10 +126,12 @@ scripts/nightly.sh                            # everything, with a markdown repo
 The coordinator suite starts real module processes, and those always run confined; how depends on the OS:
 
 - **macOS**: Seatbelt (`sandbox-exec`), nothing to build.
-- **Linux and Windows**: the agent's launcher, `oarbank-agent sandbox-exec` (Landlock and seccomp; an AppContainer),
-  which a coordinator build ships as `bin/oarbank-sandbox`. The suite builds it first with
+- **Linux and Windows**: the agent's launcher, `oarbank-agent sandbox-exec` (Landlock and seccomp; an AppContainer,
+  in a Job Object the coordinator holds), which a coordinator build ships as `bin/oarbank-sandbox`. The suite builds it first with
   `cargo build -p oarbank-agent` in `rust/` (`tests/agentbin.py`, the same build the end-to-end tests use) and points
-  `OARBANK_SANDBOX_EXEC` at `rust/target/debug/oarbank-agent`. Set `OARBANK_SANDBOX_EXEC` yourself to use another
+  `OARBANK_SANDBOX_EXEC` at `rust/target/debug/oarbank-agent`. On Windows the suite runs on x64 CPython (on arm64 too:
+  `UV_PYTHON=cpython-3.12-windows-x86_64-none`), and module CLIs and egress allowlists need the elevated helper
+  (`OarbankHelper`; CI installs it with `scripts/ci-windows-helper.ps1`). Set `OARBANK_SANDBOX_EXEC` yourself to use another
   copy. Without a Rust toolchain, or with a binary whose `sandbox-status` reports no backend (a Linux kernel without
   Landlock), the run stops with a usage error that says what to build: modules never run unconfined, and their tests
   are never skipped for it.

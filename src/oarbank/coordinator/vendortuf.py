@@ -42,7 +42,7 @@ def store(home, items: dict) -> list[str]:
     d = directory(home)
     for name, text in checked.items():
         tmp = d / f".{name}.tmp"
-        tmp.write_text(text)
+        tmp.write_text(text, encoding="utf-8", newline="\n")
         tmp.replace(d / name)
     return sorted(checked)
 
@@ -59,7 +59,7 @@ def listing(home) -> list[dict]:
     out = []
     for p in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
-            s = json.loads(p.read_text()).get("signed") or {}
+            s = json.loads(p.read_text(encoding="utf-8")).get("signed") or {}
         except ValueError:
             s = {}
         out.append({"name": p.name, "type": s.get("_type"), "version": s.get("version"), "expires": s.get("expires")})

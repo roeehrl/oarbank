@@ -9,7 +9,7 @@ A standby oarbankd (`oarbankd --standby --pair <code> --from <old url>`) keeps i
 3. when the old coordinator froze and took the final snapshot: copies it and the changed files, verifies
    integrity and the invariants, and reports ready;
 4. on the old coordinator's signed promote: asks it for the commit decision (taken there, atomically). On yes, it
-   installs the staging copy in place and restarts (exit 75: launchd starts it again). The new process
+   installs the staging copy in place and restarts (exit 75: the service manager starts it again). The new process
    finishes the install, raises the epoch, and serves as the active coordinator.
 
 It also signs the move statement when the old coordinator asks, after checking that it names this machine's key,
@@ -40,16 +40,14 @@ def state_path(home: Path) -> Path:
 
 def load(home: Path) -> dict:
     p = state_path(home)
-    return json.loads(p.read_text()) if p.exists() else {}
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
 
 def save(home: Path, st: dict):
     p = state_path(home)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(st, indent=1))
-    os.chmod(tmp, 0o600)
-    tmp.replace(p)
+    from ..platform import files
+    files.write_private(p, json.dumps(st, indent=1))
 
 
 def _sha(p: Path) -> str:
@@ -132,7 +130,8 @@ class Puller:
                            json={"code": self.st.pop("code"), "b_url": self.st["my_url"], "b_cik": k.public_b64,
                                  "b_audit_pub": audit_pub, "b_platform": portable.host_platform(),
                                  "b_secrets_pub": modsecrets.transport_public(self.home),
-                                 "b_tls_ca": (self.home / "tls" / "ca.pem").read_text() if (self.home / "tls" / "ca.pem").exists() else None})
+                                 "b_tls_ca": (self.home / "tls" / "ca.pem").read_text(encoding="utf-8")
+                                 if (self.home / "tls" / "ca.pem").exists() else None})
         if r.status_code >= 400:
             raise PullError(f"pairing refused: {r.status_code} {r.text[:300]}")
         d = r.json()
@@ -152,7 +151,7 @@ class Puller:
         m = self._get("/v1/move/manifest")
         held = {}
         vf = self.home / "move" / "verified.json"
-        verified = json.loads(vf.read_text()) if vf.exists() else {}
+        verified = json.loads(vf.read_text(encoding="utf-8")) if vf.exists() else {}
         for f in m["files"]:
             dst = (self.staging() / "files" / f["path"]).resolve()
             if (self.staging() / "files").resolve() not in dst.parents:
@@ -167,10 +166,10 @@ class Puller:
                     raise PullError(f"{f['path']}: hash mismatch after transfer")
             verified[f["path"]] = [f["sha256"], dst.stat().st_mtime]
             held[f["path"]] = f["sha256"]
-        vf.write_text(json.dumps(verified))
+        vf.write_text(json.dumps(verified), encoding="utf-8", newline="\n")
         # files no longer in the manifest (deleted on the old side) leave the staging copy
         for p in list((self.staging() / "files").rglob("*")) if (self.staging() / "files").exists() else []:
-            rel = str(p.relative_to(self.staging() / "files"))
+            rel = p.relative_to(self.staging() / "files").as_posix()
             if p.is_file() and rel not in held:
                 p.unlink()
         return held
@@ -294,7 +293,8 @@ class Puller:
             self.st["phase"] = "ready"                # the old side's timeout decides; asking again is safe
             save(self.home, self.st)
             return
-        os._exit(RESTART_EXIT)                         # launchd starts us again on the installed copy
+        from ..platform import service
+        service.exit_now(RESTART_EXIT)                 # the service manager starts us again on the installed copy
 
 
 def _q(s: str) -> str:
@@ -370,8 +370,11 @@ def verify_modules(staging: Path, move_id: str | None = None) -> dict:
 
 
 def install_staging(home: Path):
-    """Move the verified staging copy into place (renames within one volume). The database replaces the
-    standby's own; our identity key and move state stay."""
+    """Put the verified staging copy in place: files by renames within one volume, each database's content through
+    SQLite's backup API into the standby's own file, which this process and the console keep open (on Windows an open
+    file cannot be replaced; elsewhere the console would go on reading the replaced one). Our identity key and move
+    state stay."""
+    import sqlite3
     st = home / "move" / "staging"
     for p in sorted((st / "files").rglob("*")) if (st / "files").exists() else []:
         if p.is_file():
@@ -380,12 +383,15 @@ def install_staging(home: Path):
             os.replace(p, dst)
     for p in sorted((st / "databases").glob("**/*")) if (st / "databases").exists() else []:
         if p.is_file() and not p.name.endswith(".partial"):
-            rel = p.relative_to(st / "databases")
-            dst = home / rel
-            for side in (dst.with_name(dst.name + "-wal"), dst.with_name(dst.name + "-shm")):
-                side.unlink(missing_ok=True)
+            dst = home / p.relative_to(st / "databases")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(p, dst)
+            src, out = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True), sqlite3.connect(dst, timeout=30)
+            try:
+                src.backup(out)
+            finally:
+                src.close()
+                out.close()
+            p.unlink()
 
 
 def finish_install(db: DB, home: Path) -> bool:

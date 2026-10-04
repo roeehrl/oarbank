@@ -10,17 +10,19 @@ import time
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
+import agentbin  # noqa: E402
+from agentbin import EXE  # noqa: E402
 from conftest import CARGO, REPO  # noqa: E402
 
-LAUNCHER = REPO / "rust" / "target" / "debug" / "oarbank-launcher"
+LAUNCHER = REPO / "rust" / "target" / "debug" / f"oarbank-launcher{EXE}"
 
 
 @pytest.fixture(scope="module")
 def launcher():
     if not os.path.exists(CARGO):
         pytest.skip("no Rust toolchain")
-    env = {**os.environ, "PATH": f"{os.path.dirname(CARGO)}:{os.environ.get('PATH', '')}"}
-    r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-launcher"], cwd=REPO / "rust", env=env, capture_output=True, text=True)
+    r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-launcher"], cwd=REPO / "rust", env=agentbin.cargo_env(),
+                       capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-3000:]
     return LAUNCHER
 

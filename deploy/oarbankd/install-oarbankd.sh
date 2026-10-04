@@ -47,7 +47,7 @@ case "$OS" in
     Linux)  DATA="${XDG_DATA_HOME:-$HOME/.local/share}/oarbank"
             LA="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
             SYS_PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin ;;
-    *) die "the coordinator installs on macOS and Linux, not $OS" ;;
+    *) die "the coordinator installs on macOS and Linux (install-oarbankd.ps1 on Windows), not $OS" ;;
 esac
 HOME_DIR="$DATA/coordinator"
 SIGNING="${OARBANK_RELEASE_SIGNING:-1}"

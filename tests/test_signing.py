@@ -4,6 +4,7 @@ and refuses any seq that does not rise. The feature is off by default (OARBANK_R
 these tests switch it on, except the ones that pin the default-off behaviour."""
 import json
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,13 +46,15 @@ def signed(db, key, rid, seq):
     return stmt, signing.sign(stmt, key)
 
 
-def test_keygen_writes_a_private_0600_key_and_refuses_overwrite(tmp_path):
+def test_keygen_writes_an_owner_only_key_and_refuses_overwrite(tmp_path):
+    from helpers import loosen
+    from oarbank.platform import files
     k = tmp_path / "k" / "release.key"
     pub = signing.keygen(k)
-    assert oct(os.stat(k).st_mode & 0o777) == "0o600" and len(pub) == 44
+    assert files.owner_only(k) and files.owner_only(k.parent) and len(pub) == 44
     with pytest.raises(FileExistsError):
         signing.keygen(k)
-    os.chmod(k, 0o644)
+    loosen(k)
     with pytest.raises(PermissionError):
         signing.load_key(k)
 
@@ -141,10 +144,10 @@ def test_every_key_option_names_the_key_keygen_writes(tmp_path):
     # following them pinned one key and signed with another
     import subprocess
     import sys
-    env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path), "HOME": str(tmp_path), "COLUMNS": "500"}
+    env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path), "APPDATA": str(tmp_path), "HOME": str(tmp_path), "COLUMNS": "500"}
     env.pop("OARBANK_RELEASE_KEY", None)
     run = lambda *a: subprocess.run([sys.executable, *a], env=env, capture_output=True, text=True, check=True).stdout
     key = run("-c", "from oarbank import signing; print(signing.DEFAULT_KEY)").strip()
-    assert key.endswith("keys/release-ed25519.key") and key.startswith(str(tmp_path))
+    assert Path(key).parts[-2:] == ("keys", "release-ed25519.key") and key.startswith(str(tmp_path))
     for cmd in ("release", "owner", "agent", "coordinator-build"):
         assert f"default {key})" in run("-m", "oarbank.cli.main", cmd, "--help"), cmd

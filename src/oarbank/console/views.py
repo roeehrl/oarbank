@@ -358,7 +358,7 @@ def waterfall(r, j: dict, atts: list, now: float | None = None) -> dict:
     span = max(end - start, 1e-6)
     rows, prev_end = [], start
     for a in atts:
-        ph = r.q("SELECT phase, at FROM attempt_phases WHERE attempt_id=? ORDER BY at, phase", (a["attempt_id"],))
+        ph = r.q("SELECT phase, at FROM attempt_phases WHERE attempt_id=? ORDER BY at, rowid", (a["attempt_id"],))
         marks = [(p["phase"], p["at"]) for p in ph]
         if not marks:
             marks = [("granted", a["granted_at"] or prev_end)]

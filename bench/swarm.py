@@ -92,6 +92,15 @@ class Cfg:
 
 
 # ============================================================================ oarbankd process
+def loadavg() -> list | None:
+    """The 1, 5 and 15 minute load averages; None on Windows, which keeps none."""
+    return [round(x, 1) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None
+
+
+def load1(r: dict) -> str:
+    return str(r["loadavg_start"][0]) if r.get("loadavg_start") else "n/a"
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -196,7 +205,7 @@ def node_csr(idx: int, out: Path) -> str:
 def admin_auth(home) -> dict:
     """The swarm's oarbankd writes its owner admin token into its scratch home; admin calls send it."""
     p = Path(home) / "admin.token"
-    return {"authorization": f"Bearer {p.read_text().strip()}"} if p.exists() else {}
+    return {"authorization": f"Bearer {p.read_text(encoding="utf-8").strip()}"} if p.exists() else {}
 
 
 
@@ -826,7 +835,7 @@ def run(cfg: Cfg, log=print) -> dict:
     out_dir = home / "swarm-out"
     out_dir.mkdir(parents=True, exist_ok=True)
     res = {"cfg": dataclasses.asdict(cfg), "workers": nworkers, "inproc": inproc,
-           "loadavg_start": [round(x, 1) for x in os.getloadavg()]}
+           "loadavg_start": loadavg()}
     tag = f"r{cfg.seed}n{cfg.agents}"
     seeded = 0
     admin_calls = []
@@ -954,7 +963,7 @@ def run(cfg: Cfg, log=print) -> dict:
     samples, canonical, attempts, viol, gaps, lag = [], [], {}, [], [], []
     counters = {}
     for f in sorted(out_dir.glob("w*.json")):
-        d = json.loads(f.read_text())
+        d = json.loads(f.read_text(encoding="utf-8"))
         samples += [tuple(s) for s in d["samples"]]
         canonical += [tuple(c) for c in d["canonical"]]
         attempts.update(d["attempts"])
@@ -989,7 +998,7 @@ def run(cfg: Cfg, log=print) -> dict:
         "admin_add_study": [{"t": round(t - t_go, 1), "s": round(dt, 2), "jobs": k} for t, dt, k in admin_calls],
         "counters": counters, "invariant_violations": viol + inv, "db": info,
         "timeline": timeline[::max(1, len(timeline) // 120)],
-        "loadavg_end": [round(x, 1) for x in os.getloadavg()],
+        "loadavg_end": loadavg(),
     })
     if res["invariant_violations"] or any(v["http503"] or (v["err"] - v["conn_err"]) for v in res["endpoints"].values()):
         try:   # keep the evidence: oarbankd's own stderr (tracebacks) from the scratch home
@@ -1062,7 +1071,7 @@ def write_results(runs: list[dict], path: Path, extra_md: str = ""):
              f"Generated {time.strftime('%Y-%m-%d %H:%M %Z')} by `bench/swarm.py sweep` / `report`. Raw data: `bench/results/*.json`.", "",
              "## Machine", "", md_table([mi]), "",
              f"Load average at the start of each run: " +
-             ", ".join(f"N={r['cfg']['agents']}: {r['loadavg_start'][0]}" for r in runs) +
+             ", ".join(f"N={r['cfg']['agents']}: {load1(r)}" for r in runs) +
              ".", "",
              "## Settings", "",
              f"slots/agent {runs[0]['cfg']['slots']}, heartbeat {runs[0]['cfg']['heartbeat_s']} s, "
@@ -1102,7 +1111,7 @@ def write_results(runs: list[dict], path: Path, extra_md: str = ""):
             lines += ["In-oarbankd request time (arrival to response): " + "; ".join(
                 f"`{k}` p50 {_fmt(v.get('p50_ms'))} / p99 {_fmt(v.get('p99_ms'))} ms"
                 for k, v in sv["http"].items() if k in ("heartbeat", "claim", "complete", "hello")) +
-                f". Host disk during window: {r.get('disk') or 'n/a'}; load avg {r['loadavg_start'][0]}.", ""]
+                f". Host disk during window: {r.get('disk') or 'n/a'}; load avg {load1(r)}.", ""]
         lines += [f"Setup (enroll + certify) {r['setup_s']} s; initial seed {r['initial_seed']['jobs']} jobs in "
                   f"{r['initial_seed']['s']} s; drain {r['drain_s']} s; jobs done {r['total_jobs_done']}; "
                   f"counters {r['counters']}; expiries {r['expiries']}; harness loop lag p99 "
@@ -1125,13 +1134,13 @@ def experiment_row(r: dict) -> dict:
             "prefetch_for p50/p99 ms": f"{g(sv, 'inner', 'prefetch_for', 'p50_ms')} / {g(sv, 'inner', 'prefetch_for', 'p99_ms')}",
             "COMMIT p99/max ms": f"{g(sv, 'sql', 'commit', 'p99_ms')} / {g(sv, 'sql', 'commit', 'max_ms')}",
             "lock util %": g(sv, "lock_util_pct"), "lock wait max ms": g(sv, "lock_wait", "max_ms"),
-            "disk MB/s (host)": g(r, "disk", "disk0_mb_s_mean"), "load avg": r["loadavg_start"][0],
+            "disk MB/s (host)": g(r, "disk", "disk0_mb_s_mean"), "load avg": load1(r),
             "harness lag p99 ms": r["harness_loop_lag_p99_ms"], "violations": len(r["invariant_violations"])}
 
 
 def report(results_dir: Path, out: Path, intro_md: str = ""):
     """Rebuild results.md from bench/results/*.json: sweep-n*.json is the main table, every other run an experiment."""
-    load = lambda f: json.loads(f.read_text())
+    load = lambda f: json.loads(f.read_text(encoding="utf-8"))
     sweep = sorted((load(f) for f in results_dir.glob("sweep-n*.json")), key=lambda r: r["cfg"]["agents"])
     other = sorted((f for f in results_dir.glob("*.json") if not f.name.startswith("sweep-n")), key=lambda f: f.stat().st_mtime)
     md = [intro_md] if intro_md else []
@@ -1175,7 +1184,7 @@ def main():
     rp.add_argument("--intro", default=None, help="markdown file to insert before the experiments")
     a = ap.parse_args()
     if a.cmd == "report":
-        report(BENCH / "results", Path(a.out), Path(a.intro).read_text() if a.intro else "")
+        report(BENCH / "results", Path(a.out), Path(a.intro).read_text(encoding="utf-8") if a.intro else "")
         return
     if a.cmd == "run":
         res = run(cfg_from_args(a))

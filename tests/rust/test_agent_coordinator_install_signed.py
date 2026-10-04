@@ -4,16 +4,16 @@ signature, and the agent verifies all of it before following."""
 import io
 import json
 import os
-import signal
 import sqlite3
 import subprocess
 import sys
 import tarfile
 
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import REPO, Coordinator, agent_env, free_port  # noqa: E402
+from conftest import REPO, Coordinator, agent_env, free_port, venv_python  # noqa: E402
 from test_agent_move import LOCK, t3  # noqa: E402
 from test_agent_session import wait  # noqa: E402
+from helpers import stop_tree  # noqa: E402
 
 from oarbank import signing  # noqa: E402
 
@@ -22,9 +22,11 @@ SIGNED = {"OARBANK_RELEASE_SIGNING": "1"}
 
 def synthetic_build(version, platform):
     """A coordinator build whose oarbankd is this checkout's (the compiled build is exercised by its own script)."""
+    py = venv_python(REPO / ".venv")
+    exe, script = ("bin/oarbankd.cmd", f'@"{py}" -m oarbank.coordinator %*\r\n') if os.name == "nt" else \
+        ("bin/oarbankd", f'#!/bin/sh\nexec {py} -m oarbank.coordinator "$@"\n')
     files = {"oarbank-coordinator.json": json.dumps({"format": 1, "version": version, "platform": platform,
-                                                     "exec": ["bin/oarbankd"]}).encode(),
-             "bin/oarbankd": f"#!/bin/sh\nexec {REPO / '.venv' / 'bin' / 'python'} -m oarbank.coordinator \"$@\"\n".encode()}
+                                                     "exec": [exe]}).encode(), exe: script.encode()}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as t:
         for name, data in files.items():
@@ -56,7 +58,7 @@ def test_signed_build_and_owner_signed_move(agent_bin, tmp_path):
             pending = wait(lambda: [e for e in a.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"])
             a.admit(pending[0]["enrollment_id"])
             node_id = wait(lambda: next((n["node_id"] for n in a.api("GET", "/api/v1/fleet")["nodes"] if n.get("last_hello_at")), None), 60)
-            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text())
+            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text(encoding="utf-8"))
             wait(lambda: cfg()["coordinator_trust"].get("owner_keys") == [p_pub, b_pub], timeout=60)
             # a signed build for the node's platform
             pf = json.loads(subprocess.run([str(agent_bin), "facts"], capture_output=True, text=True).stdout)["platform"]
@@ -80,16 +82,13 @@ def test_signed_build_and_owner_signed_move(agent_bin, tmp_path):
             b_url = f"https://127.0.0.1:{b_port}"
             wait(lambda: cfg()["coordinator"] == b_url and cfg()["coordinator_trust"]["max_epoch"] == 2, timeout=240)
         finally:
+            for pid in install.glob("*/standby.pid"):           # first: on Windows it holds the agent's output pipe
+                stop_tree(int(pid.read_text(encoding="utf-8")))
             p.terminate()
             out = p.communicate(timeout=30)[0]
             print(out[-6000:])
-            for pid in install.glob("*/standby.pid"):
-                try:
-                    os.kill(int(pid.read_text()), signal.SIGTERM)
-                except (ProcessLookupError, ValueError):
-                    pass
             log = b_home / "logs" / "oarbankd.log"
             if log.exists():
-                print(log.read_text()[-3000:])
+                print(log.read_text(encoding="utf-8")[-3000:])
     assert "standby coordinator installed" in out
 

@@ -232,12 +232,12 @@ def manifest(db: DB) -> dict:
             continue
         if p.suffix in (".sqlite3", ".db") or p.name.endswith((".sqlite3-wal", ".sqlite3-shm", ".db-wal", ".db-shm")):
             if p.suffix in (".sqlite3", ".db"):
-                dbs.append(str(rel))
+                dbs.append(rel.as_posix())
             continue
-        files.append({"path": str(rel), "size": p.stat().st_size, "sha256": _sha_cached(p)})
+        files.append({"path": rel.as_posix(), "size": p.stat().st_size, "sha256": _sha_cached(p)})
     # blobs the database references outside the home (datasets registered from files on this machine, e.g. a
     # module's archive and tools): they move too, as external/<digest>, and the target rewrites their paths
-    inside = str(root.resolve()) + "/"
+    inside = os.path.join(str(root.resolve()), "")
     for b in db.q("SELECT digest, path, size FROM blobs WHERE path IS NOT NULL"):
         if b["digest"] in skip:
             continue
@@ -662,7 +662,7 @@ def finalize(db: DB, actor: str) -> dict:
     if m and now() - (m["ended_at"] or 0) < PROBATION_S and not os.environ.get("OARBANKD_MOVE_SKIP_PROBATION"):
         left = PROBATION_S - (now() - (m["ended_at"] or 0))
         raise MoveError(f"probation has {left / 3600:.1f} h left (stragglers may still need the redirect)")
-    (home(db) / "FINALIZED").write_text(json.dumps({"at": now(), "by": actor}) + "\n")
+    (home(db) / "FINALIZED").write_text(json.dumps({"at": now(), "by": actor}) + "\n", encoding="utf-8", newline="\n")
     db.event("coordinator_finalized", actor=actor)
     return {"finalized": True, "home": str(home(db)), "note": "oarbankd stops now and will not start here again"}
 

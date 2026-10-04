@@ -24,7 +24,7 @@ def tried(fn) -> str:
 
 
 def run(spec_path: Path, ws: Path, out: Path) -> int:
-    env = json.loads(spec_path.read_text())
+    env = json.loads(spec_path.read_text(encoding="utf-8"))
     res = {"envelope": 1, "schema": "ferry/result@1", "module_version": env.get("module_version", "1.0.0"), "protocol": 1}
     n = env["payload"]["n"]
     if n == 1:

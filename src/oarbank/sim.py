@@ -407,9 +407,15 @@ class Simulation:
                "disputes": self.db.one("SELECT COUNT(*) n FROM events WHERE kind='dispute_resolved'")["n"]}
         clock.set_fake(None)
         if not keep:
-            self.db.conn.close()
-            self.tmp.cleanup()
+            self.close()
         return out
+
+    def close(self):
+        """End the run's module processes, then remove its database and files (a running process holds its files)."""
+        from .coordinator import modcalls
+        modcalls.close_host(self.db)
+        self.db.conn.close()
+        self.tmp.cleanup()
 
 
 def main():

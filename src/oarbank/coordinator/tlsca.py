@@ -92,7 +92,7 @@ def _ca(home):
 
 
 def ca_pem(home) -> str:
-    return (tls_dir(home) / "ca.pem").read_text()
+    return (tls_dir(home) / "ca.pem").read_text(encoding="utf-8")
 
 
 def pins(home) -> dict:
@@ -142,7 +142,7 @@ def ensure_server_cert(home, names: list[str]) -> tuple[Path, Path]:
     want = sorted({n.strip().strip("[]") for n in names if n and n.strip()} | {"127.0.0.1", "localhost"})
     meta = d / "server.json"
     if (d / "server.pem").exists() and meta.exists():
-        m = json.loads(meta.read_text())
+        m = json.loads(meta.read_text(encoding="utf-8"))
         cert = x509.load_pem_x509_certificate((d / "server.pem").read_bytes())
         if m.get("names") == want and cert.not_valid_after_utc - _now() > dt.timedelta(days=30) \
                 and m.get("ca") == spki_sha256(ca_cert):
@@ -152,7 +152,7 @@ def ensure_server_cert(home, names: list[str]) -> tuple[Path, Path]:
                  ExtendedKeyUsageOID.SERVER_AUTH)
     _write_key(d / "server.key", key)
     (d / "server.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM) + ca_cert.public_bytes(serialization.Encoding.PEM))
-    meta.write_text(json.dumps({"names": want, "ca": spki_sha256(ca_cert)}))
+    meta.write_text(json.dumps({"names": want, "ca": spki_sha256(ca_cert)}), encoding="utf-8", newline="\n")
     return d / "server.pem", d / "server.key"
 
 
@@ -217,7 +217,7 @@ def trust_adopted_ca(home, ca_pem: str):
     verify the client certificates its nodes hold until they renew under this CA; it never issues with it, and a node
     is still its current certificate's fingerprint (core.auth_cert)."""
     x509.load_pem_x509_certificate(ca_pem.encode())
-    (tls_dir(home) / "adopted-ca.pem").write_text(ca_pem)
+    (tls_dir(home) / "adopted-ca.pem").write_text(ca_pem, encoding="utf-8", newline="\n")
 
 
 def client_cas(home) -> Path:
@@ -225,7 +225,8 @@ def client_cas(home) -> Path:
     d = tls_dir(home)
     if not (d / "adopted-ca.pem").exists():
         return d / "ca.pem"
-    (d / "client-cas.pem").write_text((d / "ca.pem").read_text() + (d / "adopted-ca.pem").read_text())
+    (d / "client-cas.pem").write_text((d / "ca.pem").read_text(encoding="utf-8") + (d / "adopted-ca.pem").read_text(encoding="utf-8"),
+                                      encoding="utf-8", newline="\n")
     return d / "client-cas.pem"
 
 

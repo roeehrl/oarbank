@@ -24,7 +24,7 @@ def test_linux_and_windows_wrap_with_the_agent_launcher(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     argv = sandboxexec.wrap(S.Policy(module="m", rw=[str(tmp_path)]), tmp_path / "p.json", ["/usr/bin/python3", "-I", "x.py"])
     assert argv[:4] == [str(launcher), "sandbox-exec", str(tmp_path / "p.json"), "--"] and argv[4:] == ["/usr/bin/python3", "-I", "x.py"]
-    assert json.loads((tmp_path / "p.json").read_text())["module"] == "m"
+    assert json.loads((tmp_path / "p.json").read_text(encoding="utf-8"))["module"] == "m"
 
 
 def test_no_launcher_is_no_backend(monkeypatch, tmp_path):
@@ -39,4 +39,4 @@ def test_no_launcher_is_no_backend(monkeypatch, tmp_path):
 def test_macos_still_uses_seatbelt(tmp_path):
     assert sandboxexec.backend() == "seatbelt"
     argv = sandboxexec.wrap(S.Policy(module="m", rw=[str(tmp_path)]), tmp_path / "p.sb", ["/bin/echo", "hi"])
-    assert "--" in argv and argv[-2:] == ["/bin/echo", "hi"] and (tmp_path / "p.sb").read_text().startswith("(version 1)")
+    assert "--" in argv and argv[-2:] == ["/bin/echo", "hi"] and (tmp_path / "p.sb").read_text(encoding="utf-8").startswith("(version 1)")

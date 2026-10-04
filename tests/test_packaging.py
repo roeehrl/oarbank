@@ -1,4 +1,5 @@
 """The node packages' declarative parts, checked without building them."""
+import os
 import re
 import subprocess
 import sys
@@ -47,7 +48,7 @@ def test_windows_build_scripts_stop_when_a_native_command_fails():
     # to package the binaries an earlier build had left in target\release
     scripts = WXS.parents[2] / "scripts"
     for name in ("package-windows.ps1", "build-node-runtime.ps1"):
-        lines = [l.strip() for l in (scripts / name).read_text().splitlines()]
+        lines = [l.strip() for l in (scripts / name).read_text(encoding="utf-8").splitlines()]
         for i, line in enumerate(lines):
             if line.split(" ")[0] in ("cargo", "uv", "wix") or (line.startswith("& ") and ".ps1" not in line):
                 assert any("$LASTEXITCODE" in l for l in lines[i + 1:i + 4]), f"{name}: {line}"
@@ -56,18 +57,18 @@ def test_windows_build_scripts_stop_when_a_native_command_fails():
 def test_build_scripts_remove_their_temporary_directories():
     # package-linux.sh left its 140 MB node runtime in /tmp after every build (a tmpfs on the build VM)
     for script in sorted((WXS.parents[2] / "scripts").glob("*.sh")):
-        text = script.read_text()
+        text = script.read_text(encoding="utf-8")
         for var in re.findall(r'^\s*(\w+)="\$\(mktemp -d', text, re.M):
             assert re.search(rf"trap '[^']*rm -rf \"\${var}\"", text), f"{script.name}: {var} is never removed"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the coordinator installer is for macOS and Linux")
+@pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
 def test_the_coordinator_installer_lists_every_option_and_refuses_unknown_ones():
     # --help was an "unknown argument", and nothing listed the options
     script = WXS.parents[1] / "oarbankd" / "install-oarbankd.sh"
     r = subprocess.run(["bash", str(script), "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.startswith("usage: install-oarbankd.sh")
-    options = {o for pat in re.findall(r"^\s+(-[-\w|]+)\)", script.read_text(), re.M) for o in pat.split("|")}
+    options = {o for pat in re.findall(r"^\s+(-[-\w|]+)\)", script.read_text(encoding="utf-8"), re.M) for o in pat.split("|")}
     assert {"--build", "--checkout", "--agent-bind", "--dry-run", "--help", "-h"} <= options
     assert all(re.search(rf"^\s+(-h, )?{re.escape(o)}\b", r.stdout, re.M) for o in options), r.stdout
     for argv in (["--bogus"], ["stray"], ["--build"], ["--checkout", "--build", "x.tar.gz", "--agent-bind", "127.0.0.1"]):
@@ -107,7 +108,7 @@ def _coordinator_build(tmp_path, platform) -> Path:
     return out
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the coordinator installer is for macOS and Linux")
+@pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
 def test_the_coordinator_installer_finds_uv_and_reads_builds_on_macos_and_linux(tmp_path):
     # --checkout ran /opt/homebrew/bin/uv (macOS with Homebrew only) and the platform check spoke of "this Mac"
     import hashlib
@@ -129,7 +130,7 @@ def test_the_coordinator_installer_finds_uv_and_reads_builds_on_macos_and_linux(
     assert f"coordinator-app/1.2.3-{hashlib.sha256(build.read_bytes()).hexdigest()[:12]}" in r.stdout
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the coordinator installer is for macOS and Linux")
+@pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
 def test_the_coordinator_installer_writes_systemd_units_on_linux(tmp_path):
     # run as on a Linux machine (a fake uname) wherever the suite runs
     fake = tmp_path / "tools"
@@ -146,7 +147,51 @@ def test_the_coordinator_installer_writes_systemd_units_on_linux(tmp_path):
     assert "systemctl --user enable --now" in r.stdout and "launchctl" not in r.stdout
     (fake / "uname").write_text('#!/bin/sh\necho MINGW64_NT-10.0\n')
     r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "10.0.0.1", "--dry-run")
-    assert r.returncode == 1 and "installs on macOS and Linux, not MINGW64_NT-10.0" in r.stderr, r.stderr
+    assert r.returncode == 1 and "installs on macOS and Linux (install-oarbankd.ps1 on Windows), not MINGW64_NT-10.0" in r.stderr, r.stderr
+
+
+WINDOWS_INSTALLER = WXS.parents[1] / "oarbankd" / "install-oarbankd.ps1"
+
+
+def _ps_installer(*argv):
+    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(WINDOWS_INSTALLER), *argv],
+                          capture_output=True, text=True)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows coordinator installer (PowerShell, sc.exe, icacls)")
+def test_the_windows_installer_sets_up_two_services_under_virtual_accounts(tmp_path):
+    """install-oarbankd.ps1 -DryRun: the build checked against this machine, the services under their own virtual
+    accounts with the recovery actions that keep exit 0 down and restart a failed exit, the home's DACL naming the two
+    accounts by the SIDs the coordinator computes, the firewall rule and the standby arguments."""
+    import hashlib
+    import platform as pf
+    from oarbank.platform import files
+    r = _ps_installer("-Help")
+    assert r.returncode == 0 and r.stdout.startswith("usage: install-oarbankd.ps1"), r.stderr
+    for opt in ("-Build", "-AgentBind", "-Url", "-Pair", "-From", "-FromCa", "-ArchiveHome", "-Uninstall", "-DryRun"):
+        assert opt in r.stdout, opt
+    want = "windows-arm64" if pf.machine().upper() == "ARM64" or os.environ.get("PROCESSOR_ARCHITECTURE") == "ARM64" else "windows-amd64"
+    r = _ps_installer("-Build", str(_coordinator_build(tmp_path, "plan9-mips")), "-AgentBind", "10.0.0.1", "-DryRun")
+    assert r.returncode != 0 and f"the build is for plan9-mips, this machine is {want}" in r.stderr, r.stderr
+    build = _coordinator_build(tmp_path, want)
+    r = _ps_installer("-Build", str(build), "-AgentBind", "10.0.0.1", "-DryRun")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    sha = hashlib.sha256(build.read_bytes()).hexdigest()[:12]
+    assert f"Coordinator\\1.2.3-{sha}" in out and "junction" in out
+    for name in files.COORDINATOR_SERVICES:
+        assert f"sc.exe create {name} binPath= " in out and f"obj= NT SERVICE\\{name}" in out
+        assert f"sc.exe failure {name} reset= 86400 actions= restart/10000/restart/10000/restart/60000" in out
+        assert f"sc.exe failureflag {name} 1" in out and f"*{files.service_sid(name)}:(OI)(CI)F" in out
+    assert "-m oarbank.coordinator --service --agent-bind 10.0.0.1 --agent-port 7443 --url https://10.0.0.1:7443" in out
+    assert "-m oarbank.console --service" in out and "/inheritance:r" in out
+    assert "OARBANKD_HOME=" in out and "inbound TCP 7443 for dev.codonic.oarbank.oarbankd" in out
+    r = _ps_installer("-Build", str(build), "-AgentBind", "10.0.0.1", "-Pair", "OBP-1", "-From", "https://a:7443",
+                      "-FromCa", "abc", "-ArchiveHome", "-DryRun")
+    assert r.returncode == 0, r.stderr
+    assert "--url https://10.0.0.1:7443 --standby --pair OBP-1 --from https://a:7443 --from-ca abc --archive-home" in r.stdout
+    r = _ps_installer("-Build", str(build), "-AgentBind", "10.0.0.1", "-Pair", "OBP-1", "-DryRun")
+    assert r.returncode != 0 and "-Pair) also needs -From and -FromCa" in r.stderr
 
 
 def _relocate_shebangs():
@@ -175,7 +220,7 @@ def test_bundled_console_scripts_run_from_wherever_the_build_is_unpacked(tmp_pat
         (built / name).write_text(text)
         (built / name).chmod(0o755)
     assert rs.relocate(built) == ["long", "plain"]
-    assert (built / "shell").read_text() == scripts["shell"]
+    assert (built / "shell").read_text(encoding="utf-8") == scripts["shell"]
     unpacked = tmp_path / "elsewhere"
     (tmp_path / "build dir").rename(unpacked)
     for name in ("plain", "long", "shell"):
@@ -278,13 +323,13 @@ def test_windows_launchers_name_the_bundled_python_relative_to_themselves(tmp_pa
 
 def test_build_scripts_relocate_their_bundled_console_scripts():
     scripts = WXS.parents[2] / "scripts"
-    coord = (scripts / "build-coordinator.sh").read_text()
+    coord = (scripts / "build-coordinator.sh").read_text(encoding="utf-8")
     call = '"$PY" -I "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"'
     assert call in coord and coord.index(call) < coord.index('tar -czf "$TGZ"')
     assert coord.index("uv pip install") < coord.index(call)
-    node = (scripts / "build-node-runtime.sh").read_text()
+    node = (scripts / "build-node-runtime.sh").read_text(encoding="utf-8")
     assert '"$PY" -I "$REPO/scripts/relocate_shebangs.py" "$OUT/bin"' in node
-    windows = (scripts / "build-node-runtime.ps1").read_text()
+    windows = (scripts / "build-node-runtime.ps1").read_text(encoding="utf-8")
     call = '& "$Out\\python.exe" -I "$Repo\\scripts\\relocate_shebangs.py" "$Out\\Scripts" $Out'
     assert call in windows and windows.index('Copy-Item (Get-Command uv).Source') < windows.index(call)
     assert windows.index("uv pip install") < windows.index(call)

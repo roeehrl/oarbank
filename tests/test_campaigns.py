@@ -25,7 +25,7 @@ def test_core_names_no_module_concepts():
         rel = p.relative_to(SRC).as_posix()
         if p.suffix not in (".py", ".html", ".js", ".css", ".json") or rel in EXEMPT_FILES or "__pycache__" in rel:
             continue
-        for i, line in enumerate(p.read_text().splitlines(), 1):
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             if GATED.search(line):
                 hits.append(f"{rel}:{i}: {line.strip()[:120]}")
     assert not hits, "module concepts in the core:\n" + "\n".join(hits)

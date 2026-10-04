@@ -4,7 +4,6 @@ supervised child instead of a launchd job); the standby pairs over pinned TLS, t
 and the agent follows it to the coordinator it installed."""
 import json
 import os
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -13,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from conftest import Coordinator, agent_env, free_port  # noqa: E402
 from test_agent_move import LOCK, t3  # noqa: E402
 from test_agent_session import wait  # noqa: E402
+from helpers import stop_tree  # noqa: E402
 
 
 def test_the_agent_installs_the_standby_and_follows_the_move(agent_bin, tmp_path):
@@ -40,19 +40,16 @@ def test_the_agent_installs_the_standby_and_follows_the_move(agent_bin, tmp_path
             wait(lambda: st() == "paired", timeout=600)
             t3(a, "coordinator.move", params={"timelock_s": 3}, reason="e2e move")
             b_url = f"https://127.0.0.1:{b_port}"
-            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text())
+            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text(encoding="utf-8"))
             wait(lambda: cfg()["coordinator"] == b_url and cfg()["coordinator_trust"]["max_epoch"] == 2, timeout=240)
             assert (b_home / "oarbank.sqlite3").exists()
         finally:
+            for pid in install.glob("*/standby.pid"):           # first: on Windows it holds the agent's output pipe
+                stop_tree(int(pid.read_text(encoding="utf-8")))
             p.terminate()
             out = p.communicate(timeout=30)[0]
             print(out[-6000:])
-            for pid in install.glob("*/standby.pid"):
-                try:
-                    os.kill(int(pid.read_text()), signal.SIGTERM)
-                except (ProcessLookupError, ValueError):
-                    pass
             log = b_home / "logs" / "oarbankd.log"
             if log.exists():
-                print(log.read_text()[-3000:])
+                print(log.read_text(encoding="utf-8")[-3000:])
     assert "standby coordinator installed" in out

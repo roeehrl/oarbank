@@ -12,6 +12,7 @@ import pytest
 
 import agentbin
 from agentbin import CARGO, REPO
+from oarbank.platform.files import venv_python
 
 
 def free_port():
@@ -40,7 +41,7 @@ class Coordinator:
             return self
         for _ in range(300):
             if self.proc.poll() is not None:
-                raise RuntimeError((self.home.parent / f"{self.home.name}.log").read_text()[-3000:])
+                raise RuntimeError((self.home.parent / f"{self.home.name}.log").read_text(encoding="utf-8")[-3000:])
             try:
                 if (self.home / "admin.token").exists() and httpx.get(f"{self.admin}/api/v1/fleet", headers=self.auth(), timeout=1).status_code == 200:
                     return self
@@ -59,7 +60,7 @@ class Coordinator:
                                      env=env, stdout=self.log, stderr=subprocess.STDOUT)
 
     def auth(self):
-        return {"authorization": f"Bearer {(self.home / 'admin.token').read_text().strip()}"}
+        return {"authorization": f"Bearer {(self.home / 'admin.token').read_text(encoding="utf-8").strip()}"}
 
     def api(self, method, path, headers=None, **kw):
         r = httpx.request(method, f"{self.admin}{path}", headers={**self.auth(), **(headers or {})}, timeout=30, **kw)
@@ -67,9 +68,14 @@ class Coordinator:
         return r.json() if r.text else None
 
     def admit(self, eid):
-        """nodes.admit as the owner does it: previewed (T2), then the plan applied with a reason."""
+        """nodes.admit as the owner does it: previewed (T2), then the plan applied with a reason. The node then reserves
+        no memory for the OS or a person (nodes.set_policy): these tests drive the agent's work, not host protection, so
+        the test machine's memory (an 8 GB VM) and whether someone seems to be using it never decide whether work runs."""
         plan = self.api("POST", "/api/v1/ops/nodes.admit", json={"target": eid, "dry_run": True})["plan"]
-        return self.api("POST", "/api/v1/ops/nodes.admit", json={"plan_id": plan["plan_id"], "reason": "e2e"})
+        out = self.api("POST", "/api/v1/ops/nodes.admit", json={"plan_id": plan["plan_id"], "reason": "e2e"})
+        self.api("POST", "/api/v1/ops/nodes.set_policy", json={"target": out["result"]["node_id"], "reason": "e2e",
+                                                               "params": {"patch": {"os_reserve_gb": 0, "user_reserve_gb": 0}}})
+        return out
 
     def __exit__(self, *a):
         self.proc.terminate()
@@ -104,5 +110,27 @@ def install_module(c: "Coordinator", src: Path, tmp: Path, version_note: str = "
 
 
 def agent_env():
-    return {**os.environ, "OARBANK_LOG": "info", "OARBANK_RUNTIME_PYTHON": str(REPO / ".venv" / "bin" / "python"),
+    return {**os.environ, "OARBANK_LOG": "info", "OARBANK_RUNTIME_PYTHON": str(venv_python(REPO / ".venv")),
             "OARBANK_UV": shutil.which("uv") or ""}
+
+
+def build_version(version: str, dest: Path, extra_env=None) -> tuple[Path, Path]:
+    """The agent and launcher built as `version` (and `extra_env`, e.g. a vendor TUF root), copied into `dest`. Every
+    version builds in one target directory (`rust/target-e2e`), so each build after the first only rebuilds what the
+    variables change, and a run keeps one copy of the build tree, not one per version."""
+    env = {**agentbin.cargo_env(), "OARBANK_AGENT_VERSION": version, **(extra_env or {})}
+    r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-agent", "-p", "oarbank-launcher", "--target-dir",
+                        str(REPO / "rust" / "target-e2e")], cwd=REPO / "rust", env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    dest.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in ("oarbank-agent", "oarbank-launcher"):
+        exe = f"{name}{agentbin.EXE}"
+        shutil.copy2(REPO / "rust" / "target-e2e" / "debug" / exe, dest / exe)
+        out.append(dest / exe)
+    return out[0], out[1]
+
+
+def pointer(link: Path) -> str:
+    """What a `current` link names: a symlink's target on POSIX, a pointer file's content on Windows (fsutil.rs `point`)."""
+    return os.readlink(link) if os.name == "posix" else link.read_text(encoding="utf-8").strip()

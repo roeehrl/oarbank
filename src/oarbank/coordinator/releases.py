@@ -13,7 +13,6 @@ status 'current'. A node whose composition differs (a canary node, a pinned node
 composition: the release is the signed lock of module digests.
 """
 import json
-import stat
 import tarfile
 import tempfile
 from pathlib import Path
@@ -124,6 +123,23 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                         **({"folders": [{"id": f.id, "access": f.access} for f in sb.folders]} if sb.folders else {})}}
 
 
+def _tar(out: Path, root: Path, modes: dict):
+    """The release archive: its directories (0755) and files with the modes the release records, `/`-separated."""
+    names = set(modes)
+    for rel in modes:
+        parts = rel.split("/")
+        names.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    with tarfile.open(out, "w:gz") as t:
+        for rel in sorted(names, key=lambda r: r.split("/")):
+            info = t.gettarinfo(str(root / rel), arcname=rel)
+            info.mode = modes.get(rel, 0o755)
+            if info.isfile():
+                with open(root / rel, "rb") as f:
+                    t.addfile(info, f)
+            else:
+                t.addfile(info)
+
+
 def build(db: DB, make_current: bool = True, comp: dict | None = None, platform: str = platforms.DEFAULT_PLATFORM) -> dict:
     """Compose a release for one platform from the module store (default: its default composition) and record it."""
     from oarbank_sdk import manifest as mf, portable
@@ -132,35 +148,32 @@ def build(db: DB, make_current: bool = True, comp: dict | None = None, platform:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td) / "bundle"
         root.mkdir()
-        entries_mod = []
-        for name, c in sorted(comp.items()):
+        entries_mod, modes = [], {}               # modes are part of the release, recorded here, never read back
+        for name, c in sorted(comp.items()):      # from the filesystem (Windows keeps no modes)
             src = Path(c["path"])
             m = mf.load(src / "oarbank-module.toml")
-            for f in node_files(m, json.loads((src / "bundle.json").read_text())["files"], platform):
-                dst = root / "modules" / name / f["path"]
+            for f in node_files(m, json.loads((src / "bundle.json").read_text(encoding="utf-8"))["files"], platform):
+                rel = f"modules/{name}/{f['path']}"
+                dst = root / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes((src / f["path"]).read_bytes())
-                dst.chmod(int(f["mode"], 8))
+                modes[rel] = int(f["mode"], 8)
             ids = [t.id for t in m.sandbox.tools]
             tools = {i: platforms.tool_paths(db, [i], os_)[0] for i in ids}
             entries_mod.append(module_entry(name, c["version"], c["digest"], src, platform, tools))
         (root / "modules.json").write_text(json.dumps({"format": MODULES_FORMAT, "platform": platform, "modules": entries_mod},
-                                                      indent=1, sort_keys=True))
-        (root / "modules.json").chmod(0o644)          # modes are part of the release; never the coordinator's umask
-        entries = []
-        for p in sorted(root.rglob("*")):
-            if p.is_file():
-                mode = stat.S_IMODE(p.stat().st_mode)
-                entries.append({"path": str(p.relative_to(root)), "sha256": sha256_file(p), "mode": oct(mode)})
+                                                      indent=1, sort_keys=True), encoding="utf-8", newline="\n")
+        modes["modules.json"] = 0o644
+        entries = [{"path": rel, "sha256": sha256_file(root / rel), "mode": oct(modes[rel])}
+                   for rel in sorted(modes, key=lambda r: r.split("/"))]
         man = json.dumps({"files": entries}, sort_keys=True, indent=1)
         rid = "r_" + sha256_hex(json.dumps(entries, sort_keys=True))[:12]
-        (root / "MANIFEST.json").write_text(man)
+        (root / "MANIFEST.json").write_text(man, encoding="utf-8", newline="\n")
+        modes["MANIFEST.json"] = 0o644
         C.RELEASE_DIR.mkdir(parents=True, exist_ok=True)
         out = C.RELEASE_DIR / f"{rid}.tar.gz"
         if not out.exists():
-            with tarfile.open(out, "w:gz") as t:
-                for p in sorted(root.rglob("*")):
-                    t.add(p, arcname=str(p.relative_to(root)), recursive=False)
+            _tar(out, root, modes)
     digest = sha256_file(out)
     prev = db.one("SELECT status, seq, statement, signature FROM releases WHERE release_id=?", (rid,)) or {}
     comp_json = json.dumps({n: {"version": c["version"], "digest": c["digest"]} for n, c in comp.items()}, sort_keys=True)

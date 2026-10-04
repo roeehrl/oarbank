@@ -212,7 +212,7 @@ def test_a_blocker_that_outlasts_the_wait_aborts_unless_forced(tmp_path, db, mon
     m = coordmove.request_move(db, "test", "t", timelock_s=1, sign_b=puller.sign_statement, force=force)
     time.sleep(1.1)
     coordmove.driver_tick(db)
-    time.sleep(0.01)
+    time.sleep(0.05)                                    # past the wait on Windows too, whose clock ticks every 15.6 ms
     coordmove.driver_tick(db)
     if force:
         assert coordmove.phase(db) == "final_ready" and coordmove.move(db, m["move_id"])["force"] == 1

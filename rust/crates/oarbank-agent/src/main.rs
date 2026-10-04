@@ -149,9 +149,6 @@ enum Cmd {
     /// This node's sandbox backend and what it enforces, as JSON (the coordinator asks it on Linux and Windows).
     #[command(name = "sandbox-status", hide = true)]
     SandboxStatus,
-    /// Exit 0 when the process started through `sandbox-exec` is confined (internal: the coordinator's check).
-    #[command(name = "sandbox-check", hide = true)]
-    SandboxCheck { pid: i32 },
     /// Apply a sandbox profile to this process, then exec argv (internal: how module processes start).
     #[command(name = "sandbox-exec", hide = true)]
     SandboxExec {
@@ -254,7 +251,6 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Containers { action } => containers(&layout, action),
-        Cmd::SandboxCheck { pid } => std::process::exit(if sandbox::is_confined(pid) { 0 } else { 1 }),
         Cmd::Status => rt.block_on(async {
             let mut a = agent::Agent::open(layout, Some("https://127.0.0.1:7443"))?;
             if a.directives.is_null() {

@@ -231,7 +231,8 @@ def _build_runtime(path: Path, man: "mf.Manifest | None" = None) -> str | None:
         if modsandbox.backend() is None:
             raise InstallError("no module sandbox backend on this OS: dependencies are not installed unconfined")
         argv = _sandboxed_install(argv, path, venv, tmp, man.module.id, uv)
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=900, env=_uv_env(tmp), cwd=str(tmp))
+        from ..platform import procs
+        r = procs.run(argv, capture_output=True, text=True, timeout=900, env=_uv_env(tmp), cwd=str(tmp))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if r.returncode != 0:
@@ -250,13 +251,15 @@ def _link_host_env(venv: Path):
         d = sysconfig.get_paths()[k]
         if d not in host and Path(d).resolve() != site_dir.resolve():
             host.append(d)
-    (site_dir / "_oarbank_host.pth").write_text("".join(f"import site; site.addsitedir({d!r})\n" for d in host))
+    (site_dir / "_oarbank_host.pth").write_text("".join(f"import site; site.addsitedir({d!r})\n" for d in host),
+                                                encoding="utf-8", newline="\n")
 
 
 def _uv_env(home: Path) -> dict:
     """A clean environment for uv: no user configuration, no index, no inherited proxy or credentials."""
-    return {"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home) + "/", "UV_NO_CONFIG": "1",
-            "UV_OFFLINE": "1", "UV_NO_CACHE": "1", "UV_PYTHON_DOWNLOADS": "never", "LANG": "C.UTF-8"}
+    from oarbank_sdk import portable
+    return {**portable.os_env(home, home), "UV_NO_CONFIG": "1", "UV_OFFLINE": "1", "UV_NO_CACHE": "1",
+            "UV_PYTHON_DOWNLOADS": "never"}
 
 
 def _sandboxed_install(argv: list[str], bundle: Path, venv: Path, tmp: Path, module_id: str, uv: str) -> list[str]:

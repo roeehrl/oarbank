@@ -107,8 +107,7 @@ def test_a_thousand_jobs_on_a_mixed_fleet_verify_clean():
         assert rep["ok"], rep["violations"]
         assert r["jobs"] == {"done": 1000} and r["units"] == {"hard": 40} and set(r["classes"]) == {"darwin", "linux"}
     finally:
-        s.db.conn.close()
-        s.tmp.cleanup()
+        s.close()
 
 
 @pytest.mark.parametrize("seed", range(N // 4))

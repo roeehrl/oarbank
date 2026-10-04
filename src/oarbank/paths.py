@@ -6,8 +6,9 @@
 | Linux | $XDG_DATA_HOME/oarbank (~/.local/share/oarbank) | $XDG_CONFIG_HOME/oarbank (~/.config/oarbank) |
 | Windows | %LOCALAPPDATA%\\Oarbank | %APPDATA%\\Oarbank |
 
-The coordinator lives in `<data root>/coordinator`, the agent in `<data root>/agent`. OARBANKD_HOME overrides the
-coordinator's home.
+The coordinator lives in `<data root>/coordinator`, the agent in `<data root>/agent`, except that on Windows the
+coordinator is always a system service with its home in %ProgramData%\\Oarbank\\coordinator (the CLI in an elevated
+prompt finds it there). OARBANKD_HOME overrides the coordinator's home.
 """
 import os
 import sys
@@ -36,22 +37,7 @@ def release_key() -> Path:
 
 
 def coordinator_home() -> Path:
+    if sys.platform == "win32":
+        return Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "Oarbank" / "coordinator"
     return data_root() / "coordinator"
 
-
-def runtime_socket(home, name: str) -> "Path":
-    """Where a Unix socket for `home` lives: `<home>/run/<name>`, unless that path exceeds the 104-byte limit (macOS),
-    then a short owner-only directory under /tmp named after the home. A directory someone else created is refused,
-    so another account cannot pre-create it to intercept the socket."""
-    import hashlib
-    from pathlib import Path
-    p = Path(home) / "run" / name
-    if len(str(p).encode()) <= 100:
-        return p
-    d = Path("/tmp") / f"oarbank-{os.getuid()}" / hashlib.sha256(str(Path(home).resolve()).encode()).hexdigest()[:12]
-    for x in (d.parent, d):
-        x.mkdir(mode=0o700, exist_ok=True)
-        st = x.stat()
-        if st.st_uid != os.getuid() or st.st_mode & 0o077:
-            raise PermissionError(f"{x} is not this account's private directory")
-    return d / name

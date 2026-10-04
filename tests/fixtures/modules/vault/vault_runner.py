@@ -30,13 +30,13 @@ def secrets_seen(ws: Path) -> dict:
 
 
 def run(spec_path: Path, ws: Path, out: Path) -> int:
-    env = json.loads(spec_path.read_text())
+    env = json.loads(spec_path.read_text(encoding="utf-8"))
     res = {"envelope": 1, "schema": "vault/result@1", "module_version": env.get("module_version", "1.0.0"), "protocol": 1}
     stage, payload = env.get("stage"), env.get("payload") or {}
     if stage in ("call", "probe"):
         seen = secrets_seen(ws)
         if stage == "call" and payload.get("leak") and seen["file"]:
-            key = json.loads(Path(os.environ["OARBANK_SECRETS_FILE"]).read_text())["api_key"]
+            key = json.loads(Path(os.environ["OARBANK_SECRETS_FILE"]).read_text(encoding="utf-8"))["api_key"]
             sys.stderr.write("x" * 6000 + "\n")              # enough output for the agent to stream a log chunk
             print(f"calling the provider with {key}", file=sys.stderr, flush=True)
             sys.stderr.write("y" * 6000 + "\n")
