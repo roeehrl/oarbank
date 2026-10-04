@@ -111,7 +111,13 @@ def test_a_secret_reaches_only_its_stage_runner_and_no_log_shows_it(agent_bin, c
     try:
         pending = wait(lambda: [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"])
         coordinator.admit(pending[0]["enrollment_id"])
-        wait(lambda: node_modules(coordinator).get("vault", {}).get("state") == "certified", timeout=120)
+        try:
+            wait(lambda: node_modules(coordinator).get("vault", {}).get("state") == "certified", timeout=120)
+        except AssertionError:
+            # say why the goldens failed: the agent's reason and the runner's (or the agent's own) stderr
+            for (pj,) in q("SELECT payload_json FROM events WHERE kind='attempt_failed' ORDER BY event_id DESC LIMIT 3"):
+                print("golden failed:", (json.loads(pj or "{}").get("stderr_tail") or "")[-1500:])
+            raise
         coordinator.api("POST", "/api/v1/ops/mod.vault.call", json={"params": {}, "reason": "e2e"},
                         headers={"idempotency-key": "e2e-call"})
         wait(lambda: (lambda j: j if j["d"] == 2 else None)(coordinator.api("GET", "/api/v1/campaigns/c_call")["jobs"]), timeout=120)

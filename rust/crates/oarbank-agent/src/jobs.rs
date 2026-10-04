@@ -335,13 +335,16 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let images: Vec<(String, String)> = entry["sandbox"]["containers"].as_array().cloned().unwrap_or_default().iter()
         .filter_map(|c| Some((c["image"].as_str()?.to_string(), c["platform"].as_str()?.to_string()))).collect();
     let sets = entry["sandbox"]["container_sets"].as_array().cloned().unwrap_or_default();
+    // a broker only for a job whose stage runs containers (it reserves the agent's containers pool); a module's other
+    // stages, its goldens among them, need no container runtime on the node
+    let runs_containers = (!images.is_empty() || !sets.is_empty()) && needs.iter().any(|p| p == "containers");
     #[cfg(windows)]
-    let broker: Option<crate::broker::Broker> = match images.is_empty() && sets.is_empty() {
-        true => None,
-        false => bail!("the module runs containers but this node has no container runtime"),
+    let broker: Option<crate::broker::Broker> = match runs_containers {
+        false => None,
+        true => bail!("the module runs containers but this node has no container runtime"),
     };
     #[cfg(unix)]
-    let broker = if images.is_empty() && sets.is_empty() {
+    let broker = if !runs_containers {
         None
     } else {
         let rt = ctx.containers.clone().context("the module runs containers but this node has no container runtime")?;
