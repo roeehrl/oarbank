@@ -328,11 +328,20 @@ fn keep_session_helpers(agent: PathBuf) {
     }
 }
 
-/// Serve requests forever, one connection at a time (and keep the session helpers on a thread of their own).
+/// Serve requests until the service stops, one connection at a time, and keep the session helpers on a thread of
+/// their own. The service process ends when this returns, so it first waits for that thread to end the session
+/// helpers: otherwise every stop or upgrade would leave them running beside the next helper's.
 pub fn serve() -> Result<()> {
     // the agent binary installed beside this launcher (Program Files: administrators' only)
     let agent = std::env::current_exe()?.with_file_name("oarbank-agent.exe");
-    std::thread::spawn(move || keep_session_helpers(agent));
+    let keeper = std::thread::spawn(move || keep_session_helpers(agent));
+    let r = serve_requests();
+    crate::stop_now();
+    let _ = keeper.join();
+    r
+}
+
+fn serve_requests() -> Result<()> {
     let mut h = Helper::open()?;
     let sddl = wide(&pipe_sddl());
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -404,5 +413,35 @@ mod tests {
         keeper.join().unwrap();
         std::thread::sleep(std::time::Duration::from_secs(1));
         assert!(!helpers().iter().any(|h| running.contains(h)), "the helpers end with the service");
+    }
+
+    /// As LocalSystem, with no OarbankHelper service running and an oarbank-agent.exe beside the test binary (what
+    /// `serve` starts): the whole service loop, stopped the way the service manager stops it (the stop flag and a
+    /// connection of its own). `serve` returns only once its session helpers have ended, since the service process
+    /// exits right after.
+    #[test]
+    #[ignore = "needs LocalSystem and a person logged on, and the OarbankHelper service stopped"]
+    fn a_stopped_helper_leaves_no_session_helper_behind() {
+        use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        let in_sessions = || -> usize {
+            let out = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq oarbank-agent.exe", "/FO", "CSV", "/NH"])
+                .output().unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().filter(|l| {
+                let pid: Option<u32> = l.split(',').nth(1).and_then(|p| p.trim_matches('"').parse().ok());
+                let mut s = 0u32;
+                pid.is_some_and(|pid| unsafe { ProcessIdToSessionId(pid, &mut s) } != 0 && s != 0)
+            }).count()
+        };
+        assert_eq!(in_sessions(), 0, "stop the OarbankHelper service first (its session helpers end with it)");
+        let server = std::thread::spawn(serve);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while in_sessions() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        assert!(in_sessions() > 0, "a session helper runs in a person's session");
+        crate::stop_now();
+        let _ = std::fs::OpenOptions::new().read(true).write(true).open(PIPE);
+        server.join().unwrap().unwrap();
+        assert_eq!(in_sessions(), 0, "serve returned with its session helpers ended");
     }
 }
