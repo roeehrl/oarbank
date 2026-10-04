@@ -68,7 +68,13 @@ impl RunSpec {
     /// Exactly: `run --rm --platform P --network none|bridge --cpus C --memory Mg --label oarbank.attempt_id=<id>
     /// --label oarbank.module=<name> [-v src:dst[:ro]]... [--workdir W] [--entrypoint E] [-e K=V]... image args...`.
     /// Nothing from the request reaches a flag position except through these fields.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn docker_args(&self) -> Vec<String> {
+        self.docker_args_with(&self.image)
+    }
+
+    /// The same, naming the image as `image` (a runtime that needs it spelled differently: see [`qualified`]).
+    pub fn docker_args_with(&self, image: &str) -> Vec<String> {
         let mut a: Vec<String> = vec![
             "run".into(), "--rm".into(), "--platform".into(), self.platform.clone(),
             "--network".into(), if self.network { "bridge" } else { "none" }.into(),
@@ -88,7 +94,7 @@ impl RunSpec {
         for (k, v) in &self.env {
             a.extend(["-e".into(), format!("{k}={v}")]);
         }
-        a.push(self.image.clone());
+        a.push(image.to_string());
         a.extend(self.args.iter().cloned());
         a
     }
@@ -144,6 +150,29 @@ pub fn image_key(reference: &str) -> (String, String) {
         format!("docker.io/library/{repo}")
     };
     (repo, digest.to_string())
+}
+
+/// A reference with its registry spelled out as Docker resolves a short name (docker.io, and library/ for a one-part
+/// name), its tag and digest kept. Modules approve images in Docker's form (`genonet/hap-py@sha256:…`), and Podman
+/// refuses a short name unless the host configures unqualified-search registries, which a default install does not.
+pub fn qualified(reference: &str) -> String {
+    let (name, digest) = match reference.split_once('@') {
+        Some((n, d)) => (n, Some(d)),
+        None => (reference, None),
+    };
+    let first = name.split('/').next().unwrap_or("");
+    let has_registry = name.contains('/') && (first.contains('.') || first.contains(':') || first == "localhost");
+    let full = if has_registry {
+        name.to_string()
+    } else if name.contains('/') {
+        format!("docker.io/{name}")
+    } else {
+        format!("docker.io/library/{name}")
+    };
+    match digest {
+        Some(d) => format!("{full}@{d}"),
+        None => full,
+    }
 }
 
 // MARK: helper processes
@@ -582,14 +611,14 @@ impl ContainerRuntime for NativeRuntime {
     }
 
     fn pull(&self, image: &str, platform: &str) -> Result<(), String> {
-        let r = self.cli(&["pull", "--platform", platform, image], 1800)?;
+        let r = self.cli(&["pull", "--platform", platform, &qualified(image)], 1800)?;
         if r.ok() { Ok(()) } else { Err(r.stderr_tail(1000)) }
     }
 
     fn run(&self, spec: &RunSpec, cancel: &AtomicBool) -> Result<RunResult, String> {
         crate::fsutil::private_dir(&self.docker_config).map_err(|e| e.to_string())?;
         let mut argv = vec![self.cli.to_string_lossy().to_string()];
-        argv.extend(spec.docker_args());
+        argv.extend(spec.docker_args_with(&qualified(&spec.image)));
         let file = |f: &Option<std::fs::File>| -> Result<Out, String> {
             Ok(match f {
                 Some(f) => Out::File(f.try_clone().map_err(|e| e.to_string())?),
@@ -798,6 +827,27 @@ mod tests {
         assert_eq!(fmt_num(0.1), "0.1");
         assert_eq!(fmt_num(0.25), "0.25");
         assert_eq!(fmt_num(16.0), "16");
+    }
+
+    #[test]
+    fn short_names_are_spelled_out_for_podman() {
+        let d = "sha256:".to_string() + &"c".repeat(64);
+        assert_eq!(qualified(&format!("genonet/hap-py@{d}")), format!("docker.io/genonet/hap-py@{d}"));
+        assert_eq!(qualified("alpine:3.20"), "docker.io/library/alpine:3.20");
+        for full in [format!("quay.io/biocontainers/bcftools:1.20--h8b25389_0@{d}"), format!("localhost:5000/x@{d}"),
+                     format!("docker.io/org/tool@{d}"), "localhost/x".to_string()] {
+            assert_eq!(qualified(&full), full);
+        }
+        for r in [format!("genonet/hap-py@{d}"), format!("alpine@{d}"), format!("ghcr.io/o/t:2@{d}")] {
+            assert_eq!(image_key(&qualified(&r)), image_key(&r), "the broker's comparison is unchanged");
+        }
+        let s = RunSpec {
+            image: format!("genonet/hap-py@{d}"), platform: "linux/amd64".into(), args: vec![], entrypoint: None, mounts: vec![],
+            env: vec![], workdir: None, network: false, cpus: 1.0, mem_gb: 1.0, attempt_id: 1, module: "m".into(), timeout_s: 1.0,
+            stdout: None, stderr: None,
+        };
+        assert_eq!(s.docker_args_with(&qualified(&s.image)).last().unwrap(), &format!("docker.io/genonet/hap-py@{d}"));
+        assert_eq!(s.docker_args().last().unwrap(), &s.image);
     }
 
     #[test]
