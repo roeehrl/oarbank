@@ -1191,6 +1191,28 @@ mod tests {
         assert_eq!(handle(&sh, &json!({"op": "status"})).await["error"], "cancelled");
     }
 
+    /// Many clients at once, each closing as soon as its answer is read while the broker closes its end: on Windows the
+    /// broker's pipe and the clients' are mio named pipes, whose reads failing right after they were submitted freed
+    /// memory still in use before mio 1.2.4 (tokio-rs/mio#2014; the agent's tests died with STATUS_HEAP_CORRUPTION).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_broker_survives_many_clients_closing_at_once() {
+        let t = tmp();
+        let rt = Fake::running();
+        let b = Broker::start(bind(&t, "many"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let ep = b.endpoint();
+        let tasks: Vec<_> = (0..32).map(|_| {
+            let ep = ep.clone();
+            tokio::spawn(async move {
+                for _ in 0..40 {
+                    assert_eq!(ask(&ep, r#"{"op": "status"}"#).await["ok"], true);
+                }
+            })
+        }).collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_platform_the_runtime_cannot_run_is_unavailable() {
         let t = tmp();

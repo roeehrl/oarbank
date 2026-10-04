@@ -257,7 +257,9 @@ design:
   the broker), and the doctor's probe as an installed agent runs it, then `containers remove`. CI found three things the
   QEMU guest could not: wslc takes a NUL stdin for a console (helpers get an empty pipe), WSLc has no host networking
   (the live test forwards the session VM's registry port), and a session VM asked for more processors than the host has
-  does not start. **Not verified:** the system scope's virtual account driving WSLc (CI runs as an administrator account;
+  does not start; and the first many-client runs of the broker's pipe hit a use-after-free in mio's Windows named pipes
+(a read failing right after it was submitted; fixed in mio 1.2.4, tokio-rs/mio#2014), which the stress test
+`the_broker_survives_many_clients_closing_at_once` reproduced under full page heap and no longer does. **Not verified:** the system scope's virtual account driving WSLc (CI runs as an administrator account;
   upstream untested; doctor reports `account` and the remedy if it fails), and GPU passthrough (no GPU: the gated GPU
   test runs on contributors' hardware).
 
