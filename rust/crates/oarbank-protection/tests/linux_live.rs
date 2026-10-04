@@ -13,7 +13,7 @@ use oarbank_protection::*;
 #[test]
 #[ignore = "reads every process's open files"]
 fn gpu_time_comes_from_drm_fdinfo() {
-    let mut meter = linux::NativeMeter::new();
+    let mut meter = linux::NativeMeter::new(None);
     let a = meter.gpu_times().expect("/proc lists");
     sleep(Duration::from_secs(1));
     let b = meter.gpu_times().unwrap();
@@ -42,7 +42,7 @@ fn gpu_time_comes_from_drm_fdinfo() {
 #[ignore = "reads the live logind sessions"]
 fn presence_comes_from_logind() {
     let sessions = linux::sessions().expect("systemd-logind runs");
-    let r = platform::native_presence().read();
+    let r = platform::native_presence(None).read();
     eprintln!("{} sessions; presence {r:?}", sessions.len());
     // whoever runs this test is logged in (ssh, a terminal or a desktop)
     assert!(sessions.iter().any(|s| s.is_person()), "{sessions:?}");
@@ -56,7 +56,7 @@ fn presence_comes_from_logind() {
 #[ignore = "reads the live process table"]
 fn the_process_table_reads_procfs() {
     let me = std::process::id() as i32;
-    let mut t = ProcessTable::new(Box::new(linux::NativeProcessSource::new()));
+    let mut t = ProcessTable::new(Box::new(linux::NativeProcessSource::new(None)));
     let rows = t.summary(100_000, &HashSet::new(), SystemClock.now()).unwrap();
     let mine = rows.iter().find(|r| r.pid == me).expect("own process listed");
     let exe = std::env::current_exe().unwrap();
@@ -213,7 +213,7 @@ fn the_front_follows_the_session_at_the_seat() {
         leader: me,
         ..Session::default()
     };
-    let mut f = linux::FrontReader::new();
+    let mut f = linux::FrontReader::new(None);
     assert_eq!(f.read(Some(&[])).front, Front::Nothing);
     let ssh = Session { seat: String::new(), ..seat("tty", uid) };
     assert_eq!(f.read(Some(&[ssh])).front, Front::Nothing, "an ssh session is at no seat");

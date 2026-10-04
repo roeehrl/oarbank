@@ -9,6 +9,11 @@
 //! Only `Oarbank.*` containers are served. The pipe `\\.\pipe\oarbank-helper` admits SYSTEM, administrators, the
 //! agent's service account and interactive users. The filters live in a dynamic WFP session (they end with the
 //! helper), and the exemptions the helper added are listed in a state file and removed when it starts again.
+//!
+//! It also keeps a session helper (`oarbank-agent.exe session-helper`, the agent binary installed beside it) running
+//! in each person's session, started with that person's token and no window: the agent's system service, in session
+//! 0, cannot see a session's foreground window, last input or (another account's) command lines, and the session
+//! helper tells it. Only a LocalSystem service may start a process in another session (WTSQueryUserToken).
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -232,8 +237,104 @@ fn pipe_sddl() -> String {
     sddl
 }
 
-/// Serve requests forever, one connection at a time.
+/// A session helper started in one session.
+struct SessionHelper {
+    process: HANDLE,
+    started: std::time::Instant,
+}
+
+/// Start `exe args` in a person's session, as that person, with no window (the agent's session helper).
+fn start_in_session(exe: &std::path::Path, args: &str, session: u32) -> Option<HANDLE> {
+    use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows_sys::Win32::System::RemoteDesktop::WTSQueryUserToken;
+    use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+                                                CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW};
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: LocalSystem may ask for a session's user token; nothing is held on failure.
+    if unsafe { WTSQueryUserToken(session, &mut token) } == 0 {
+        return None;
+    }
+    let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: a live token; the block is destroyed below.
+    let have_env = unsafe { CreateEnvironmentBlock(&mut env, token, 0) } != 0;
+    let app = wide(&exe.display().to_string());
+    let mut cmd = wide(&format!("\"{}\" {args}", exe.display()));
+    let mut desktop = wide(r"winsta0\default");
+    let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    si.lpDesktop = desktop.as_mut_ptr();
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: NUL-terminated strings that outlive the call, a live token, and the environment block (or none).
+    let ok = unsafe {
+        CreateProcessAsUserW(token, app.as_ptr(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0,
+                             CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP,
+                             if have_env { env } else { std::ptr::null_mut() }, std::ptr::null(), &si, &mut pi)
+    } != 0;
+    unsafe {
+        if have_env {
+            DestroyEnvironmentBlock(env);
+        }
+        CloseHandle(token);
+    }
+    if !ok {
+        return None;
+    }
+    unsafe { CloseHandle(pi.hThread) };
+    Some(pi.hProcess)
+}
+
+fn running(h: HANDLE) -> bool {
+    use windows_sys::Win32::Foundation::STILL_ACTIVE;
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+    let mut code = 0u32;
+    unsafe { GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32 }
+}
+
+/// Keep a session helper in every session a person is logged on to: started when the session appears and again
+/// when it exits (no sooner than a minute after the previous start), ended when the service stops.
+fn keep_session_helpers(agent: PathBuf) {
+    use windows_sys::Win32::System::RemoteDesktop::{WTSEnumerateSessionsW, WTSFreeMemory, WTSActive, WTS_CURRENT_SERVER_HANDLE,
+                                                    WTS_SESSION_INFOW};
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+    let mut helpers: HashMap<u32, SessionHelper> = HashMap::new();
+    while !crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        let mut list: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+        let mut n = 0u32;
+        let mut active = vec![];
+        if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut list, &mut n) } != 0 {
+            active = unsafe { std::slice::from_raw_parts(list, n as usize) }.iter()
+                .filter(|s| s.SessionId != 0 && s.State == WTSActive).map(|s| s.SessionId).collect();
+            unsafe { WTSFreeMemory(list.cast()) };
+        }
+        helpers.retain(|id, h| {
+            let keep = active.contains(id) && (running(h.process) || h.started.elapsed().as_secs() < 60);
+            if !keep {
+                unsafe { CloseHandle(h.process) };
+            }
+            keep
+        });
+        for id in active {
+            if !helpers.contains_key(&id) && agent.exists() {
+                if let Some(process) = start_in_session(&agent, "session-helper", id) {
+                    helpers.insert(id, SessionHelper { process, started: std::time::Instant::now() });
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    for h in helpers.into_values() {
+        unsafe {
+            TerminateProcess(h.process, 0);
+            CloseHandle(h.process);
+        }
+    }
+}
+
+/// Serve requests forever, one connection at a time (and keep the session helpers on a thread of their own).
 pub fn serve() -> Result<()> {
+    // the agent binary installed beside this launcher (Program Files: administrators' only)
+    let agent = std::env::current_exe()?.with_file_name("oarbank-agent.exe");
+    std::thread::spawn(move || keep_session_helpers(agent));
     let mut h = Helper::open()?;
     let sddl = wide(&pipe_sddl());
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -269,5 +370,41 @@ pub fn serve() -> Result<()> {
         let _ = (&file).flush();
         unsafe { DisconnectNamedPipe(pipe) };
         drop(file);                                                          // closes the handle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// As LocalSystem (a scheduled task run as SYSTEM): the agent's session helper runs in every session a person is
+    /// logged on to, in that session and with no window, and ends with the service.
+    #[test]
+    #[ignore = "needs LocalSystem and a person logged on"]
+    fn keeps_a_session_helper_in_each_person_s_session() {
+        use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        let agent = std::env::var_os("OARBANK_TEST_AGENT").map(PathBuf::from).expect("OARBANK_TEST_AGENT: an oarbank-agent.exe");
+        let keeper = std::thread::spawn(move || keep_session_helpers(agent));
+        let helpers = || -> Vec<(u32, u32)> {
+            let out = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq oarbank-agent.exe", "/FO", "CSV", "/NH"])
+                .output().unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| {
+                let pid: u32 = l.split(',').nth(1)?.trim_matches('"').parse().ok()?;
+                let mut s = 0u32;
+                (unsafe { ProcessIdToSessionId(pid, &mut s) } != 0).then_some((pid, s))
+            }).collect()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !helpers().iter().any(|h| h.1 != 0) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        // (an installed agent's own service runs in session 0)
+        let running: Vec<(u32, u32)> = helpers().into_iter().filter(|h| h.1 != 0).collect();
+        eprintln!("session helpers (pid, session): {running:?}");
+        assert!(!running.is_empty(), "a helper runs in a person's session");
+        crate::STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+        keeper.join().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(!helpers().iter().any(|h| running.contains(h)), "the helpers end with the service");
     }
 }

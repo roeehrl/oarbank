@@ -402,7 +402,7 @@ impl ProcessSource for Shared {
             .cloned()
             .collect())
     }
-    fn argv(&mut self, pid: i32) -> Option<Vec<String>> {
+    fn argv(&mut self, pid: i32, _: u64) -> Option<Vec<String>> {
         self.0.lock().unwrap().calls.push(format!("argv {pid}"));
         Some(vec![format!("p{pid}"), "--flag".into()])
     }

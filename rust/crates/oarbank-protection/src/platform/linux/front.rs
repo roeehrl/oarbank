@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::procs::reader;
 use crate::presence::logind::{front_session, Session};
+use crate::session::{Principal, SessionHub};
 use crate::signals::{Front, FrontReading};
 use crate::x11;
 
@@ -197,15 +199,16 @@ fn find_xauthority(uid: u32, display: &str) -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-/// The front app, from logind's sessions and the X server of an X11 session in front.
-#[derive(Default)]
+/// The front app, from logind's sessions and the X server of an X11 session in front; another account's display
+/// through that account's session helper.
 pub struct FrontReader {
     conn: Option<Conn>,
+    hub: Option<Arc<SessionHub>>,
 }
 
 impl FrontReader {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(hub: Option<Arc<SessionHub>>) -> Self {
+        Self { conn: None, hub }
     }
 
     pub fn read(&mut self, sessions: Option<&[Session]>) -> FrontReading {
@@ -240,10 +243,20 @@ impl FrontReader {
     fn x11(&mut self, s: &Session) -> FrontReading {
         // SAFETY: getuid cannot fail.
         if s.uid != unsafe { libc::getuid() } {
-            return FrontReading::new(
-                Front::Unknown,
-                format!("unknown: session {} belongs to another account, whose display only it may open", s.id),
-            );
+            return self
+                .hub
+                .as_ref()
+                .and_then(|h| h.front(Principal::Uid(s.uid)))
+                .unwrap_or_else(|| {
+                    FrontReading::new(
+                        Front::Unknown,
+                        format!(
+                            "unknown: session {} belongs to another account, whose display only it may open, and \
+                             no session helper of that account reports",
+                            s.id
+                        ),
+                    )
+                });
         }
         if self.conn.as_ref().is_some_and(|c| c.display != s.display) {
             self.conn = None;

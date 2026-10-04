@@ -29,7 +29,9 @@ pub struct Protection {
 }
 
 impl Protection {
-    pub fn new(l: &Layout) -> Self {
+    /// `session_hub`: serve session helpers (the system service on Linux and Windows), whose reports tell what the
+    /// service's own account may not read.
+    pub fn new(l: &Layout, session_hub: bool) -> Self {
         let journal = Arc::new(P::DecisionJournal::new(Box::new(P::SystemClock),
                                                        Some(Box::new(P::FileJournalSink::new(l.state().join("journal"))))));
         let store = Some(Box::new(P::FileRegistryStore::new(l.state().join("spawn-registry.json"))) as Box<dyn P::RegistryStore>);
@@ -37,10 +39,16 @@ impl Protection {
         let registry = Arc::new(P::SpawnRegistry::native(Some(journal.clone()), store));
         #[cfg(not(target_os = "macos"))]
         let registry = Arc::new(P::SpawnRegistry::new(Box::new(ContainerActuator), Some(journal.clone()), store));
-        let ctrl = P::ProtectionController::new(Some(journal.clone()), P::Host::native());
+        let hub = session_hub.then(P::session::SessionHub::new);
+        if let Some(h) = &hub {
+            if let Err(e) = P::platform::serve_sessions(h.clone()) {
+                tracing::warn!(error = %e, "cannot serve session helpers: other accounts' paths, arguments, display and input stay unreadable");
+            }
+        }
+        let ctrl = P::ProtectionController::new(Some(journal.clone()), P::platform::native_host(hub.clone()));
         // the owner's local protection file sits beside the agent's home (docs/protocol.md, "Agent config")
         let local = l.home.parent().unwrap_or(&l.home).join("protection.json");
-        Protection { ctrl, presence: P::platform::native_presence(), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
+        Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
                      last: None, capacity: None, telemetry: json!({}),
                      service_pools: Default::default(), service_reserved_mem_gb: 0.0 }
     }
@@ -306,10 +314,8 @@ mod tests {
         let _ = crate::cgroup::root();
         let mut cmd = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" });
         cmd.args(if cfg!(windows) { &["-n", "30", "127.0.0.1"][..] } else { &["30"][..] }).stdout(std::process::Stdio::null());
-        crate::sys::new_group_std(&mut cmd);
-        let mut child = cmd.spawn().unwrap();
+        let mut child = crate::sys::spawn_contained(&mut cmd, false).unwrap();
         let pid = child.id() as i32;
-        crate::sys::adopt(pid as u32).unwrap();
         let reg = P::SpawnRegistry::new(Box::new(ContainerActuator), None, None);
         let start = procs::start_time_us(pid).unwrap();
         assert_eq!(procs::start_time_us(pid), Some(start), "a process's start time is stable");
@@ -377,5 +383,144 @@ mod tests {
             CloseHandle(h);
             class == IDLE_PRIORITY_CLASS
         }
+    }
+}
+
+/// Host protection end to end on this machine, through the agent's own code: a rule naming a running process of the
+/// owner pauses one fleet job (frozen through its container) and lowers another, and both come back once that
+/// process ends. Windows: run it in a person's session (session 0 holds no owner's processes).
+#[cfg(test)]
+mod e2e {
+    use super::*;
+    use crate::jobs::JobState;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// A busy fleet job in a container of its own, as jobs.rs starts runners; killed with its container on drop.
+    struct Job(Child);
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            let pg = self.0.id() as i32;
+            crate::sys::signal_group(pg, crate::sys::Sig::Kill);
+            let _ = self.0.wait();
+            crate::sys::release(pg);
+        }
+    }
+
+    /// A process of the owner's, killed on drop.
+    struct Owner(Child);
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn job() -> Job {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/c", "for /l %i in (0,0,1) do @rem"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "while :; do :; done"]);
+            c
+        };
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        Job(crate::sys::spawn_contained(&mut cmd, false).unwrap())
+    }
+
+    fn state(aid: i64, pgid: i32, caps: &[&str]) -> JobState {
+        JobState { attempt_id: aid, phase: "running".into(), cpu: 1.0, mem_gb: 0.1, gpu: false, pgid: Some(pgid), stop: None,
+                   pause: false, usage: Default::default(), log_bytes: 0, started_at: crate::doctor::now(),
+                   caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, needs: vec![],
+                   wake: Default::default() }
+    }
+
+    /// CPU seconds the container uses over `secs`.
+    fn cpu_over(pgid: i32, secs: f64) -> f64 {
+        let a = procs::group_usage(pgid).cpu_s;
+        std::thread::sleep(Duration::from_secs_f64(secs));
+        procs::group_usage(pgid).cpu_s - a
+    }
+
+    /// Lowered as this OS lowers: the container's background quota (Linux), background QoS (macOS), the idle priority
+    /// class (Windows).
+    fn lowered(pgid: i32) -> bool {
+        #[cfg(target_os = "linux")]
+        return crate::cgroup::container(pgid)
+            .and_then(|c| std::fs::read_to_string(c.join("run/cpu.max")).ok())
+            .is_some_and(|q| q.trim() != "max 100000");
+        // getpriority(PRIO_DARWIN_PROCESS) answers only for the caller; background QoS runs at priority 4
+        #[cfg(target_os = "macos")]
+        return Command::new("/bin/ps").args(["-o", "pri=", "-p", &pgid.to_string()]).output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "4");
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{GetPriorityClass, OpenProcess, IDLE_PRIORITY_CLASS,
+                                                        PROCESS_QUERY_LIMITED_INFORMATION};
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pgid as u32);
+            let class = GetPriorityClass(h);
+            CloseHandle(h);
+            class == IDLE_PRIORITY_CLASS
+        }
+    }
+
+    #[test]
+    #[ignore = "starts busy processes and runs protection for several seconds"]
+    fn a_rule_naming_a_running_process_pauses_and_lowers_fleet_jobs() {
+        #[cfg(target_os = "linux")]
+        let _ = crate::cgroup::root(); // cgroups first, as the agent's main does
+        let home = std::env::temp_dir().join(format!("oarbank-prot-e2e-{}", std::process::id()));
+        let l = Layout::new(home.clone());
+        l.ensure().unwrap();
+        let mut p = Protection::new(&l, false);
+        let (a, b) = (job(), job());
+        let (pa, pb) = (a.0.id() as i32, b.0.id() as i32);
+        assert!(p.registry.register(pa, Some(1), None) && p.registry.register(pb, Some(2), None));
+        let table = Table::default();
+        table.lock().unwrap().insert(1, state(1, pa, &["freeze_ok"]));
+        table.lock().unwrap().insert(2, state(2, pb, &[]));
+        // the owner's process the rule names by its arguments
+        let marker = if cfg!(windows) { "127.0.0.42" } else { "4242.5" };
+        let owner = Owner(if cfg!(windows) {
+            Command::new("ping").args(["-n", "600", marker]).stdout(Stdio::null()).spawn().unwrap()
+        } else {
+            Command::new("sleep").arg(marker).spawn().unwrap()
+        });
+        let rule = json!({"id": "owner", "match": {"argv_regex": marker.replace('.', "\\.")}, "active_when": {"for_s": 0},
+                          "pause_fleet": {}, "lower_fleet": {}, "exit_after_s": 0});
+        let d = json!({"desired_state": "active", "limits": {}, "policy": {"protection": {
+            "node": {"mode": "fleet_first", "defaults": {"cooldown": {"base_s": 1, "max_s": 1}}}, "rule": [rule]}}});
+        let facts = json!({"cpu": {"logical": 4}});
+        p.tick(&d, &table, &facts);
+        let r = p.last.clone().unwrap();
+        assert!(r.reports[0].active, "{:?}", r.reports);
+        assert_eq!((r.paused.iter().copied().collect::<Vec<_>>(), r.lowered.contains(&2)), (vec![1], true));
+        // the pausable job is frozen; the other is lowered where this node can lower
+        let frozen = cpu_over(pa, 1.0);
+        assert!(frozen < 0.05, "a frozen job used {frozen} s of CPU");
+        assert_eq!(lowered(pb), can_lower());
+        // the owner's process ends: both come back
+        drop(owner);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            p.tick(&d, &table, &facts);
+            let r = p.last.as_ref().unwrap();
+            if r.paused.is_empty() && r.lowered.is_empty() || Instant::now() > deadline {
+                break;
+            }
+        }
+        let r = p.last.clone().unwrap();
+        assert!(!r.reports[0].active && r.paused.is_empty() && r.lowered.is_empty(), "{:?}", r.reports);
+        let running = cpu_over(pa, 1.0);
+        assert!(running > 0.3, "a resumed job used only {running} s of CPU");
+        assert!(!lowered(pb));
+        drop((a, b));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

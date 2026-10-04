@@ -1,6 +1,9 @@
 //! The launcher under systemd (Linux): a user unit in `~/.config/systemd/user`, or with `--system` a system unit in
 //! `/etc/systemd/system` run as a named account. The unit restarts the launcher on any exit (the launcher itself
-//! handles the agent's exit 75) and delegates its cgroup, so the agent can put jobs in cgroups of their own.
+//! handles the agent's exit 75) and delegates its cgroup, so the agent can put jobs in cgroups of their own. A system
+//! install also enables, for every person's user manager, the session helper that tells the agent's host protection
+//! what the service's account may not read (`/etc/systemd/user/<label>.session.service`), and runs the agent with
+//! `--session-hub`.
 
 use crate::{flag, Home, LABEL};
 use anyhow::{bail, Context, Result};
@@ -29,6 +32,8 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
         bail!("bad label {label:?}");
     }
     let unit = format!("{label}.service");
+    let helper_unit = format!("{label}.session.service");
+    let helper_path = PathBuf::from("/etc/systemd/user").join(&helper_unit);
     let path = if system { PathBuf::from("/etc/systemd/system").join(&unit) } else {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).context("HOME is not set")?;
@@ -40,10 +45,16 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
             let home_dir = std::path::absolute(&home.0)?;
             let mut program = vec![exe.display().to_string(), "--home".into(), home_dir.display().to_string(), "run".into()];
             program.extend(agent_args.iter().cloned());
+            let account = if system { flag(opts, "--user") } else { None };
+            if account.is_some() {
+                program.push("--session-hub".into());
+            }
+            // the agent binary installed beside the launcher (root's), never the service account's current version
+            let helper_agent = exe.with_file_name("oarbank-agent");
             let spec = oarbank_core::service::ServiceSpec {
                 label: label.clone(), program, env: vec![("OARBANK_LOG".into(), "info".into())],
                 working_dir: Some(home_dir.display().to_string()), stdout: None, stderr: None,
-                user: if system { flag(opts, "--user") } else { None }, keep_alive: true, restart_on_failure: false,
+                user: account.clone(), keep_alive: true, restart_on_failure: false,
             };
             let text = oarbank_core::service::systemd_unit(&spec, "Oarbank agent", system);
             if dry {
@@ -56,6 +67,22 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 let tmp = path.with_extension("service.tmp");
                 std::fs::write(&tmp, &text)?;
                 std::fs::rename(&tmp, &path)?;
+            }
+            if let (Some(a), true) = (&account, helper_agent.exists()) {
+                let text = oarbank_core::service::session_helper_unit(&helper_agent.display().to_string(), a);
+                if dry {
+                    println!("# {}\n{text}", helper_path.display());
+                } else {
+                    std::fs::write(&helper_path, text)?;
+                }
+                // started in each person's user manager at their next login
+                let o = systemctl(false, &["--global", "enable", &helper_unit], dry)?;
+                if !o.status.success() {
+                    bail!("systemctl --global enable failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+                }
+            } else if account.is_some() {
+                eprintln!("no agent binary beside the launcher ({}): no session helpers; other accounts' paths, arguments \
+                           and displays stay unreadable to host protection", helper_agent.display());
             }
             systemctl(!system, &["daemon-reload"], dry)?;
             let o = systemctl(!system, &["enable", "--now", &unit], dry)?;
@@ -71,6 +98,14 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 println!("rm {}", path.display());
             } else if path.exists() {
                 std::fs::remove_file(&path)?;
+            }
+            if system && (dry || helper_path.exists()) {
+                let _ = systemctl(false, &["--global", "disable", &helper_unit], dry)?;
+                if dry {
+                    println!("rm {}", helper_path.display());
+                } else {
+                    std::fs::remove_file(&helper_path)?;
+                }
             }
             systemctl(!system, &["daemon-reload"], dry)?;
             println!("uninstalled {unit}");

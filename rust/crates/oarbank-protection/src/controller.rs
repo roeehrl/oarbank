@@ -146,9 +146,9 @@ impl Host {
         }
     }
 
-    /// This platform's process table and meters, and file-based owner sources.
+    /// This platform's process table and meters, and file-based owner sources (no session helpers).
     pub fn native() -> Self {
-        crate::platform::native_host()
+        crate::platform::native_host(None)
     }
 }
 

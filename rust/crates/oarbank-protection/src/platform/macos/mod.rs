@@ -88,7 +88,8 @@ impl Actuator for NativeActuator {
         let mut rc = 0;
         for pid in members {
             // SAFETY: plain syscall on a member of a group the registry verified.
-            let r = unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid as libc::id_t, prio) };
+            let r =
+                unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid as libc::id_t, prio) };
             if r != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
                 rc = r;
             }

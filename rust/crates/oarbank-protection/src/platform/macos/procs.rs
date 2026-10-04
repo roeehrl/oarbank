@@ -276,7 +276,7 @@ impl ProcessSource for NativeProcessSource {
         Ok(out)
     }
 
-    fn argv(&mut self, pid: i32) -> Option<Vec<String>> {
+    fn argv(&mut self, pid: i32, _: u64) -> Option<Vec<String>> {
         argv(pid)
     }
 

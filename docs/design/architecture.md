@@ -72,14 +72,17 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Job container | a process group | a cgroup v2 leaf where systemd delegated the agent's cgroup (kill, freeze, usage), else a process group | a Job Object, kill-on-close for attempts |
 | Hard limits (`hard_limits` policy) | none | cgroup `cpu.max` and `memory.max` | Job Object limits |
 | Process inspection | libproc, `KERN_PROCARGS2`, code-signing identity | `/proc` (stat, status, cmdline, exe, schedstat) | the native process list (`NtQuerySystemInformation`: processes, threads' states, image paths), command lines |
-| Meters | rusage, IORegistry GPU time, memory pressure, thermal state, battery | `/proc`, DRM `fdinfo` GPU time, PSI memory pressure, thermal zones, power supplies, hybrid core types | `GlobalMemoryStatusEx`, GPU Engine counters, efficiency classes, power status |
-| Presence | HID idle, screen sharing | systemd-logind's sessions (desktop idle hints, terminal access times) | the sessions WTS lists (logged on, connected, locked), the last input in the user's own session |
+| Meters | rusage, IORegistry GPU time, memory pressure, thermal state, battery | `/proc` (CPU time, run-queue wait from `schedstat`, major faults), DRM `fdinfo` GPU time, PSI memory pressure, thermal zones, power supplies, hybrid core types | the process list (CPU time, threads waiting for a core, hard faults), `GlobalMemoryStatusEx`, GPU Engine counters, efficiency classes, power status |
+| Front app | `lsappinfo` | the seat's session from logind: an X11 session's active window (EWMH), a text console's foreground group | the console session from WTS, its foreground window |
+| Presence | HID idle, screen sharing | systemd-logind's sessions (desktop idle hints, terminal access times) | the sessions WTS lists (logged on, connected, locked), the last input in each person's session (the session helper's, for the system service) |
+| Session helpers (the system service) | none | a global systemd user unit per person, reporting over `/run/oarbank/session.sock` | started by the elevated helper in each person's session, reporting over `\\.\pipe\oarbank-session` |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
 | Module sandbox | Seatbelt | Landlock and seccomp | AppContainer in a Job Object, plus an elevated helper for the egress allowlist |
 | Containers | an agent-owned Colima profile | rootless Podman, else Docker Engine | not yet |
 
-Host protection's dynamic controller has a macOS backend so far; Linux and Windows nodes run the memory guard,
-capacity and owner caps.
+Host protection runs on every OS ([protection.md](protection.md), "On each OS" and "Whose processes"): the rules,
+their process trees and triggers, presence, the front app, GPU time, the dynamic controller's measured signals and its
+actions on fleet jobs.
 
 ## The coordinator
 
@@ -214,7 +217,6 @@ runtime yet (planned: an agent-owned WSL2 distribution running Podman).
 ## Not built yet
 
 - Containers on Windows, and the Windows admin channel (the coordinator runs on macOS and Linux).
-- Host protection's dynamic controller on Linux and Windows, GPU meters there (NVML, PDH), and protection measurements
-  on hardware other than Apple Silicon.
-- The per-session presence helper for the system-scope agent.
+- NVIDIA's per-process GPU time on Linux (NVML: the proprietary driver writes no DRM `fdinfo`, so its processes' GPU
+  use counts as unknown), and protection measurements on hardware other than Apple Silicon.
 - The apt/dnf repository (its hosting and key are the owner's).

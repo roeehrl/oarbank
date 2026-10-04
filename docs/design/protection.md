@@ -18,6 +18,23 @@ The agent signals, lowers or pauses only processes in its spawn registry (a pid 
 one). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
 one (S16). Unknown processes are never signalled; their memory always counts.
 
+## Whose processes
+
+The owner's processes are, on macOS, those of the agent's own account; on Linux, those of the agent's account and of
+every person logged in (systemd-logind's user sessions) or reporting through a session helper; on Windows, those of
+the agent's account in the personal scope, and for the system service each person's own processes in their session.
+A system install's agent runs as a service account that may not read everything about another account's processes:
+on Linux their executable path and open files (ptrace access), on Windows their command line (a process handle), and
+on both their display and input. A **session helper**, the agent's binary run as the person in their session
+(`oarbank-agent session-helper`: a global systemd user unit on Linux, started by the elevated helper service on
+Windows), reports those facts every two seconds over a local endpoint the agent serves (`/run/oarbank/session.sock`,
+`\\.\pipe\oarbank-session`): the person's processes with their paths and arguments, their GPU use (Linux), the front
+window and the last input (Windows). The endpoint names the account or session that sent a report, the agent accepts
+claims only about processes of that account or session that started when the claim says, and it forgets a helper ten
+seconds after its last report. A helper can only describe its own person's work, and that only ever restricts the
+fleet. Without one, those facts are unreadable and the fail-safe rules apply; on Windows the system's own processes
+in that person's session then count as the owner's too.
+
 ## Modes
 
 A node's mode selects a controller profile. It changes thresholds and triggers, never authority; owner rules bind in
@@ -125,8 +142,9 @@ One pure decision function over signals, configuration and its own state, on the
 - **Bandwidth classes:** a module declares its runner's `bandwidth_class`. When the harm is only to GPU-bound groups,
   `low` jobs get no dynamic rung and `high` jobs are lowered as soon as the budget shrinks.
 - **Failure defaults favour the owner:** a stale signal counts as a violation of every metric that uses it, a failed
-  identity lookup counts as a match, a missing private meter blocks growth but never the memory guard, and a restarted
-  agent admits nothing until it has adopted its running jobs and evaluated every rule.
+  identity lookup counts as a match, presence that cannot be read counts as someone present, a missing private meter
+  blocks growth but never the memory guard, and a restarted agent admits nothing until it has adopted its running jobs
+  and evaluated every rule.
 
 ### Why the growth gate exists
 

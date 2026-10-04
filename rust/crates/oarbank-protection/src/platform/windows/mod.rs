@@ -6,6 +6,7 @@ mod front;
 mod pdh;
 mod presence;
 mod procs;
+mod session;
 
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +14,10 @@ pub use front::{front, own_front};
 pub use pdh::{RawCounter, GPU_ENGINE_RUNNING_TIME};
 pub use presence::{own_idle_s, own_session, sessions, NativePresence};
 pub use procs::{command_line, processes, NativeProcessSource, ProcessCounters, Snapshots};
+pub use session::{pipe_name, run_helper, serve};
 
 use crate::gpu::{self, GpuTimes};
+use crate::session::SessionHub;
 use crate::signals::{FrontReading, Meter, ProcCounters};
 
 /// Counters from the native process list (shared with the table), GPU time from the GPU Engine performance
@@ -22,13 +25,15 @@ use crate::signals::{FrontReading, Meter, ProcCounters};
 pub struct NativeMeter {
     counters: ProcessCounters,
     gpu: Option<RawCounter>,
+    hub: Option<Arc<SessionHub>>,
 }
 
 impl NativeMeter {
-    pub fn new(shared: Arc<Mutex<Snapshots>>) -> Self {
+    pub fn new(shared: Arc<Mutex<Snapshots>>, hub: Option<Arc<SessionHub>>) -> Self {
         Self {
             counters: ProcessCounters::new(shared),
             gpu: None,
+            hub,
         }
     }
 }
@@ -47,6 +52,6 @@ impl Meter for NativeMeter {
         ))
     }
     fn front(&mut self) -> FrontReading {
-        front()
+        front(self.hub.as_deref())
     }
 }

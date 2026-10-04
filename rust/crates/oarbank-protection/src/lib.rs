@@ -27,6 +27,7 @@ pub mod model;
 pub mod platform;
 pub mod presence;
 pub mod procinfo;
+pub mod session;
 pub mod signals;
 pub mod sources;
 pub mod spawn_registry;

@@ -45,8 +45,8 @@ pub enum SourceError {
 pub trait ProcessSource: Send {
     /// The owner's processes, without the ones in `excluding` (the agent's own groups).
     fn list(&mut self, excluding: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError>;
-    /// argv; None when unreadable.
-    fn argv(&mut self, pid: i32) -> Option<Vec<String>>;
+    /// The arguments of the process with this pid and start time; None when unreadable.
+    fn argv(&mut self, pid: i32, start_us: u64) -> Option<Vec<String>>;
     fn signing(&mut self, pid: i32) -> SigningIdentity;
     /// Does the live process satisfy a code-signing requirement string?
     fn satisfies(&mut self, pid: i32, requirement: &str) -> bool;
@@ -63,7 +63,7 @@ impl ProcessSource for UnsupportedProcessSource {
     fn list(&mut self, _: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError> {
         Err(SourceError::Unsupported(std::env::consts::OS))
     }
-    fn argv(&mut self, _: i32) -> Option<Vec<String>> {
+    fn argv(&mut self, _: i32, _: u64) -> Option<Vec<String>> {
         None
     }
     fn signing(&mut self, _: i32) -> SigningIdentity {
@@ -182,7 +182,7 @@ impl ProcessTable {
             seen.insert(key);
             let mut id = self.identity(key, rp.path.as_deref());
             if need_argv && id.argv.is_none() {
-                id.argv = self.source.argv(rp.pid);
+                id.argv = self.source.argv(rp.pid, rp.start_us);
             }
             if need_signing && id.team_id.is_none() && id.signing_id.is_none() {
                 let s = self.source.signing(rp.pid);
@@ -264,7 +264,7 @@ impl ProcessTable {
                 id.signing_id = Some(s.signing_id.unwrap_or_default());
             }
             if id.argv.is_none() {
-                id.argv = self.source.argv(p.pid);
+                id.argv = self.source.argv(p.pid, p.start_us);
             }
             out.push(ProcessSummaryRow {
                 pid: p.pid,

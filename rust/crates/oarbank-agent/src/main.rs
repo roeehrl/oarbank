@@ -105,7 +105,15 @@ enum Cmd {
         /// A file holding a join code (installers and MDM): used while this node has no certificate, then deleted.
         #[arg(long)]
         join_file: Option<PathBuf>,
+        /// Serve session helpers, which tell host protection what this service's account may not read about the
+        /// people using the machine (system installs on Linux and Windows).
+        #[arg(long)]
+        session_hub: bool,
     },
+    /// Report this person's session to the system agent's host protection: their processes' paths and arguments,
+    /// their front window and last input (each person's session runs one; system installs start it).
+    #[command(name = "session-helper")]
+    SessionHelper,
     /// Enroll and wait for the owner's approval, then exit.
     Enroll {
         #[arg(long)]
@@ -186,7 +194,8 @@ fn main() -> anyhow::Result<()> {
             let mut a = agent::Agent::open(layout, coordinator.as_deref())?;
             a.enroll(std::time::Duration::from_secs(2), wait.map(std::time::Duration::from_secs)).await
         }),
-        Cmd::Run { coordinator, mut join, join_file } => rt.block_on(async {
+        Cmd::SessionHelper => Err(oarbank_protection::platform::run_session_helper().into()),
+        Cmd::Run { coordinator, mut join, join_file, session_hub } => rt.block_on(async {
             // cgroups first, while the agent has no children (cgroup.rs)
             #[cfg(target_os = "linux")]
             let _ = cgroup::root();
@@ -215,6 +224,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(f) = consumed {
                 let _ = std::fs::remove_file(f);
             }
+            a.session_hub = session_hub;
             let (tx, rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;

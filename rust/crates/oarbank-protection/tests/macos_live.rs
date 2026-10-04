@@ -185,7 +185,7 @@ fn frontmost_detection_returns_the_front_apps_bundle_id() {
 
 #[test]
 fn presence_reads_the_hid_idle_time() {
-    let r = platform::native_presence().read();
+    let r = platform::native_presence(None).read();
     assert!(r.idle_s.is_some_and(|s| s >= 0.0), "{r:?}");
     assert!(r.source == "hid" || r.source == "screen sharing", "{r:?}");
     assert!(macos::hid_idle_s().is_some());

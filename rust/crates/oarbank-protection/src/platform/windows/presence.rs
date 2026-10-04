@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::ptr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use windows_sys::Win32::System::RemoteDesktop::{
@@ -14,6 +15,7 @@ use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
 use crate::presence::wts::{self, Session};
+use crate::session::{Principal, SessionHub};
 use crate::signals::{Presence, PresenceReading};
 
 /// WTSINFOEX's SessionFlags.
@@ -102,16 +104,19 @@ pub fn sessions() -> Option<Vec<Session>> {
     Some(out)
 }
 
-/// Presence from the sessions, with the last input of this process's own session and the time each locked
-/// session was first seen locked.
-#[derive(Debug, Default)]
+/// Presence from the sessions, with the last input of this process's own session (or of any session, from its
+/// helper) and the time each locked session was first seen locked.
 pub struct NativePresence {
+    hub: Option<Arc<SessionHub>>,
     locked_since: HashMap<u32, Instant>,
 }
 
 impl NativePresence {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(hub: Option<Arc<SessionHub>>) -> Self {
+        Self {
+            hub,
+            locked_since: HashMap::new(),
+        }
     }
 }
 
@@ -131,9 +136,16 @@ impl Presence for NativePresence {
         }
         let own = own_session();
         let own_idle = own_idle_s();
+        let hub = self.hub.as_deref();
         wts::presence(
             &sessions,
-            |id| if id == own { own_idle } else { None },
+            |id| {
+                if id == own {
+                    own_idle
+                } else {
+                    hub?.idle_s(Principal::Session(id))
+                }
+            },
             |id| {
                 self.locked_since
                     .get(&id)

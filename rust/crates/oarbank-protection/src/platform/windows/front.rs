@@ -14,6 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::presence::{own_session, sessions};
 use crate::presence::wts::front_session;
+use crate::session::{Principal, SessionHub};
 use crate::signals::{Front, FrontReading};
 
 fn window_pid(w: HWND) -> u32 {
@@ -82,8 +83,8 @@ pub fn own_front() -> FrontReading {
 }
 
 /// What is in front: nothing when nobody is logged on at the console or the session is locked; the foreground
-/// window when the agent runs in that session; unknown from any other session.
-pub fn front() -> FrontReading {
+/// window when this process runs in that session; from any other session, what that session's helper reports.
+pub fn front(hub: Option<&SessionHub>) -> FrontReading {
     let Some(sessions) = sessions() else {
         return FrontReading::new(
             Front::Unknown,
@@ -101,11 +102,14 @@ pub fn front() -> FrontReading {
     if s.id == own_session() {
         return own_front();
     }
-    FrontReading::new(
-        Front::Unknown,
-        format!(
-            "unknown: session {}'s foreground window is read only from inside it",
-            s.id
-        ),
-    )
+    hub.and_then(|h| h.front(Principal::Session(s.id))).unwrap_or_else(|| {
+        FrontReading::new(
+            Front::Unknown,
+            format!(
+                "unknown: session {}'s foreground window is read only from inside it, and no session helper \
+                 reports from there",
+                s.id
+            ),
+        )
+    })
 }

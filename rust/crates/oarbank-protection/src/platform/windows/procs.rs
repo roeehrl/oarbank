@@ -1,10 +1,13 @@
 //! The Windows process table. One `NtQuerySystemInformation(SystemProcessInformation)` call lists every process
 //! with its parent, session, times, private working set, hard faults and its threads' scheduling states, without
-//! opening any process. The owner's processes are those in people's sessions (1 and up; session 0 holds the
-//! services, the agent's system service and its jobs among them). An executable's path comes from
+//! opening any process. The owner's processes are a person's: in the personal scope those whose token is the
+//! agent's own account's (as on macOS, an elevated process counts as another account's); for the system service,
+//! in session 0, those each person's session helper reports as its own, and in a person's session without a helper
+//! every process there (the system's own session processes too: fail-safe). An executable's path comes from
 //! `SystemProcessIdInformation`, which needs no handle either; the command line needs a handle with
 //! PROCESS_QUERY_LIMITED_INFORMATION, which another account's process denies the agent's service account, so
-//! another account's arguments are unreadable to the system service (and count as matching).
+//! the system service takes another account's arguments from that session's helper, and without one they are
+//! unreadable (and count as matching).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -12,10 +15,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, UNICODE_STRING};
+use windows_sys::Win32::Security::{
+    GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+};
 use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::procinfo::nt::{self, Process};
+use crate::session::{Principal, SessionHub};
 use crate::signals::ProcCounters;
 use crate::table::{ProcessSource, RawProcess, SigningIdentity, SourceError};
 
@@ -112,6 +121,58 @@ fn kernel_image_path(pid: u32) -> Option<String> {
         )
     };
     (st >= 0).then(|| String::from_utf16_lossy(&buf[..info.image.Length as usize / 2]))
+}
+
+/// The account a process handle's token runs as (its user SID).
+fn handle_user(h: HANDLE) -> Option<Vec<u8>> {
+    let mut tok: HANDLE = std::ptr::null_mut();
+    // SAFETY: a live process handle; the token handle is closed below.
+    if unsafe { OpenProcessToken(h, TOKEN_QUERY, &mut tok) } == 0 {
+        return None;
+    }
+    let mut buf = vec![0u64; 64];
+    let mut len = 0u32;
+    // SAFETY: a live token and a 512-byte buffer (a TOKEN_USER with its SID).
+    let ok = unsafe {
+        GetTokenInformation(
+            tok,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut len,
+        )
+    } != 0;
+    let sid = ok.then(|| {
+        // SAFETY: GetTokenInformation wrote a TOKEN_USER whose SID lies within `buf`.
+        unsafe {
+            let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+            let sid = user.User.Sid;
+            std::slice::from_raw_parts(sid.cast::<u8>(), GetLengthSid(sid) as usize).to_vec()
+        }
+    });
+    // SAFETY: we own the token handle.
+    unsafe { CloseHandle(tok) };
+    sid
+}
+
+/// The account a process runs as, when this process may open it (None: another account's that denies it, such as
+/// the system's, or an elevated one; or gone).
+pub fn process_user(pid: u32) -> Option<Vec<u8>> {
+    // SAFETY: plain call; the handle is closed below.
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        return None;
+    }
+    let user = handle_user(h);
+    // SAFETY: we own the handle.
+    unsafe { CloseHandle(h) };
+    user
+}
+
+/// This process's own account.
+pub fn own_user() -> Option<Vec<u8>> {
+    // SAFETY: the pseudo-handle needs no closing.
+    handle_user(unsafe { GetCurrentProcess() })
 }
 
 /// A process's command line as arguments (None: the process may not be opened, or is gone).
@@ -236,17 +297,38 @@ impl ProcessCounters {
 /// The owner's processes (read-only).
 pub struct NativeProcessSource {
     shared: Arc<Mutex<Snapshots>>,
+    hub: Option<Arc<SessionHub>>,
+    /// The agent's session (0: the system service) and account.
+    session: u32,
+    user: Option<Vec<u8>>,
     drives: Vec<(String, String)>,
-    /// Paths by (pid, create time): a process's executable never changes.
-    paths: HashMap<(u32, i64), Option<String>>,
+    /// Path and whether it is the owner's, by (pid, create time): neither ever changes.
+    known: HashMap<(u32, i64), (Option<String>, bool)>,
 }
 
 impl NativeProcessSource {
-    pub fn new(shared: Arc<Mutex<Snapshots>>) -> Self {
+    pub fn new(shared: Arc<Mutex<Snapshots>>, hub: Option<Arc<SessionHub>>) -> Self {
         Self {
             shared,
+            hub,
+            session: super::own_session(),
+            user: own_user(),
             drives: drives(),
-            paths: HashMap::new(),
+            known: HashMap::new(),
+        }
+    }
+
+    /// Whether a process is the owner's (the module's doc). The system service's answer for a session with a helper
+    /// is the helper's, so it is not cached.
+    fn owners(&self, p: &Process, start_us: u64, mine: bool) -> bool {
+        if self.session != 0 {
+            return mine;
+        }
+        let Some(hub) = &self.hub else { return true };
+        if hub.principals().contains(&Principal::Session(p.session)) {
+            hub.identity(p.pid as i32, start_us).is_some()
+        } else {
+            true
         }
     }
 
@@ -263,12 +345,13 @@ impl NativeProcessSource {
 
 impl ProcessSource for NativeProcessSource {
     fn list(&mut self, excluding: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError> {
+        let personal = self.session != 0;
         let procs: Vec<Process> = {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.fresh()
                 .ok_or_else(|| SourceError::Unreadable("NtQuerySystemInformation failed".into()))?
                 .iter()
-                .filter(|p| p.session != 0 && !excluding.contains(&(p.pid as i32)))
+                .filter(|p| (personal || p.session != 0) && !excluding.contains(&(p.pid as i32)))
                 .cloned()
                 .collect()
         };
@@ -280,14 +363,18 @@ impl ProcessSource for NativeProcessSource {
             };
             let key = (p.pid, p.create_time);
             seen.insert(key);
-            let path = match self.paths.get(&key) {
-                Some(path) => path.clone(),
+            let (path, mine) = match self.known.get(&key) {
+                Some(k) => k.clone(),
                 None => {
-                    let path = self.path(p.pid);
-                    self.paths.insert(key, path.clone());
-                    path
+                    let mine = personal && self.user.is_some() && process_user(p.pid) == self.user;
+                    let k = (self.path(p.pid), mine);
+                    self.known.insert(key, k.clone());
+                    k
                 }
             };
+            if !self.owners(&p, start_us, mine) {
+                continue;
+            }
             out.push(RawProcess {
                 pid: p.pid as i32,
                 ppid: p.ppid as i32,
@@ -298,12 +385,13 @@ impl ProcessSource for NativeProcessSource {
                 footprint_gb: p.private_ws_bytes as f64 / GB,
             });
         }
-        self.paths.retain(|k, _| seen.contains(k));
+        self.known.retain(|k, _| seen.contains(k));
         Ok(out)
     }
 
-    fn argv(&mut self, pid: i32) -> Option<Vec<String>> {
+    fn argv(&mut self, pid: i32, start_us: u64) -> Option<Vec<String>> {
         command_line(u32::try_from(pid).ok()?)
+            .or_else(|| self.hub.as_ref()?.identity(pid, start_us)?.argv)
     }
 
     /// Authenticode is not a code-signing identity rules match on (they are refused here).

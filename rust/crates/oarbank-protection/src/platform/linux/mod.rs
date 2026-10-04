@@ -6,29 +6,45 @@ mod front;
 mod gpu;
 mod logind;
 mod procs;
+mod session;
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub use front::{x11_front, FrontReader};
 pub use gpu::{gpu_times, process_gpu};
 pub use logind::{sessions, NativePresence};
 pub use procs::{owner_uids, reader, start_time_us, NativeProcessSource, ProcessCounters};
+pub use session::{run_helper, serve, socket_path};
 
 use crate::gpu::{drm, GpuTimes};
+use crate::session::SessionHub;
 use crate::signals::{FrontReading, Meter, ProcCounters};
 
-/// Scheduler counters from procfs, GPU time from DRM `fdinfo`, and the front app.
-#[derive(Default)]
+/// Scheduler counters from procfs, GPU time from DRM `fdinfo` (another account's from its session helper), and the
+/// front app.
 pub struct NativeMeter {
     counters: ProcessCounters,
     front: FrontReader,
+    hub: Option<Arc<SessionHub>>,
     drm: drm::Usage,
     last: Option<Instant>,
+    /// GPU time accumulated from session helpers' busy fractions, for the processes whose files only their own
+    /// account may read.
+    helped: HashMap<i32, f64>,
 }
 
 impl NativeMeter {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(hub: Option<Arc<SessionHub>>) -> Self {
+        Self {
+            counters: ProcessCounters::new(),
+            front: FrontReader::new(hub.clone()),
+            hub,
+            drm: drm::Usage::default(),
+            last: None,
+            helped: HashMap::new(),
+        }
     }
 }
 
@@ -39,8 +55,24 @@ impl Meter for NativeMeter {
     fn gpu_times(&mut self) -> Option<GpuTimes> {
         let now = Instant::now();
         let seconds = self.last.map(|t| now.duration_since(t).as_secs_f64());
-        let t = gpu_times(&mut self.drm, seconds)?;
+        let mut t = gpu_times(&mut self.drm, seconds)?;
         self.last = Some(now);
+        // a process whose files the agent may not read, whose helper reads them: its busy fraction, accumulated
+        // over this reading's interval (the first reading has no interval, so it stays unknown)
+        if let (Some(hub), Some(dt)) = (&self.hub, seconds) {
+            let helped: Vec<(i32, f64)> = t
+                .unknown
+                .iter()
+                .filter_map(|&pid| Some((pid, hub.gpu_busy(pid)??)))
+                .collect();
+            for (pid, busy) in helped {
+                let ns = self.helped.entry(pid).or_insert(0.0);
+                *ns += busy * dt * 1e9;
+                t.ns.insert(pid, *ns);
+                t.unknown.remove(&pid);
+            }
+            self.helped.retain(|pid, _| t.ns.contains_key(pid));
+        }
         Some(t)
     }
     fn front(&mut self) -> FrontReading {

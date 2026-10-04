@@ -111,7 +111,11 @@ sudo install -d /etc/oarbank && echo 'OB1-…' | sudo tee /etc/oarbank/join-code
 sudo apt install ./oarbank-agent_<v>_amd64.deb        # or: sudo dnf install ./oarbank-agent-<v>.x86_64.rpm
 ```
 The postinstall creates the `oarbank` account, sets up `/var/lib/oarbank/agent`, installs the systemd unit
-`dev.codonic.oarbank.agent.service` (with a delegated cgroup, so jobs get cgroup leaves) and deletes the code file.
+`dev.codonic.oarbank.agent.service` (with a delegated cgroup, so jobs get cgroup leaves) and deletes the code file. It
+also enables, for every person's user manager, the session helper `dev.codonic.oarbank.agent.session.service`
+(`/etc/systemd/user`), which tells host protection what the `oarbank` account may not read about that person's
+processes and display; it starts at each person's next login (or at once with `systemctl --user start
+dev.codonic.oarbank.agent.session.service`).
 Without a code: `sudo oarbank-launcher setup --scope system --join-code 'OB1-…'`. Containers use rootless Podman when
 it is installed (the `oarbank` account needs subordinate ids: `sudo usermod --add-subuids 100000-165535
 --add-subgids 100000-165535 oarbank`), else Docker Engine.
@@ -133,8 +137,9 @@ component (`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) or a standalone LLV
 `scripts\windows-clang.ps1`, which adds the Visual Studio component when run with `-Install`.
 
 The MSI installs `C:\Program Files\Oarbank`, the elevated helper service (`OarbankHelper`, which lets module sandboxes
-reach only their job's egress proxy), and the agent as the service `dev.codonic.oarbank.agent` run by its virtual
-account, with its home in `C:\ProgramData\Oarbank\agent`. Both services start automatically about two minutes after
+reach only their job's egress proxy, and keeps a session helper running in each person's session that tells host
+protection that session's foreground window, last input and command lines), and the agent as the service
+`dev.codonic.oarbank.agent` run by its virtual account, with its home in `C:\ProgramData\Oarbank\agent`. Both services start automatically about two minutes after
 boot (Automatic, Delayed Start), and the service manager restarts either one that crashes or stops with an error.
 `JOINCODE=` or `COORDINATOR=` work instead of a file. Module
 processes run in AppContainers; containers are not available on Windows yet.

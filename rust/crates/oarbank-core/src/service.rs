@@ -61,26 +61,39 @@ pub fn launchd_plist(s: &ServiceSpec) -> String {
     out
 }
 
+/// systemd's quoting: an argument in double quotes, with \ and " escaped and % doubled.
+fn systemd_quote(a: &str) -> String {
+    format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
+}
+
 /// A systemd unit. The launcher handles exit 75 itself, so the unit restarts on any exit; `Delegate=yes` lets the
-/// agent manage its jobs' cgroups.
+/// agent manage its jobs' cgroups. A system unit run as an account gets the runtime directory `/run/oarbank`,
+/// readable by everyone, where the agent serves the people's session helpers.
 pub fn systemd_unit(s: &ServiceSpec, description: &str, system: bool) -> String {
-    // systemd's quoting: each argument in double quotes, with \ and " escaped and % doubled
-    let q = |a: &str| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"));
     let mut out = format!("[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\n");
-    out += &format!("ExecStart={}\n", s.program.iter().map(|a| q(a)).collect::<Vec<_>>().join(" "));
+    out += &format!("ExecStart={}\n", s.program.iter().map(|a| systemd_quote(a)).collect::<Vec<_>>().join(" "));
     for (k, v) in &s.env {
-        out += &format!("Environment={}\n", q(&format!("{k}={v}")));
+        out += &format!("Environment={}\n", systemd_quote(&format!("{k}={v}")));
     }
     if let Some(d) = &s.working_dir {
         out += &format!("WorkingDirectory={d}\n");             // a path setting: taken literally, no quoting
     }
     if let (true, Some(u)) = (system, &s.user) {
-        out += &format!("User={u}\nGroup={u}\n");
+        out += &format!("User={u}\nGroup={u}\nRuntimeDirectory=oarbank\nRuntimeDirectoryMode=0755\n");
     }
     out += if s.keep_alive { "Restart=always\n" } else if s.restart_on_failure { "Restart=on-failure\n" } else { "Restart=no\n" };
     out += "RestartSec=10\nKillMode=mixed\nDelegate=yes\n\n[Install]\n";
     out += if system { "WantedBy=multi-user.target\n" } else { "WantedBy=default.target\n" };
     out
+}
+
+/// The systemd user unit that runs the session helper in every person's user manager (enabled with
+/// `systemctl --global`): `agent` is the agent binary installed beside the launcher (root's, never the service
+/// account's), and the service's own account runs none.
+pub fn session_helper_unit(agent: &str, account: &str) -> String {
+    format!("[Unit]\nDescription=Oarbank session helper (tells the Oarbank agent's host protection about this session)\n\
+             ConditionUser=!{account}\n\n[Service]\nExecStart={} \"session-helper\"\nRestart=always\nRestartSec=10\n\n\
+             [Install]\nWantedBy=default.target\n", systemd_quote(agent))
 }
 
 /// `sc.exe create` arguments for a Windows service whose binary path is `program` (quoted per the Windows rules),
@@ -122,7 +135,12 @@ mod tests {
         let u = systemd_unit(&spec, "Oarbank agent", true);
         assert!(u.contains("ExecStart=\"/opt/oarbank/oarbank-launcher\" \"--home\" \"/var/lib/oarbank/a b\" \"run\"\n"));
         assert!(u.contains("User=oarbank\n") && u.contains("Restart=always") && u.contains("WantedBy=multi-user.target"));
-        assert!(!systemd_unit(&spec, "x", false).contains("User="));
+        assert!(u.contains("RuntimeDirectory=oarbank\nRuntimeDirectoryMode=0755\n"));
+        let personal = systemd_unit(&spec, "x", false);
+        assert!(!personal.contains("User=") && !personal.contains("RuntimeDirectory"));
+        let h = session_helper_unit("/usr/lib/oarbank/oarbank-agent", "oarbank");
+        assert!(h.contains("ExecStart=\"/usr/lib/oarbank/oarbank-agent\" \"session-helper\"\n"));
+        assert!(h.contains("ConditionUser=!oarbank\n") && h.contains("WantedBy=default.target"));
         let a = sc_create_args("OarbankAgent", "Oarbank agent", &[r"C:\Program Files\Oarbank\oarbank-launcher.exe".into(), "run".into()], None);
         assert_eq!(a[3], r#""C:\Program Files\Oarbank\oarbank-launcher.exe" run"#);
         assert_eq!(a[7], r"NT SERVICE\OarbankAgent");

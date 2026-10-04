@@ -8,7 +8,7 @@ use std::ffi::CStr;
 
 use super::cf;
 use super::iokit::{
-    property, IORegistryCreateIterator, IOIteratorNext, IOObjectConformsTo, IoObject, Object,
+    property, IOIteratorNext, IOObjectConformsTo, IORegistryCreateIterator, IoObject, Object,
 };
 
 const SERVICE_PLANE: &CStr = c"IOService";

@@ -39,6 +39,8 @@ pub struct Agent {
     pub healthy: Vec<String>,
     pub draining: bool,
     pub prot: Option<crate::prot::Protection>,
+    /// Serve session helpers (`run --session-hub`: the system service on Linux and Windows).
+    pub session_hub: bool,
     facts: Value,
     pub update: crate::selfupdate::SelfUpdate,
     /// What happened to the pending coordinator move, for the heartbeat (`coordinator_move_state`).
@@ -90,7 +92,7 @@ impl Agent {
         Ok(Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: Value::Null, hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
                    last_release_error: None, need_hello: false, table: Table::default(), healthy: vec![],
-                   draining: false, prot: None, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
+                   draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
                    #[cfg(unix)]
                    containers: None,
@@ -329,7 +331,8 @@ impl Agent {
         let Some(rel) = self.release.clone() else { return };
         if self.services.is_none() {
             let Ok(rt) = self.runtime() else { return };
-            let registry = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&self.layout)).registry.clone();
+            let hub = self.session_hub;
+            let registry = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&self.layout, hub)).registry.clone();
             self.services = Some(Arc::new(std::sync::Mutex::new(crate::services::ServiceManager::new(
                 Layout::new(self.layout.home.clone()), rt, Some(registry), self.cfg.manage_services))));
         }
@@ -616,7 +619,8 @@ impl Agent {
                 self.rerun_doctors = true;
             }
         }
-        let p = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&l));
+        let hub = self.session_hub;
+        let p = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&l, hub));
         p.service_pools = pools;
         p.service_reserved_mem_gb = reserved;
         p.tick(&self.directives, &self.table, &self.facts);

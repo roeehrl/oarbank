@@ -115,7 +115,7 @@ their process groups, deletes their workspaces, and does not report them.
                "disk_free_gb": 350.2, "services_running": ["example/vm"], "services_reserved_gb": 8.0,
                "guard": "clear", "protection": {"mode": "moderate", "active": ["…"], "rules": [{"id": "…", "active": true,
                "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
-               "budget_cores": 6}},
+               "budget_cores": 6, "front": "app 812 (lsappinfo)", "source_error": null, "lowering": true}},
  "capacity": { …Capacity… },
  "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused", "cpu_s": 55.2,
                "log_bytes": 10231, "rss_gb": 0.9}],
@@ -463,9 +463,11 @@ Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `d
 ## Staged jobs (stage chains)
 
 A module whose manifest has a stage `B` with `after = "A"` can run a job as the chain A → B. Its
-single-stage form is the stage that neither runs `after` another nor is depended on. The chain is enabled
-when the module's pipeline is split (`oarbank pipeline split --module <name>`, setting
-`pipeline:<module>`).
+single-stage form is the default stage: the one marked `default = true`, or the only stage that neither runs `after`
+another nor is depended on. The chain is enabled when the module's pipeline is split (`oarbank pipeline split --module
+<name>`, setting `pipeline:<module>`), for jobs that name no stage. A `jobs.enqueue` item that names a standalone stage
+(`stage`, host capability `jobs.stage`) runs exactly that stage in any pipeline mode, with that stage's resources,
+timeout, retry and platforms; its envelope names the stage, except the default stage, which stays absent.
 
 | | head job | tail job |
 |---|---|---|

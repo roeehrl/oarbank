@@ -1,7 +1,8 @@
 //! The launcher under the Windows service manager (docs/design/architecture.md, "Host interfaces": the launcher
 //! is the service). The system scope is a service run by its virtual account (`NT SERVICE\<name>`), started at boot
 //! (delayed) and restarted by the service manager's recovery actions; the personal scope is a scheduled task at
-//! the user's logon. The service manager starts `oarbank-launcher --home H service-main <agent args>`.
+//! the user's logon. The service manager starts `oarbank-launcher --home H service-main <agent args>`; the system
+//! scope's agent serves the session helpers the elevated helper starts (`--session-hub`).
 
 use crate::{flag, Home, LABEL};
 use anyhow::{bail, Context, Result};
@@ -80,6 +81,8 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
             if system {
                 let mut program = vec![exe.display().to_string(), "--home".into(), home_dir.display().to_string(), "service-main".into()];
                 program.extend(agent_args.iter().cloned());
+                // the elevated helper starts a session helper in each person's session; they report here
+                program.push("--session-hub".into());
                 let _ = sc(&s(&["stop", &name]), dry);
                 let _ = sc(&s(&["delete", &name]), dry);
                 ok(&sc(&oarbank_core::service::sc_create_args(&name, "Oarbank agent", &program, flag(opts, "--user").as_deref()), dry)?, "sc create")?;

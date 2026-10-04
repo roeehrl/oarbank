@@ -21,7 +21,7 @@ fn gpu_time_comes_from_the_gpu_engine_counters() {
         items.iter().all(|(n, v)| n.starts_with("pid_") && *v >= 0),
         "{items:?}"
     );
-    let mut meter = windows::NativeMeter::new(windows::Snapshots::shared());
+    let mut meter = windows::NativeMeter::new(windows::Snapshots::shared(), None);
     let a = meter.gpu_times().unwrap();
     sleep(Duration::from_secs(1));
     let b = meter.gpu_times().unwrap();
@@ -66,7 +66,7 @@ fn wildcard_counters_pick_up_new_instances() {
 fn presence_comes_from_the_session_list() {
     let sessions = windows::sessions().expect("WTS lists sessions");
     assert!(sessions.iter().any(|s| s.id == 0), "session 0 (services) always exists: {sessions:?}");
-    let r = platform::native_presence().read();
+    let r = platform::native_presence(None).read();
     eprintln!("own session {}; sessions {sessions:?}; presence {r:?}", windows::own_session());
     if windows::own_session() != 0 {
         assert!(windows::own_idle_s().is_some());
@@ -83,7 +83,7 @@ fn the_process_table_lists_the_people_s_sessions() {
     let all = windows::processes().expect("the process list");
     let mine = all.iter().find(|p| p.pid == me).expect("this test is listed");
     assert!(mine.threads >= 1 && mine.start_us().is_some() && mine.cpu_s() >= 0.0);
-    let mut t = ProcessTable::new(Box::new(windows::NativeProcessSource::new(windows::Snapshots::shared())));
+    let mut t = ProcessTable::new(Box::new(windows::NativeProcessSource::new(windows::Snapshots::shared(), None)));
     let rows = t.summary(100_000, &HashSet::new(), SystemClock.now()).unwrap();
     eprintln!("this test in session {}; {} processes in people's sessions", mine.session, rows.len());
     for r in rows.iter().take(6) {
@@ -147,7 +147,7 @@ fn counters_estimate_run_queue_wait_from_thread_states() {
 #[test]
 #[ignore = "reads the live sessions"]
 fn the_front_follows_the_console_session() {
-    let r = windows::front();
+    let r = windows::front(None);
     eprintln!("own session {}; front {r:?}", windows::own_session());
     let sessions = windows::sessions().unwrap();
     let person = sessions.iter().any(|s| s.is_person());
