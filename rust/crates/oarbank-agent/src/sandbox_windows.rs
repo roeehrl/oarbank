@@ -306,7 +306,57 @@ mod ffi {
         Ok(())
     }
 
-    /// Add an inheritable allow entry for `sid` to `path`'s DACL.
+    /// The machine's lock on ACL edits by shims (a named mutex in this session, which every shim of one agent shares),
+    /// held until dropped. A shim that dies holding it abandons it, and the next one takes it.
+    pub struct AclLock(HANDLE);
+
+    impl AclLock {
+        pub fn take() -> AclLock {
+            use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
+            let name = wide("Local\\oarbank-sandbox-acl");
+            let m = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+            if m.is_null() {
+                die(70, &format!("the ACL lock: {}", std::io::Error::last_os_error()));
+            }
+            unsafe { WaitForSingleObject(m, INFINITE) };
+            AclLock(m)
+        }
+    }
+
+    impl Drop for AclLock {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Threading::ReleaseMutex;
+            unsafe {
+                ReleaseMutex(self.0);
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Whether `acl` already allows `sid` at least `mask`, inherited by files and folders below.
+    unsafe fn allows(acl: *const ACL, sid: PSID, mask: u32) -> bool {
+        use windows_sys::Win32::Security::{EqualSid, GetAce, ACCESS_ALLOWED_ACE, CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
+        const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+        if acl.is_null() {
+            return false;
+        }
+        for i in 0..(*acl).AceCount as u32 {
+            let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+            if GetAce(acl, i, &mut ace) == 0 {
+                continue;
+            }
+            let a = &*(ace as *const ACCESS_ALLOWED_ACE);
+            let inherit = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
+            if a.Header.AceType == ACCESS_ALLOWED_ACE_TYPE && a.Header.AceFlags & inherit == inherit && a.Mask & mask == mask
+                && EqualSid(&a.SidStart as *const u32 as PSID, sid) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Add an inheritable allow entry for `sid` to `path`'s DACL, unless it has one already (writing it again would
+    /// walk the whole tree below to propagate it).
     pub fn grant(path: &str, sid: PSID, mask: u32) -> Result<(), String> {
         let p = wide(path);
         unsafe {
@@ -316,6 +366,10 @@ mod ffi {
                                           &mut old, std::ptr::null_mut(), &mut sd);
             if e != 0 {
                 return Err(format!("{path}: reading its ACL failed ({e})"));
+            }
+            if allows(old, sid, mask) {
+                LocalFree(sd as _);
+                return Ok(());
             }
             let ea = EXPLICIT_ACCESS_W {
                 grfAccessPermissions: mask, grfAccessMode: GRANT_ACCESS, grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
@@ -378,6 +432,9 @@ pub fn exec(args: &[String]) -> ! {
         _ => None,
     };
     let ro = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+    // one shim at a time edits ACLs: an edit reads the ACL and writes it back with its entry, so two shims granting the
+    // same path (the runtime's Python, a tool) at once could each drop the other's entry
+    let acl_lock = ffi::AclLock::take();
     // read-only roots the agent does not own (a Python under Program Files) cannot take a new entry, and every
     // AppContainer can already read the system's: a failed read grant only means the module may not read that path
     for p in pol.ro.iter().chain(pol.exe.iter()) {
@@ -390,6 +447,12 @@ pub fn exec(args: &[String]) -> ! {
             die(70, &e);
         }
     }
+    // user32 (and with it COM, ctypes, Python's platform module) initialises only if the container can read the window
+    // station and desktop it starts on
+    if let Err(e) = ffi::open_desktop(sid) {
+        eprintln!("sandbox launch: {e} (user32, COM and ctypes will not load)");
+    }
+    drop(acl_lock);
     // capabilities: internetClient for egress-any only
     let mut cap_sid = [0u8; 68];
     let mut caps: Vec<SID_AND_ATTRIBUTES> = vec![];
@@ -424,12 +487,6 @@ pub fn exec(args: &[String]) -> ! {
         si.StartupInfo.hStdOutput = stdout;
         si.StartupInfo.hStdError = stderr;
         si.lpAttributeList = list;
-        // kept open until the job exits: the window station goes away with its last handle
-        // user32 (and with it COM, ctypes, Python's platform module) initialises only if the container can read the
-        // window station and desktop it starts on
-        if let Err(e) = ffi::open_desktop(sid) {
-            eprintln!("sandbox launch: {e} (user32, COM and ctypes will not load)");
-        }
         let mut cmd = wide(&args[sep + 1..].iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" "));
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let ok = CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), (!inherit.is_empty()).into(),
