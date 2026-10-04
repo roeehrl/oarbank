@@ -450,12 +450,18 @@ def pools_of_disabled(disabled: list[str]) -> set[str]:
 
 def node_class(node: dict | None, name: str) -> dict:
     """What golden.list may know about a node (NodeClass): platform, OS version, CPU, GPUs, capabilities and pools,
-    never its identity. A pool counts as available unless the owner disabled every service that provides it here."""
+    never its identity. Pools: those the node reports (its agent's own, such as `containers` from its container runtime,
+    and running services') and those its services provide, which count as available although an on-demand service may
+    not run yet, unless the owner disabled every service that provides it here. Capabilities: those its doctor report
+    names for the module (services and healthy probes, such as a tool probe) and its enabled services'."""
     import json as _json
+    from .predicates import node_capabilities
     disabled = (_json.loads((node or {}).get("policy_json") or "{}") or {}).get("disabled_services") or [] if node else []
     facts = _json.loads((node or {}).get("facts_json") or "{}") or {} if node else {}
+    reported = (_json.loads((node or {}).get("capacity_json") or "{}") or {}).get("pools") or {} if node else {}
     off = pools_of_disabled(disabled)
-    pools, caps = {}, set()
+    pools = {p: 1 for p, k in reported.items() if isinstance(k, (int, float)) and k > 0 and p not in off}
+    caps = node_capabilities(node, name) if node else set()
     for mname, i in CATALOG.items():
         for s in i.manifest.services:
             for p in s.provides.pools:

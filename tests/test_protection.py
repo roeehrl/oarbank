@@ -58,6 +58,28 @@ def test_disabled_service_zeroes_its_pools(db):
     assert modcalls.node_class(fresh(db, n), "relay")["pools"] == {"scorer": 1}
 
 
+def test_golden_node_class_has_the_agents_own_pools_and_the_doctors_capabilities(db):
+    """A node class names what the node really has: the agent's own pools (a container runtime's `containers`, which no
+    module service provides) and the capabilities its doctor report names (a tool probe's), as stages' requirements
+    are checked against. Without them a module that grades through containers got only its call-only goldens, and
+    its grading was never certified."""
+    from oarbank.coordinator import modcalls
+    n = enrolled_node(db)[1]
+    db.x("UPDATE nodes SET capacity_json=?, doctor_json=? WHERE node_id=?",
+         (json.dumps({"pools": {"containers": 2, "gone": 0}}),
+          json.dumps({"capabilities": ["java17"], "modules": {"relay": {"capabilities": ["own"]}}}), n["node_id"]))
+    c = modcalls.node_class(fresh(db, n), "relay")
+    assert c["pools"] == {"containers": 1, "scorer": 1}
+    assert {"java17", "own"} <= set(c["capabilities"])
+    assert "own" not in modcalls.node_class(fresh(db, n), "toy")["capabilities"]      # another module's doctor
+    # a pool only disabled services provide stays off, whatever the node reports
+    db.x("UPDATE nodes SET capacity_json=?, policy_json=? WHERE node_id=?",
+         (json.dumps({"pools": {"containers": 2, "scorer": 4}}), json.dumps({"disabled_services": ["relay/scorer"]}), n["node_id"]))
+    assert modcalls.node_class(fresh(db, n), "relay")["pools"] == {"containers": 1, "scorer": 0}
+    from oarbank_sdk.module_protocol import NodeClass
+    NodeClass.model_validate(c)
+
+
 def test_golden_list_gets_the_nodes_platform_class(db, monkeypatch):
     """NodeClass [stable] fields: a module can return goldens for the node's platform, OS version, CPU and GPUs."""
     from oarbank.coordinator import modcalls
