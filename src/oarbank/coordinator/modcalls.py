@@ -171,6 +171,36 @@ def compares(name: str, stage: str | None, version: str | None = None) -> bool:
     return i is None or i.manifest.compares(stage)
 
 
+def tick_results(name: str, version: str | None) -> bool:
+    """Whether that module version declares campaign.tick.results (it validates and delivers structured results)."""
+    from oarbank_sdk import module_protocol as mp
+    try:
+        return mp.CAP_TICK_RESULTS in info_for(name, version).manifest.coordinator.capabilities
+    except KeyError:
+        return False
+
+
+_VALIDATORS: dict = {}
+
+
+def payload_problem(name: str, version: str | None, payload) -> str | None:
+    """Why a result payload is unfit for campaign.tick (None: it is fit): over results.max_inline_kb as compact UTF-8
+    JSON, or invalid against results.schema (the version's bundle file)."""
+    import jsonschema
+    i = info_for(name, version)
+    res = i.manifest.results
+    size = len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
+    if size > res.max_inline_kb * 1024:
+        return f"payload of {size} bytes > results.max_inline_kb {res.max_inline_kb}"
+    path = i.path / res.schema_
+    v = _VALIDATORS.get(str(path))
+    if v is None:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        v = _VALIDATORS[str(path)] = jsonschema.validators.validator_for(schema)(schema)
+    err = next(iter(v.iter_errors(payload)), None)
+    return f"results.schema: {'/'.join(map(str, err.absolute_path)) or '(payload)'}: {err.message}"[:300] if err else None
+
+
 def split_enabled(db, name: str) -> bool:
     return name in CATALOG and info(name).splittable and db.get_setting(f"pipeline:{name}", "single") == "split"
 

@@ -1,1 +1,2 @@
-{"type": "object", "properties": {"score": {"type": ["number", "string"]}, "tiles": {"type": "integer"}, "image_sha256": {"type": "string"}}}
+{"type": "object", "properties": {"score": {"type": ["number", "string"]}, "tiles": {"type": "integer"}, "image_sha256": {"type": "string"},
+ "items": {"type": "array", "items": {"type": "string"}}, "feed_sha": {"type": "string"}}}

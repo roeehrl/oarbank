@@ -8,7 +8,10 @@ parameter search, a benchmark sweep or a backfill are all the owning module's bu
 
 Module faults leave the campaign as it is (it is ticked again later) and are never charged to anyone.
 """
+import json
 import time
+
+from oarbank_sdk import module_protocol as mp
 
 from . import audit, clock, effects, modcalls, placement
 from .db import DB, jl
@@ -26,18 +29,43 @@ def campaign_row(db: DB, c: dict) -> dict:
             "created_at": c["created_at"], "finished_at": c["finished_at"], "placement": placement.summary(db, c["campaign_id"])}
 
 
-def campaign_jobs(db: DB, campaign_id: str) -> list[dict]:
+def campaign_jobs(db: DB, campaign_id: str, module: str | None = None) -> list[dict]:
     """The campaign's evaluations with their canonical results, as CampaignJob rows. A split evaluation is its tail
-    job (kind 'eval'); the head stage's job (kind 'call') is an input to it, not an evaluation."""
+    job (kind 'eval'); the head stage's job (kind 'call') is an input to it, not an evaluation. For a `module` that
+    declares campaign.tick.results, done jobs also carry `result` (results_of)."""
     rows = db.q("SELECT j.job_id, j.job_key, j.state, j.kind, j.stage, j.dataset_id, j.labels_json, j.done_at, j.group_key, "
-                "r.value, r.digest, r.fields_json, r.platform FROM jobs j LEFT JOIN results r ON r.result_id=j.canonical_result_id "
-                "WHERE j.campaign_id=? AND j.kind='eval' "
+                "r.value, r.digest, r.fields_json, r.platform, r.module_version, r.result_json FROM jobs j "
+                "LEFT JOIN results r ON r.result_id=j.canonical_result_id WHERE j.campaign_id=? AND j.kind='eval' "
                 "ORDER BY j.job_id", (campaign_id,))
-    return [{"job_id": r["job_id"], "job_key": r["job_key"], "state": r["state"], "kind": r["kind"], "stage": r["stage"],
-             "dataset_id": r["dataset_id"], "labels": jl(r["labels_json"], {}) or {}, "done_at": r["done_at"],
-             "value": r["value"] if r["state"] == "done" else None, "digest": r["digest"] if r["state"] == "done" else None,
-             "fields": (jl(r["fields_json"], {}) or {}) if r["state"] == "done" else {},
-             "platform": r["platform"] if r["state"] == "done" else None, "group": r["group_key"]} for r in rows]
+    out = [{"job_id": r["job_id"], "job_key": r["job_key"], "state": r["state"], "kind": r["kind"], "stage": r["stage"],
+            "dataset_id": r["dataset_id"], "labels": jl(r["labels_json"], {}) or {}, "done_at": r["done_at"],
+            "value": r["value"] if r["state"] == "done" else None, "digest": r["digest"] if r["state"] == "done" else None,
+            "fields": (jl(r["fields_json"], {}) or {}) if r["state"] == "done" else {},
+            "platform": r["platform"] if r["state"] == "done" else None, "group": r["group_key"]} for r in rows]
+    if module and modcalls.has_capability(module, mp.CAP_TICK_RESULTS):
+        results_of(module, rows, out)
+    return out
+
+
+def results_of(module: str, rows: list[dict], out: list[dict]):
+    """campaign.tick.results: each done job's canonical payload and artifact files, when a version declaring the
+    capability accepted it (and so validated it), newest done first within mp.TICK_RESULTS_BUDGET bytes; a done job
+    left out of the budget gets result_omitted."""
+    left = mp.TICK_RESULTS_BUDGET
+    for r, o in sorted(zip(rows, out), key=lambda ro: (-(ro[0]["done_at"] or 0), -ro[0]["job_id"])):
+        if r["state"] != "done" or not r["result_json"] or not modcalls.tick_results(module, r["module_version"]):
+            continue
+        res = jl(r["result_json"], {}) or {}
+        result = {"payload": res.get("payload") or {},
+                  "artifacts": [{"name": a.get("name"), "files": [{k: f.get(k) for k in ("path", "digest", "size")}
+                                                                  for f in a.get("files") or []]}
+                                for a in res.get("artifacts") or []]}
+        size = len(json.dumps(result, separators=(",", ":")))
+        if size > left:
+            o["result_omitted"] = True
+            continue
+        left -= size
+        o["result"] = result
 
 
 def _fault(db: DB, cid: str, module: str, e: Exception):
@@ -51,7 +79,7 @@ def tick_one(db: DB, c: dict, now: float | None = None) -> list[dict]:
     """Tick one campaign; returns the applied effect records (empty when the module had nothing to do)."""
     module, cid = c["module"], c["campaign_id"]
     try:
-        res = modcalls.tick(db, module, campaign_row(db, c), campaign_jobs(db, cid), now or clock.now())
+        res = modcalls.tick(db, module, campaign_row(db, c), campaign_jobs(db, cid, module), now or clock.now())
     except (ModuleUnavailable, ModuleError) as e:
         _fault(db, cid, module, e)
         return []

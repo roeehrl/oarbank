@@ -167,6 +167,8 @@ CODES: list[ReasonCode] = [
     C("ARTIFACT_MISSING", "verdict", "The result references artifacts the coordinator does not hold", wire=["artifact_missing"], node=True, job=False),
     C("INPUT_MISSING", "verdict", "A stage input (a dataset, a blob or the upstream result) was unavailable", wire=["input_missing"],
       node=True, job=False),
+    C("RESULT_INVALID", "verdict", "The result payload does not match the module's results.schema or exceeds results.max_inline_kb",
+      wire=["result_invalid"], node=False, job=True),
     C("MODE_MISMATCH", "verdict", "The runner's effective mode is not the job's expected mode", wire=["mode_mismatch"], node=True, job=False),
     C("INPUT_MISMATCH", "verdict", "The score does not match its call's input digest", wire=["input_mismatch"], node=True, job=False),
     C("GOLDEN_MISMATCH", "verdict", "Golden job {golden} produced a different digest", "P5", remedies=["nodes.recertify"],

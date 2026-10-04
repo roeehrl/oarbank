@@ -130,6 +130,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `BAD_ARTIFACT` | The result names an artifact without a name or files | P1 | no / yes | – | `bad_artifact` |
 | `ARTIFACT_MISSING` | The result references artifacts the coordinator does not hold | P1 | yes / no | – | `artifact_missing` |
 | `INPUT_MISSING` | A stage input (a dataset, a blob or the upstream result) was unavailable | P1 | yes / no | – | `input_missing` |
+| `RESULT_INVALID` | The result payload does not match the module's results.schema or exceeds results.max_inline_kb | P1 | no / yes | – | `result_invalid` |
 | `MODE_MISMATCH` | The runner's effective mode is not the job's expected mode | P1 | yes / no | – | `mode_mismatch` |
 | `INPUT_MISMATCH` | The score does not match its call's input digest | P1 | yes / no | – | `input_mismatch` |
 | `GOLDEN_MISMATCH` | Golden job {golden} produced a different digest | P5 | yes / no | `nodes.recertify` | `golden_mismatch` |

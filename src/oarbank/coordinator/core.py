@@ -1254,6 +1254,7 @@ class _Evaluation:
     digest_version: int | None
     fields: dict
     golden_ok: bool | None
+    problem: str | None = None      # why the payload is unfit for campaign.tick (verdict result_invalid)
 
 
 def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
@@ -1280,7 +1281,13 @@ def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
     gok = None
     if j["kind"] == "golden":
         gok = modcalls.golden_ok(db, j["module"], (jl(j["spec_json"], {}) or {}).get("expected") or {}, merged, v.digest, ver)
-    return _Evaluation(j["job_id"], dep_id, merged, v.ok, v.reason, v.value, v.digest, v.digest_version, v.fields, gok)
+    ok, reason, problem = v.ok, v.reason, None
+    if ok and j["kind"] == "eval" and modcalls.tick_results(j["module"], ver):
+        # campaign.tick delivers this payload: nothing invalid or oversized may become canonical (sdk-1.3.md, #3)
+        problem = modcalls.payload_problem(j["module"], ver, (merged or {}).get("payload"))
+        if problem:
+            ok, reason = False, "result_invalid"
+    return _Evaluation(j["job_id"], dep_id, merged, ok, reason, v.value, v.digest, v.digest_version, v.fields, gok, problem)
 
 
 def _await_module(db: DB, attempt_id: int, e: Exception):
@@ -1480,9 +1487,12 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             elif j["kind"] == "replica":
                 _check_replica(db, j, rid, node["node_id"], ev.digest, value, post)
         elif a["state"] == "live":
-            # a wrong-mode run implicates the host: it is a failed attempt (consistent with exec_failures)
-            host_fault = reason in ("mode_mismatch",)
-            _end_attempt(db, attempt_id, "failed" if host_fault else "completed", reason, count_failure=host_fault)
+            # a wrong-mode run implicates the host and an invalid payload the job: failed attempts (consistent with
+            # exec_failures); whether one spends the job's retries is its reason code's (counts_against_job)
+            failed = reason in ("mode_mismatch", "result_invalid")
+            _end_attempt(db, attempt_id, "failed" if failed else "completed", reason, count_failure=failed)
+        if reason == "result_invalid":
+            db.event("result_invalid", node_id=node["node_id"], attempt_id=attempt_id, job_id=j["job_id"], reason=ev.problem)
         for fn in post:
             fn()
         if j["kind"] == "golden" and reason == "ok":
