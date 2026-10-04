@@ -38,6 +38,9 @@ SIM_MODULES = (REPO / "vendor" / "oarbank-sdk" / "examples" / "toy", REPO / "tes
 MODE = {"runtime": "native-arm64", "sampler": "sobol-owen", "filter": "blackman-harris"}
 PLATFORMS = ("darwin-arm64", "linux-amd64", "linux-arm64")          # node i runs PLATFORMS[i % 3]
 PARAMS = {"samples": 10, "light_clamp": 30.0}
+# what a healthy agent's sandbox backend reports (spec/sandbox.md): oarbankd gives module work only to sandboxed agents
+SANDBOX_ENFORCED = {c: "enforced" for c in ("filesystem", "ipc", "net.none", "net.egress-allowlist", "net.egress-any",
+                                            "no_loopback", "gpu.compute", "exec_writable_deny")}
 def create_study(db, name: str, configs: list, datasets: list, baseline: dict, actor: str = "sim", **kw) -> str:
     """A comparison study, created as the console and the CLI do: the relay module's own operation
     (mod.relay.create_study). Returns the campaign id."""
@@ -170,7 +173,8 @@ class Simulation:
     def _make_agent(self, name, platform, bad=False):
         os_, arch = platform.split("-")
         facts = {"facts": 2, "hostname": name, "platform": {"os": os_, "arch": arch, "os_version": "27.0" if os_ == "darwin" else "6.8"},
-                 "cpu": {"perf_cores": 8, "eff_cores": 4, "logical": 12}, "memory_gb": 64.0}
+                 "cpu": {"perf_cores": 8, "eff_cores": 4, "logical": 12}, "memory_gb": 64.0,
+                 "sandbox": {"backend": "seatbelt" if os_ == "darwin" else "landlock", "enforcement": SANDBOX_ENFORCED}}
         e = core.enroll(self.db, name, facts, "127.0.0.1", _csr())
         core.approve_enrollment(self.db, e["enrollment_id"], "sim")
         pem = core.enroll_status(self.db, e["enrollment_id"])["cert_pem"]
