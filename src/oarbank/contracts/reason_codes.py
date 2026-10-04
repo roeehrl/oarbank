@@ -78,6 +78,8 @@ CODES: list[ReasonCode] = [
     C("COMPARED_ON_PLATFORM", "job_pending", "A replica or tie-break that must run in class {class_}: the module compares results within "
       "one {scope} class (results.determinism_scope)"),
     C("DISPUTE_PARTY", "job_pending", "This node is a party to the job's dispute; a third node must break the tie", wire=["dispute_party"]),
+    C("DATASETS_NOT_REGISTERED", "job_pending", "Waiting for {missing} to be registered (a bootstrap job brings a module's "
+      "pinned datasets)"),
     C("DATASETS_NOT_STAGED", "job_pending", "The node has not staged {missing} yet"),
 
     # ---------------------------------------------------------------- why a node is not admitting work
@@ -174,6 +176,8 @@ CODES: list[ReasonCode] = [
     C("ARTIFACT_MISSING", "verdict", "The result references artifacts the coordinator does not hold", wire=["artifact_missing"], node=True, job=False),
     C("INPUT_MISSING", "verdict", "A stage input (a dataset, a blob or the upstream result) was unavailable", wire=["input_missing"],
       node=True, job=False),
+    C("BOOTSTRAP_PIN_MISMATCH", "verdict", "A bootstrap result is not exactly the module's pinned datasets: {detail}",
+      wire=["pin_mismatch"], node=False, job=True),
     C("RESULT_INVALID", "verdict", "The result payload does not match the module's results.schema or exceeds results.max_inline_kb",
       wire=["result_invalid"], node=False, job=True),
     C("MODE_MISMATCH", "verdict", "The runner's effective mode is not the job's expected mode", wire=["mode_mismatch"], node=True, job=False),

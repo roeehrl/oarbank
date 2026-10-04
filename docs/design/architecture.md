@@ -122,6 +122,10 @@ confinement and fails closed. Grants are whole directories or files, approved pe
 - **GPU** is one coarse `compute` device class per backend.
 - **Every node reports enforcement per capability** (enforced, cooperative, unavailable) with its backend and ABI; work
   is placed only where every capability it needs is enforced.
+- **Bootstrap jobs** ([bootstrap-stages.md](bootstrap-stages.md)) run with less: the module's egress allowlist and their
+  work directory, no tools, GPU, containers, module data or settings. The agent narrows them from the signed release's
+  module entry and reports `grants.bootstrap`; they run before the module is certified on the node, and the
+  coordinator registers their output only when it is exactly the module's pinned datasets.
 
 | Backend | Enforcement | Floor |
 |---|---|---|

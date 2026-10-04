@@ -32,7 +32,7 @@ from oarbank_sdk import portable
 from . import config as C
 from .db import DB, jl
 
-CORE_VERSION = "2.3.0"
+CORE_VERSION = "2.4.0"
 MODULE_PROTOCOLS = {1}
 RUNNER_PROTOCOLS = {1}
 FEATURES = ("placement",)                  # requires.features this core implements (must-understand)

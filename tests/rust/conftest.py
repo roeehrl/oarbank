@@ -87,14 +87,18 @@ def coordinator(tmp_path):
         yield c
 
 
-def install_module(c: "Coordinator", src: Path, tmp: Path, version_note: str = "test") -> dict:
-    """Build a module bundle with the SDK and install + enable it through the admin API (the operator's path)."""
+def install_module(c: "Coordinator", src: Path, tmp: Path, version_note: str = "test", approve: bool = False) -> dict:
+    """Build a module bundle with the SDK and install + enable it through the admin API (the operator's path); `approve`:
+    approve its sandbox grants first, as a version that asks for any needs."""
     from oarbank_sdk import bundle as B
     out, info = B.build(src, tmp / f"{src.name}.mfb")
     sha = c.api("POST", "/api/v1/modules/bundles", content=out.read_bytes())["sha256"]
     plan = c.api("POST", "/api/v1/ops/modules.install", json={"params": {"sha256": sha}, "dry_run": True})["plan"]
     c.api("POST", "/api/v1/ops/modules.install", json={"plan_id": plan["plan_id"], "reason": version_note})
     name = info.name
+    if approve:
+        plan = c.api("POST", "/api/v1/ops/modules.approve", json={"target": f"{name}@{info.version}", "dry_run": True})["plan"]
+        c.api("POST", "/api/v1/ops/modules.approve", json={"plan_id": plan["plan_id"], "reason": version_note})
     c.api("POST", "/api/v1/ops/modules.enable", json={"target": f"{name}@{info.version}", "reason": version_note})
     return {"name": name, "version": info.version}
 

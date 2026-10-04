@@ -69,11 +69,16 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
                 for e in db.q("SELECT event_id, kind FROM events WHERE job_id=? ORDER BY event_id DESC LIMIT 10", (job_id,))]
     as_of = X.AsOf(snapshot_version=db.one("SELECT COALESCE(MAX(event_id),0) m FROM events")["m"], evaluated_at=now)
     subj = X.Subject(kind="job", id=job_id)
+    boot = modcalls.stage_bootstrap(j["module"], j["stage"])
+    actions = [f"Runs as a bootstrap job (stage {j['stage']}): on nodes where {j['module']}'s doctor is healthy, before its "
+               "goldens pass, with only the module's egress allowlist; its result must be exactly the module's pinned datasets, "
+               "which the coordinator then registers, and it never counts toward certification"] if boot else []
     if j["state"] != "pending":
         a = db.one("SELECT a.*, n.hostname FROM attempts a LEFT JOIN nodes n ON n.node_id=a.node_id WHERE a.job_id=? "
                    "ORDER BY a.attempt_id DESC LIMIT 1", (job_id,))
         if j["state"] == "leased" and a:
-            head = X.Headline(code="OK", text=f"Running on {a['hostname']} (attempt {a['attempt_id']}, phase {a['phase']})")
+            head = X.Headline(code="OK", text=f"Running{' as a bootstrap job' if boot else ''} on {a['hostname']} "
+                                              f"(attempt {a['attempt_id']}, phase {a['phase']})")
         elif j["state"] == "done":
             head = X.Headline(code="OK", text="Done")
         elif j["state"] == "cancelled":
@@ -83,7 +88,7 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
             code = RC.WIRE.get(er) or (er if "/" in er else "JOB_QUARANTINED")      # a module's own code renders as itself
             head = X.Headline(code=code, text=f"{j['state']}: last attempt ended {(a or {}).get('end_reason')}")
         return X.ExplainDocument(subject=subj, as_of=as_of, verdict=j["state"], headline=head, evidence=evidence,
-                                 remedies=_remedies([head.code, "JOB_QUARANTINED" if j["state"] in ("failed", "quarantined") else ""],
+                                 system_actions=actions, remedies=_remedies([head.code, "JOB_QUARANTINED" if j["state"] in ("failed", "quarantined") else ""],
                                                     {"job_id": job_id}))
     nodes = db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
     matrix, by_code, eligible_nodes = [], collections.defaultdict(list), []
@@ -114,7 +119,7 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
     return X.ExplainDocument(
         subject=subj, as_of=as_of, verdict="pending", headline=head, summary=summary,
         clauses=[X.Clause(predicate=p, matched=m, of=o) for p, (m, o) in clause.items()], matrix=matrix,
-        next_trigger="Re-evaluated on every claim (agents claim each heartbeat)",
+        next_trigger="Re-evaluated on every claim (agents claim each heartbeat)", system_actions=actions,
         remedies=_remedies([s.code for s in summary], {"job_id": job_id, **({"campaign_id": j["campaign_id"]} if j["campaign_id"] else {})}), evidence=evidence)
 
 

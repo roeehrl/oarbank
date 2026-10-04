@@ -561,6 +561,13 @@ def stage_retry(name: str, stage: str | None) -> dict:
     return {"max": st.retry.max_attempts, "by_platform": {k: v.retry.max_attempts for k, v in st.variants.items() if v.retry}}
 
 
+def stage_bootstrap(name: str, stage: str | None) -> bool:
+    """Whether a job of this stage is a bootstrap job (oarbank-sdk stages[].bootstrap): it runs where the module's doctor is
+    healthy before its goldens pass, with the bootstrap grants, and its result must be exactly pinned datasets."""
+    i = CATALOG.get(name)
+    return bool(i and i.manifest.is_bootstrap(stage))
+
+
 def resources_on(res: dict, platform: str | None) -> dict:
     """A job's stored resources on a node of `platform`: its stage's per-platform overrides applied (by_platform: the
     OS's entry, then the token's)."""

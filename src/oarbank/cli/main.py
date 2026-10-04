@@ -478,6 +478,8 @@ def cmd_explain(a):
         print(json.dumps(d, indent=1))
         return
     print(f"{a.kind} {a.id}: {d['verdict']} - {d['headline']['text']} [{d['headline']['code']}]")
+    for x in d.get("system_actions") or []:
+        print(f"  {x}")
     for s in d.get("summary") or []:
         print(f"  {s['code']:<24} {', '.join(s.get('nodes') or [])} {json.dumps(s.get('detail') or {}) if s.get('detail') else ''}")
     for row in d.get("matrix") or []:

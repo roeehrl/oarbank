@@ -221,8 +221,9 @@ def _own_dataset(db: DB, module: str, did: str) -> dict:
 
 
 def _datasets_create(db: DB, module: str, a: dict, actor: str) -> dict:
-    """A dataset whose blobs the module can reach, of a kind it declares (short kinds: the owning module scopes them).
-    An existing id of the module's with the same kind, meta, files and platform is skipped; anything else fails."""
+    """A dataset whose blobs the module can reach, of a kind it declares (short kinds: the owning module scopes them); a
+    pinned id only with its pinned contents. An existing id of the module's with the same kind, meta, files and platform
+    is skipped; anything else fails."""
     from . import modfiles
     did, kind, files, meta = a.get("dataset_id", ""), a.get("kind"), a.get("files") or [], a.get("meta") or {}
     kinds = modcalls.info(module).manifest.datasets.kinds
@@ -233,6 +234,12 @@ def _datasets_create(db: DB, module: str, a: dict, actor: str) -> dict:
                 or not modfiles.visible_blob(db, module, str(f.get("digest") or "")):
             raise EffectError(422, "unknown_blob", f"{did}: {f.get('path')} ({f.get('digest')})")
     plat = placement.dataset_platform(module, kind, a.get("platform"))
+    pin = modcalls.info(module).manifest.datasets.pin(did)
+    if pin is not None:                                 # a pinned id: only its pinned contents (bootstrap-stages.md)
+        got = sorted(({k: f.get(k) for k in ("path", "digest", "size")} for f in files), key=lambda f: str(f["path"]))
+        if (kind, got, plat) != (pin.kind, pin.dataset_files(), pin.platform) or (pin.meta and meta != pin.meta):
+            raise EffectError(422, "pin_mismatch", f"{did} is pinned ([[datasets.pinned]]): it is registered only with its pinned "
+                              "kind, files, platform and meta")
     ex = db.one("SELECT * FROM datasets WHERE dataset_id=?", (did,))
     if ex and ex["module"] != module:                   # never another module's or the operator's dataset
         raise EffectError(409, "dataset_owned", f"{did} belongs to {ex['module'] or 'the operator'}")

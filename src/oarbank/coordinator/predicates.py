@@ -45,6 +45,7 @@ class NodeView:
     excluded: dict = field(default_factory=dict)   # {module: reason}: platform, OS version, sandbox, agent (modsandbox)
     excluded_why: dict = field(default_factory=dict)   # {module: the module's own words}: requires.unsupported.runner
     capabilities: dict = field(default_factory=dict)   # {module: node_capabilities(node, module)} for the offered modules
+    bootstrap_grants: bool = False    # the agent runs bootstrap jobs with the bootstrap grants (modsandbox.bootstrap_enforced)
 
     @property
     def certified(self) -> set:
@@ -64,6 +65,15 @@ def node_capabilities(node: dict, module: str) -> set:
     offered services and healthy probes provide, and the ones the module's own doctor reported."""
     doc = json.loads(node.get("doctor_json") or "null") or {}
     return set(doc.get("capabilities") or []) | set(((doc.get("modules") or {}).get(module) or {}).get("capabilities") or [])
+
+
+def module_serves(job: dict, state: str | None, bootstrap_grants: bool) -> bool:
+    """Could a node whose module is in `state` run the job (claim's module and bootstrap-grants checks, for the questions
+    asked of every node): certified; for a bootstrap job, certified or certifying (a healthy doctor) on a node whose agent
+    applies the bootstrap grants."""
+    if job["bootstrap"]:
+        return bootstrap_grants and state in ("certified", "certifying")
+    return state == "certified"
 
 
 def capabilities_fit(job: dict, have: set) -> bool:
@@ -137,15 +147,20 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
     units = pl["units"]
     mod = job["module"]
     golden = job["kind"] == "golden"
+    boot = job["bootstrap"]                                # a bootstrap stage's job: runs before the goldens pass
 
     def module_check():
         if mod in nv.excluded:
             return R(f"module_runs_here({mod})", nv.excluded[mod], False, nv.excluded_why.get(mod, nv.excluded[mod]), "supported")
-        ok = mod in nv.certified or (golden and mod in (nv.certified | nv.certifying))
+        state = nv.states.get(mod, {}).get("state")
         code = "MODULE_DISABLED" if mod in nv.disabled else \
-            "MODULE_NOT_READY" if nv.states.get(mod, {}).get("state") in ("doctor_failed", "undetected", "golden_failed") \
+            "MODULE_NOT_READY" if state in ("doctor_failed", "undetected", "golden_failed") \
             else "MODULE_NOT_CERTIFIED"
-        return R(f"module_certified({mod})", code, ok, nv.states.get(mod, {}).get("state"), "certified")
+        if boot:                                           # the doctor is healthy and the release current: certifying will do
+            return R(f"module_ready_for_bootstrap({mod})", code, mod in (nv.certified | nv.certifying), state,
+                     "certified or certifying")
+        ok = mod in nv.certified or (golden and mod in (nv.certified | nv.certifying))
+        return R(f"module_certified({mod})", code, ok, state, "certified")
 
     def pool_checks():
         if not (res.get("pools") or res.get("needs_pools")):
@@ -177,6 +192,8 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
         module_check,
         lambda: R("stage platform", "STAGE_PLATFORM_UNSUPPORTED",
                   not stage_platforms or nv.node.get("platform") in stage_platforms, nv.node.get("platform"), stage_platforms),
+        lambda: R("bootstrap grants enforced", "CAPABILITY_NOT_ENFORCED", not boot or nv.bootstrap_grants,
+                  nv.bootstrap_grants if boot else None, True if boot else None),
         lambda: (lambda have: R("stage capabilities", "STAGE_CAPABILITY_MISSING", capabilities_fit(job, have),
                                 sorted(have & set(stage_caps)), stage_caps))(nv.capabilities.get(mod, set())),
         lambda: R("job platforms", "STAGE_PLATFORM_UNSUPPORTED", bool(plat) and pf.matches(plat, pl["platforms"]) if pl["platforms"]
@@ -190,6 +207,7 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
                   [u["state"] for u in units], "pinned"),
         lambda: R("unit class", "PLATFORM_BOUND_ELSEWHERE", all(not u["class"] or _cls(plat, u["mix"]) == u["class"] for u in units),
                   [_cls(plat, u["mix"]) for u in units], [u["class"] for u in units]),
+        lambda: R("datasets registered", "DATASETS_NOT_REGISTERED", not pl["unregistered"], pl["unregistered"], "[]"),
         lambda: R("datasets staged", "DATASETS_NOT_STAGED", set(datasets or []) <= nv.ready,
                   sorted(set(datasets or []) - nv.ready), "[]"),
         lambda: R(f"cpu({need_cpu:g}) <= free", "INSUFFICIENT_CPU", need_cpu <= nv.free_cpu, nv.free_cpu, need_cpu),

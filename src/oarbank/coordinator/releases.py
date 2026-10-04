@@ -81,9 +81,10 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
     m = mf.load(path / "oarbank-module.toml")
     run = m.runner.for_platform(platform)
     on = lambda xs: [x for x in xs if not x.platforms or platform in x.platforms]
+    # bootstrap: the agent runs the stage's jobs with the bootstrap grants (only when set, so other entries keep their bytes)
     stages = [{"name": st.name, "capabilities": list(st.requires.capabilities),
                "pools": sorted(set(st.requires.pools) | set(st.requires.needs_pools)),
-               "platforms": list(st.requires.platforms)} for st in m.stages]
+               "platforms": list(st.requires.platforms), **({"bootstrap": True} if st.bootstrap else {})} for st in m.stages]
     every = set.intersection(*(set(s["capabilities"]) for s in stages)) if stages else set()
     sb = m.sandbox
     return {"name": name, "module_id": m.module.id, "version": version, "digest": digest, "bundle": f"modules/{name}",

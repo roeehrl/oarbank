@@ -1,4 +1,4 @@
-"""Protocol invariants as pure checks over the coordinator database (S21 also reads the modules' manifests).
+"""Protocol invariants as pure checks over the coordinator database (S8, S21 and S22 also read the modules' manifests).
 
 One catalogue, reused by: the Hypothesis state machine (tests/test_stateful.py), the seeded
 fault-injecting simulator (oarbank.sim), the swarm load test (bench/), and `oarbank verify`
@@ -13,14 +13,15 @@ Safety (must hold after every committed transaction):
   S5  pending / done / cancelled / quarantined jobs have no live attempts
   S6  accepted results are exactly the canonical ones, except results superseded by a later generation
   S7  live attempts only run on ready (not quarantined/retired) nodes
-  S8  a live non-golden attempt runs a module certified on its node, under the current certification
+  S8  a live non-golden attempt runs a module certified on its node, under the current certification, or is a
+      bootstrap job's attempt on a node where the module is certifying or certified
   S9  attempt bookkeeping: ended_at is set iff the attempt is no longer live
   S10 a job's exec_failures never exceeds its failed/killed attempts
   S11 no node holds more live attempts than its `jobs` cap (when set and enforced hard)
   S12 staged jobs: no live attempt on a job whose dependency (its call) is not done
   S13 staged jobs: a done job's dependency is done and fed it the same input (digest)
   S14 every canonical result carries its job's module's verdict: produced for the job's module and
-      evaluated by it
+      evaluated by it (a bootstrap job's verdict is the host's pin check)
   S15 a module fault is never charged: an attempt whose completion waited on its module
       (phase awaiting_module) is never killed, and never ends failed unless the module, once back,
       judged its result (a recorded verdict); the wait itself never counts as an exec failure
@@ -31,6 +32,8 @@ Safety (must hold after every committed transaction):
       unit's class (and of its parent unit's), result-cache hits included (D33; S19 is the agent's protection invariant)
   S21 a job of a stage that does not compare (determinism none) never has a replica, a dispute or a golden, and never
       shares a canonical result through the cache (reads the catalogue's manifests)
+  S22 a bootstrap job's canonical result is exactly pinned datasets of the module version that produced it: an empty
+      payload, and artifacts that each hold one pin's files (reads the catalogue's manifests)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -98,12 +101,26 @@ def s7_live_on_ready_nodes(db: DB):
               "S7 attempt {attempt_id} live on node {node_id} in lifecycle {lifecycle}")
 
 
+def _manifest(module: str, version: str | None):
+    """The manifest of the module version that produced a row, else the current one (None: neither is catalogued)."""
+    from . import modcalls
+    try:
+        return modcalls.info_for(module, version).manifest
+    except KeyError:
+        i = modcalls.CATALOG.get(module)
+        return i.manifest if i else None
+
+
 def s8_live_module_certified(db: DB):
     out = []
-    for r in db.q("SELECT a.attempt_id, a.cert_generation, j.module, j.kind, n.node_id, n.modules_json FROM attempts a "
-                  "JOIN jobs j ON j.job_id=a.job_id JOIN nodes n ON n.node_id=a.node_id WHERE a.state='live'"):
+    for r in db.q("SELECT a.attempt_id, a.cert_generation, a.module_version, j.module, j.kind, j.stage, n.node_id, n.modules_json "
+                  "FROM attempts a JOIN jobs j ON j.job_id=a.job_id JOIN nodes n ON n.node_id=a.node_id WHERE a.state='live'"):
         st = (jl(r["modules_json"], {}) or {}).get(r["module"], {})
-        if r["kind"] == "golden":
+        man = _manifest(r["module"], r["module_version"]) if r["stage"] else None
+        if man is not None and man.is_bootstrap(r["stage"]):
+            if st.get("state") not in ("certifying", "certified"):
+                out.append(f"S8 bootstrap attempt {r['attempt_id']} live but {r['module']} is {st.get('state')} on {r['node_id']}")
+        elif r["kind"] == "golden":
             if st.get("state") not in ("certifying", "certified"):
                 out.append(f"S8 golden attempt {r['attempt_id']} live but {r['module']} is {st.get('state')} on {r['node_id']}")
         elif st.get("state") != "certified" or st.get("generation") != r["cert_generation"]:
@@ -322,12 +339,30 @@ def s21_unreplicated_never_compared(db: DB):
     return out
 
 
+def s22_bootstrap_results_are_pinned(db: DB):
+    """S22: a bootstrap job's canonical result is exactly pinned datasets of the module version that produced it (an empty
+    payload; artifacts that each hold one pin's files), judged by the catalogue's manifests."""
+    out = []
+    for r in db.q("SELECT j.job_id, j.module, j.stage, r.result_id, r.module_version, r.result_json FROM jobs j "
+                  "JOIN results r ON r.result_id=j.canonical_result_id WHERE j.state='done' AND j.stage IS NOT NULL "
+                  "AND r.job_id=j.job_id"):
+        man = _manifest(r["module"], r["module_version"])
+        if man is None or not man.is_bootstrap(r["stage"]):
+            continue
+        res = json.loads(r["result_json"] or "{}") or {}
+        problem = man.bootstrap_problem(res.get("payload"), res.get("artifacts") or [])
+        if problem:
+            out.append(f"S22 bootstrap job {r['job_id']} ({r['module']}) has canonical result {r['result_id']}: {problem}")
+    return out
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
-          s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared]
+          s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
+          s22_bootstrap_results_are_pinned]
 
 
 def check_all(db: DB) -> list[str]:
@@ -402,6 +437,6 @@ if __name__ == "__main__":
     import sys
     from . import config as C, modcalls
     db = DB(C.DB_PATH)
-    modcalls.use(db)                             # S21 reads the modules' manifests
+    modcalls.use(db)                             # S8, S21 and S22 read the modules' manifests
     print(json.dumps(report(db), indent=1))
     sys.exit(0)

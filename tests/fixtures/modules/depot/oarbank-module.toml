@@ -1,0 +1,74 @@
+# depot: the core test suite's fixture module for bootstrap stages (not shipped). Its goldens mount a tool dataset that
+# no operator registers: the bootstrap stage "fetch" brings it, pinned file by file in [[datasets.pinned]], on nodes
+# whose doctor is healthy before any of them is certified. "eval" is the default stage, the one certification tests.
+manifest = 1
+
+[module]
+id = "dev.codonic.oarbank.depot"
+version = "1.0.0"
+compat = "depot1"
+publisher = "oarbank"
+license = "Apache-2.0"
+codeowners = ["roeehrl"]
+stability = "experimental"
+description = "Core test fixture: goldens that mount a tool a bootstrap stage provisions"
+
+[requires]
+core = ">=2.4,<3"
+module_protocol = [1]
+runner_protocol = [1]
+platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]
+
+[coordinator]
+exec = ["python", "-I", "{bundle}/depot_module.py"]
+runtime = { kind = "python" }
+capabilities = ["result.merge", "op.plan", "op.apply"]
+permissions = ["datasets:read", "jobs:read:self"]
+
+[runner]
+exec = ["python", "-I", "{bundle}/depot_runner.py"]
+runtime = { kind = "python" }
+capabilities = ["deterministic_output"]
+
+[[stages]]
+name = "eval"
+default = true
+timeout_s = 600
+requires = { resources = { cpu = 1, mem_gb = 0.5 } }
+
+[[stages]]
+name = "fetch"
+bootstrap = true
+determinism = "none"
+timeout_s = 600
+requires = { resources = { cpu = 0.5, mem_gb = 0.25 } }
+retry = { max_attempts = 2 }
+
+[sandbox]
+net = { mode = "egress-allowlist", allow = ["tools.example.org"] }
+
+[results]
+schema = "schemas/result.schema.json"
+schema_version = 1
+determinism = "exact"
+digest = { version = 1, over = ["digest"] }
+fields = [{ name = "digest", type = "string" }]
+
+[datasets]
+kinds = ["tool"]
+
+[[datasets.pinned]]
+dataset_id = "tool:depot-1"
+kind = "tool"
+meta = { version = "1" }
+files = [
+  { path = "bin/tool.txt", sha256 = "ed65d31e78d424c4b3da39c8d2fa7e6b176321f0b2edf786fc1b27bb98ccdb10", size = 14 },
+  { path = "README", sha256 = "911f80ff3f9ba7835e65f88041a808e71d6b0b6ba94ef4bcfdb20f493f605c56", size = 47 },
+]
+
+[[operations]]
+verb = "provision"
+title = "Fetch the tools"
+tier = "T1"
+target = "none"
+effects = ["campaigns.create", "jobs.enqueue"]

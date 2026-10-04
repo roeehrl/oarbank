@@ -114,6 +114,18 @@ def node_exclusions(db: DB, node: dict, offered: set) -> dict:
     return out
 
 
+BOOTSTRAP_GRANTS = "grants.bootstrap"    # spec/sandbox.md, "Bootstrap jobs": the agent narrows a bootstrap job's grants
+
+
+def bootstrap_enforced(node: dict) -> bool:
+    """Whether the node's agent runs bootstrap jobs with the bootstrap grants (its facts' sandbox.enforcement); an older
+    agent would give them the module's full grants, so it never gets one."""
+    if not REQUIRE_SANDBOXED_AGENTS:
+        return True
+    enf = ((json.loads(node.get("facts_json") or "{}").get("sandbox") or {}).get("enforcement") or {})
+    return enf.get(BOOTSTRAP_GRANTS) == "enforced"
+
+
 def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
     """{module: the module's own reason} for the PLATFORM_UNSUPPORTED exclusions it explains
     (requires.unsupported.runner, by the node's platform, then its OS)."""

@@ -78,7 +78,8 @@ spec/platforms.md):
  "gpus": [{"vendor": "apple", "model": "Apple M5 Pro", "apis": ["metal"], "vram_gb": null, "unified": true}],
  "sandbox": {"backend": "seatbelt", "enforcement": {"filesystem": "enforced", "ipc": "enforced", "net.none": "enforced",
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
-             "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable"}},
+             "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable",
+             "grants.bootstrap": "enforced"}},
  "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
@@ -87,7 +88,8 @@ spec/platforms.md):
 - **Sandbox.** `enforcement` reports, per capability of the module sandbox contract (spec/sandbox.md), whether
   the node's backend enforces it: `enforced`, `cooperative` or `unavailable`. A module runs only where its
   always-on rules and its grants are `enforced`. A node without a `backend` gets no module work
-  (`SANDBOX_BACKEND_MISSING`); a gap is `CAPABILITY_NOT_ENFORCED`.
+  (`SANDBOX_BACKEND_MISSING`); a gap is `CAPABILITY_NOT_ENFORCED`. `grants.bootstrap` says the agent runs a bootstrap
+  stage's jobs with the bootstrap grants (spec/sandbox.md, "Bootstrap jobs"); only such a node gets them.
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
   `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
   (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`).
@@ -167,8 +169,9 @@ their process groups, deletes their workspaces, and does not report them.
 oarbankd grants jobs:
 
 - whose resources fit `free_cpu` and `free_mem_gb`;
-- whose module is offered in `modules` (its doctor reported healthy) and certified on this node;
-- whose datasets are all in `ready_datasets`;
+- whose module is offered in `modules` (its doctor reported healthy) and certified on this node, or, for a job of a
+  bootstrap stage (docs/design/bootstrap-stages.md), certifying there, on a node whose facts report `grants.bootstrap`;
+- whose datasets are all registered (else `DATASETS_NOT_REGISTERED`) and in `ready_datasets`;
 - whose pool needs fit the node's pools;
 - whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor);
   otherwise the job waits with `STAGE_CAPABILITY_MISSING`.
@@ -237,7 +240,9 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   - `golden_mismatch`, `stale_generation` and `job_done` (compared as a replica);
   - `release_invalid`, `attempt_closed` and `dispute_party`;
   - `node_quarantined` and `node_retired`;
-  - `artifact_missing`, `input_missing` and `input_mismatch`.
+  - `artifact_missing`, `input_missing` and `input_mismatch`;
+  - `pin_mismatch`: a bootstrap job's result is not exactly the module's pinned datasets. For a bootstrap job the host
+    checks the pins instead of calling `result.evaluate`, and registers the datasets when the result is accepted.
 - `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel"}`;
   a release without a reason is refused (400 `reason_required`). These are not failures.
 - `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient"}`.
@@ -276,8 +281,8 @@ completion, oarbankd registers each artifact as the content-addressed dataset `a
   - 416 discards the partial.
 
   The final SHA-256 check guards every blob.
-- **Ready.** A dataset is ready when every file is present and verified. `prefetch` names datasets to stage
-  ahead of need.
+- **Ready.** A dataset is ready when every file is present and verified. `prefetch` names registered datasets to
+  stage ahead of need.
 
 ## Releases
 

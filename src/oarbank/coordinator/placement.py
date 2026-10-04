@@ -162,6 +162,22 @@ def dataset_platforms(db: DB, j: dict, cache: dict | None = None) -> list[str]:
     return out
 
 
+def unregistered(db: DB, j: dict, cache: dict | None = None) -> list[str]:
+    """The datasets the job names that are not registered (yet): a golden waits for the pinned datasets a bootstrap job
+    brings."""
+    ids = sorted(set(jl(j.get("datasets_json"), []) or []))
+    if not ids:
+        return []
+    key = ("unregistered",) + tuple(ids)
+    if cache is not None and key in cache:
+        return cache[key]
+    have = {r["dataset_id"] for r in db.q(f"SELECT dataset_id FROM datasets WHERE dataset_id IN ({','.join('?' * len(ids))})", ids)}
+    out = [d for d in ids if d not in have]
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
 def _ahead(j: dict) -> list[str]:
     """The stages the job and what it feeds still have to run: a head stage's job (kind call) runs its tail after it."""
     mi = modcalls.CATALOG.get(j["module"])
@@ -172,31 +188,40 @@ def _ahead(j: dict) -> list[str]:
     return [j["stage"] or mi.single_stage]
 
 
+def _serving(module: str, stage: str | None):
+    """Whether a node can serve the module for jobs of `stage`: certified, or certifying recently (core._can_serve); a
+    bootstrap stage on any node whose module is certified or certifying and whose agent applies the bootstrap grants."""
+    from . import core, modsandbox
+    if modcalls.stage_bootstrap(module, stage):
+        return lambda n, st: predicates.module_serves({"bootstrap": True}, st.get("state"), modsandbox.bootstrap_enforced(n))
+    return lambda n, st: core._can_serve(st)
+
+
 def classes_running(db: DB, module: str, stages, mix: str, online: bool = False, cache: dict | None = None) -> set:
-    """The classes under `mix` where, for every one of `stages`, a ready node that can serve the module (certified, or
-    certifying recently: core._can_serve) runs that stage (its platforms) and holds its pools and capabilities. `online`:
-    only active nodes that heartbeat recently (a unit's class able to take its work now). Binding, the capacity choice and
-    the stranded check all use this one test, so a unit never binds where a stage of its work can never run."""
+    """The classes under `mix` where, for every one of `stages`, a ready node that can serve the module for that stage
+    (_serving) runs it (its platforms) and holds its pools and capabilities. `online`: only active nodes that heartbeat
+    recently (a unit's class able to take its work now). Binding, the capacity choice and the stranded check all use this
+    one test, so a unit never binds where a stage of its work can never run."""
     from . import core
     stages = tuple(sorted(set(stages)))
     key = ("running", module, mix, stages, online)
     if cache is not None and key in cache:
         return cache[key]
     mi = modcalls.info(module)
-    sql = ("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
+    sql = ("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json, facts_json FROM nodes "
            "WHERE lifecycle='ready' AND platform IS NOT NULL")
     args: tuple = ()
     if online:
         sql += " AND desired_state='active' AND last_heartbeat_at>?"
         args = (clock.now() - C.OFFLINE_AFTER,)
-    nodes = [(n, predicates.node_capabilities(n, module)) for n in db.q(sql, args)
-             if core._can_serve((jl(n["modules_json"], {}) or {}).get(module, {}))]
+    nodes = [(n, (jl(n["modules_json"], {}) or {}).get(module, {}), predicates.node_capabilities(n, module))
+             for n in db.q(sql, args)]
     out = None
     for st in stages:
         res, plats = mi.stage_resources(st), modcalls.stage_platforms(module, st)
-        caps = set(modcalls.stage_capabilities(module, st))
-        here = {pf.class_key(n["platform"], mix) for n, have in nodes
-                if (not plats or n["platform"] in plats) and core._pools_fit(n, res) and caps <= have}
+        caps, serves = set(modcalls.stage_capabilities(module, st)), _serving(module, st)
+        here = {pf.class_key(n["platform"], mix) for n, state, have in nodes
+                if serves(n, state) and (not plats or n["platform"] in plats) and core._pools_fit(n, res) and caps <= have}
         out = here if out is None else out & here
     out = out or set()
     if cache is not None:
@@ -217,9 +242,9 @@ def unit_stages(db: DB, b: dict) -> list[str]:
 
 
 def facts(db: DB, j: dict, cache: dict | None = None) -> dict:
-    """What the placement predicates decide on (predicates.placement): the job's platforms, its datasets' platforms and
-    its unit chain {unit, mix, class, state, bind, feasible}. An unbound unit's `feasible` keeps only the classes where
-    every stage ahead of the job has a node to run it (_servable)."""
+    """What the placement predicates decide on (predicates.placement): the job's platforms, its datasets' platforms, the
+    datasets it names that are not registered, and its unit chain {unit, mix, class, state, bind, feasible}. An unbound
+    unit's `feasible` keeps only the classes where every stage ahead of the job has a node to run it (_servable)."""
     units = []
     for b in chain(db, j.get("placement_unit"), cache):
         u = {k: b[k] for k in ("unit", "mix", "class", "state", "bind", "feasible")}
@@ -227,6 +252,7 @@ def facts(db: DB, j: dict, cache: dict | None = None) -> dict:
             u["feasible"] = sorted(set(u["feasible"]) & _servable(db, j, u["mix"], cache))
         units.append(u)
     return {"platforms": jl(j.get("platforms_json"), []) or [], "dataset_platforms": dataset_platforms(db, j, cache),
+            "unregistered": unregistered(db, j, cache),
             "units": units}
 
 
@@ -375,17 +401,21 @@ def cache_hit(db: DB, j: dict) -> int | None:
 
 def capacity_class(db: DB, module: str, mix: str, feasible: list[str], stages, exclude: str | None = None) -> str | None:
     """Among the feasible classes where every one of `stages` has a node to run it (classes_running), the one with the
-    most free CPU on ready, active nodes certified for the module (None: no such class)."""
+    most free CPU on ready, active nodes certified for the module, or able to run its bootstrap stages when every one of
+    `stages` is one (None: no such class)."""
     runs = classes_running(db, module, stages, mix)
+    boot = bool(stages) and all(modcalls.stage_bootstrap(module, st) for st in stages)
     free: dict = {}
     live = {r["node_id"]: r["cpu"] or 0 for r in db.q(
         "SELECT a.node_id, SUM(COALESCE(json_extract(j.resources_json,'$.cpu'),1)) cpu FROM attempts a "
         "JOIN jobs j ON j.job_id=a.job_id WHERE a.state='live' GROUP BY a.node_id")}
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json FROM nodes WHERE lifecycle='ready' "
+    from . import modsandbox
+    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, facts_json FROM nodes WHERE lifecycle='ready' "
                   "AND desired_state='active' AND platform IS NOT NULL"):
         cls = pf.class_key(n["platform"], mix)
+        state = (jl(n["modules_json"], {}) or {}).get(module, {}).get("state")
         if cls not in feasible or cls not in runs or cls == exclude \
-                or (jl(n["modules_json"], {}) or {}).get(module, {}).get("state") != "certified":
+                or not predicates.module_serves({"bootstrap": boot}, state, modsandbox.bootstrap_enforced(n)):
             continue
         slots = float((jl(n["capacity_json"], {}) or {}).get("cpu_slots") or 0)
         free[cls] = free.get(cls, 0.0) + max(0.0, slots - float(live.get(n["node_id"], 0)))

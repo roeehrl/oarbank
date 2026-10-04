@@ -18,13 +18,13 @@ proved in one layer means the same thing in every other.
 | S5 | pending, done, cancelled and quarantined jobs have no live attempts |
 | S6 | accepted results are exactly the canonical ones, except results superseded by a later generation |
 | S7 | live attempts only run on ready nodes |
-| S8 | a live attempt runs a module certified on its node, under the current certification |
+| S8 | a live attempt runs a module certified on its node, under the current certification; a bootstrap job's attempt, on a node where the module is certifying or certified |
 | S9 | attempt bookkeeping: `ended_at` is set if and only if the attempt is no longer live |
 | S10 | a job's `exec_failures` never exceeds its failed or killed attempts |
 | S11 | no node holds more live attempts than its hard `jobs` cap |
 | S12 | staged jobs: no live attempt on a job whose dependency is not done |
 | S13 | staged jobs: a done job's dependency is done and fed it the same input |
-| S14 | every canonical result carries its job's module's verdict |
+| S14 | every canonical result carries its job's module's verdict (a bootstrap job's: the host's pin check) |
 | S15 | a module fault is never charged to a node or a job |
 | S16 | every journaled actuation targets one of the node's own attempts or services (host protection never signals your processes) |
 | S17 | no node admits work while its memory guard is active |
@@ -32,6 +32,7 @@ proved in one layer means the same thing in every other.
 | S19 | the protection controller is monotone and fail-safe: worse, stale or missing signals never grow the fleet's allowance (agent tests) |
 | S20 | every live, leased or done job of a bound unit of work ran on, or got its canonical result from, a node of the unit's platform class, result-cache hits included (placement, D33) |
 | S21 | a job of a stage that does not compare (`determinism = "none"`) never has a replica, a dispute or a golden, and never shares a canonical result through the result cache (SDK 1.3) |
+| S22 | a bootstrap job's canonical result is exactly pinned datasets of the module version that produced it: an empty payload, and artifacts that each hold one pin's files (SDK 1.4) |
 | L1 | liveness: under bounded faults, every job reaches done, cancelled or quarantined |
 | I1 | integrity: a node never convicted of nondeterminism is never quarantined by a dispute |
 | I2 | integrity: once a node is convicted, no canonical result it produced survives |
@@ -42,8 +43,8 @@ proved in one layer means the same thing in every other.
 |-------|----------------|-------|-------------|--------------|
 | unit tests | one behaviour per test, real core | `tests/test_core.py`, `tests/test_robustness.py`, and one file per area (console, HTTP, operations, campaigns, modules, protection, alerting, rescue) | every run | same |
 | HTTP | mTLS auth (a test client stands in for the TLS layer; `tests/test_mtls.py` runs the real listener), cross-node fencing, idempotent replay, 503 with Retry-After, admin identity, CSRF | `tests/test_http.py`, `tests/test_mtls.py` | every run | same |
-| model-based (Hypothesis) | random interleavings of every agent, user and coordinator action on a mixed fleet (darwin-arm64, linux-amd64, linux-arm64), including placement studies, rebinds and placement changes; S1–S18, S20 and S21 after every step | `tests/test_stateful.py` | 150 × 60 steps | `OARBANK_THOROUGH=1`: 1000 × 100 |
-| seeded fleet simulation | whole mixed-platform fleets over simulated hours with injected faults (including module process kills and outages), with and without placement; S1–S18, S20 and S21 during, L1/I1/I2 at the end, and a 1000-job mixed-fleet run whose `oarbank verify` report is clean. Runs the SDK's toy module and the core's relay fixture module | `src/oarbank/sim.py`, `tests/test_simulation.py` | 67 runs | `scripts/sim-sweep.sh` (seeds × 7 shapes) |
+| model-based (Hypothesis) | random interleavings of every agent, user and coordinator action on a mixed fleet (darwin-arm64, linux-amd64, linux-arm64), including placement studies, rebinds and placement changes; S1–S18 and S20–S22 after every step | `tests/test_stateful.py` | 150 × 60 steps | `OARBANK_THOROUGH=1`: 1000 × 100 |
+| seeded fleet simulation | whole mixed-platform fleets over simulated hours with injected faults (including module process kills and outages), with and without placement; S1–S18 and S20–S22 during, L1/I1/I2 at the end, and a 1000-job mixed-fleet run whose `oarbank verify` report is clean. Runs the SDK's toy module and the core's relay fixture module | `src/oarbank/sim.py`, `tests/test_simulation.py` | 67 runs | `scripts/sim-sweep.sh` (seeds × 7 shapes) |
 | model checking (TLA+) | exhaustive exploration of every interleaving in small scopes: 2–3 nodes, 1–2 jobs, ≤ 2 faults. Weakened variants must fail, and witness configs show the interesting paths are reachable | `specs/` (`run_tlc.sh`, README) | `QUICK=1 run_tlc.sh` | full `run_tlc.sh` |
 | contracts and parity | every mutating route is an operation, every operation reachable from the API, CLI and console, every end reason has a code, generated docs and schemas fresh | `tests/test_contracts.py`, `oarbank.contracts.parity` | every run | — |
 | agent (Rust) | protection (controller, evaluator, matcher on the shared vectors, spawn registry, memory guard, soaks), services, staging, jobs, sandbox backends, self-update, moves and rescue | `rust/` (`cargo test --workspace`) | every CI run, on macOS, Linux and Windows | — |

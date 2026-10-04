@@ -40,7 +40,7 @@ PLATFORMS = ("darwin-arm64", "linux-amd64", "linux-arm64")          # node i run
 PARAMS = {"samples": 10, "light_clamp": 30.0}
 # what a healthy agent's sandbox backend reports (spec/sandbox.md): oarbankd gives module work only to sandboxed agents
 SANDBOX_ENFORCED = {c: "enforced" for c in ("filesystem", "ipc", "net.none", "net.egress-allowlist", "net.egress-any",
-                                            "no_loopback", "gpu.compute", "exec_writable_deny")}
+                                            "no_loopback", "gpu.compute", "exec_writable_deny", "grants.bootstrap")}
 def create_study(db, name: str, configs: list, datasets: list, baseline: dict, actor: str = "sim", **kw) -> str:
     """A comparison study, created as the console and the CLI do: the relay module's own operation
     (mod.relay.create_study). Returns the campaign id."""

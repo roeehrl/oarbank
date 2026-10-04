@@ -1,6 +1,8 @@
 # Bootstrap stages: a module provisions its own datasets on a fresh fleet
 
-Status: design (owner decision: bootstrap stages), for **oarbank-sdk 1.4.0** and **core 2.4.0**.
+Status: built as designed (owner decision: bootstrap stages; PLAN D34) in **oarbank-sdk 1.4.0** and **core 2.4.0**.
+Found on the way: a bundle whose manifest does not validate made `oarbank_sdk.bundle.verify` raise pydantic's error
+instead of a `BundleError`, so the core's install crashed on it instead of refusing it; it is a `BundleError` now.
 
 ## The problem
 
@@ -54,7 +56,7 @@ pins from its own manifest (`oarbank_sdk.manifest.load`), so the module keeps on
 `PinnedDataset = {dataset_id, kind, meta = {}, platform = null, files: [{path, sha256, size}]}`; `path` is a
 PortablePath, `sha256` 64 lowercase hex digits, `size` bytes (an integer, at least 0).
 
-**Rules** (spec/manifest.md, new rule 16; all errors, in `oarbank-sdk check` and at install):
+**Rules** (spec/manifest.md, new rule 15; the lint list becomes 16; all errors, in `oarbank-sdk check` and at install):
 1. `bootstrap` is set only on a standalone stage (neither `after` another nor depended on) that is not the default
    stage: a job runs it only when it names the stage, so the evaluation form never runs as bootstrap.
 2. A bootstrap stage's effective determinism is `none`.
@@ -163,9 +165,9 @@ by the bundle digest the operator installs, approves and signs releases over.
   is a bootstrap attempt on a node where the module is certifying or certified.
 - **S14** (amended): every canonical result carries its module's verdict; a bootstrap job's verdict is the host's pin
   check (empty fields).
-- **S22** (new): a bootstrap job's canonical result has an empty payload and each of its artifacts is one pinned
-  dataset of the module version that produced it; every registered dataset whose id its module pins holds exactly the
-  pinned contents.
+- **S22** (new): a bootstrap job's canonical result is exactly pinned datasets of the module version that produced it:
+  an empty payload, and artifacts that each hold one pin's files. (What a pinned id holds in the registry is not an
+  invariant: an operator may register any dataset by hand, which `pinned_dataset_conflict` reports.)
 
 The Hypothesis machine, the simulator, the Verify page and `oarbank verify` check S22 with the rest of the catalogue.
 
@@ -220,7 +222,10 @@ a `provision` operation):
 - a bootstrap stage without `determinism = "none"`, without pins, or with `requires.core` below 2.4 is refused at
   install (the SDK's model, which the core uses);
 - `datasets.create` of a pinned id with other files is refused;
-- the release entry marks the stage; S8, S14 and S22 hold, and S22 catches a deliberately broken database.
+- the release entry marks the stage; S8, S14 and S22 hold, and S22 catches a deliberately broken database;
+- `certifying_stuck` names the pinned datasets a node's goldens wait for.
 
 Agent: the bootstrap grants as a pure function of the release entry and the job's stage (unit tests), applied in
-`jobs::execute`; the facts key on every backend.
+`jobs::execute`; the facts key on every backend. End to end (tests/rust/test_agent_jobs.py): depot on a real agent and
+a real oarbankd, from a fresh node to certified, the fetch job sandboxed with the bootstrap grants (depot's runner
+fails if it sees a module data directory, a tool or the node's module settings).

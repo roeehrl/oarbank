@@ -636,7 +636,7 @@ _PREFETCH_CACHE: dict = {}      # id(db) -> {"at", "rows"}
 
 
 def prefetch_for(db: DB, node: dict) -> list[str]:
-    """Datasets this node should stage: everything referenced by open work it may run."""
+    """Datasets this node should stage: everything registered that open work it may run references."""
     mods = set(certified_modules(node)) | {m for m, st in node_modules(node).items() if st.get("state") == "certifying"}
     if not mods:
         return []
@@ -656,7 +656,12 @@ def prefetch_for(db: DB, node: dict) -> list[str]:
         for d in jl(r["datasets_json"], []):
             if d not in want:
                 want.append(d)
-    return want
+    if not want:
+        return []
+    # only registered datasets: a golden may name pinned datasets a bootstrap job has yet to bring
+    have = {r["dataset_id"] for r in db.q(f"SELECT dataset_id FROM datasets WHERE dataset_id IN ({','.join('?' * len(want))})",
+                                          want)}
+    return [d for d in want if d in have]
 
 
 # ---------------------------------------------------------------- dispatch
@@ -763,16 +768,24 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
     f = _job_facts(db, j)
     disputed = set(f["dispute"].get("nodes", []))
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
+    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json, facts_json FROM nodes "
                   "WHERE lifecycle='ready' AND node_id!=?", (nid,)):
         if n["node_id"] in failed or n["node_id"] in disputed or not predicates.platform_fits(f, n["platform"]) \
                 or predicates.retry_max(f, n["platform"]) <= j["exec_failures"]:
             continue
         # it must be able to run it at all: a call-only worker cannot take a score job (sim finding)
-        if (jl(n["modules_json"], {}) or {}).get(j["module"], {}).get("state") == "certified" and _pools_fit(n, res) \
+        if _module_serves(n, f) and _pools_fit(n, res) \
                 and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"])):
             return True
     return False
+
+
+def _module_serves(node: dict, f: dict) -> bool:
+    """Does the node's state for the job's module let it run the job (predicates.module_serves): certified, or, for a
+    bootstrap job, certifying on a node whose agent applies the bootstrap grants."""
+    from . import modsandbox
+    state = (jl(node["modules_json"], {}) or {}).get(f["module"], {}).get("state")
+    return predicates.module_serves(f, state, modsandbox.bootstrap_enforced(node))
 
 
 def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: float, free_mem: float,
@@ -785,6 +798,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         node=node, states=node_modules(node), offered=set(offered) - set(excluded), excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in set(offered) - set(excluded)},
+        bootstrap_grants=modsandbox.bootstrap_enforced(node),
         disabled=modstore.disabled_names(db),
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
         live=db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"],
@@ -803,7 +817,7 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
     return {**j, "dispute": {**d, "scope": (cmp or {}).get("scope"), "class": (cmp or {}).get("class")} if cmp is not None else d,
             "stage_platforms": modcalls.stage_platforms(j["module"], j["stage"]), "retry": modcalls.stage_retry(j["module"], j["stage"]),
             "stage_capabilities": modcalls.stage_capabilities(j["module"], j["stage"]),
-            "placement": placement.facts(db, j, cache)}
+            "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]), "placement": placement.facts(db, j, cache)}
 
 
 def sent_stage(mi, stage: str | None) -> str | None:
@@ -992,14 +1006,14 @@ def counts_against_job(reason: str) -> bool:
 
 
 def _retry_possible(db: DB, j: dict) -> bool:
-    """Can any ready node certified for the job's module, able to run its stage, still try it: its stage's retry
-    (stages[].retry.max_attempts, for that node's platform) above the job's failures."""
+    """Can any ready node that serves the job's module (_module_serves), able to run its stage, still try it: its stage's
+    retry (stages[].retry.max_attempts, for that node's platform) above the job's failures."""
     f = _job_facts(db, j)
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json FROM nodes WHERE lifecycle='ready'"
+    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, facts_json FROM nodes WHERE lifecycle='ready'"
                   + (" AND node_id=?" if j["target_node"] else ""), (j["target_node"],) if j["target_node"] else ()):
         if (predicates.retry_max(f, n["platform"]) > j["exec_failures"] and predicates.platform_fits(f, n["platform"])
-                and (jl(n["modules_json"], {}) or {}).get(j["module"], {}).get("state") == "certified" and _pools_fit(n, res)):
+                and _module_serves(n, f) and _pools_fit(n, res)):
             return True
     return False
 
@@ -1261,7 +1275,9 @@ class _Evaluation:
     digest_version: int | None
     fields: dict
     golden_ok: bool | None
-    problem: str | None = None      # why the payload is unfit for campaign.tick (verdict result_invalid)
+    problem: str | None = None      # why the payload is unfit for campaign.tick (result_invalid), or the pin check failed
+    bootstrap: bool = False         # judged by the host's pin check (a bootstrap stage's job), not by the module
+    pinned: tuple = ()              # a bootstrap job's datasets (oarbank-sdk PinnedDataset), registered when it is accepted
 
 
 def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
@@ -1275,6 +1291,12 @@ def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
         return None
     # judged by the version that ran it (still active), else by the current version
     ver = a["module_version"] if a["module_version"] and (j["module"], a["module_version"]) in modcalls.VERSIONS else None
+    try:
+        man = modcalls.info_for(j["module"], ver).manifest
+    except KeyError:
+        man = None                     # not in the catalogue: the module call below reports it unavailable
+    if man is not None and man.is_bootstrap(j["stage"]):
+        return _bootstrap_verdict(db, j["job_id"], man, res)
     dep_id, merged, arts = None, res, None
     dep = _dep_result(db, j) if j["depends_on"] else None
     if dep:
@@ -1295,6 +1317,52 @@ def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
         if problem:
             ok, reason = False, "result_invalid"
     return _Evaluation(j["job_id"], dep_id, merged, ok, reason, v.value, v.digest, v.digest_version, v.fields, gok, problem)
+
+
+def _bootstrap_verdict(db: DB, job_id: int, man, res: dict) -> _Evaluation:
+    """The host's verdict on a bootstrap job's result (docs/design/bootstrap-stages.md): no module code reads it. It must
+    be exactly pinned datasets of the version that ran it (oarbank-sdk Manifest.bootstrap_problem), with every file a blob
+    the coordinator holds at the size it measured on upload. What is stored is the envelope's identity, the empty
+    payload and the artifacts; `effective` and `provenance` are dropped."""
+    arts, missing = [], None
+    for a in res.get("artifacts") or []:
+        files = []
+        for f in a.get("files") or []:
+            b = db.one("SELECT size FROM blobs WHERE digest=?", (f.get("digest"),))
+            if b is None:
+                missing = missing or f"artifact {a.get('name')!r}: {f.get('path')} was never uploaded"
+            files.append({"path": f.get("path"), "digest": f.get("digest"), "size": b["size"] if b else f.get("size")})
+        arts.append({"name": a.get("name"), "files": files})
+    stored = {k: res.get(k) for k in ("envelope", "schema", "module_version", "protocol")} | {"payload": {}, "artifacts": arts}
+    if missing:
+        return _Evaluation(job_id, None, stored, False, "artifact_missing", None, None, None, {}, None, missing, bootstrap=True)
+    problem = man.bootstrap_problem(res.get("payload"), arts)
+    if problem:
+        return _Evaluation(job_id, None, stored, False, "pin_mismatch", None, None, None, {}, None, problem, bootstrap=True)
+    return _Evaluation(job_id, None, stored, True, "ok", None, None, None, {}, None, bootstrap=True,
+                       pinned=tuple(man.pin_of(a["files"]) for a in arts))
+
+
+def _register_pinned(db: DB, module: str, pins, node_id: str, job_id: int, post: list):
+    """Register a bootstrap job's pinned datasets, owned by its module, exactly as pinned. A dataset already registered
+    with the same contents stays; one with other contents (an operator's registration, say) is never overwritten: the
+    alert pinned_dataset_conflict:<id> names it."""
+    for p in pins:
+        files, meta = p.dataset_files(), dict(p.meta)
+        ex = db.one("SELECT * FROM datasets WHERE dataset_id=?", (p.dataset_id,))
+        if ex is None:
+            db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at,platform) VALUES(?,?,?,?,?,?,?)",
+                 (p.dataset_id, p.kind, module, json.dumps(meta), json.dumps([{**f, "origins": []} for f in files]), now(),
+                  p.platform))
+            db.event("dataset_imported", actor="bootstrap", node_id=node_id, job_id=job_id, reason=p.dataset_id)
+            continue
+        have = [{k: f.get(k) for k in ("path", "digest", "size")} for f in jl(ex["files_json"], [])]
+        if (ex["module"], ex["kind"], sorted(have, key=lambda f: f["path"]), ex["platform"]) != (module, p.kind, files, p.platform):
+            post.append(lambda p=p, ex=ex: _alert(
+                db, f"pinned_dataset_conflict:{p.dataset_id}", f"module:{module}",
+                f"{module}: bootstrap job {job_id} brought pinned dataset {p.dataset_id}, but a dataset of "
+                f"{ex['module'] or 'the operator'} (kind {ex['kind']}) with other files is registered under that id; it was "
+                "left as it is: delete it so the next bootstrap job registers the pinned one"))
 
 
 def _await_module(db: DB, attempt_id: int, e: Exception):
@@ -1351,6 +1419,7 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
         if ev is None or ev.job_id != j["job_id"] or ev.dep_result_id != (dep["result_id"] if dep else None):
             # the dependency changed between evaluation and commit (a demoted call): evaluate again
             raise ApiError(503, "reevaluate", "the stage input changed during evaluation", headers={"Retry-After": "1"})
+        boot = ev.bootstrap
         if j["depends_on"]:
             # a tail-stage result stands on its head's result: same input, merged into one canonical result
             if not dep:
@@ -1358,6 +1427,8 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             elif ev.digest and dep["digest"] and ev.digest != dep["digest"]:
                 stage_problem = "input_mismatch"
             res = ev.result
+        elif boot:
+            res = ev.result                     # only pinned datasets: no `art:` datasets, nothing else stored
         elif res.get("artifacts") is not None:
             stage_problem = _register_artifacts(db, res, j["module"])
         ok, why = ev.ok, ev.reason
@@ -1378,7 +1449,8 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             reason, accepted = {"quarantined": "node_quarantined", "retired": "node_retired"}[node["lifecycle"]], 0
         elif a["generation"] != j["generation"]:
             reason, accepted = "stale_generation", 0
-        elif j["kind"] != "golden" and a["cert_generation"] != mstate.get("generation"):
+        elif j["kind"] != "golden" and not boot and a["cert_generation"] != mstate.get("generation"):
+            # a bootstrap result never depended on certification: its pins decide (a revocation ends its attempt)
             reason, accepted = "release_invalid", 0
         elif not ok:
             reason, accepted = why, 0
@@ -1478,6 +1550,8 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
                     # still leased while another attempt runs; pending only when nothing else is live (S5)
                     still = db.one("SELECT COUNT(*) n FROM attempts WHERE job_id=? AND state='live'", (j["job_id"],))["n"]
                     db.x("UPDATE jobs SET state=? WHERE job_id=?", ("leased" if still else "pending", j["job_id"]))
+        if canonical and boot:
+            _register_pinned(db, j["module"], ev.pinned, node["node_id"], j["job_id"], post)
         if canonical:
             db.x("UPDATE results SET canonical=1 WHERE result_id=?", (rid,))
             db.x("UPDATE jobs SET state='done', done_at=?, canonical_result_id=? WHERE job_id=?", (now(), rid, j["job_id"]))
@@ -1496,10 +1570,10 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
         elif a["state"] == "live":
             # a wrong-mode run implicates the host and an invalid payload the job: failed attempts (consistent with
             # exec_failures); whether one spends the job's retries is its reason code's (counts_against_job)
-            failed = reason in ("mode_mismatch", "result_invalid")
+            failed = reason in ("mode_mismatch", "result_invalid", "pin_mismatch")
             _end_attempt(db, attempt_id, "failed" if failed else "completed", reason, count_failure=failed)
-        if reason == "result_invalid":
-            db.event("result_invalid", node_id=node["node_id"], attempt_id=attempt_id, job_id=j["job_id"], reason=ev.problem)
+        if reason in ("result_invalid", "pin_mismatch"):
+            db.event(reason, node_id=node["node_id"], attempt_id=attempt_id, job_id=j["job_id"], reason=ev.problem)
         for fn in post:
             fn()
         if j["kind"] == "golden" and reason == "ok":
@@ -1531,6 +1605,23 @@ def _stranded_disputes(db: DB) -> list[dict]:
             continue
         if not _eligible_nodes(db, j, set(d.get("nodes", []))):
             out.append(j)
+    return out
+
+
+def _goldens_waiting(db: DB, node_id: str, module: str) -> str:
+    """Why a node's goldens may not have run: the unregistered datasets they name, and whether the module pins them (a
+    bootstrap job brings those)."""
+    missing = sorted({d for j in db.q("SELECT datasets_json FROM jobs WHERE target_node=? AND kind='golden' AND module=? "
+                                      "AND state='pending'", (node_id, module))
+                      for d in placement.unregistered(db, j)})
+    if not missing:
+        return ""
+    i = modcalls.CATALOG.get(module)
+    pinned = [d for d in missing if i and i.manifest.datasets.pin(d)]
+    out = f"; its goldens wait for unregistered datasets {', '.join(missing)}"
+    if pinned:
+        stages = [st.name for st in i.manifest.stages if st.bootstrap]
+        out += f" ({', '.join(pinned)} pinned: a job of bootstrap stage {', '.join(stages)} brings them)"
     return out
 
 
@@ -1571,7 +1662,8 @@ def reap(db: DB):
                 # goldens that never finish (e.g. the Mac sleeps through every run) no longer block work (F5),
                 # but the operator must hear about it (TLA+ review follow-up)
                 _alert(db, f"certifying_stuck:{mname}", n["node_id"],
-                       f"{n['hostname']}: {mname} has been certifying for over {int(CERTIFYING_GRACE_S // 60)} min")
+                       f"{n['hostname']}: {mname} has been certifying for over {int(CERTIFYING_GRACE_S // 60)} min"
+                       + _goldens_waiting(db, n["node_id"], mname))
     run_pending_goldens(db)             # backstop: golden sets whose fetch failed or was interrupted
     for raise_, rule, subject, detail in placed:
         if raise_:
