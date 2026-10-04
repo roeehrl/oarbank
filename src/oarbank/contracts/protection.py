@@ -73,11 +73,9 @@ class NodeSection(_M):
     mode: Mode = DEFAULT_MODE
     pause: bool = Field(False, description="Local brake: no fleet work at all (local file only needs no coordinator).")
     gpu_jobs: Literal["never", "when_no_gpu_protected", "always"] = "when_no_gpu_protected"
-    duty_cycle: bool = Field(False, description="D3d: SIGSTOP/SIGCONT time-slicing rung, off by default.")
     memory: MemoryGuard = Field(default_factory=MemoryGuard)
     implicit: Implicit = Field(default_factory=Implicit, description="moderate/strict_yield only.")
     defaults: Timing = Field(default_factory=Timing)
-    private_signals: bool = Field(True, description="D3c: feature-detected private sources; they can only restrict.")
 
 
 # ------------------------------------------------------------------------------------------ rules

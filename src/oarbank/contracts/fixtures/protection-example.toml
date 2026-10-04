@@ -4,7 +4,6 @@ schema = 1
 [node]
 mode         = "moderate"
 gpu_jobs     = "when_no_gpu_protected"
-duty_cycle   = false
 implicit     = { frontmost_app = true, owner_stall = { max = 0.15 } }
 
 # TOML 1.0 inline tables must fit on one line, so the longer sections are ordinary tables.

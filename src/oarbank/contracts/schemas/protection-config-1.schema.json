@@ -490,12 +490,6 @@
         "defaults": {
           "$ref": "#/$defs/Timing"
         },
-        "duty_cycle": {
-          "default": false,
-          "description": "D3d: SIGSTOP/SIGCONT time-slicing rung, off by default.",
-          "title": "Duty Cycle",
-          "type": "boolean"
-        },
         "gpu_jobs": {
           "default": "when_no_gpu_protected",
           "enum": [
@@ -527,12 +521,6 @@
           "default": false,
           "description": "Local brake: no fleet work at all (local file only needs no coordinator).",
           "title": "Pause",
-          "type": "boolean"
-        },
-        "private_signals": {
-          "default": true,
-          "description": "D3c: feature-detected private sources; they can only restrict.",
-          "title": "Private Signals",
           "type": "boolean"
         }
       },

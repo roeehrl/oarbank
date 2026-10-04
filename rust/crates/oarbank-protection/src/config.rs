@@ -574,7 +574,6 @@ pub struct ProtectionConfig {
     pub cooldown_window_s: f64,
     /// GPU fleet jobs: never | when_no_gpu_protected | always.
     pub gpu_jobs: String,
-    pub duty_cycle: bool,
     /// moderate / strict_yield only: protect the frontmost app while the user is present, and a generic owner
     /// CPU stall signal over every unmatched owner process.
     pub implicit_frontmost: bool,
@@ -597,7 +596,6 @@ impl Default for ProtectionConfig {
             cooldown_max_s: 3840.0,
             cooldown_window_s: 3600.0,
             gpu_jobs: "when_no_gpu_protected".to_string(),
-            duty_cycle: false,
             implicit_frontmost: true,
             owner_stall_max: Some(0.15),
             rules: vec![],
@@ -635,7 +633,6 @@ impl ProtectionConfig {
         if let Some(g) = str_of(get(node, "gpu_jobs")) {
             c.gpu_jobs = g.to_string();
         }
-        c.duty_cycle = bool_of(get(node, "duty_cycle")).unwrap_or(false);
         let im = get(node, "implicit");
         if is_object(im) {
             c.implicit_frontmost = bool_of(get(im, "frontmost_app")).unwrap_or(true);
@@ -726,8 +723,6 @@ impl ProtectionConfig {
             } else {
                 self.gpu_jobs.clone()
             },
-            // duty-cycling is an extra mechanism: both must allow it
-            duty_cycle: self.duty_cycle && o.duty_cycle,
             implicit_frontmost: self.implicit_frontmost || o.implicit_frontmost,
             owner_stall_max: match (self.owner_stall_max, o.owner_stall_max) {
                 (Some(a), Some(b)) => Some(a.min(b)),

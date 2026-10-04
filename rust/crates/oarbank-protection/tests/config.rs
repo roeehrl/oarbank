@@ -155,7 +155,7 @@ fn node_section_defaults_and_overrides() {
     );
     assert_eq!(d.owner_stall_max, Some(0.15));
     let c = ProtectionConfig::from_json(
-        &json!({"node": {"gpu_jobs": "never", "duty_cycle": true, "pause": true,
+        &json!({"node": {"gpu_jobs": "never", "pause": true,
                          "implicit": {"frontmost_app": false, "owner_stall": null},
                          "defaults": {"enter_for_s": 2, "exit_after_s": 30, "cooldown": {"backoff": 0.5, "base_s": 60}}},
                 "rules": [{"id": "a", "match": {"name": "x"}, "evict": {}}]}),
@@ -163,7 +163,7 @@ fn node_section_defaults_and_overrides() {
     )
     .unwrap();
     assert_eq!(c.gpu_jobs, "never");
-    assert!(c.duty_cycle && c.pause && !c.implicit_frontmost);
+    assert!(c.pause && !c.implicit_frontmost);
     assert_eq!(c.owner_stall_max, None);
     assert_eq!(
         (c.enter_for_s, c.exit_after_s, c.cooldown_base_s),
@@ -206,7 +206,7 @@ fn union_is_strictest_on_every_dimension() {
 #[test]
 fn union_timing_gpu_and_implicit() {
     let a = ProtectionConfig::from_json(
-        &json!({"node": {"gpu_jobs": "always", "duty_cycle": true, "defaults": {"enter_for_s": 8, "exit_after_s": 10},
+        &json!({"node": {"gpu_jobs": "always", "defaults": {"enter_for_s": 8, "exit_after_s": 10},
                          "implicit": {"owner_stall": {"max": 0.3}}}}),
         "central",
     )
@@ -219,7 +219,6 @@ fn union_timing_gpu_and_implicit() {
     .unwrap();
     let u = a.union(&b);
     assert_eq!(u.gpu_jobs, "never");
-    assert!(!u.duty_cycle); // both must allow it
     assert_eq!((u.enter_for_s, u.exit_after_s), (2.0, 90.0));
     assert_eq!(u.owner_stall_max, Some(0.1));
 }

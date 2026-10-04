@@ -186,7 +186,6 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | Implicit signal smoothing | weight 0.1 a sample (about 20 s) |
 | `protect` window | 20 s |
 | GPU fleet jobs | `when_no_gpu_protected` |
-| Duty cycling | off (fans pulse) |
 | Eviction grace | the runner's `stop_grace_s` |
 | Flapping alert (coordinator) | more than 12 lower or pause escalations per node-hour |
 | Probe-harm alert (coordinator) | a probe showing the protected process losing over 25 % |

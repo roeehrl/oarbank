@@ -20,7 +20,7 @@ verification stack in [docs/verification.md](../verification.md). The console, o
 | D3a | New nodes default to `moderate` with no rules. A rule protecting a GPU-bound process reserves **memory only**: such a process barely competes for CPU, so fleet CPU jobs never pause, drain or cap for it. |
 | D3b | `reserve` is an admission rule for CPU as well as memory. |
 | D3c | Private and undocumented OS signals are optional, feature-detected inputs that can only restrict fleet growth. |
-| D3d | Duty-cycling is off by default. Fleet GPU jobs run only while no protected group is using the GPU. |
+| D3d | No duty-cycling rung: lowering and caps slow fleet jobs without pulsing fans. Fleet GPU jobs run only while no protected group is using the GPU. |
 | D4 | **One baseline schema, no upgrade path.** The data model is generic (campaigns, module stores, results with digests) and is created fresh; a data directory from an older build is not migrated. |
 | D5 | `job_key` is keyed by the module-declared `compat` string. The module digest drives certification. |
 | D6 | Digest and hash verification are always on. *(Release signing: D31.)* |
