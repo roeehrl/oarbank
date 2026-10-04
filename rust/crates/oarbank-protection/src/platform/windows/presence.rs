@@ -71,6 +71,7 @@ const HELPER_TTL: Duration = Duration::from_secs(1);
 /// The longest the protection tick waits for the helper.
 const HELPER_WAIT: Duration = Duration::from_secs(2);
 const ERROR_PIPE_BUSY: i32 = 231;
+const ERROR_FILE_NOT_FOUND: i32 = 2;
 
 /// The sessions as the elevated helper reads them (`{"op": "sessions"}`), kept for a second. A request is never
 /// waited on longer than two seconds, and none is sent while an earlier one is still out (a helper that does not
@@ -116,10 +117,16 @@ fn ask_helper() -> Option<Vec<Session>> {
                 pipe = Some(p);
                 break;
             }
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+            // busy with another client, or between two of its pipe instances
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(ERROR_PIPE_BUSY | ERROR_FILE_NOT_FOUND)
+                ) =>
+            {
                 std::thread::sleep(Duration::from_millis(50))
             }
-            Err(_) => return None, // no helper (the personal scope, where WTS answers anyway)
+            Err(_) => return None,
         }
     }
     let mut pipe = pipe?;

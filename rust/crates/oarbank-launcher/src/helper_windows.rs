@@ -349,13 +349,23 @@ fn serve_requests() -> Result<()> {
         bail!("pipe security descriptor: {}", std::io::Error::last_os_error());
     }
     let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
-    let name = wide(PIPE);
+    serve_pipe(PIPE, Some(&sa), &|| crate::STOP.load(std::sync::atomic::Ordering::SeqCst), |req| h.handle(req))
+}
+
+/// Answer one request a connection, a line of JSON each way, until `stop()`. The reply is flushed before the pipe is
+/// disconnected: DisconnectNamedPipe throws away whatever the client has not read yet, so without the flush a client
+/// that reads a moment later gets nothing.
+fn serve_pipe(name: &str, sa: Option<&SECURITY_ATTRIBUTES>, stop: &dyn Fn() -> bool,
+              mut handle: impl FnMut(&Value) -> Result<Value>) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+    let name = wide(name);
     loop {
-        if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        if stop() {
             return Ok(());
         }
         let pipe = unsafe { CreateNamedPipeW(name.as_ptr(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                                             PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa) };
+                                             PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0,
+                                             sa.map_or(std::ptr::null(), |sa| sa as *const SECURITY_ATTRIBUTES)) };
         if pipe == INVALID_HANDLE_VALUE {
             bail!("creating the pipe: {}", std::io::Error::last_os_error());
         }
@@ -369,12 +379,13 @@ fn serve_requests() -> Result<()> {
         let mut line = String::new();
         let mut r = BufReader::new(&file);
         let reply = match r.read_line(&mut line).map_err(anyhow::Error::from)
-            .and_then(|_| serde_json::from_str::<Value>(&line).map_err(anyhow::Error::from)).and_then(|req| h.handle(&req)) {
+            .and_then(|_| serde_json::from_str::<Value>(&line).map_err(anyhow::Error::from)).and_then(|req| handle(&req)) {
             Ok(v) => v,
             Err(e) => json!({"ok": false, "error": format!("{e:#}")}),
         };
-        let _ = (&file).write_all(format!("{reply}\n").as_bytes());
-        let _ = (&file).flush();
+        if (&file).write_all(format!("{reply}\n").as_bytes()).is_ok() {
+            unsafe { FlushFileBuffers(pipe) };                               // until the client has read the reply
+        }
         unsafe { DisconnectNamedPipe(pipe) };
         drop(file);                                                          // closes the handle
     }
@@ -383,6 +394,42 @@ fn serve_requests() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every reply reaches its client, also one that reads only after the helper has written and moved on (the
+    /// helper used to disconnect right after writing, which drops an unread reply: the client read nothing).
+    #[test]
+    fn every_reply_reaches_its_client() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let name = format!(r"\\.\pipe\oarbank-helper-test-{}", std::process::id());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (n, s) = (name.clone(), stop.clone());
+        let server = std::thread::spawn(move || {
+            serve_pipe(&n, None, &|| s.load(Ordering::SeqCst), |req| Ok(json!({"ok": true, "pad": "x".repeat(3000), "req": req})))
+        });
+        let open = || {
+            for _ in 0..400 {
+                match std::fs::OpenOptions::new().read(true).write(true).open(&name) {
+                    Ok(f) => return f,
+                    Err(e) if matches!(e.raw_os_error(), Some(2) | Some(231)) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            panic!("the test pipe never opened");
+        };
+        for i in 0..100 {
+            let mut f = open();
+            f.write_all(format!("{{\"i\": {i}}}\n").as_bytes()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));     // the helper has written by now
+            let mut line = String::new();
+            BufReader::new(&f).read_line(&mut line).unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("reply {i}: {e} in {line:?}"));
+            assert_eq!(v["req"]["i"], json!(i));
+        }
+        stop.store(true, Ordering::SeqCst);
+        let _ = std::fs::OpenOptions::new().read(true).write(true).open(&name);
+        server.join().unwrap().unwrap();
+    }
 
     /// As LocalSystem (a scheduled task run as SYSTEM): the agent's session helper runs in every session a person is
     /// logged on to, in that session and with no window, and ends with the service.
