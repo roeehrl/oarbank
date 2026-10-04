@@ -57,25 +57,25 @@ mod imp {
         }
     }
 
-    /// The child leads a new session and process group, from its first instruction.
+    /// The child leads a new session and process group and, on Linux with a delegated cgroup, enters a container of
+    /// its own (cgroup.rs `Placement`): both between the fork and the exec, so its first instruction, and everything it
+    /// starts, are already inside.
     pub(super) fn new_group(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
+        #[cfg(target_os = "linux")]
+        let placement = crate::cgroup::placement();
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(p) = &placement {
+                    p.enter()?;
                 }
                 Ok(())
             });
         }
-    }
-
-    /// Just after the spawn: on Linux with a delegated cgroup the leader gets a container of its own (cgroup.rs).
-    pub(super) fn contain(pid: u32, _lasting: bool) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        crate::cgroup::adopt(pid as i32)?;
-        let _ = pid;
-        Ok(())
     }
 
     /// Hard limits on the container (Linux cgroups; nothing on macOS, where admission control is the limit).
@@ -566,29 +566,38 @@ mod imp {
 
 pub use imp::*;
 
-/// Start `cmd` as the leader of a process container of its own: a process group from its first instruction (and on
-/// Linux a cgroup when delegated); on Windows a Job Object it is in before it runs a line (started suspended, put in
-/// the job, resumed), so nothing it starts is ever outside. When the container cannot be made the child is killed.
+/// Start `cmd` as the leader of a process container of its own, in it before it runs a line, so nothing it starts is
+/// ever outside: a process group and, on Linux with a delegated cgroup, a cgroup, both entered between fork and exec;
+/// on Windows a Job Object (started suspended, put in the job, resumed). When the container cannot be made the spawn
+/// fails (on Windows the child is killed before it ran).
 /// `lasting`: the container outlives the agent (a module service).
 pub fn spawn_contained(cmd: &mut std::process::Command, lasting: bool) -> std::io::Result<std::process::Child> {
     imp::new_group(cmd);
+    #[allow(unused_mut)]
     let mut child = cmd.spawn()?;
+    #[cfg(windows)]
     if let Err(e) = imp::contain(child.id(), lasting) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(std::io::Error::other(format!("process container: {e}")));
     }
+    #[cfg(unix)]
+    let _ = lasting;
     Ok(child)
 }
 
 /// `spawn_contained` for a tokio command.
 pub fn spawn_contained_async(cmd: &mut tokio::process::Command, lasting: bool) -> std::io::Result<tokio::process::Child> {
     imp::new_group(cmd.as_std_mut());
+    #[allow(unused_mut)]
     let mut child = cmd.spawn()?;
+    #[cfg(windows)]
     if let Err(e) = imp::contain(child.id().unwrap_or(0), lasting) {
         let _ = child.start_kill();
         return Err(std::io::Error::other(format!("process container: {e}")));
     }
+    #[cfg(unix)]
+    let _ = lasting;
     Ok(child)
 }
 
