@@ -249,9 +249,17 @@ design:
   module and the refusal of another, junction escapes, the real SDK and CLI up to the VM start, and the MSI built by
   `scripts/package-windows.ps1` (with the pinned `wslcsdk.dll`) installing with `CONTAINERS=1`. Linux (rootless Podman
   in the Lima VM): the broker refactor with the real engine, and the live test's registry push helper against a real
-  `registry:3`. **Not verified here:** a running session VM (no WSL 2 in a nested arm64 guest; GitHub's windows-2025
-  runner runs it in CI), the system scope's virtual account driving WSLc (upstream untested; doctor reports `account`
-  and the remedy if it fails), and GPU passthrough (no GPU: the gated GPU test runs on contributors' hardware).
+  `registry:3`. On GitHub's windows-2025 runner (x64, WSL 3.0.1, CI job `windows-containers`): the agent's own
+  session created through the SDK and proven ready (`linux/amd64`, no GPU on the runner's Hyper-V Video adapter), a
+  signed image pushed to a registry inside the session, verified by the broker on Windows, pulled by digest and run
+  with the Linux semantics (no network, then a granted one; the reservation's memory and CPU limits in its cgroup; the
+  work directory mounted; the unsigned and unapproved images refused before any pull; the attempt's containers gone with
+  the broker), and the doctor's probe as an installed agent runs it, then `containers remove`. CI found three things the
+  QEMU guest could not: wslc takes a NUL stdin for a console (helpers get an empty pipe), WSLc has no host networking
+  (the live test forwards the session VM's registry port), and a session VM asked for more processors than the host has
+  does not start. **Not verified:** the system scope's virtual account driving WSLc (CI runs as an administrator account;
+  upstream untested; doctor reports `account` and the remedy if it fails), and GPU passthrough (no GPU: the gated GPU
+  test runs on contributors' hardware).
 
 ## Open questions
 
