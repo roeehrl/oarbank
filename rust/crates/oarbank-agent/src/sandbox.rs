@@ -302,8 +302,18 @@ pub fn exec(args: &[String]) -> ! {
     }
 }
 
-/// The facts' `sandbox`: the backend and, per capability, `enforced`, `cooperative` or `unavailable`.
+/// The facts' `sandbox`: the backend and, per capability, `enforced`, `cooperative` or `unavailable`. With a backend,
+/// `grants.bootstrap` is enforced too: the agent itself runs a bootstrap stage's jobs with the bootstrap grants
+/// (jobs::bootstrap_entry), so the coordinator may grant it one.
 pub fn report() -> Value {
+    let mut r = backend_report();
+    if !r["backend"].is_null() {
+        r["enforcement"]["grants.bootstrap"] = json!("enforced");
+    }
+    r
+}
+
+fn backend_report() -> Value {
     #[cfg(target_os = "macos")]
     return json!({"backend": "seatbelt", "enforcement": {
         "filesystem": "enforced", "ipc": "enforced", "net.none": "enforced", "net.egress-allowlist": "enforced",

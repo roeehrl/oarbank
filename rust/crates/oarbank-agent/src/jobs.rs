@@ -54,6 +54,29 @@ pub struct JobState {
     pub wake: Arc<Notify>,
 }
 
+/// Whether the job runs a stage the release marks `bootstrap` (spec/sandbox.md, "Bootstrap jobs"): taken from the
+/// module's entry in the signed release, never from the grant.
+pub fn is_bootstrap(entry: &Value, stage: Option<&str>) -> bool {
+    stage.is_some_and(|st| entry["stages"].as_array().is_some_and(|ss| {
+        ss.iter().any(|s| s["name"].as_str() == Some(st) && s["bootstrap"].as_bool() == Some(true))
+    }))
+}
+
+/// The module entry a bootstrap job runs under: its approved network if that is an egress allowlist (the SDK refuses
+/// egress-any for a module with a bootstrap stage; any other mode becomes none) and no other grant: no host tools,
+/// GPU, containers or execution of written files. The job also gets no module data directory and no settings.
+pub fn bootstrap_entry(entry: &Value) -> Value {
+    let mut e = entry.clone();
+    let net = if entry["sandbox"]["net"]["mode"].as_str() == Some("egress-allowlist") {
+        entry["sandbox"]["net"].clone()
+    } else {
+        json!({"mode": "none", "allow": []})
+    };
+    e["sandbox"] = json!({"contract": entry["sandbox"]["contract"], "net": net, "tools": [], "devices": {"gpu": "none"},
+                          "exec_writable": false, "containers": []});
+    e
+}
+
 /// The pool names a grant's resources reserve (`pools`) or only require (`needs_pools`).
 pub fn needs_of(resources: &Value) -> Vec<String> {
     let mut out: Vec<String> = resources["pools"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
@@ -207,6 +230,8 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let spec = &grant["spec"];
     let module = grant["module"].as_str().context("grant without module")?;
     let entry = ctx.release.module(module).context("the module is not in this node's release")?.clone();
+    let bootstrap = is_bootstrap(&entry, spec["stage"].as_str());
+    let entry = if bootstrap { bootstrap_entry(&entry) } else { entry };
     let _ = std::fs::remove_dir_all(ws);
     crate::fsutil::private_dir(&ws.join("tmp"))?;
     set_phase(&ctx.table, aid, "staging");
@@ -234,11 +259,13 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let bundle = ctx.release.bundle(&entry);
     let python = ctx.runtime.module_python(&ctx.release.dir, module);
     let data = ctx.layout.module_data().join(module);
-    crate::fsutil::private_dir(&data.join("tmp"))?;
+    if !bootstrap {
+        crate::fsutil::private_dir(&data.join("tmp"))?;
+    }
     let grants_dir = ws.join(".grants");
     let mut settings = ctx.policy["module_settings"][module].clone();
-    if settings.is_null() {
-        settings = json!({});
+    if settings.is_null() || bootstrap {
+        settings = json!({});                            // operators keep credentials in settings: never a bootstrap job's
     }
     let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings)?;
     let net = entry["sandbox"]["net"]["mode"].as_str().unwrap_or("none").to_string();
@@ -281,9 +308,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     let mut env = base_env(module, ws, &ws.join("tmp"));
     env.extend([("OARBANK_WORKDIR".into(), ws.display().to_string()), ("OARBANK_TMP".into(), ws.join("tmp").display().to_string()),
-                ("OARBANK_MODULE_DATA".into(), data.display().to_string()), ("OARBANK_ATTEMPT_ID".into(), aid.to_string()),
-                ("OARBANK_TOOLS_FILE".into(), tools_file.display().to_string()),
+                ("OARBANK_ATTEMPT_ID".into(), aid.to_string()), ("OARBANK_TOOLS_FILE".into(), tools_file.display().to_string()),
                 ("OARBANK_SETTINGS_FILE".into(), settings_file.display().to_string())]);
+    if !bootstrap {
+        env.push(("OARBANK_MODULE_DATA".into(), data.display().to_string()));   // a bootstrap job keeps nothing on the node
+    }
     if let Some(p) = &proxy {
         let url = format!("http://127.0.0.1:{}", p.port);
         for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy"] {
@@ -308,7 +337,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         }
         pol.ro.extend(ctx.runtime.roots.iter().cloned());
         pol.ro.extend(tool_paths);
-        pol.rw = vec![ws.display().to_string(), data.display().to_string()];
+        pol.rw = if bootstrap { vec![ws.display().to_string()] } else { vec![ws.display().to_string(), data.display().to_string()] };
         pol.net = net.clone();
         pol.proxy_port = proxy.as_ref().map(|p| p.port);
         pol.broker_socket = broker.as_ref().map(|b| b.endpoint().trim_start_matches("unix:").to_string());
@@ -566,6 +595,34 @@ mod tests {
 
     fn seq_of(doc: &str) -> Option<i64> {
         serde_json::from_str::<Value>(doc).ok().and_then(|d| d["seq"].as_i64())
+    }
+
+    fn entry() -> Value {
+        json!({"name": "depot", "stages": [{"name": "eval"}, {"name": "fetch", "bootstrap": true}],
+               "sandbox": {"contract": 1, "net": {"mode": "egress-allowlist", "allow": ["tools.example.org"]},
+                           "tools": [{"id": "java17", "trust": "code-exec", "paths": ["/opt/jdk"]}], "devices": {"gpu": "compute"},
+                           "exec_writable": true, "containers": [{"image": "docker.io/x/y@sha256:00", "platform": "linux/amd64"}]}})
+    }
+
+    /// A stage is a bootstrap stage only when the release says so, whatever the grant names.
+    #[test]
+    fn bootstrap_comes_from_the_release_entry() {
+        let e = entry();
+        assert!(is_bootstrap(&e, Some("fetch")));
+        assert!(!is_bootstrap(&e, Some("eval")) && !is_bootstrap(&e, None) && !is_bootstrap(&e, Some("other")));
+        assert!(!is_bootstrap(&json!({"stages": [{"name": "fetch", "bootstrap": "yes"}]}), Some("fetch")));
+    }
+
+    /// A bootstrap job keeps the egress allowlist and loses every other grant (spec/sandbox.md, "Bootstrap jobs").
+    #[test]
+    fn a_bootstrap_job_gets_the_allowlist_and_nothing_else() {
+        let b = bootstrap_entry(&entry());
+        assert_eq!(b["sandbox"], json!({"contract": 1, "net": {"mode": "egress-allowlist", "allow": ["tools.example.org"]},
+                                        "tools": [], "devices": {"gpu": "none"}, "exec_writable": false, "containers": []}));
+        assert_eq!(b["stages"], entry()["stages"]);
+        let mut any = entry();
+        any["sandbox"]["net"] = json!({"mode": "egress-any", "allow": []});
+        assert_eq!(bootstrap_entry(&any)["sandbox"]["net"], json!({"mode": "none", "allow": []}));
     }
 
     /// The agent and the SDK's runner-failure schema agree on the end reasons a runner may give.
