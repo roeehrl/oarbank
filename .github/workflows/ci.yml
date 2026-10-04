@@ -61,6 +61,13 @@ jobs:
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
         run: scripts/windows-clang.ps1 -Install | Add-Content $env:GITHUB_PATH
         shell: pwsh
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - name: the repository's Python with the SDK (the endpoint tests run the SDK's reference service with it)
+        run: |
+          uv venv .venv
+          uv pip install --python .venv ./vendor/oarbank-sdk
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

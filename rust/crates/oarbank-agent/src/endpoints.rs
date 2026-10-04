@@ -781,7 +781,8 @@ pub mod tests {
     /// The repository's Python with the SDK (OARBANK_TEST_PYTHON, else the repository's .venv) and what the sandbox must
     /// let it read: its prefixes and the SDK's source.
     fn python() -> (PathBuf, Vec<String>) {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        // canonical, so the interpreter resolves no `..` through directories its sandbox does not grant
+        let repo = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
         let venv = if cfg!(windows) { repo.join(r".venv\Scripts\python.exe") } else { repo.join(".venv/bin/python") };
         let py = std::env::var_os("OARBANK_TEST_PYTHON").map(PathBuf::from).unwrap_or(venv);
         let probe = "import json, os, sys, oarbank_sdk\n\
