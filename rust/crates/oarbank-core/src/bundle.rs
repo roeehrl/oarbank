@@ -59,22 +59,20 @@ impl VerifiedBundle {
     }
 }
 
-/// `_mode`: a bundle file mode as `"644"` or `"755"`. Accepts what Python's `int(m, 8)` (strings) or `int(m)`
-/// (numbers, floats truncated) accepts, then only 0o644 and 0o755.
+/// `_mode`: a bundle file mode as `"644"` or `"755"`. An octal string as Python's `int(m, 8)` reads it, or an integer;
+/// then only 0o644 and 0o755.
 pub fn mode(m: &Value) -> Result<&'static str, BundleError> {
     let v: i128 = match m {
         Value::String(s) => match py::int(s, 8) {
             Some(v) => v,
             None => return fail(format!("file mode {}: not an octal number", py::repr(s))),
         },
-        Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
-            (Some(i), _, _) => i as i128,
-            (_, Some(u), _) => u as i128,
-            (_, _, Some(f)) => f.trunc() as i128,
-            _ => return fail(format!("file mode {n}: not a number")),
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => i as i128,
+            (_, Some(u)) => u as i128,
+            _ => return fail(format!("file mode {n}: an octal string or an integer")),
         },
-        Value::Bool(b) => *b as i128,
-        other => return fail(format!("file mode {other}: not a number")),
+        other => return fail(format!("file mode {other}: an octal string or an integer")),
     };
     match v {
         0o644 => Ok("644"),
@@ -385,14 +383,14 @@ mod tests {
 
     #[test]
     fn modes_follow_python_int() {
-        for ok in [json!("644"), json!("0o644"), json!(" 6_44 "), json!("0644"), json!(420), json!(420.9)] {
+        for ok in [json!("644"), json!("0o644"), json!(" 6_44 "), json!("0644"), json!(420)] {
             assert_eq!(mode(&ok).unwrap(), "644", "{ok}");
         }
         assert_eq!(mode(&json!("755")).unwrap(), "755");
         assert_eq!(mode(&json!(493)).unwrap(), "755");
         assert_eq!(mode(&json!("600")).unwrap_err().0, "file mode 0o600: only 644 and 755");
         assert_eq!(mode(&json!(644)).unwrap_err().0, "file mode 0o1204: only 644 and 755");
-        for bad in [json!("rw-"), json!(true), json!(null), json!("100644"), json!([])] {
+        for bad in [json!("rw-"), json!(true), json!(null), json!("100644"), json!([]), json!(420.9), json!(420.0)] {
             assert!(mode(&bad).is_err(), "{bad}");
         }
     }

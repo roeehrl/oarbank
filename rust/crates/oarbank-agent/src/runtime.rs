@@ -7,6 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,6 +18,9 @@ pub struct Runtime {
     /// The interpreter's site directories (the SDK lives there) and the directories it needs to read to run.
     pub site_dirs: Vec<String>,
     pub roots: Vec<String>,
+    /// What the runtime's environment provides, so a module never pins it (`oarbank_sdk.deps.host_provided()`: the SDK
+    /// and its dependency closure); None when the runtime has no SDK.
+    pub host_provided: Option<BTreeSet<String>>,
 }
 
 pub fn which(name: &str) -> Option<PathBuf> {
@@ -47,12 +51,15 @@ for d in site:
                 line = line.strip()
                 if line and not line.startswith(("#", "import")) and os.path.isdir(line):
                     extra.append(os.path.realpath(line))
+host = None
 try:
     import oarbank_sdk
     extra.append(os.path.dirname(os.path.dirname(os.path.realpath(oarbank_sdk.__file__))))
+    from oarbank_sdk import deps
+    host = sorted(deps.host_provided())
 except Exception:
     pass
-print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) | set(site))}))
+print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) | set(site)), "host_provided": host}))
 "##;
         let out = Command::new(&python).args(["-I", "-c", probe]).output().context("running the runtime Python")?;
         if !out.status.success() {
@@ -60,7 +67,8 @@ print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) 
         }
         let v: Value = serde_json::from_slice(&out.stdout)?;
         let strs = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
-        Ok(Runtime { python, uv, site_dirs: strs("site"), roots: strs("roots") })
+        let host_provided = v["host_provided"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+        Ok(Runtime { python, uv, site_dirs: strs("site"), roots: strs("roots"), host_provided })
     }
 
     pub fn venv_python(venv: &Path) -> PathBuf {
@@ -87,7 +95,9 @@ print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) 
         let name = entry["name"].as_str().context("module entry without a name")?;
         let bundle = release.join(entry["bundle"].as_str().unwrap_or(&format!("modules/{name}")));
         let req = bundle.join(req_rel);
-        oarbank_core::deps::parse_requirements(&std::fs::read_to_string(&req)?)
+        let host = self.host_provided.as_ref()
+            .context("the runtime Python has no oarbank-sdk, so what the host provides is unknown")?;
+        oarbank_core::deps::parse_requirements(&std::fs::read_to_string(&req)?, host)
             .map_err(|e| anyhow::anyhow!("{name}: {req_rel}: {e}"))?;
         let uv = self.uv.as_ref().context("uv is not available; it installs module dependencies")?;
         let venv = release.join("venvs").join(name);

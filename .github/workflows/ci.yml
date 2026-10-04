@@ -43,6 +43,13 @@ jobs:
       - run: cargo test --workspace --locked
         working-directory: rust
       - run: uv run pytest -q -p no:cacheprovider tests/rust
+      - name: oarbank-core against the SDK (rust/crates/oarbank-core-py/tests/test_parity.py)
+        # the oarbank_core extension, built from the crates cargo test just compiled, into the synced environment
+        # (which has the SDK); runs last, as the environment then holds a package the lock file does not
+        run: |
+          uvx maturin@1.15.0 build --locked -i .venv/bin/python -m rust/crates/oarbank-core-py/Cargo.toml -o "$RUNNER_TEMP/ocore-wheels"
+          uv pip install --python .venv "$RUNNER_TEMP"/ocore-wheels/oarbank_core-*.whl
+          uv run --no-sync pytest -q -p no:cacheprovider rust/crates/oarbank-core-py/tests/test_parity.py
 
   rust-other-os:
     # the agent, launcher and portable crates on Linux and Windows, x64 and arm64: unit tests on the real OS (the

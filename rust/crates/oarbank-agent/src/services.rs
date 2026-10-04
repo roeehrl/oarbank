@@ -1482,7 +1482,7 @@ mod tests {
         }
 
         fn manager(&self, policy: Value, manage: bool) -> ServiceManager {
-            let rt = Runtime { python: PathBuf::from("/usr/bin/python3"), uv: None, site_dirs: vec![], roots: vec![] };
+            let rt = Runtime { python: PathBuf::from("/usr/bin/python3"), uv: None, site_dirs: vec![], roots: vec![], host_provided: None };
             let mut m = ServiceManager::new(self.layout(), rt, None, manage);
             m.fingerprint_every = Duration::from_millis(300);
             m.configure(&self.release, &policy, Some("node-1"));
