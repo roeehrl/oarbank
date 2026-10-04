@@ -56,6 +56,8 @@ pub struct RunSpec {
     /// The full output, opened by the broker inside the work directory (None: discarded).
     pub stdout: Option<std::fs::File>,
     pub stderr: Option<std::fs::File>,
+    /// Every GPU of the node, as the runtime's CDI device kind (`nvidia.com/gpu`): `--device <kind>=all`.
+    pub gpu_device: Option<String>,
 }
 
 /// `2.50` -> `2.5`, `4.00` -> `4`.
@@ -66,7 +68,8 @@ pub fn fmt_num(v: f64) -> String {
 
 impl RunSpec {
     /// Exactly: `run --rm --platform P --network none|bridge --cpus C --memory Mg --label oarbank.attempt_id=<id>
-    /// --label oarbank.module=<name> [-v src:dst[:ro]]... [--workdir W] [--entrypoint E] [-e K=V]... image args...`.
+    /// --label oarbank.module=<name> [--device <cdi kind>=all] [-v src:dst[:ro]]... [--workdir W] [--entrypoint E]
+    /// [-e K=V]... image args...`.
     /// Nothing from the request reaches a flag position except through these fields.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn docker_args(&self) -> Vec<String> {
@@ -81,6 +84,9 @@ impl RunSpec {
             "--cpus".into(), fmt_num(self.cpus), "--memory".into(), format!("{}g", fmt_num(self.mem_gb)),
             "--label".into(), format!("{ATTEMPT_LABEL}={}", self.attempt_id), "--label".into(), format!("{MODULE_LABEL}={}", self.module),
         ];
+        if let Some(kind) = self.gpu_device.as_deref().filter(|k| !k.is_empty()) {
+            a.extend(["--device".into(), format!("{kind}=all")]);
+        }
         for m in &self.mounts {
             a.push("-v".into());
             a.push(format!("{}:{}{}", m.host.to_string_lossy(), m.dst, if m.ro { ":ro" } else { "" }));
@@ -129,7 +135,49 @@ pub trait ContainerRuntime: Send + Sync {
     fn pool_tokens(&self) -> u32 {
         0
     }
+    /// The CDI device kind through which containers get every GPU of the node (None: no passthrough here).
+    fn gpu_device(&self) -> Option<String> {
+        None
+    }
 }
+
+/// The CDI device kind (`nvidia.com/gpu`, `amd.com/gpu`, ...) of the first spec in `dirs` that declares a device named
+/// `all`, as `nvidia-ctk cdi generate` writes. JSON specs are parsed; YAML specs are read by their top-level `kind:` line
+/// and a device `name: all` (the only facts needed), without a YAML parser.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn cdi_kind(dirs: &[&Path]) -> Option<String> {
+    let files = dirs.iter().flat_map(|d| {                 // the directories in order, each one's files sorted by name
+        let mut fs: Vec<PathBuf> = std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json" || x == "yaml" || x == "yml")).collect();
+        fs.sort();
+        fs
+    });
+    for f in files {
+        let Ok(text) = std::fs::read_to_string(&f) else { continue };
+        if f.extension().is_some_and(|x| x == "json") {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let all = v["devices"].as_array().is_some_and(|ds| ds.iter().any(|d| d["name"] == "all"));
+            if let (true, Some(k)) = (all, v["kind"].as_str()) {
+                return Some(k.to_string());
+            }
+            continue;
+        }
+        let unq = |s: &str| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        let kind = text.lines().find_map(|l| l.strip_prefix("kind:")).map(unq);
+        let all = text.lines().any(|l| {
+            let t = l.trim().trim_start_matches("- ");
+            t.strip_prefix("name:").is_some_and(|v| unq(v) == "all")
+        });
+        if let (true, Some(k)) = (all, kind.filter(|k| k.contains('/'))) {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// Where CDI specs live (the CDI specification's static and dynamic directories).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const CDI_DIRS: [&str; 2] = ["/etc/cdi", "/var/run/cdi"];
 
 /// `docker.io/org/tool:1.2@sha256:x` and `org/tool@sha256:x` name the same image: (canonical repository, digest).
 pub fn image_key(reference: &str) -> (String, String) {
@@ -526,6 +574,8 @@ pub struct NativeRuntime {
     pub home: PathBuf,
     pub docker_config: PathBuf,
     pub mem_gb: f64,
+    /// The CDI device kind for every GPU, when the host has a CDI spec for one (GPU passthrough).
+    pub gpu_kind: Option<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -537,7 +587,8 @@ impl NativeRuntime {
         let home = engine_home(std::env::var_os("HOME").map(PathBuf::from), &layout.home);
         // the same budget a Mac's VM would get
         let (mem_gb, _, _) = sizing(ram_gb, None, None);
-        Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb })
+        let gpu_kind = cdi_kind(&CDI_DIRS.map(Path::new));
+        Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb, gpu_kind })
     }
 
     fn env(&self) -> Vec<(String, String)> {
@@ -648,6 +699,10 @@ impl ContainerRuntime for NativeRuntime {
     fn pool_tokens(&self) -> u32 {
         tokens(self.mem_gb)
     }
+
+    fn gpu_device(&self) -> Option<String> {
+        self.gpu_kind.clone()
+    }
 }
 
 
@@ -757,7 +812,7 @@ mod tests {
             "echo hello > /w/hi.txt && cat /w/hi.txt".into()], entrypoint: None,
             mounts: vec![Mount { host: work.clone(), dst: "/w".into(), ro: false }], env: vec![], workdir: None, network: false,
             cpus: 1.0, mem_gb: 0.5, attempt_id: 424242, module: "test".into(), timeout_s: 120.0,
-            stdout: Some(std::fs::File::create(&out).unwrap()), stderr: None };
+            stdout: Some(std::fs::File::create(&out).unwrap()), stderr: None, gpu_device: None };
         let r = rt.run(&spec, &AtomicBool::new(false));
         let _ = rt.cli(&["rmi", "-f", &image], 60);
         assert_eq!(r.unwrap().exit_code, 0);
@@ -820,11 +875,13 @@ mod tests {
             image: "x@sha256:00".into(), platform: "linux/arm64".into(), args: vec!["--privileged".into()], entrypoint: None,
             mounts: vec![Mount { host: "/w/in".into(), dst: "/in".into(), ro: true }], env: vec![("A".into(), "1".into())],
             workdir: Some("/in".into()), network: false, cpus: 2.0, mem_gb: 2.5, attempt_id: 7, module: "toy".into(),
-            timeout_s: 10.0, stdout: None, stderr: None,
+            timeout_s: 10.0, stdout: None, stderr: None, gpu_device: None,
         };
         assert_eq!(s.docker_args(), ["run", "--rm", "--platform", "linux/arm64", "--network", "none", "--cpus", "2", "--memory", "2.5g",
                                      "--label", "oarbank.attempt_id=7", "--label", "oarbank.module=toy", "-v", "/w/in:/in:ro",
                                      "--workdir", "/in", "-e", "A=1", "x@sha256:00", "--privileged"]);
+        let g = RunSpec { gpu_device: Some("nvidia.com/gpu".into()), ..s };
+        assert_eq!(g.docker_args()[14..16], ["--device", "nvidia.com/gpu=all"]);
         assert_eq!(fmt_num(0.1), "0.1");
         assert_eq!(fmt_num(0.25), "0.25");
         assert_eq!(fmt_num(16.0), "16");
@@ -845,10 +902,27 @@ mod tests {
         let s = RunSpec {
             image: format!("genonet/hap-py@{d}"), platform: "linux/amd64".into(), args: vec![], entrypoint: None, mounts: vec![],
             env: vec![], workdir: None, network: false, cpus: 1.0, mem_gb: 1.0, attempt_id: 1, module: "m".into(), timeout_s: 1.0,
-            stdout: None, stderr: None,
+            stdout: None, stderr: None, gpu_device: None,
         };
         assert_eq!(s.docker_args_with(&qualified(&s.image)).last().unwrap(), &format!("docker.io/genonet/hap-py@{d}"));
         assert_eq!(s.docker_args().last().unwrap(), &s.image);
+    }
+
+    #[test]
+    fn cdi_specs_name_the_gpu_device_kind() {
+        let d = temp("cdi");
+        assert_eq!(cdi_kind(&[d.as_path()]), None);
+        std::fs::write(d.join("readme.txt"), "kind: x/y\n- name: all\n").unwrap();
+        assert_eq!(cdi_kind(&[d.as_path()]), None, "only .json, .yaml and .yml files are specs");
+        std::fs::write(d.join("nvidia.yaml"), "---\ncdiVersion: 0.5.0\ncontainerEdits:\n  deviceNodes:\n  - path: /dev/nvidiactl\n\
+            devices:\n- containerEdits:\n    deviceNodes:\n    - path: /dev/nvidia0\n  name: \"0\"\n- containerEdits:\n\
+                deviceNodes:\n    - path: /dev/nvidia0\n  name: all\nkind: nvidia.com/gpu\n").unwrap();
+        assert_eq!(cdi_kind(&[d.as_path()]).as_deref(), Some("nvidia.com/gpu"));
+        let j = temp("cdi-json");
+        std::fs::write(j.join("amd.json"), r#"{"cdiVersion": "0.6.0", "kind": "amd.com/gpu", "devices": [{"name": "0"}]}"#).unwrap();
+        assert_eq!(cdi_kind(&[j.as_path()]), None, "no `all` device");
+        std::fs::write(j.join("amd.json"), r#"{"kind": "amd.com/gpu", "devices": [{"name": "0"}, {"name": "all"}]}"#).unwrap();
+        assert_eq!(cdi_kind(&[j.as_path(), d.as_path()]).as_deref(), Some("amd.com/gpu"));
     }
 
     #[test]
@@ -920,7 +994,7 @@ mod tests {
             image: image.into(), platform: "linux/arm64".into(), args: vec!["cat".into(), "/in/hello.txt".into()],
             entrypoint: None, mounts: vec![Mount { host: std::fs::canonicalize(ws.join("in")).unwrap(), dst: "/in".into(), ro: true }], env: vec![],
             workdir: None, network: false, cpus: 1.0, mem_gb: 0.5, attempt_id: -4242, module: "livetest".into(), timeout_s: 120.0,
-            stdout: Some(std::fs::File::create(&out).unwrap()), stderr: None,
+            stdout: Some(std::fs::File::create(&out).unwrap()), stderr: None, gpu_device: None,
         };
         let r = c.run(&spec, &AtomicBool::new(false)).unwrap();
         assert_eq!(r.exit_code, 0);

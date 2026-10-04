@@ -180,6 +180,23 @@ pub fn collect(home: &std::path::Path) -> Value {
         "memory_gb": mem.map(|b| (b as f64 / 1073741824.0 * 10.0).round() / 10.0),
         "gpus": gpus,
         "sandbox": sandbox_report(),
+        "containers": {"gpu": container_gpu()},
         "disk_free_gb": disk_free_gb(home),
     })
+}
+
+/// GPU passthrough to containers: `cdi:<kind>` on Linux when a container engine and a CDI spec with an `all` device
+/// exist; `undetected` elsewhere (macOS container runtimes have no Metal passthrough; Windows has no agent container
+/// runtime yet).
+fn container_gpu() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let engine = ["/usr/bin", "/usr/local/bin", "/bin"].iter()
+            .any(|d| ["podman", "docker"].iter().any(|n| std::path::Path::new(d).join(n).is_file()));
+        let dirs = crate::container_runtime::CDI_DIRS.map(std::path::Path::new);
+        if let (true, Some(kind)) = (engine, crate::container_runtime::cdi_kind(&dirs)) {
+            return format!("cdi:{kind}");
+        }
+    }
+    "undetected".into()
 }

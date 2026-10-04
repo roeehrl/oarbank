@@ -1,7 +1,7 @@
 //! Python bindings for oarbank-core (module `oarbank_core`), so the SDK's own tests can check the Rust rules against
 //! the Python reference. Every refusal raises ValueError.
 
-use ::oarbank_core::{bundle, canonical, deps, egress, portable, sandbox};
+use ::oarbank_core::{bundle, canonical, deps, egress, images, portable, sandbox};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -95,6 +95,42 @@ fn parse_requirements(text: &str) -> PyResult<Vec<(String, String, Vec<String>)>
     Ok(reqs.into_iter().map(|r| (r.name, r.version, r.hashes.into_iter().collect())).collect())
 }
 
+/// (repository, tag, digest) of an image reference, normalized as Docker resolves it.
+#[pyfunction]
+fn image_normalize(reference: &str) -> PyResult<(String, Option<String>, Option<String>)> {
+    images::normalize(reference).map(|r| (r.repository, r.tag, r.digest)).map_err(value_error)
+}
+
+/// The SHA-256 (hex) of an ECDSA P-256 public key's DER, as approval shows it.
+#[pyfunction]
+fn image_key_sha256(pem: &str) -> PyResult<String> {
+    images::key_sha256(pem).map_err(value_error)
+}
+
+/// Why a cosign simple-signing payload and signature do not approve `digest` (None: they do); `prefix` is the set's
+/// `<registry>/<repository>` the docker-reference must lie in.
+#[pyfunction]
+fn image_check_simple(pem: &str, payload: &[u8], signature_b64: &str, digest: &str, registry: &str, repository: &str)
+                      -> PyResult<Option<String>> {
+    let point = images::public_key(pem).map_err(value_error)?;
+    let set = images::ContainerSet { name: "s".into(), registry: registry.into(), repository: repository.into(),
+                                     platform: String::new(), key_pem: pem.into(), index: None };
+    Ok(images::check_simple_signing(&point, payload, signature_b64, digest, |r| set.covers(r)))
+}
+
+/// Why a Sigstore bundle does not approve `digest` (None: it does).
+#[pyfunction]
+fn image_check_bundle(pem: &str, bundle: &[u8], digest: &str) -> PyResult<Option<String>> {
+    let point = images::public_key(pem).map_err(value_error)?;
+    Ok(images::check_bundle(&point, bundle, digest))
+}
+
+/// (seq, digests) of an image index document for the set `<registry>/<repository>`.
+#[pyfunction]
+fn image_parse_index(doc: &[u8], registry: &str, repository: &str) -> PyResult<(u64, Vec<String>)> {
+    images::parse_index(doc, registry, repository).map_err(value_error)
+}
+
 #[pyfunction]
 fn version() -> &'static str {
     ::oarbank_core::version()
@@ -114,6 +150,11 @@ fn oarbank_core_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ip_is_global, m)?)?;
     m.add_function(wrap_pyfunction!(wheel_fits, m)?)?;
     m.add_function(wrap_pyfunction!(parse_requirements, m)?)?;
+    m.add_function(wrap_pyfunction!(image_normalize, m)?)?;
+    m.add_function(wrap_pyfunction!(image_key_sha256, m)?)?;
+    m.add_function(wrap_pyfunction!(image_check_simple, m)?)?;
+    m.add_function(wrap_pyfunction!(image_check_bundle, m)?)?;
+    m.add_function(wrap_pyfunction!(image_parse_index, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }

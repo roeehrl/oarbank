@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 import oarbank_core as oc
-from oarbank_sdk import bundle, deps, egress_proxy, keys, portable, sandbox
+from oarbank_sdk import bundle, deps, egress_proxy, images, imagetest, keys, portable, sandbox
 
 SPEC = Path(__file__).resolve().parents[4] / "vendor" / "oarbank-sdk" / "spec"
 SEED = int(os.environ.get("OCORE_PARITY_SEED", 20261003))
@@ -368,6 +368,43 @@ def test_parse_requirements():
         py = outcome(lambda t: [(r["name"], r["version"], sorted(r["hashes"])) for r in deps.parse_requirements(t)], text)
         rs = outcome(lambda t: [(n, v, list(hs)) for n, v, hs in oc.parse_requirements(t)], text)
         same(py, rs, f"requirements #{i} {text!r}", messages=text.isascii())
+
+
+def test_image_signatures():
+    """Container set signatures: the shared vectors, then random tampering of valid signatures and documents."""
+    import base64
+    v = json.loads((SPEC / "vectors" / "image-signatures.json").read_text())
+    pem, reg, repo = v["keys"][0]["pem"], v["set"]["registry"], v["set"]["repository"]
+    assert oc.image_key_sha256(pem) == images.key_sha256(pem)
+    covers = lambda r: r.partition("/")[0] == reg and r.partition("/")[2].startswith(repo)
+    q = images.public_key(pem)
+    for c in v["simple"]:
+        payload = base64.b64decode(c["payload_b64"])
+        r = oc.image_check_simple(pem, payload, c["signature_b64"], c["digest"], reg, repo)
+        assert (r is None) == (images.check_simple_signing(q, payload, c["signature_b64"], c["digest"], covers) is None) == c["ok"]
+    for c in v["bundle"]:
+        b = base64.b64decode(c["bundle_b64"])
+        assert (oc.image_check_bundle(pem, b, c["digest"]) is None) == (images.check_bundle(q, b, c["digest"]) is None) == c["ok"]
+    for c in v["normalize"]:
+        assert outcome(oc.image_normalize, c["ref"])[0] == outcome(images.normalize, c["ref"])[0]
+        if not c.get("error"):
+            assert oc.image_normalize(c["ref"]) == images.normalize(c["ref"])
+    rng = random.Random(SEED)
+    key = imagetest.Key.from_seed(b"parity")
+    kpem = key.public_pem()
+    for i in range(min(N, 400)):
+        digest = "sha256:" + "%064x" % rng.getrandbits(256)
+        b = bytearray(imagetest.bundle(key, f"{reg}/{repo}t{i}@{digest}", digest))
+        if rng.random() < 0.5:
+            b[rng.randrange(len(b))] = rng.randrange(256)
+        b = bytes(b)
+        want = outcome(images.check_bundle, images.public_key(kpem), b, digest)
+        got = outcome(oc.image_check_bundle, kpem, b, digest)
+        assert (want[0], want[1] is None) == (got[0], got[1] is None), (i, want, got)
+        doc = bytearray(images.index_document(reg, repo, rng.randrange(100), [digest]))
+        if rng.random() < 0.5:
+            doc[rng.randrange(len(doc))] = rng.randrange(256)
+        assert outcome(images.parse_index, bytes(doc), reg, repo)[0] == outcome(oc.image_parse_index, bytes(doc), reg, repo)[0]
 
 
 def test_version():

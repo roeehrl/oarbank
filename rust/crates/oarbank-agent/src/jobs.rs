@@ -103,6 +103,9 @@ pub struct Ctx {
     /// The agent's container runtime, for modules approved for containers.
     #[cfg(unix)]
     pub containers: Option<Arc<dyn crate::container_runtime::ContainerRuntime>>,
+    /// Verifies container set images (shared by every attempt of the agent).
+    #[cfg(unix)]
+    pub images: Arc<crate::imageset::Verifier>,
     /// The module services, for the readiness gate before a runner that needs their pools starts.
     pub services: Option<Arc<Mutex<crate::services::ServiceManager>>>,
 }
@@ -209,23 +212,61 @@ fn tail(p: &Path, n: usize) -> String {
     std::fs::read(p).map(|b| String::from_utf8_lossy(&b[b.len().saturating_sub(n)..]).to_string()).unwrap_or_default()
 }
 
+/// At start no attempt is live: every work directory an earlier run left behind (it crashed or was killed mid-job)
+/// goes, with any secrets file in it.
+pub fn clear_workdirs(layout: &Layout) {
+    for e in std::fs::read_dir(layout.work()).into_iter().flatten().flatten() {
+        if std::fs::remove_dir_all(e.path()).is_err() {
+            warn!(path = %e.path().display(), "could not remove a work directory left by an earlier run");
+        }
+    }
+}
+
 /// Run one granted attempt. `deadline`: when it must stop, on this node's monotonic clock (clock::local_deadline).
 pub async fn run(ctx: Arc<Ctx>, grant: Value, deadline: Option<Instant>) {
     let aid = grant["attempt_id"].as_i64().unwrap_or(0);
     let ws = ctx.layout.work().join(aid.to_string());
     let started = Instant::now();
-    let outcome = match execute(&ctx, &grant, &ws, deadline).await {
+    let ran_images = Mutex::new(Vec::new());
+    let outcome = match execute(&ctx, &grant, &ws, deadline, &ran_images).await {
         Ok(o) => o,
         Err(e) => Outcome::Failed { reason: if format!("{e:#}").contains("dataset") || format!("{e:#}").contains("blob") {
                                         "input_missing".into() } else { "exit_nonzero".into() },
                                     exit_code: None, stderr_tail: format!("{e:#}"), fault: None },
     };
-    report(&ctx, aid, &ws, outcome, started.elapsed()).await;
+    let images = ran_images.into_inner().unwrap_or_default();
+    report(&ctx, aid, &ws, outcome, started.elapsed(), images, &secrets_of(&grant)).await;
     ctx.table.lock().unwrap().remove(&aid);
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Instant>) -> Result<Outcome> {
+/// The secrets a grant carries for its stage, `(name, value)`.
+fn secrets_of(grant: &Value) -> Vec<(String, Value)> {
+    grant["secrets"].as_object().map(|m| m.iter().filter(|(_, v)| v.is_string()).map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
+/// Shorter values are not redacted: they would mangle ordinary text.
+const REDACT_MIN: usize = 6;
+
+/// Every exact occurrence of a delivered value (at least REDACT_MIN bytes) replaced with `[secret:<name>]`, longest
+/// first. A safety net, not a guarantee: an encoded or split value passes through.
+pub fn redact(text: &str, secrets: &[(String, Value)]) -> String {
+    let mut vals: Vec<(&str, &str)> = secrets.iter().filter_map(|(k, v)| Some((k.as_str(), v.as_str()?)))
+        .filter(|(_, v)| v.len() >= REDACT_MIN).collect();
+    vals.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    let mut out = text.to_string();
+    for (name, v) in vals {
+        if out.contains(v) {
+            out = out.replace(v, &format!("[secret:{name}]"));
+        }
+    }
+    out
+}
+
+#[cfg_attr(windows, allow(unused_variables))]
+async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Instant>, ran_images: &Mutex<Vec<Value>>)
+                 -> Result<Outcome> {
     let aid = grant["attempt_id"].as_i64().context("grant without attempt id")?;
     let spec = &grant["spec"];
     let module = grant["module"].as_str().context("grant without module")?;
@@ -268,6 +309,16 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         settings = json!({});                            // operators keep credentials in settings: never a bootstrap job's
     }
     let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings)?;
+    // the secrets this job's stage lists (only such a grant carries any): an owner-only file inside the work directory,
+    // deleted with it; never in spec.json, the environment or a log
+    let secrets = secrets_of(grant);
+    let secrets_file = if secrets.is_empty() || bootstrap {
+        None
+    } else {
+        let f = grants_dir.join("secrets.json");
+        crate::fsutil::write_private(&f, &serde_json::to_vec(&secrets.iter().cloned().collect::<serde_json::Map<_, _>>())?)?;
+        Some(f)
+    };
     let net = entry["sandbox"]["net"]["mode"].as_str().unwrap_or("none").to_string();
     let proxy = if net == "egress-allowlist" {
         let allow: Vec<String> = entry["sandbox"]["net"]["allow"].as_array().cloned().unwrap_or_default().iter()
@@ -278,22 +329,28 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     };
     let images: Vec<(String, String)> = entry["sandbox"]["containers"].as_array().cloned().unwrap_or_default().iter()
         .filter_map(|c| Some((c["image"].as_str()?.to_string(), c["platform"].as_str()?.to_string()))).collect();
+    let sets = entry["sandbox"]["container_sets"].as_array().cloned().unwrap_or_default();
     #[cfg(windows)]
-    let broker: Option<crate::broker::Broker> = match images.is_empty() {
+    let broker: Option<crate::broker::Broker> = match images.is_empty() && sets.is_empty() {
         true => None,
         false => bail!("the module runs containers but this node has no container runtime"),
     };
     #[cfg(unix)]
-    let broker = if images.is_empty() {
+    let broker = if images.is_empty() && sets.is_empty() {
         None
     } else {
         let rt = ctx.containers.clone().context("the module runs containers but this node has no container runtime")?;
         let sock = crate::paths::socket_path(&ctx.layout.home, &format!("broker-{aid}.sock"))?;
         let res = &spec["resources"];
-        let grant = crate::broker::BrokerGrant { attempt_id: aid, module: module.to_string(), approved_images: images,
+        let sets = sets.iter().map(oarbank_core::images::ContainerSet::from_json).collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("the release's container sets: {e}"))?;
+        let job_images = grant["images"].as_array().cloned().unwrap_or_default().iter()
+            .filter_map(|i| i.as_str().map(str::to_string)).collect();
+        let grant = crate::broker::BrokerGrant { attempt_id: aid, module: module.to_string(), approved_images: images, sets,
+            job_images, gpu: res["pools"]["gpu"].as_i64().unwrap_or(0) > 0,
             workdir: ws.to_path_buf(), module_data: data.clone(), network_granted: net != "none",
             cpus: res["cpu"].as_f64().unwrap_or(1.0), mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0) };
-        Some(crate::broker::Broker::start(sock, grant, rt).await?)
+        Some(crate::broker::Broker::start(sock, grant, rt, ctx.images.clone()).await?)
     };
     let runner = &entry["runner"];
     let mut argv = resolve_exec(runner["exec"].as_array().map(Vec::as_slice).unwrap_or(&[]), &bundle, &python);
@@ -312,6 +369,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                 ("OARBANK_SETTINGS_FILE".into(), settings_file.display().to_string())]);
     if !bootstrap {
         env.push(("OARBANK_MODULE_DATA".into(), data.display().to_string()));   // a bootstrap job keeps nothing on the node
+    }
+    if let Some(f) = &secrets_file {
+        env.push(("OARBANK_SECRETS_FILE".into(), f.display().to_string()));
     }
     if let Some(p) = &proxy {
         let url = format!("http://127.0.0.1:{}", p.port);
@@ -401,6 +461,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let mut paused = false;
     let mut threads: Option<i64> = None;
     let mut log_sent = 0u64;
+    let holdback = secrets.iter().map(|(_, v)| v.as_str().unwrap_or("").len() as u64).max().unwrap_or(0);
     let mut escaped: Option<String> = None;
     let status = loop {
         if let Some(st) = child.try_wait()? {
@@ -433,11 +494,14 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                 None => (Some(Stop::Revoke), false, None),
             }
         };
-        if log_len > log_sent + 4096 {
-            let chunk = std::fs::read(ws.join(".runner.log")).ok().map(|b| String::from_utf8_lossy(&b[log_sent as usize..]).to_string());
+        // a value split across two chunks would escape redaction: hold back as many bytes as the longest secret
+        let upto = log_len.saturating_sub(holdback);
+        if upto > log_sent + 4096 {
+            let chunk = std::fs::read(ws.join(".runner.log")).ok()
+                .map(|b| redact(&String::from_utf8_lossy(&b[log_sent as usize..(upto as usize).min(b.len())]), &secrets));
             if let Some(c) = chunk {
                 if ctx.api.post_text(&format!("/v1/attempts/{aid}/log"), c).await.is_ok() {
-                    log_sent = log_len;
+                    log_sent = upto;
                 }
             }
         }
@@ -482,6 +546,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     crate::sys::release(pid);
     drop(proxy);
+    #[cfg(unix)]
+    if let Some(b) = &broker {
+        *ran_images.lock().unwrap() = b.ran_images();
+    }
     #[cfg(unix)]
     drop(broker);                                              // stops serving and removes this attempt's containers
     if let Some(e) = escaped {
@@ -544,7 +612,8 @@ async fn upload_artifacts(ctx: &Ctx, ws: &Path, result: &mut Value) -> Result<()
 }
 
 /// Report how the attempt ended and log it with how long it ran (from the grant, staging included).
-async fn report(ctx: &Ctx, aid: i64, ws: &Path, o: Outcome, ran: Duration) {
+/// `images`: the container set images the attempt ran (`[{set, image}]`), which the coordinator audits.
+async fn report(ctx: &Ctx, aid: i64, ws: &Path, o: Outcome, ran: Duration, images: Vec<Value>, secrets: &[(String, Value)]) {
     let ran_s = (ran.as_secs_f64() * 10.0).round() / 10.0;
     match o {
         Outcome::Completed(mut result) => {
@@ -554,13 +623,20 @@ async fn report(ctx: &Ctx, aid: i64, ws: &Path, o: Outcome, ran: Duration) {
                                      &json!({"reason": "exit_nonzero", "stderr_tail": format!("artifacts: {e:#}")})).await;
                 return;
             }
-            let body = json!({"idempotency_key": format!("att-{aid}-complete"), "result": result});
+            let mut body = json!({"idempotency_key": format!("att-{aid}-complete"), "result": result});
+            if !images.is_empty() {
+                body["images"] = json!(images);
+            }
             crate::outbox::send(&ctx.api, &ctx.layout, &format!("/v1/attempts/{aid}/complete"), &body).await;
             info!(attempt = aid, ran_s, "completed");
         }
         Outcome::Failed { reason, exit_code, stderr_tail, fault } => {
-            let body = json!({"reason": reason, "exit_code": exit_code, "stderr_tail": stderr_tail.chars().rev().take(2000)
+            let stderr_tail = redact(&stderr_tail, secrets);
+            let mut body = json!({"reason": reason, "exit_code": exit_code, "stderr_tail": stderr_tail.chars().rev().take(2000)
                 .collect::<String>().chars().rev().collect::<String>(), "fault": fault});
+            if !images.is_empty() {
+                body["images"] = json!(images);
+            }
             crate::outbox::send(&ctx.api, &ctx.layout, &format!("/v1/attempts/{aid}/fail"), &body).await;
             info!(attempt = aid, %reason, ran_s, "failed");
         }
@@ -585,6 +661,27 @@ pub fn attempts(t: &Table) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_directories_left_by_an_earlier_run_are_removed_at_start() {
+        let home = scratch("clear");
+        let layout = Layout::new(home.clone());
+        std::fs::create_dir_all(layout.work().join("17/.grants")).unwrap();
+        std::fs::write(layout.work().join("17/.grants/secrets.json"), "{}").unwrap();
+        clear_workdirs(&layout);
+        assert!(layout.work().exists() && std::fs::read_dir(layout.work()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn delivered_secret_values_are_redacted_from_what_the_agent_sends() {
+        let grant = json!({"secrets": {"api_key": "sk-live-0123456789", "pin": "1234", "long": "sk-live-0123456789-extra"},
+                           "spec": {}});
+        let s = secrets_of(&grant);
+        assert_eq!(s.len(), 3);
+        let text = "calling with sk-live-0123456789-extra and sk-live-0123456789; pin 1234";
+        assert_eq!(redact(text, &s), "calling with [secret:long] and [secret:api_key]; pin 1234");
+        assert!(secrets_of(&json!({"spec": {}})).is_empty(), "a grant for another stage carries none");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("oarbank-control-{name}-{}", std::process::id()));
