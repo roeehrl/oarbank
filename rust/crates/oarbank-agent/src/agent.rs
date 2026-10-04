@@ -128,6 +128,9 @@ impl Agent {
         let ans: Value = boot.get(&url).send().await.context("identity: coordinator unreachable")?
             .error_for_status()?.json().await?;
         let proof = identity::check(&ans, &nonce, &self.cfg.coordinator_trust)?;
+        if proof.role == "handed_off" {
+            self.catch_up_move(&boot).await;
+        }
         if proof.role != "active" {
             bail!("identity: the coordinator is {}, not active", proof.role);
         }
@@ -148,6 +151,24 @@ impl Agent {
         identity::apply(&mut self.cfg.coordinator_trust, &proof);
         self.cfg.save(&self.layout.config())?;
         Ok(ca_pem)
+    }
+
+    /// The coordinator this node trusts proved it handed off, and no move is pending here: the node missed the statement
+    /// (it was away through the time lock, or the cutover froze the coordinator before a heartbeat carried it). Read
+    /// the committed chain there and record the next move, which the session loop then follows; the statement is
+    /// verified like one from a directive, so the unpinned client is enough.
+    async fn catch_up_move(&mut self, client: &reqwest::Client) {
+        if self.cfg.coordinator_trust.pending_move.is_some() {
+            return;
+        }
+        let url = format!("{}/v1/coordinator/moves?since_epoch={}", self.cfg.coordinator, self.cfg.coordinator_trust.max_epoch);
+        match async { client.get(&url).send().await?.error_for_status()?.json::<Value>().await }.await {
+            Ok(c) => match c["moves"].get(0) {
+                Some(next) => self.observe_moves(&json!({"coordinator_move": next})),
+                None => warn!("the coordinator handed off but lists no move after this node's epoch"),
+            },
+            Err(e) => warn!(error = %e, "the coordinator handed off; its move chain is unreadable"),
+        }
     }
 
     fn mtls(&self) -> Result<Arc<Api>> {

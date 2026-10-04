@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import Coordinator, agent_env  # noqa: E402
 from test_agent_session import wait  # noqa: E402
@@ -31,13 +33,17 @@ def supervise(c: Coordinator, stop: threading.Event):
         time.sleep(0.3)
 
 
-def test_the_agent_follows_a_coordinator_move(agent_bin, tmp_path):
+@pytest.mark.parametrize("away", [False, True], ids=["online", "away_through_cutover"])
+def test_the_agent_follows_a_coordinator_move(agent_bin, tmp_path, away):
+    """away: the agent is down from before the move until the old coordinator handed off, so it never got the
+    statement in a directive; it reads the chain from the handed-off coordinator when it comes back."""
     a_home, b_home = tmp_path / "a", tmp_path / "b"
     a_home.mkdir()
     b_home.mkdir()
     with Coordinator(a_home, extra_env=LOCK) as a:
-        p = subprocess.Popen([str(agent_bin), "--home", str(tmp_path / "agent"), "run", "--coordinator", a.url], env=agent_env(),
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        agent = lambda *extra: subprocess.Popen([str(agent_bin), "--home", str(tmp_path / "agent"), "run", *extra],
+                                                env=agent_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        p = agent("--coordinator", a.url)
         stop = threading.Event()
         b = None
         out = ""
@@ -54,7 +60,13 @@ def test_the_agent_follows_a_coordinator_move(agent_bin, tmp_path):
             threading.Thread(target=supervise, args=(b, stop), daemon=True).start()
             wait(lambda: a.api("GET", "/api/v1/coordinator")["plan"] and a.api("GET", "/api/v1/coordinator")["plan"]["state"] == "paired", 60)
             time.sleep(3)                                          # let the standby seed before the move is requested
+            if away:
+                p.terminate()
+                out += p.communicate(timeout=10)[0]
             t3(a, "coordinator.move", params={"timelock_s": 3}, reason="e2e move")
+            if away:
+                wait(lambda: a.api("GET", "/api/v1/coordinator")["role"] == "handed_off", timeout=120)
+                p = agent()
             cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text())
             wait(lambda: cfg()["coordinator"] == b.url and cfg()["coordinator_trust"]["max_epoch"] == 2, timeout=180)
             trust = cfg()["coordinator_trust"]
@@ -66,7 +78,7 @@ def test_the_agent_follows_a_coordinator_move(agent_bin, tmp_path):
         finally:
             stop.set()
             p.terminate()
-            out = p.communicate(timeout=10)[0]
+            out += p.communicate(timeout=10)[0]
             print(out[-6000:])
             if b is not None:
                 b.__exit__()

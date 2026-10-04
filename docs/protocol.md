@@ -408,7 +408,9 @@ Agents trust a key, not a URL (design: docs/design/coordinator-move.md).
   going back to the old coordinator.
 - A handed-off coordinator answers every agent call `410 coordinator_moved` with the statement.
   `GET /v1/coordinator/moves?since_epoch=<n>` returns the committed chain, which an agent offline across
-  several moves walks one epoch at a time.
+  several moves walks one epoch at a time: an agent whose coordinator's identity proof shows `handed_off` while it
+  holds no statement (it was away through the time lock, or the freeze came before a heartbeat carried the
+  statement) reads the chain there, records the next move and follows it.
 - **Signing mode.** Agents built with release signing also pin the owner key set (`owner_anchors`), and
   accept a new set only at version + 1 when signed by a key of the old set and every new key. A move then needs
   the `owner` signature. `owner_security` turns signing off only when an owner key signs it.
