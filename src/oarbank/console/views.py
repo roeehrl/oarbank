@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import time
 
+from ..coordinator import detail
+
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
 CLOCK_SKEW_S = 60.0           # oarbankd core.CLOCK_SKEW_S
 LIMIT_KEYS = ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps", "schedule")
@@ -47,16 +49,6 @@ def hardware(facts: dict) -> dict:
             "memory_gb": facts.get("memory_gb"), "os": " ".join(x for x in (os_name, plat.get("os_version")) if x) or None,
             "arch": plat.get("arch") or None,
             "gpus": [g.get("model") or g.get("vendor") for g in facts.get("gpus") or [] if g.get("model") or g.get("vendor")]}
-
-
-def gpu_view(facts: dict, doctor: dict | None) -> dict:
-    """The GPU APIs the node's doctor reports (docs/protocol.md "Doctor") and how its containers get the GPU (the facts'
-    `containers.gpu`): `cdi:<kind>` on Linux, `virtio-gpu:venus` on macOS with krunkit, else none."""
-    g = (doctor or {}).get("gpu_apis")
-    how = ((facts or {}).get("containers") or {}).get("gpu") or ""
-    mechanism = f"{how[4:]} (CDI)" if how.startswith("cdi:") else "Venus over virtio-gpu (krunkit)" if how == "virtio-gpu:venus" else None
-    return {"reported": g is not None, "host": list((g or {}).get("host") or []), "containers": list((g or {}).get("containers") or []),
-            "evidence": dict((g or {}).get("evidence") or {}), "mechanism": mechanism}
 
 
 def limit_label(b: str | None) -> str | None:
@@ -112,7 +104,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
          "hb_age": now - hb if hb else None, "live": live, "done1h": done1h,
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
-    v["gpu"] = gpu_view(facts, v["doctor"])
+    v["gpu"] = detail.gpu(facts, v["doctor"])
     return v
 
 
@@ -156,7 +148,9 @@ def fleet_data(r, now: float | None = None) -> dict:
             "modules_disabled": r.get_setting("modules_disabled", []) or []}
 
 
-def node_page(r, nid: str, now: float) -> dict | None:
+def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
+    """The node page: its card (node_view), the detail document `oarbank node show` prints (doctor, GPU APIs with
+    their evidence, containers, services, folders, per-capability enforcement), history, protection and secrets."""
     n = r.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
     if not n:
         return None
@@ -182,9 +176,9 @@ def node_page(r, nid: str, now: float) -> dict | None:
     # module secrets with a value of this node's own (names, fingerprints: never a value)
     secrets = r.q("SELECT module, name, fingerprint, set_at FROM secrets WHERE node_id=? AND module!='' ORDER BY module, name",
                   (nid,))
-    return {"n": nv, "attempts": atts, "fails": fails, "events": events, "history": history,
-            "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions, "conditions": node_conditions(nv),
-            "node_secrets": secrets}
+    return {"n": nv, "d": detail.node(r, nid, now, manifest_for), "attempts": atts, "fails": fails, "events": events,
+            "history": history, "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions,
+            "conditions": node_conditions(nv), "node_secrets": secrets}
 
 
 def node_conditions(n: dict) -> list[dict]:
@@ -216,6 +210,34 @@ def node_conditions(n: dict) -> list[dict]:
         out.append({"code": "CLOCK_SKEW", "tone": "warn",
                     "message": f"its clock is {abs(off):.0f} s {'ahead of' if off > 0 else 'behind'} the coordinator's: set the "
                                "node's time (certificates and update metadata need it)"})
+    return out
+
+
+# explain remedies whose operation needs more than its target: the page whose form collects the rest, formatted with
+# the explain document's subject ids, and where to go when the subject does not name them; `jobs.set_priority` takes its
+# one value inline
+REMEDY_FORMS = {"nodes.set_caps": ("/nodes/{node}#limits", "/"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
+                "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
+                "settings.tools.update": ("/settings", "/settings"), "settings.folders.update": ("/settings", "/settings"),
+                "agent.promote": ("/agent", "/agent")}
+REMEDY_INPUTS = {"jobs.set_priority": "priority"}
+
+
+def remedy_actions(doc: dict) -> list[dict]:
+    """Explain's remedies as the console offers them: a button for an operation that needs only its target (T2/T3 still
+    open their plan review), the operation's form page when it needs more, else its name with the CLI command."""
+    from ..contracts import operations as registry
+    out = []
+    for r in doc.get("remedies") or []:
+        href = None
+        if r["op"] in REMEDY_FORMS:
+            page, fallback = REMEDY_FORMS[r["op"]]
+            try:
+                href = page.format(**r.get("params") or {})
+            except KeyError:
+                href = fallback
+        out.append({**r, "href": href, "input": REMEDY_INPUTS.get(r["op"]),
+                    "button": href is None and r.get("target") is not None, "command": registry.command(r["op"], r.get("target"))})
     return out
 
 
@@ -321,10 +343,13 @@ def jobs_page(r, state: str, campaign: str, node: str, now: float) -> dict:
 
 
 def job_page(r, jid: int, attempt_log_dir) -> dict | None:
-    j = r.one("SELECT * FROM jobs WHERE job_id=?", (jid,))
-    if not j:
+    """The job page: the detail document `oarbank job show` prints (attempts, the checkpoint the next attempt resumes
+    from), with results, logs, events, history and the waterfall."""
+    d = detail.job(r, jid)
+    if d is None:
         return None
-    atts = r.q("SELECT a.*, n.hostname FROM attempts a LEFT JOIN nodes n ON n.node_id=a.node_id WHERE job_id=? ORDER BY attempt_id", (jid,))
+    j = r.one("SELECT * FROM jobs WHERE job_id=?", (jid,))
+    atts = d["attempts"]
     res = r.q("SELECT * FROM results WHERE job_id=? ORDER BY result_id", (jid,))
     for x in res:
         full = jl(x["result_json"], {}) or {}
@@ -337,13 +362,8 @@ def job_page(r, jid: int, attempt_log_dir) -> dict | None:
             logs[a["attempt_id"]] = p.read_bytes()[-20000:].decode(errors="replace")
     events = r.q("SELECT * FROM events WHERE job_id=? ORDER BY event_id", (jid,))
     history = r.q("SELECT * FROM audit WHERE target_type='job' AND target_id=? ORDER BY event_id DESC LIMIT 30", (str(jid),))
-    for a in atts:
-        a["resume"] = jl(a.get("resume_json"))
-    ckpt = r.one("SELECT * FROM checkpoints WHERE job_id=? AND generation=?", (jid, j["generation"]))
-    if ckpt:
-        ckpt["files"] = jl(ckpt["files_json"], [])
     return {"j": j, "spec": jl(j["spec_json"], {}), "attempts": atts, "results": res, "logs": logs, "events": events,
-            "history": history, "waterfall": waterfall(r, j, atts), "checkpoint": ckpt}
+            "history": history, "waterfall": waterfall(r, j, atts), "checkpoint": d["checkpoint"]}
 
 
 SEGMENT_CLASS = {"queued": "seg-q", "staging": "seg-s", "finalizing": "seg-f", "evaluating": "seg-e"}

@@ -29,7 +29,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from ..contracts import operations as registry
+from ..contracts import impact, operations as registry
 from . import forms, views
 from .state import ConsoleState
 
@@ -118,7 +118,8 @@ def templates() -> Jinja2Templates:
         fromjson=lambda s: json.loads(s) if s else {},
     )
     t.env.tests["known"] = lambda v: v is not None and not isinstance(v, jinja2.Undefined)   # reported, not missing or null
-    t.env.globals.update(new_key=lambda: uuid.uuid4().hex, OPS=registry.REGISTRY, CAMPAIGN_OPS=registry.CAMPAIGN_OPS)
+    t.env.globals.update(new_key=lambda: uuid.uuid4().hex, OPS=registry.REGISTRY, CAMPAIGN_OPS=registry.CAMPAIGN_OPS,
+                         impact_rows=lambda i: impact.rows(i, skip=(impact.MATCHES, "why")))   # plan.html draws these two itself
     return t
 
 
@@ -418,7 +419,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     @app.get("/nodes/{nid}", response_class=HTMLResponse)
     async def node(nid: str, request: Request):
         actor = who(request)
-        d = await drill(views.node_page, nid, time.time())
+        await refresh_catalog(actor)                      # the node's modules' manifests: services and sandbox needs
+        d = await drill(views.node_page, nid, time.time(), catalog.manifest)
         if d is None:
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         d["panels"] = await panels("node.detail.panel", request, actor,
@@ -585,7 +587,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         r = await coordinator_json("GET", f"/api/v1/explain/{kind}/{ident}", actor)
         if r.status_code != 200:
             return render(request, "error.html", {"message": f"explain {kind} {ident}: {r.text[:200]}", "actor": actor}, r.status_code)
-        return render(request, "explain.html", {"doc": r.json(), "actor": actor})
+        doc = r.json()
+        return render(request, "explain.html", {"doc": doc, "remedies": views.remedy_actions(doc), "actor": actor})
 
     @app.get("/verify", response_class=HTMLResponse)
     async def verify(request: Request):
@@ -744,11 +747,18 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         log = Path(state.db_path).parent / "logs" / "modules" / f"{name}.log"
         tail = log.read_bytes()[-16000:].decode(errors="replace") if log.exists() else ""
 
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+
         def load(rd):
+            from ..coordinator import datasets, modimages
             return {"events": rd.q("SELECT * FROM events WHERE kind IN ('module_fault','module_restarted','module_disabled',"
                                    "'module_enabled') AND reason LIKE ? ORDER BY event_id DESC LIMIT 40", (f"%{name}%",)),
-                    "alerts": rd.q("SELECT * FROM alerts WHERE rule=? ORDER BY opened_at DESC LIMIT 20", (f"module_host_down:{name}",))}
-        extra = await drill(load) or {"events": [], "alerts": []}
+                    "alerts": rd.q("SELECT * FROM alerts WHERE rule=? ORDER BY opened_at DESC LIMIT 20", (f"module_host_down:{name}",)),
+                    # bootstrap stages' pinned datasets, and the first run of each container set image (secrets-and-signed-images.md)
+                    "pins": datasets.pin_states(rd, name, man) if man else [],
+                    "first_runs": modimages.first_runs(rd, name, 50)}
+        extra = await drill(load) or {"events": [], "alerts": [], "pins": [], "first_runs": []}
         return render(request, "module_health.html", {"mod": rows.get(name), "name": name, "tail": tail, **extra, "actor": actor})
 
     @app.get("/healthz")

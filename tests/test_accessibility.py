@@ -81,15 +81,24 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
     nid = node["node_id"]
     # the Agent page with two builds, a canary on the node, and a failed update (every control renders)
     for sha, v in (("a" * 64, "0.4.0"), ("b" * 64, "0.4.1")):
-        db.x("INSERT INTO agent_builds(sha256, version, path, size, uploaded_at, uploaded_by) VALUES(?,?,?,?,?,?)",
-             (sha, v, "/dev/null", 2_900_000, 0, "test"))
-    db.x("INSERT INTO agent_channel(id, current, canary, canary_nodes_json) VALUES(1, ?, ?, ?)", ("a" * 64, "b" * 64, json.dumps([nid])))
+        db.x("INSERT INTO agent_builds(sha256, version, path, size, uploaded_at, uploaded_by, platform) VALUES(?,?,?,?,?,?,?)",
+             (sha, v, "/dev/null", 2_900_000, 0, "test", "darwin-arm64"))
+    db.x("INSERT INTO agent_channel(platform, current, canary, canary_nodes_json) VALUES(?, ?, ?, ?)",
+         ("darwin-arm64", "a" * 64, "b" * 64, json.dumps([nid])))
     db.x("UPDATE nodes SET agent_build=?, agent_update_json=? WHERE node_id=?",
          ("a" * 64, json.dumps({"state": "failed", "error": "sha256 mismatch"}), nid))
     db.x("INSERT INTO coordinator_plans(plan_id,target_url,state,created_at) VALUES('mvp_1','http://100.64.0.2:7443','paired',0)")
     db.x("INSERT INTO coordinator_moves(move_id,plan_id,epoch,statement,state,created_at,not_before,actor,reason) VALUES(?,?,?,?,?,?,?,?,?)",
          ("mv_1", "mvp_1", 2, json.dumps({"to": {"url": "http://100.64.0.2:7443"}}), "pending", 0, 2e9, "test", "a11y"))
     db.x("UPDATE nodes SET cik_pinned='ab'||substr(hex(randomblob(31)),1,62) WHERE node_id=?", (nid,))
+    # the node page's services, GPU API evidence, enforcement and folders tables, and explain's remedy buttons (a paused
+    # node), the module health page's image first runs (test_console_parity.dress)
+    from test_console_parity import dress
+    from helpers import run_op
+    dress(db, nid)
+    run_op(db, "nodes.pause", nid)
+    db.x("INSERT INTO module_images(module,digest,image,set_name,key_sha256,first_run_at,node_id,attempt_id) VALUES(?,?,?,?,?,?,?,?)",
+         ("relay", "cd" * 32, "ghcr.io/example/relay@sha256:" + "cd" * 32, "scorers", "ef" * 32, 0, nid, 1))
     pages = ["/", "/agent", "/coordinator", f"/nodes/{nid}", f"/nodes/{nid}/protection", "/campaigns", f"/campaigns/{cid}", "/jobs", f"/jobs/{job}",
              "/events", "/audit", "/settings", "/verify", "/modules", "/modules/relay", "/modules/toy", "/m/relay/scores",
              f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health", "/datasets", "/datasets/upload"]
@@ -105,9 +114,11 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
                 f = f.with_suffix(".html")
                 f.write_text(r.text)
                 files.append(f)
-            r = c.post("/do/releases.promote", data={"target": "x", "return_to": "/", "idem": "a"})     # a plan page
-            (tmp_path / "plan.html").write_text(r.text)
-            files.append(tmp_path / "plan.html")
+            for op, target in (("releases.promote", "x"), ("coordinator.move", None)):          # plan pages
+                r = c.post(f"/do/{op}", data={"target": target or "", "return_to": "/", "idem": "a"})
+                assert "Review" in r.text, op
+                (tmp_path / f"plan-{op}.html").write_text(r.text)
+                files.append(tmp_path / f"plan-{op}.html")
     out = subprocess.run(["node", str(ROOT / "tests" / "a11y" / "run_axe.cjs"), *map(str, files)], capture_output=True, text=True,
                          env={**os.environ, "NODE_PATH": NODE_MODULES}, timeout=600)
     assert out.returncode == 0, out.stderr[-2000:]

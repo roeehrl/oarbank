@@ -28,7 +28,22 @@
   <td>{% if p.runner %}<span class="chip ok">runs</span>{% else %}<span class="mut">no</span>{% if p.runner_reason %} · {{ p.runner_reason }}{% endif %}{% endif %}</td>
   <td>{% if p.coordinator %}<span class="chip ok">runs</span>{% else %}<span class="mut">no</span>{% if p.coordinator_reason %} · {{ p.coordinator_reason }}{% endif %}{% endif %}</td>
   <td>{{ p.nodes }}</td><td>{{ p.certified }}</td></tr>{% endfor %}</table>
+{% if pins %}
+<h2>Pinned datasets <span class="small mut">(its bootstrap stages bring them; registered only exactly as pinned)</span></h2>
+<table class="small"><tr><th>dataset</th><th>kind</th><th>platform</th><th class="num">files</th><th class="num">MB</th><th>state</th><th>detail</th></tr>
+{% for p in pins %}<tr><td class="mono">{% if p.state == 'registered' %}<a href="/datasets/{{ p.dataset_id }}">{{ p.dataset_id }}</a>{% else %}{{ p.dataset_id }}{% endif %}</td>
+  <td>{{ p.kind }}</td><td class="mono">{{ p.platform or 'any' }}</td><td class="num">{{ p.files }}</td><td class="num">{{ (p.bytes / 1048576) | num(1) }}</td>
+  <td><span class="chip {{ {'registered': 'ok', 'waiting': '', 'conflict': 'bad'}[p.state] }}">{{ p.state }}</span></td>
+  <td>{% if p.state == 'registered' %}<span class="mut">since {{ p.registered_at | ago }}</span>{% elif p.state == 'waiting' %}<span class="mut">a bootstrap job of the module registers it</span>
+    {% else %}{{ p.held_by }} holds the id{% if p.detail %}: <span class="mono">pinned_dataset_conflict</span> {{ p.detail }}{% endif %}{% endif %}</td></tr>{% endfor %}</table>
+{% endif %}
 {% else %}<p class="mut">coordinator unreachable or no such module</p>{% endif %}
+<h2>Container images <span class="small mut">(the first run of each set image, audited as containers.first_run)</span></h2>
+<table class="small"><tr><th>image</th><th>set</th><th>key</th><th>first run</th><th>node</th><th>attempt</th></tr>
+{% for x in first_runs %}<tr><td class="mono">{{ x.image }}</td><td>{{ x.set_name }}</td><td class="mono">{{ (x.key_sha256 or '')[:16] }}</td>
+  <td class="mut">{{ x.first_run_at | ago }}</td><td class="mono">{% if x.node_id %}<a href="/nodes/{{ x.node_id }}">{{ x.node_id }}</a>{% endif %}</td>
+  <td>{{ x.attempt_id or '' }}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">no image of a container set has run yet</td></tr>{% endfor %}</table>
 <h2>Alerts</h2><table class="small">{% for a in alerts %}<tr><td>{{ a.state }}</td><td class="mut">{{ a.opened_at | ago }}</td><td>{{ a.detail }}</td></tr>{% else %}<tr><td class="mut">none</td></tr>{% endfor %}</table>
 <h2>Events</h2><table class="small">{% for e in events %}<tr><td class="mut">{{ e.ts | hm }}</td><td>{{ e.kind }}</td><td>{{ e.reason }}</td></tr>{% else %}<tr><td class="mut">none</td></tr>{% endfor %}</table>
 <h2>stderr (tail)</h2><pre class="mono" hx-disable>{{ tail }}</pre>

@@ -12,7 +12,9 @@
       {% for r in plan.impact.matches %}<tr><td class="mono">{{ r.rule }}</td><td class="num">{{ r.processes | length }}</td>
       <td class="mono small">{% for q in r.processes[:8] %}{{ q.pid }} {{ (q.path or '').rsplit('/', 1)[-1] }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endfor %}</table></span>{% endif %}
     {% if plan.impact.why is defined and plan.impact.why %}<span class="mut">not promotable</span><span>{% for w in plan.impact.why %}<div class="chip bad">{{ w }}</div>{% endfor %}</span>{% endif %}
-    <span class="mut">impact</span><pre>{{ plan.impact | tojson(indent=1) }}</pre>
+    {% for row in impact_rows(plan.impact) %}<span class="mut">{{ row.label }}</span><span>{% if row['items'] | length == 1 %}{{ row['items'][0] }}{% else %}<ul style="margin:0;padding-left:1.1em">{% for x in row['items'] %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}</span>
+    {% endfor %}
+    <span class="mut">as JSON</span><details><summary class="small">the plan's impact, as stored</summary><pre>{{ plan.impact | tojson(indent=1) }}</pre></details>
     {% if plan.versions %}<span class="mut">versions read</span><span class="mono">{{ plan.versions | tojson }}</span>{% endif %}
     {% if plan.expires_at %}<span class="mut">plan</span><span class="mono">{{ plan.plan_id }} · valid until {{ plan.expires_at | hm }}</span>{% endif %}
   </div>

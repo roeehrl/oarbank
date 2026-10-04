@@ -351,7 +351,8 @@ def test_a_node_without_telemetry_shows_only_what_it_reported(env):
 
 
 def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
-    """The doctor's GPU APIs (with each API's evidence on hover) and the containers' mechanism and APIs (gpu-placement.md)."""
+    """The doctor's GPU APIs with each API's evidence (a table, not a tooltip) and the containers' mechanism and APIs
+    (gpu-placement.md)."""
     import json as _json
     from helpers import FACTS
     db, n = env["db"], env["node"]
@@ -362,8 +363,7 @@ def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
     _, page = node_html(env)
     assert_clean(page)
     assert "GPU APIs metal, opencl" in page and "GPU in containers Venus over virtio-gpu (krunkit): vulkan" in page
-    raw = env["c"].get(f"/nodes/{n['node_id']}").text
-    assert 'title="cuda: CUDA does not run on macOS&#10;metal: Apple M5 Pro&#10;"' in raw
+    assert "GPU APIs API on the host in containers evidence cuda no no CUDA does not run on macOS metal yes no Apple M5 Pro" in page
     db.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (_json.dumps({**FACTS, "containers": {"gpu": "cdi:nvidia.com/gpu"}}),
                                                            n["node_id"]))
     assert "GPU in containers nvidia.com/gpu (CDI): vulkan" in node_html(env)[1]
@@ -390,7 +390,7 @@ def test_a_guarded_node_says_why_it_takes_no_jobs(env):
     assert "mem 6.9 / 7.6 GB" in card and "pressure warning" in card and "thermal nominal" in card
     assert "4 cores" in page and "Windows 10.0 · arm64" in page and "no new jobs: memory guard" in page
     assert "6.9 GB used · 9% free · fleet jobs 0.0 GB" in page and "swap" not in page and "on AC power" in page
-    assert "services running none" in page and "binding" not in page.split("Controls")[0]
+    assert "its modules declare no services here" in page and "binding" not in page.split("Controls")[0]   # relay's scorer: not on Windows
 
 
 def test_services_host_protection_stopped_are_shown_with_why(env):
@@ -401,7 +401,7 @@ def test_services_host_protection_stopped_are_shown_with_why(env):
     card, page = node_html(env)
     assert_clean(card, page)
     assert "service stopped: modelserver/model" in card
-    assert "services stopped by protection modelserver/model (preempt_memory)" in page
+    assert "modelserver/model stopped host protection holds it down (preempt_memory)" in page
 
 
 def test_slots_show_the_automatic_count_and_what_binds(env):
