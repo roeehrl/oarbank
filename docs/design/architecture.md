@@ -256,7 +256,7 @@ is a named pipe only the agent's account and the module's AppContainer may open.
 - **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the chaos tests on macOS and
   Windows (x64 and arm64), the Rust workspace with the agent end-to-end tests and the oarbank-core parity tests on
   macOS, the agent end-to-end tests on Windows (x64 and arm64), the Rust workspace on Linux and Windows (x64 and arm64
-  each), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
+  each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
   and arm64, an x64 and an arm64 MSI, and the Windows coordinator builds.
 
 ## Not built yet

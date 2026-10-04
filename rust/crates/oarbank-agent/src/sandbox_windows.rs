@@ -239,10 +239,11 @@ fn own_sid() -> Result<String, String> {
     }
 }
 
-/// The SID string of a module's AppContainer (its profile need not exist yet).
+/// The SID string of the AppContainer a module's jobs run in on this node (`container_name` for a runner; its
+/// profile need not exist yet).
 pub fn container_sid_string(module_id: &str) -> Result<String, String> {
     use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
-    let name = wide(&container_name(module_id));
+    let name = wide(&container_name(module_id, "runner"));
     let mut sid: windows_sys::Win32::Security::PSID = std::ptr::null_mut();
     if unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) } < 0 {
         return Err(format!("the AppContainer SID of {module_id}"));
