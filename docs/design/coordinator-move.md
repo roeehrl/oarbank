@@ -119,8 +119,11 @@ leave the machine. B generates its own CIK, and A's last act is a signed audit r
 ```
 
 B's chain continues from that record. The verifier accepts a signer change only at a `coordinator_move` record
-signed by the previous key. Symmetric secrets (ntfy credentials, module secrets) travel inside the mutually signed
-session.
+signed by the previous key. Symmetric secrets (ntfy credentials) travel inside the mutually signed session. Module
+secrets travel sealed: at pairing B sends an X25519 transport key, A seals every value to it in each snapshot it sends
+(its own database stays as it is), and B opens them with its key the first time it starts active and re-encrypts them
+under its own secrets key ([secrets-and-signed-images.md](secrets-and-signed-images.md)). The move preview lists them
+by name and scope.
 
 **The service on B:** launchd on macOS (`bootstrap`, `enable`, then `kickstart -k` in `gui/<uid>`; preflight warns that
 a LaunchAgent runs only after a GUI login, so with FileVault and no auto-login B serves nothing after a power loss until

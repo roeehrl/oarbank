@@ -100,3 +100,52 @@ fn platform_token_cases() {
     assert_eq!(portable::oci_platform("linux-amd64"), "linux/amd64");
     assert!(portable::is_platform_token(&portable::host_platform()));
 }
+
+#[test]
+fn image_signature_cases() {
+    use oarbank_core::images;
+    let v = vectors("image-signatures.json");
+    let b64 = |s: &Value| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s.as_str().unwrap()).unwrap();
+    let key = v["keys"][0]["pem"].as_str().unwrap();
+    assert_eq!(images::key_sha256(key).unwrap(), v["keys"][0]["sha256"].as_str().unwrap());
+    for k in v["keys"].as_array().unwrap().iter().skip(1) {
+        assert!(images::public_key(k["pem"].as_str().unwrap()).is_err(), "{}", k["error"]);
+    }
+    let point = images::public_key(key).unwrap();
+    let set = images::ContainerSet { name: "s".into(), registry: v["set"]["registry"].as_str().unwrap().into(),
+                                     repository: v["set"]["repository"].as_str().unwrap().into(), platform: "linux/amd64".into(),
+                                     key_pem: key.into(), index: None };
+    for c in v["simple"].as_array().unwrap() {
+        let r = images::check_simple_signing(&point, &b64(&c["payload_b64"]), c["signature_b64"].as_str().unwrap(),
+                                             c["digest"].as_str().unwrap(), |repo| set.covers(repo));
+        assert_eq!(r.is_none(), c["ok"].as_bool().unwrap(), "simple {}: {r:?}", c["name"]);
+    }
+    for c in v["bundle"].as_array().unwrap() {
+        let r = images::check_bundle(&point, &b64(&c["bundle_b64"]), c["digest"].as_str().unwrap());
+        assert_eq!(r.is_none(), c["ok"].as_bool().unwrap(), "bundle {}: {r:?}", c["name"]);
+    }
+    for c in v["index"].as_array().unwrap() {
+        let r = images::parse_index(&b64(&c["doc_b64"]), c["registry"].as_str().unwrap(), c["repository"].as_str().unwrap());
+        assert_eq!(r.is_ok(), c["ok"].as_bool().unwrap(), "index {}: {r:?}", c["name"]);
+        if let Ok((seq, imgs)) = r {
+            assert_eq!(seq, c["seq"].as_u64().unwrap());
+            assert_eq!(imgs, strs(&c["images"]));
+        }
+    }
+    for c in v["normalize"].as_array().unwrap() {
+        let r = images::normalize(c["ref"].as_str().unwrap());
+        if c["error"].as_bool() == Some(true) {
+            assert!(r.is_err(), "{}", c["ref"]);
+            continue;
+        }
+        let n = r.unwrap_or_else(|e| panic!("{}: {e}", c["ref"]));
+        assert_eq!(n.repository, c["repository"].as_str().unwrap());
+        assert_eq!(n.tag.as_deref(), c["tag"].as_str());
+        assert_eq!(n.digest.as_deref(), c["digest"].as_str());
+    }
+    for c in v["covers"].as_array().unwrap() {
+        let s = images::ContainerSet { registry: c["set"]["registry"].as_str().unwrap().into(),
+                                       repository: c["set"]["repository"].as_str().unwrap().into(), ..set.clone() };
+        assert_eq!(s.covers(c["repository"].as_str().unwrap()), c["covers"].as_bool().unwrap(), "{c}");
+    }
+}

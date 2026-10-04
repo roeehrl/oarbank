@@ -614,6 +614,20 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                     out.append({"module": name, "title": d.title, "html": await render_module(name, d, request, actor, context)})
         return out
 
+    @app.get("/modules/{name}/secrets", response_class=HTMLResponse)
+    async def module_secrets(name: str, request: Request):
+        """The module's secrets: set or not, fingerprints, scopes, and the write-only forms. No value ever reaches here."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        if man is None:
+            return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
+        r = await coordinator_json("GET", f"/api/v1/modules/{name}/secrets", actor)
+        nodes = await drill(lambda rd: rd.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")) or []
+        return render(request, "module_secrets.html", {"name": name, "man": man, "tab": "secrets", "nodes": nodes,
+                                                        "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
+                                                        "actor": actor})
+
     @app.get("/modules/{name}/health", response_class=HTMLResponse)
     async def module_page(name: str, request: Request):
         actor = who(request)
@@ -731,7 +745,10 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                 return back(return_to, f"{op}: {r.json().get('detail') or r.text}", "bad")
             return render(request, "plan.html", {"plan": r.json()["plan"], "entry": entry, "return_to": return_to,
                                                  "reason": reason or "", "actor": actor})
-        r = await http.post(f"/api/v1/ops/{op}", json={"target": target, "params": params, "reason": reason}, headers=headers)
+        body = {"target": target, "params": params, "reason": reason}
+        if op == "secrets.set":
+            body["secret"] = form.get("secret") or ""        # beside params: never in a plan, the audit or a log
+        r = await http.post(f"/api/v1/ops/{op}", json=body, headers=headers)
         return _result(op, r, return_to, request)
 
     SECRET_RESULTS = {"access.accounts.create": ("totp_secret", "otpauth"), "access.accounts.reset_totp": ("totp_secret", "otpauth"),

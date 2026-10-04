@@ -9,7 +9,7 @@ import re
 
 from oarbank_sdk import effects as fx
 
-from . import modcalls, clock, core, placement
+from . import modcalls, clock, core, modimages, placement
 from .db import DB, jl
 
 CAMPAIGN_ID = re.compile(r"^[a-z][a-z0-9_]{3,40}$")
@@ -64,13 +64,18 @@ def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
             continue
         target = j.get("target_node")
         group, plats = placement.check_item(module, j)
+        try:
+            images = modimages.check_job_images(modcalls.info(module).manifest, stage, j.get("images"))
+        except modimages.ImageRefused as e:
+            raise EffectError(e.status, e.code, e.detail)
         jid = db.x("INSERT INTO jobs(job_key,campaign_id,labels_json,dataset_id,kind,target_node,priority,subpriority,state,"
-                   "spec_json,datasets_json,created_at,module,resources_json,name,spec_version,platforms_json,group_key,stage)"
-                   " VALUES(?,?,?,?,'eval',?,?,?,'pending',?,?,?,?,?,?,?,?,?,?)",
+                   "spec_json,datasets_json,created_at,module,resources_json,name,spec_version,platforms_json,group_key,stage,"
+                   "images_json) VALUES(?,?,?,?,'eval',?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?)",
                    (key, campaign["campaign_id"], labels, j.get("dataset_id"), target,
                     int(campaign["priority"] or 0) + int(j.get("priority") or 0), int(j.get("subpriority") or 0),
                     json.dumps(spec), json.dumps(datasets), clock.now(), module, json.dumps(resources), j.get("name"),
-                    int(j.get("spec_version") or 1), json.dumps(plats) if plats else None, group, stage))
+                    int(j.get("spec_version") or 1), json.dumps(plats) if plats else None, group, stage,
+                    json.dumps(images) if images else None))
         placement.assign(db, jid)
         # the result cache is scoped to the module (another module's key never satisfies this one) and to the job's unit
         hit = None if target else placement.cache_hit(db, db.one("SELECT * FROM jobs WHERE job_id=?", (jid,)))

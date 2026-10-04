@@ -1137,6 +1137,7 @@ dependencies = [
  "rand",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "seccompiler",
@@ -1157,7 +1158,9 @@ dependencies = [
 name = "oarbank-core"
 version = "1.0.0-alpha.1"
 dependencies = [
+ "base64 0.22.1",
  "hex",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",

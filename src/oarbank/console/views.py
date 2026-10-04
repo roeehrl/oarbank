@@ -167,8 +167,12 @@ def node_page(r, nid: str, now: float) -> dict | None:
                                   if k not in ("t", "seq", "kind", "reason", "rule")}}
                  for d in r.q("SELECT t, kind, reason, rule, record_json FROM protection_decisions WHERE node_id=? "
                               "ORDER BY t DESC LIMIT 80", (nid,))]
+    # module secrets with a value of this node's own (names, fingerprints: never a value)
+    secrets = r.q("SELECT module, name, fingerprint, set_at FROM secrets WHERE node_id=? AND module!='' ORDER BY module, name",
+                  (nid,))
     return {"n": nv, "attempts": atts, "fails": fails, "events": events, "history": history,
-            "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions, "conditions": node_conditions(nv)}
+            "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions, "conditions": node_conditions(nv),
+            "node_secrets": secrets}
 
 
 def node_conditions(n: dict) -> list[dict]:
@@ -506,14 +510,15 @@ def protection_preview(r, nid: str, config) -> dict:
 def module_store(r) -> dict:
     """Installed bundles, which version runs where (channels, canary nodes, pins), and each canary node's
     certification of the module, for the Modules page's lifecycle panel."""
-    inst = r.q("SELECT name, version, module_id, content_digest, installed_at, installed_by, manifest_json, bundle_files, bundle_bytes "
-               "FROM modules ORDER BY name, installed_at")
+    inst = r.q("SELECT name, version, module_id, content_digest, installed_at, installed_by, manifest_json, bundle_files, bundle_bytes, "
+               "path FROM modules ORDER BY name, installed_at")
     from oarbank.coordinator import modsandbox
     from oarbank_sdk import manifest as mf
     grants = {(g["name"], g["version"]): g["digest"] for g in r.q("SELECT name, version, digest FROM module_grants")}
     for row in inst:
         try:
-            req = modsandbox.requests(mf.Manifest.model_validate(json.loads(row.pop("manifest_json") or "{}")))
+            req = modsandbox.requests(mf.Manifest.model_validate(json.loads(row.pop("manifest_json") or "{}")),
+                                      r.home / row.pop("path"))
         except Exception:
             req = {}
         row["sandbox"] = {"requests": modsandbox.describe(req) if req else "",

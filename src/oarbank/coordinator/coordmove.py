@@ -172,16 +172,17 @@ def pair(db: DB, body: dict, peer_ip: str) -> dict:
             hashlib.sha256(code.encode()).hexdigest() != p["code_sha"]:
         raise MoveError("no prepared move plan matches that pairing code (it is single-use and expires in 30 min)")
     _check_peer(p, peer_ip)
-    for k in ("b_url", "b_cik", "b_audit_pub", "b_platform"):
+    for k in ("b_url", "b_cik", "b_audit_pub", "b_platform", "b_secrets_pub"):
         if not body.get(k):
             raise MoveError(f"pairing needs {k}")
     from oarbank_sdk import portable
     if not portable.is_platform_token(body["b_platform"]):
         raise MoveError(f"b_platform {body['b_platform']!r} is not a platform token (<os>-<arch>)")
     tok = secrets.token_urlsafe(32)
-    db.x("UPDATE coordinator_plans SET state='paired', b_url=?, b_cik=?, b_audit_pub=?, move_token_sha=?, paired_at=?,"
+    db.x("UPDATE coordinator_plans SET state='paired', b_url=?, b_cik=?, b_audit_pub=?, b_secrets_pub=?, move_token_sha=?, paired_at=?,"
          " code_sha=NULL, b_tls_ca=?, target_platform=? WHERE plan_id=?",
-         (body["b_url"].rstrip("/"), body["b_cik"], body["b_audit_pub"], hashlib.sha256(tok.encode()).hexdigest(), now(),
+         (body["b_url"].rstrip("/"), body["b_cik"], body["b_audit_pub"], body["b_secrets_pub"],
+          hashlib.sha256(tok.encode()).hexdigest(), now(),
           body.get("b_tls_ca"), body["b_platform"], p["plan_id"]))
     db.event("coordinator_move_paired", reason=f"{p['plan_id']} {body['b_url']} key {identity.fingerprint(body['b_cik'])[:16]}")
     return {"plan_id": p["plan_id"], "move_token": tok, "a_cik": identity.key(home(db)).public_b64,
@@ -280,6 +281,10 @@ def snapshot(db: DB, final: bool) -> dict:
             if final:
                 db.x("PRAGMA wal_checkpoint(TRUNCATE)")
             db.x("VACUUM INTO ?", (str(dst),))
+            p = plan(db)                 # module secrets travel sealed to the target's transport key, never as they are here
+            if p and p.get("b_secrets_pub"):
+                from . import modsecrets
+                modsecrets.seal_snapshot(db, dst, p["b_secrets_pub"])
         else:
             c = sqlite3.connect(str(src), timeout=30)
             try:

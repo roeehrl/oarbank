@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-82 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+84 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -76,6 +76,8 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `modules.disable` — Kill switch: stop dispatch fleet-wide within one heartbeat, requeue live attempts | T1 | prompted | – | operator | declarative | modules.enable | `POST /api/v1/ops/{op}` (op=modules.disable)<br>`POST /do/{op}` (op=modules.disable) | oarbank module disable <name> |
 | `modules.pin` — Pin a node to a module version (or clear the pin) | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=modules.pin)<br>`POST /do/{op}` (op=modules.pin) | oarbank module pin|unpin <name>@<version> --node <node> |
 | `modules.restart_host` — Restart a module's coordinator process | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=modules.restart_host)<br>`POST /do/{op}` (op=modules.restart_host) | – |
+| `secrets.set` — Set a module secret for the module or one node (write-only: the value is never shown, only a fingerprint) | T1 | prompted | – | admin | declarative | secrets.clear | `POST /api/v1/ops/{op}` (op=secrets.set)<br>`POST /do/{op}` (op=secrets.set) | oarbank secret set <module> <name> [--node N] |
+| `secrets.clear` — Remove a module secret's value for the module or one node (jobs needing it wait) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=secrets.clear)<br>`POST /do/{op}` (op=secrets.clear) | oarbank secret clear <module> <name> [--node N] |
 | `modules.cli_token` — A one-hour token scoped to one module, for its CLI (oarbank cli <module>) | T1 | prompted | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=modules.cli_token)<br>`POST /do/{op}` (op=modules.cli_token) | oarbank cli <module> [args...] |
 
 ## releases
