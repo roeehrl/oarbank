@@ -386,3 +386,11 @@ Built as designed in **oarbank-sdk 1.5.0** and **core 2.5.0**. Where the build a
   `broker.rs` (500 distinct signed images through one broker, the refusals, `gpus`), CDI detection, redaction. Rust
   parity (`oarbank-core-py`): the image vectors and random tampering.
 
+- **Verified on each OS.** macOS: the whole core suite (real agent included), chaos, the SDK suite, the Rust
+  workspace and clippy. Linux (aarch64 VM): the same, plus a broker test in which the real rootless Podman pulls, by
+  digest, an image the agent verified from a local registry, and refuses an unsigned one before any pull; the real-agent
+  test finds the secrets file at mode 0600 under Landlock. Windows (arm64 VM): clippy for the workspace, the
+  `oarbank-core`, agent and protection tests (secrets file, redaction, work-directory cleanup; the broker and the
+  verifier are POSIX-only, as the container runtime is), the SDK suite, and the DPAPI backend of the secret store
+  (a key wrapped and unwrapped for the current user). Not verified on Windows: a sandboxed runner reading the secrets
+  file end to end (the core's real-agent tests need a coordinator, which does not run on Windows yet).
