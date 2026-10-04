@@ -246,6 +246,17 @@ fn secrets_of(grant: &Value) -> Vec<(String, Value)> {
         .unwrap_or_default()
 }
 
+/// `<grants>/secrets.json` holding the stage's secrets, owner-only from the first byte (POSIX 0600; on Windows the work
+/// directory's protected DACL); None when the grant carries none.
+fn secrets_file(grants_dir: &Path, secrets: &[(String, Value)]) -> std::io::Result<Option<PathBuf>> {
+    if secrets.is_empty() {
+        return Ok(None);
+    }
+    let f = grants_dir.join("secrets.json");
+    crate::fsutil::write_private(&f, &serde_json::to_vec(&secrets.iter().cloned().collect::<serde_json::Map<_, _>>())?)?;
+    Ok(Some(f))
+}
+
 /// Shorter values are not redacted: they would mangle ordinary text.
 const REDACT_MIN: usize = 6;
 
@@ -312,13 +323,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     // the secrets this job's stage lists (only such a grant carries any): an owner-only file inside the work directory,
     // deleted with it; never in spec.json, the environment or a log
     let secrets = secrets_of(grant);
-    let secrets_file = if secrets.is_empty() || bootstrap {
-        None
-    } else {
-        let f = grants_dir.join("secrets.json");
-        crate::fsutil::write_private(&f, &serde_json::to_vec(&secrets.iter().cloned().collect::<serde_json::Map<_, _>>())?)?;
-        Some(f)
-    };
+    let secrets_file = if bootstrap { None } else { secrets_file(&grants_dir, &secrets)? };
     let net = entry["sandbox"]["net"]["mode"].as_str().unwrap_or("none").to_string();
     let proxy = if net == "egress-allowlist" {
         let allow: Vec<String> = entry["sandbox"]["net"]["allow"].as_array().cloned().unwrap_or_default().iter()
@@ -681,6 +686,16 @@ mod tests {
         let text = "calling with sk-live-0123456789-extra and sk-live-0123456789; pin 1234";
         assert_eq!(redact(text, &s), "calling with [secret:long] and [secret:api_key]; pin 1234");
         assert!(secrets_of(&json!({"spec": {}})).is_empty(), "a grant for another stage carries none");
+        let dir = scratch("secrets-file");
+        assert!(secrets_file(&dir, &[]).unwrap().is_none());
+        let f = secrets_file(&dir, &s).unwrap().unwrap();
+        let doc: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert_eq!(doc, json!({"api_key": "sk-live-0123456789", "pin": "1234", "long": "sk-live-0123456789-extra"}));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {

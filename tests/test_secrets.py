@@ -274,3 +274,18 @@ def test_the_cli_reads_the_value_from_stdin_never_argv(db):
         r = cli("clear", "vault", "api_key", "--yes")
         assert r.returncode == 0, r.stderr
         assert "NOT SET" in cli("list", "vault").stdout
+
+
+def test_the_secrets_key_stays_in_the_secret_store(tmp_path, monkeypatch):
+    """The key that encrypts module secrets is never in the database: an owner-only file here (Linux, and tests), the
+    Keychain on macOS, a DPAPI-wrapped file on Windows (checked on the Windows VM: docs/design/secrets-and-signed-images.md)."""
+    import os
+    import stat
+    from oarbank.platform import secrets as store
+    monkeypatch.setenv("OARBANK_SECRET_STORE", "file")
+    k = store.get_or_create(modsecrets.KEY_NAME, tmp_path)
+    assert len(k) == 32 and store.get_or_create(modsecrets.KEY_NAME, tmp_path) == k
+    f = tmp_path / "keys" / f"{modsecrets.KEY_NAME}.key"
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600 and stat.S_IMODE(f.parent.stat().st_mode) == 0o700
+    monkeypatch.delenv("OARBANK_SECRET_STORE")
+    assert store.backend() == {"darwin": "keychain", "win32": "dpapi"}.get(os.sys.platform, "file")
