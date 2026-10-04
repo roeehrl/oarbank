@@ -340,20 +340,22 @@ mod ffi {
         }
     }
 
-    /// Whether `acl` already allows `sid` at least `mask`, inherited by files and folders below.
-    unsafe fn allows(acl: *const ACL, sid: PSID, mask: u32) -> bool {
+    /// Whether `acl` already allows `sid` at least `mask`: for a directory, inherited by files and folders below; for a
+    /// file, by any entry (a file's entries carry no inheritance flags, the one inherited from its folder included, so
+    /// asking for them would rewrite a granted interpreter's ACL at every launch, under other launches using it).
+    pub(super) unsafe fn allows(acl: *const ACL, sid: PSID, mask: u32, dir: bool) -> bool {
         use windows_sys::Win32::Security::{EqualSid, GetAce, ACCESS_ALLOWED_ACE, CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
         const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
         if acl.is_null() {
             return false;
         }
+        let inherit = if dir { (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8 } else { 0 };
         for i in 0..(*acl).AceCount as u32 {
             let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
             if GetAce(acl, i, &mut ace) == 0 {
                 continue;
             }
             let a = &*(ace as *const ACCESS_ALLOWED_ACE);
-            let inherit = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
             if a.Header.AceType == ACCESS_ALLOWED_ACE_TYPE && a.Header.AceFlags & inherit == inherit && a.Mask & mask == mask
                 && EqualSid(&a.SidStart as *const u32 as PSID, sid) != 0 {
                 return true;
@@ -374,7 +376,7 @@ mod ffi {
             if e != 0 {
                 return Err(format!("{path}: reading its ACL failed ({e})"));
             }
-            if allows(old, sid, mask) {
+            if allows(old, sid, mask, std::path::Path::new(path).is_dir()) {
                 LocalFree(sd as _);
                 return Ok(());
             }
@@ -533,6 +535,57 @@ mod tests {
         assert_eq!(quote_arg(r"C:\Program Files\x"), r#""C:\Program Files\x""#);
         assert_eq!(quote_arg(r#"a "b" c\"#), r#""a \"b\" c\\""#);
         assert_eq!(quote_arg(""), r#""""#);
+    }
+
+    /// The container's entries in a path's ACL: (explicit, inherited).
+    fn entries(path: &std::path::Path, sid: windows_sys::Win32::Security::PSID) -> (usize, usize) {
+        use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows_sys::Win32::Security::{EqualSid, GetAce, ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, INHERITED_ACE};
+        let w = wide(&path.display().to_string());
+        let (mut acl, mut sd): (*mut ACL, *mut std::ffi::c_void) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let mut out = (0, 0);
+        unsafe {
+            assert_eq!(GetNamedSecurityInfoW(w.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(),
+                                             std::ptr::null_mut(), &mut acl, std::ptr::null_mut(), &mut sd), 0);
+            for i in 0..(*acl).AceCount as u32 {
+                let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+                if GetAce(acl, i, &mut ace) != 0 {
+                    let a = &*(ace as *const ACCESS_ALLOWED_ACE);
+                    if EqualSid(&a.SidStart as *const u32 as _, sid) != 0 {
+                        if a.Header.AceFlags & INHERITED_ACE as u8 != 0 { out.1 += 1 } else { out.0 += 1 }
+                    }
+                }
+            }
+            LocalFree(sd as _);
+        }
+        out
+    }
+
+    /// A granted folder's file is granted through it: granting the file (the interpreter a policy names as its `exe`)
+    /// leaves its ACL alone, rather than rewriting it at every launch under other launches running it.
+    #[test]
+    fn a_file_granted_through_its_folder_is_not_rewritten() {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ};
+        let d = std::env::temp_dir().join(format!("oarbank-acl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let exe = d.join("python.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let sid = ffi::container_sid(&container_name("dev.test.acl")).unwrap();
+        let ro = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+        ffi::grant(&d.display().to_string(), sid, ro).unwrap();
+        assert_eq!(entries(&d, sid), (1, 0));
+        assert_eq!(entries(&exe, sid), (0, 1), "inherited from the folder");
+        ffi::grant(&exe.display().to_string(), sid, ro).unwrap();
+        assert_eq!(entries(&exe, sid), (0, 1), "the file's ACL was rewritten");
+        // a file outside any granted folder takes one explicit entry, once
+        let lone = std::env::temp_dir().join(format!("oarbank-acl-lone-{}.exe", std::process::id()));
+        std::fs::write(&lone, b"x").unwrap();
+        ffi::grant(&lone.display().to_string(), sid, ro).unwrap();
+        ffi::grant(&lone.display().to_string(), sid, ro).unwrap();
+        assert_eq!(entries(&lone, sid).0, 1);
+        let _ = std::fs::remove_file(&lone);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The test binary answers `sandbox-exec` itself, as the agent's main does (sandbox_linux.rs and services.rs do
