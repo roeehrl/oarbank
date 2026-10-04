@@ -773,7 +773,7 @@ pub mod tests {
         let l2 = lost.clone();
         let ch = Channel::new("svc", Arc::new(NoWake), Box::new(move || l2.store(true, Ordering::SeqCst))).unwrap();
         assert_eq!(ch.hand(1).err().map(|r| r.code), Some("service_unavailable"));
-        ch.spawned(None);
+        // closed while the service's end is still held (spawned would drop it, and its end of file is a loss)
         ch.close();
         assert!(!ch.accepting() && !lost.load(Ordering::SeqCst), "closed by the agent: not a loss");
     }
@@ -782,7 +782,7 @@ pub mod tests {
     /// let it read: its prefixes and the SDK's source.
     fn python() -> (PathBuf, Vec<String>) {
         // canonical, so the interpreter resolves no `..` through directories its sandbox does not grant
-        let repo = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+        let repo = dunce(std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap());
         let venv = if cfg!(windows) { repo.join(r".venv\Scripts\python.exe") } else { repo.join(".venv/bin/python") };
         let py = std::env::var_os("OARBANK_TEST_PYTHON").map(PathBuf::from).unwrap_or(venv);
         let probe = "import json, os, sys, oarbank_sdk\n\
