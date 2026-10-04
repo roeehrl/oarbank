@@ -31,7 +31,7 @@ the owner's own work first, every job in the operating system's sandbox.</p>
     </picture>
   </a>
   <br>
-  <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank">Watch the 20-second clip on codonic.dev</a>.</sub>
+  <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
 > **Status: not released yet.** The installers (macOS pkg, deb and rpm, Windows MSI) and the coordinator build come
