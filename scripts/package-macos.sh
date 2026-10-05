@@ -22,8 +22,10 @@ mkdir -p "$OUT"
 
 targets=(aarch64-apple-darwin)
 rustup target list --installed 2>/dev/null | grep -qx x86_64-apple-darwin && targets+=(x86_64-apple-darwin)
+# the crates' source paths the binaries embed name CARGO_HOME as /cargo, not this machine's
 for t in "${targets[@]}"; do
-    (cd "$REPO/rust" && OARBANK_AGENT_VERSION="$VERSION" cargo build -q --release --locked --target "$t" -p oarbank-agent -p oarbank-launcher)
+    (cd "$REPO/rust" && OARBANK_AGENT_VERSION="$VERSION" cargo build -q --release --locked --target "$t" -p oarbank-agent -p oarbank-launcher \
+        --config "build.rustflags=['--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo']")
 done
 
 PAYLOAD="$WORK/root/Library/Oarbank/bin"
@@ -36,6 +38,9 @@ done
 install -m 755 "$REPO/deploy/macos/oarbank-uninstall" "$PAYLOAD/oarbank-uninstall"
 # the node runtime beside the launcher (CPython 3.12 with the module SDK, and uv; scripts/build-node-runtime.sh)
 "$REPO/scripts/build-node-runtime.sh" "$PAYLOAD/runtime"
+# the payload holds no link out of itself and no path of this machine, and the runtime runs from elsewhere
+uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --build-path "$WORK" --build-path "$(uv python dir)" \
+    --run "$PAYLOAD/runtime=bin/python3" "$WORK/root" "$PAYLOAD/oarbank-agent" "$PAYLOAD/oarbank-launcher"
 
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
 for b in oarbank-agent oarbank-launcher; do

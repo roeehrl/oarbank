@@ -322,7 +322,7 @@ showed the failure and the fix.
   that starts keeps the openings whose owner still runs and removes the rest (helper_windows.rs; `helper-clear` on
   uninstall).
 - `scripts/build-node-runtime.ps1` copies the interpreter's real prefix and refuses a link; the packaging gate
-  (`scripts/check-node-runtime.py`) refuses a runtime with a reparse point or a path of the build machine (uv's
+  (`scripts/check-package.py`) refuses a runtime with a reparse point or a path of the build machine (uv's
   `direct_url.json` named the checkout), and runs a copy of it from another directory.
 - The Windows scripts take the architecture from the caller (`-Arch`) or from Windows (`scripts/windows-arch.ps1`,
   `IsWow64Process2`), build with an explicit Rust target and check the binaries' machine type.

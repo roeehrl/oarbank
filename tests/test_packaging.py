@@ -372,56 +372,99 @@ def test_the_architecture_is_the_machine_s_under_emulation_and_whatever_the_envi
         assert arch(shell, "-Arch", "ia64")[0] != 0
 
 
-def _check_node_runtime():
+def _script(name):
     import importlib.util
-    spec = importlib.util.spec_from_file_location("check_node_runtime", WXS.parents[2] / "scripts" / "check-node-runtime.py")
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), WXS.parents[2] / "scripts" / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-def test_the_node_runtime_check_finds_links_and_build_paths(tmp_path):
-    # uv names its managed Pythons through junctions; a runtime copied through one, or naming the checkout it was built
-    # from (uv's direct_url.json), is refused before the MSI packages it
-    check = _check_node_runtime()
+def test_the_package_check_finds_links_out_and_build_paths(tmp_path):
+    # uv names its managed Pythons through junctions (links), records the checkout it installed from (direct_url.json),
+    # writes its store's path into bytecode and build configuration; rustc embeds CARGO_HOME: none of it may ship
+    check = _script("check-package")
     rt = tmp_path / "runtime"
-    info = rt / "Lib" / "site-packages" / "oarbank_sdk-1.5.0.dist-info"
+    info = rt / "lib" / "site-packages" / "oarbank_sdk-1.5.0.dist-info"
     info.mkdir(parents=True)
     (info / "RECORD").write_text("oarbank_sdk/__init__.py,sha256=x,1\n", encoding="utf-8")
-    (rt / "python.exe").write_bytes(b"MZ")
-    assert check.links(rt) == [] and check.references(rt, [str(tmp_path / "checkout")]) == []
+    (rt / "python3.12").write_bytes(b"\x7fELF")
+    build = tmp_path / "Builder" / "checkout"
+    assert check.bad_links(rt) == [] and check.references(rt, [str(build)], []) == []
     target = tmp_path / "cpython-3.12.15"
     target.mkdir()
     if sys.platform == "win32":
         import _winapi
         _winapi.CreateJunction(str(target), str(rt / "DLLs"))
+        assert len(check.bad_links(rt)) == 1
     else:
-        (rt / "DLLs").symlink_to(target, target_is_directory=True)
-    assert check.links(rt) == [rt / "DLLs"]
-    checkout = tmp_path / "Checkout" / "vendor" / "oarbank-sdk"
-    (info / "direct_url.json").write_text('{"url": "' + checkout.as_uri() + '", "dir_info": {}}', encoding="utf-8")
-    found = check.references(rt, [str(tmp_path / "Checkout")])
-    assert [f for f, _ in found] == [info / "direct_url.json"], found
+        (rt / "python3").symlink_to("python3.12")                     # inside the tree: kept
+        assert check.bad_links(rt) == []
+        (rt / "DLLs").symlink_to(target, target_is_directory=True)     # absolute: refused
+        (rt / "up").symlink_to(os.path.join("..", target.name))        # relative but outside: refused
+        assert sorted(b.split(":")[0] for b in check.bad_links(rt)) == sorted([str(rt / "DLLs"), str(rt / "up")])
+        (rt / "DLLs").unlink()
+        (rt / "up").unlink()
+    (info / "direct_url.json").write_text('{"url": "' + (build / "vendor" / "oarbank-sdk").as_uri() + '"}', encoding="utf-8")
+    (rt / "module.so").write_bytes(b"\0\1" + str(build / "target" / "x.o").encode() + b"\0")      # a compiled file
+    found = sorted({f for f, _ in check.references(rt, [str(build)], [])})
+    assert found == sorted([info / "direct_url.json", rt / "module.so"]), found
+    if sys.platform == "win32":                                        # as a PE resource stores it, any case
+        (rt / "res.dll").write_bytes(str(build).upper().encode("utf-16-le"))
+        assert rt / "res.dll" in {f for f, _ in check.references(rt, [str(build)], [])}
+    # the account's home: refused in what the build writes, not in a native binary built elsewhere (a wheel's, uv's,
+    # often on a CI machine with the same account name), except a binary the build made and names itself
+    for f in ("module.so", "res.dll"):
+        (rt / f).unlink(missing_ok=True)
+    (info / "direct_url.json").unlink()
+    account = tmp_path / "Users" / "runneradmin"
+    (rt / "wheel.so").write_bytes(b"\x7fELF" + str(account / ".cargo" / "registry").encode())
+    (rt / "lib" / "site-packages" / "x.pth").write_text(str(account / "lib"), encoding="utf-8")
+    assert {f for f, _ in check.references(rt, [str(build)], [str(account)])} == {rt / "lib" / "site-packages" / "x.pth"}
+    assert check.references(rt / "wheel.so", [], [str(account)]) == [(rt / "wheel.so", str(account))]
+
+
+def test_the_coordinator_archive_names_no_owner(tmp_path):
+    # tar writes the build account's user and group names into every entry
+    import tarfile
+    (tmp_path / "root" / "bin").mkdir(parents=True)
+    (tmp_path / "root" / "bin" / "x").write_text("x", encoding="utf-8")
+    out = tmp_path / "b.tar.gz"
+    assert _script("pack-tar").main([str(out), str(tmp_path / "root"), "bin"]) == 0
+    with tarfile.open(out) as tf:
+        assert {(m.name, m.uid, m.gid, m.uname, m.gname) for m in tf} == {("bin", 0, 0, "", ""), ("bin/x", 0, 0, "", "")}
+
+
+def test_every_package_build_checks_what_it_ships():
+    scripts = WXS.parents[2] / "scripts"
+    for name in ("package-linux.sh", "package-macos.sh", "package-windows.ps1", "build-coordinator.sh", "build-coordinator.ps1"):
+        text = (scripts / name).read_text(encoding="utf-8")
+        assert "check-package.py" in text and "--run " in text, name
+        assert "remap-path-prefix" in text, name
+    for name in ("build-node-runtime.sh", "build-coordinator.sh"):
+        assert "bundle-python.sh" in (scripts / name).read_text(encoding="utf-8"), name
+    for name in ("build-node-runtime.ps1", "build-coordinator.ps1"):
+        assert "bundle-python.ps1" in (scripts / name).read_text(encoding="utf-8"), name
 
 
 @pytest.mark.skipif(not os.environ.get("OARBANK_NODE_RUNTIME"),
-                    reason="set OARBANK_NODE_RUNTIME to a node runtime scripts/build-node-runtime.ps1 built to check it")
+                    reason="set OARBANK_NODE_RUNTIME to a node runtime scripts/build-node-runtime.* built to check it")
 def test_a_built_node_runtime_is_fit_to_package():
-    check = _check_node_runtime()
     root = Path(os.environ["OARBANK_NODE_RUNTIME"])
-    assert check.main([str(root), str(WXS.parents[2])]) == 0
+    python = "python.exe" if sys.platform == "win32" else "bin/python3"
+    assert _script("check-package").main(["--run", f"{root}={python}", str(root)]) == 0
 
 
 def test_build_scripts_relocate_their_bundled_console_scripts():
     scripts = WXS.parents[2] / "scripts"
     coord = (scripts / "build-coordinator.sh").read_text(encoding="utf-8")
-    call = '"$PY" -I "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"'
-    assert call in coord and coord.index(call) < coord.index('tar -czf "$TGZ"')
+    call = '"$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"'
+    assert call in coord and coord.index(call) < coord.index('pack-tar.py" "$TGZ"')
     assert coord.index("uv pip install") < coord.index(call)
     node = (scripts / "build-node-runtime.sh").read_text(encoding="utf-8")
-    assert '"$PY" -I "$REPO/scripts/relocate_shebangs.py" "$OUT/bin"' in node
+    assert '"$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$OUT/bin"' in node
     windows = (scripts / "build-node-runtime.ps1").read_text(encoding="utf-8")
-    call = '& "$Out\\python.exe" -I "$Repo\\scripts\\relocate_shebangs.py" "$Out\\Scripts" $Out'
+    call = '& "$Out\\python.exe" -I -B "$Repo\\scripts\\relocate_shebangs.py" "$Out\\Scripts" $Out'
     assert call in windows and windows.index('Copy-Item (Get-Command uv).Source') < windows.index(call)
     assert windows.index("uv pip install") < windows.index(call)
 

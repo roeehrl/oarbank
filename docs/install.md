@@ -148,9 +148,10 @@ msiexec /i oarbank-agent-<v>-windows-arm64.msi /qn JOINCODEFILE=C:\path\join-cod
 The script builds for `-Arch` (`x64` or `arm64`), by default the machine's own architecture, which it asks Windows for
 (`IsWow64Process2`, in `scripts\windows-arch.ps1`): an x64 PowerShell on Windows on Arm still builds the arm64 MSI. The
 binaries are built for that target whatever the Rust toolchain's own host is (`rustup target add` the target's standard
-library), and the node runtime it bundles is checked before packaging (`scripts\check-node-runtime.py`: no links, no
-path of the build machine, and it runs from another directory). For arm64 the build also needs clang (the `ring` crate does not build with MSVC alone there): Visual Studio's "C++ Clang Compiler for Windows"
-component (`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) or a standalone LLVM. The script finds either through
+library), and what it packages is checked first (`scripts\check-package.py`: no links, no path of the build machine, and
+the node runtime runs from another directory). For arm64 the build also needs clang (the `ring` crate does not build
+with MSVC alone there): Visual Studio's "C++ Clang Compiler for Windows" component
+(`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) or a standalone LLVM. The script finds either through
 `scripts\windows-clang.ps1`, which adds the Visual Studio component when run with `-Install`.
 
 The MSI installs `C:\Program Files\Oarbank`, the elevated helper service (`OarbankHelper`, which lets module sandboxes

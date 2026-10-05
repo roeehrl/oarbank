@@ -33,15 +33,13 @@ function Sign($path) {
 }
 try {
   # 1. the interpreter: uv's managed CPython (python-build-standalone) is relocatable; named in full, x64 (see above)
+  #    (scripts\bundle-python.ps1: its real files, never a virtual environment or the junction uv names it by)
   $Request = "cpython-$(if ($env:OARBANK_PYTHON) { $env:OARBANK_PYTHON } else { '3.12' })-windows-x86_64-none"
-  uv python install -q $Request; Check "uv python install $Request"
-  # its real prefix: uv names a managed Python through a junction, and copying a junction leaves a copy whose
-  # installs land in the shared interpreter
-  $PyHome = (& (uv python find --managed-python $Request).Trim() -I -c "import os, sys; print(os.path.realpath(sys.base_prefix))").Trim()
-  if ((Get-Item $PyHome).LinkType) { throw "$PyHome is still a link" }
-  Copy-Item -Recurse $PyHome "$Root\python"
-  Get-ChildItem "$Root\python" -Recurse -Filter EXTERNALLY-MANAGED | Remove-Item -Force
+  & "$PSScriptRoot\bundle-python.ps1" -Dest "$Root\python" -Request $Request
   $Py = "$Root\python\python.exe"
+  # nothing the build runs writes bytecode (-B where -I ignores the environment): a .pyc written now would name this
+  # build's directory
+  $env:PYTHONDONTWRITEBYTECODE = "1"
 
   # 2. the dependencies (locked) and the SDK, never the core's source
   Push-Location $Repo
@@ -51,9 +49,14 @@ try {
   Set-Content -Encoding utf8 "$Work\requirements.txt" $req
   uv pip install -q --python $Py --break-system-packages -r "$Work\requirements.txt"; Check "installing the dependencies"
   uv pip install -q --python $Py --break-system-packages --no-deps "$Repo\vendor\oarbank-sdk"; Check "installing the SDK"
+  # a plain install, as from an index: uv records the checkout it installed from (direct_url.json)
+  $Info = (Get-Item "$Root\python\Lib\site-packages\oarbank_sdk-*.dist-info").FullName
+  Remove-Item "$Info\direct_url.json"
+  [IO.File]::WriteAllLines("$Info\RECORD", [string[]](Get-Content "$Info\RECORD" | Where-Object { $_ -notmatch '/direct_url\.json,' }),
+                           (New-Object Text.UTF8Encoding $false))
 
   # 3. the core, compiled, with its other files beside it
-  $Site = (& $Py -I -c "import sysconfig; print(sysconfig.get_paths()['purelib'])").Trim()
+  $Site = (& $Py -I -B -c "import sysconfig; print(sysconfig.get_paths()['purelib'])").Trim()
   Push-Location $Repo
   uv run --no-project --python $Py --with "nuitka>=2.7" python -m nuitka --module src\oarbank --include-package=oarbank `
     --nofollow-imports --output-dir="$Work\nuitka" --remove-output --quiet --assume-yes-for-downloads
@@ -66,13 +69,16 @@ try {
       New-Item -ItemType Directory -Force (Split-Path -Parent "$Site\$rel") | Out-Null
       Copy-Item $_.FullName "$Site\$rel"
     }
-  & $Py -I -c "import oarbank, oarbank.coordinator.app, oarbank.console.app; assert hasattr(oarbank, '__compiled__'), oarbank.__file__"
+  & $Py -I -B -c "import oarbank, oarbank.coordinator.app, oarbank.console.app; assert hasattr(oarbank, '__compiled__'), oarbank.__file__"
   Check "the compiled core does not import"
 
   # 3b. the agent's launcher confines module processes (AppContainers); uv makes module environments
   if ($Arch -eq "arm64") { $env:PATH = "$(& "$PSScriptRoot\windows-clang.ps1");$env:PATH" }   # ring needs clang here
   # for the platform's architecture, whatever the toolchain's own host is
   $Target = if ($Arch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
+  # the crates' source paths it embeds name CARGO_HOME as /cargo, not this machine's
+  $CargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$HOME\.cargo" }
+  Set-Item "env:CARGO_TARGET_$($Target.ToUpper().Replace('-', '_'))_RUSTFLAGS" "--remap-path-prefix=$CargoHome=/cargo"
   Push-Location "$Repo\rust"
   cargo build -q --release --locked --target $Target -p oarbank-agent
   $built = $LASTEXITCODE
@@ -90,7 +96,9 @@ try {
   }
   # uv's launchers (python\Scripts\*.exe) name the build path as their interpreter: point them at ..\python.exe, then
   # check every launcher the build ships
-  & $Py -I "$Repo\scripts\relocate_shebangs.py" "$Root\python\Scripts" $Root; Check "relocating the launchers"
+  & $Py -I -B "$Repo\scripts\relocate_shebangs.py" "$Root\python\Scripts" $Root; Check "relocating the launchers"
+  # bytecode for everything, recording paths relative to the build and checked against the sources' hashes
+  & $Py -I -B -m compileall -q -f -j 0 -s "$Root\python" --invalidation-mode checked-hash "$Root\python\Lib"; Check "compiling bytecode"
   $Manifest = [ordered]@{format = 1; version = $Version; platform = $Platform
                          exec = @("python/python.exe", "-I", "bin/oarbankd.py")
                          console = @("python/python.exe", "-I", "bin/oarbank-console.py")}
@@ -98,9 +106,15 @@ try {
 
   # 5. signatures, then the archive
   Get-ChildItem $Root -Recurse -Include *.exe, *.dll, *.pyd | ForEach-Object { Sign $_.FullName }
-  & "$Root\bin\oarbankd.cmd" --help | Out-Null; Check "oarbankd --help"
+  # it runs from wherever it is unpacked (a copy, so the run writes no bytecode into the build), and it ships no link and
+  # no path of this build machine
+  Copy-Item -Recurse $Root "$Work\moved"
+  & "$Work\moved\bin\oarbankd.cmd" --help | Out-Null; Check "oarbankd --help"
+  uv run --no-project --python 3.12 python "$Repo\scripts\check-package.py" --build-path $Work --build-path (uv python dir).Trim() `
+    --run "$Root=python\python.exe" --imports oarbank,oarbank_sdk $Root (Get-Item "$Site\oarbank.*.pyd").FullName "$Root\bin\oarbank-sandbox.exe"
+  Check "the coordinator build is not fit to ship"
   $Tgz = "$Out\oarbank-coordinator-$Version-$Platform.tar.gz"
-  tar -czf $Tgz -C $Root oarbank-coordinator.json bin python; Check "tar"
+  & $Py -I -B "$Repo\scripts\pack-tar.py" $Tgz $Root oarbank-coordinator.json bin python; Check "the archive"
   $h = (Get-FileHash -Algorithm SHA256 $Tgz).Hash.ToLower()
   Set-Content -Encoding ascii "$Out\SHA256SUMS-coordinator-$Version-$Platform" "$h  $(Split-Path -Leaf $Tgz)"
   $Tgz

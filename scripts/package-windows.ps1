@@ -21,6 +21,9 @@ if ($Arch -eq "arm64") { $env:PATH = "$(& "$PSScriptRoot\windows-clang.ps1");$en
 # the target named, so the binaries are for $Arch whatever the toolchain's own host is (an x64 toolchain on Windows on
 # Arm builds x64 by default)
 $Target = @{ x64 = "x86_64-pc-windows-msvc"; arm64 = "aarch64-pc-windows-msvc" }[$Arch]
+# the crates' source paths the binaries embed name CARGO_HOME as /cargo, not this machine's
+$CargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$HOME\.cargo" }
+Set-Item "env:CARGO_TARGET_$($Target.ToUpper().Replace('-', '_'))_RUSTFLAGS" "--remap-path-prefix=$CargoHome=/cargo"
 Push-Location "$Repo\rust"
 cargo build -q --release --locked --target $Target -p oarbank-agent -p oarbank-launcher
 $built = $LASTEXITCODE
@@ -51,9 +54,10 @@ function Sign($path) {
 Sign "$Bin\oarbank-agent.exe"; Sign "$Bin\oarbank-launcher.exe"
 $Runtime = "$env:TEMP\oarbank-runtime"
 & "$Repo\scripts\build-node-runtime.ps1" -Out $Runtime -Arch $Arch
-# what the MSI copies must hold no link and no path of this machine, and run from wherever it is installed
-uv run --no-project --python 3.12 python "$Repo\scripts\check-node-runtime.py" $Runtime $Repo (uv python dir).Trim()
-if ($LASTEXITCODE) { throw "the node runtime is not fit to package" }
+# what the MSI copies holds no link and no path of this machine, and the runtime runs from wherever it is installed
+uv run --no-project --python 3.12 python "$Repo\scripts\check-package.py" --build-path (uv python dir).Trim() `
+  --run "$Runtime=python.exe" $Runtime "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
+if ($LASTEXITCODE) { throw "the package is not fit to ship" }
 $Msi = "$Out\oarbank-agent-$Version-windows-$Arch.msi"
 wix build "$Repo\deploy\windows\oarbank-agent.wxs" -arch $Arch -ext WixToolset.Util.wixext -d "Version=$MsiVersion" -d "BinDir=$Bin" -d "RuntimeDir=$Runtime" -o $Msi
 if ($LASTEXITCODE) { throw "wix build failed" }
