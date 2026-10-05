@@ -341,9 +341,6 @@ struct Shared {
     /// One run at a time: each is clamped to the attempt's whole reservation, so concurrent runs would oversubscribe
     /// it (and a timed-out run is then the only container to remove).
     gate: tokio::sync::Mutex<()>,
-    /// Windows: the `broker/` output directory, held open so it cannot be swapped (open_outputs).
-    #[cfg(windows)]
-    _out_dir: std::fs::File,
 }
 
 struct Inflight<'a>(&'a Shared);
@@ -465,7 +462,7 @@ fn open_outputs(sh: &Shared) -> std::io::Result<(u64, std::fs::File, std::fs::Fi
 }
 
 /// Windows: the directory must be a real one (no junction or symlink), and the broker holds it open without sharing
-/// delete for its whole life (`Shared::_out_dir`), so it can be neither renamed nor replaced; each file is created new,
+/// delete for its whole life (`Broker::_out_dir`), so it can be neither renamed nor replaced; each file is created new,
 /// never opened through an existing name or a reparse point.
 #[cfg(windows)]
 fn open_outputs(sh: &Shared) -> std::io::Result<(u64, std::fs::File, std::fs::File)> {
@@ -613,6 +610,11 @@ pub struct Broker {
     bind: Bind,
     shared: Arc<Shared>,
     task: tokio::task::JoinHandle<()>,
+    /// Windows: the `broker/` output directory, held open so it cannot be swapped (open_outputs), and closed with the
+    /// broker: the attempt's processes are gone by then, and the work directory is removed next, which an open handle
+    /// would stop (the shared state lives on a moment, in the aborted accept task and the cleanup thread).
+    #[cfg(windows)]
+    _out_dir: std::fs::File,
 }
 
 impl Broker {
@@ -633,11 +635,9 @@ impl Broker {
         let shared = Arc::new(Shared {
             scope, runtime, verifier, ran_images: std::sync::Mutex::new(Vec::new()), closed: AtomicBool::new(false), inflight: AtomicUsize::new(0), counter: AtomicU64::new(0),
             ran: AtomicBool::new(false), gate: tokio::sync::Mutex::new(()),
-            #[cfg(windows)]
-            _out_dir: out_dir,
         });
         let task = tokio::spawn(accept(listener, shared.clone()));
-        Ok(Broker { bind, shared, task })
+        Ok(Broker { bind, shared, task, #[cfg(windows)] _out_dir: out_dir })
     }
 
     /// The job's `OARBANK_BROKER`.
