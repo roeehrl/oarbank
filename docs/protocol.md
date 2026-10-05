@@ -80,6 +80,7 @@ spec/platforms.md):
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
              "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable",
              "grants.bootstrap": "enforced"}},
+ "containers": {"gpu": "undetected"},
  "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
@@ -93,6 +94,10 @@ spec/platforms.md):
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
   `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
   (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`).
+- **Containers.** `gpu` is how containers get the node's GPUs (`cdi:<kind>`, `virtio-gpu:venus`), else `undetected`;
+  the APIs such a container can use are the doctor report's `gpu_apis.containers` (below). A Windows node adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
+  node's report"): `runtime` (`wslc`), `state` (`absent`, `starting`, `ready`, `missing`, `failed`), `session`,
+  `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes.
 
 `hostname` is the name the node reports: the machine's host name, or `OARBANK_NODE_NAME` in the agent's
 environment when the owner names it. The coordinator names the node after it, unless the node enrolled with a
@@ -124,6 +129,11 @@ their process groups, deletes their workspaces, and does not report them.
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
+ "services": [{"service": "example/model", "health": "healthy", "running": false, "ready": false, "held": "preempt_memory",
+               "disabled": false, "withdrawn": false, "failures": 0, "error": null, "gpu_api_missing": null, "users": 0,
+               "pools": {"model": 1}, "reserve_mem_gb": 0.0, "busy": false, "endpoint": true, "accepting": false,
+               "lifecycle": "on_demand"}],
+ "probes": [{"probe": "example/java17", "health": "healthy", "attrs": {"version": "17"}}],
  "journal": [{"t": 1790000000.1, "seq": 41, "kind": "rule_active", "reason": "PROTECTION_ACTIVE", "rule": "zoom"}],
  "processes": [{"pid": 812, "ppid": 1, "start_us": 1790000000000000, "path": "/Applications/…", "comm": "…",
                 "argv": ["…"], "team_id": "ABCDE12345", "signing_id": "…", "bundle_id": "…", "cpu_cores": 1.2,
@@ -135,6 +145,12 @@ their process groups, deletes their workspaces, and does not report them.
   offset from it (see Clocks).
 - **`doctor`**, when present, is the latest doctor report (see Doctor).
 - **`folders`** is the outcome, per folder id, of the folder statement the agent applied (see Folders).
+- **`services`** and **`probes`** are the agent's service report, sent on every heartbeat: each module service
+  (`<module>/<name>`) with its health, whether it runs and has answered `ready`, why it is down (`held` by host protection
+  with the release reason, `disabled` by the kill switch, `withdrawn` after failures, `gpu_api_missing`), its last
+  `error`, the jobs using it (`users`) and its lifecycle; each probe with its health and attributes. oarbankd keeps the
+  latest in `nodes.services_json`; the node page, `oarbank node show` and module pages (the `services` and `nodes` host
+  queries) show it.
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
   `journal_ack`, the highest seq it stored.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
@@ -633,9 +649,10 @@ The agent computes `capacity` every tick and sends it in the heartbeat:
  "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_mem_gb": 6.1}
 ```
 `cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide, plus the
-agent's own `containers` pool (its container runtime) and `gpu` pool (one token where containers can get the node's
-GPUs through CDI; never on macOS) (a node that reports none is offered no pool work). The facts' `containers.gpu` says
-which: `cdi:<kind>` or `undetected`. They are computed after:
+agent's own `containers` pool (its container runtime, while it can run containers: a Windows node whose session is not
+ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI; never on macOS) (a
+node that reports none is offered no pool work). The facts' `containers.gpu` says which: `cdi:<kind>` or
+`undetected`. They are computed after:
 
 - user caps, thermal state, battery and user presence;
 - running jobs and the memory services hold;

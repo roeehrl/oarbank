@@ -2,8 +2,8 @@
 
 The console is how the owner sees and changes the fleet. Three choices shape it (PLAN D9–D21): it runs as its own
 read-only process, every change goes through one operation registry in oarbankd, and every "why" is answered by the
-same predicate code the scheduler runs. Module pages are drawn by the console from declarations (D22–D24; the SDK's
-`spec/ui-contract.md`).
+same predicate code the scheduler runs. Module pages are drawn by the console from declarations (D22–D24, D41; the SDK's
+`spec/ui-contract.md`, [module-gui-1.2.md](module-gui-1.2.md)).
 
 ## Read-path isolation
 
@@ -45,8 +45,8 @@ can do nothing the API cannot; the generated [operations.md](operations.md) list
   by the effects they declare; the host draws their preview, confirmation and audit (D23).
 - **Parity** is a test: every operation is reachable from the API, the CLI and a console form, every explain kind from
   all three, every `oarbank` command the registry names exists in the CLI's parser, and every reason code's remedies
-  are operations ([parity.md](parity.md), generated). What an operator reads on a job page, `oarbank job show` prints from
-  the same detail document (D42, [console-parity.md](console-parity.md)).
+  are operations ([parity.md](parity.md), generated). What an operator reads on a node or job page, `oarbank node show`
+  and `oarbank job show` print from the same detail document (D42, [console-parity.md](console-parity.md)).
 
 ## The audit log is hash-chained
 
@@ -99,8 +99,10 @@ Alerting runs inside oarbankd (D18; `coordinator/alerting.py`, rules in `oarbank
 Nothing is admin for being local, and identity headers are never trusted (architecture.md, "Network and access"):
 console accounts with a password and TOTP, passkeys or one-time links; HttpOnly, SameSite=Strict sessions with a CSRF
 token on every form and htmx request; a strict CSP with no inline script; Fetch Metadata and Origin checks; a Host
-allowlist on both listeners; Funnel traffic refused. Module pages and panels render through host components only; the
-sandboxed iframe placement is served from a separate origin and can only request operations, which the host confirms.
+allowlist on both listeners; Funnel traffic refused. Module pages and panels render through host components only, with
+the viewer's role; the sandboxed iframe placement is served from a separate origin, uses only the bridge capabilities its
+manifest declares (checked by the console's script and again by its server) and can only request operations, which the
+host confirms and posts with the session's CSRF token.
 
 ## Chaos
 

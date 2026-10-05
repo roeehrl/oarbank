@@ -179,7 +179,8 @@ at the computer and to the apps you name, on macOS, Linux and Windows.
 
 **Can a job read my files?** No. Every job runs in the operating system's sandbox and reads only its inputs and its
 module, and writes only its own folders. Network hosts, host tools, the GPU and containers are grants you approve per
-module version. (Containers are not available on Windows nodes yet.)
+module version. Containers run on the agent's own runtime (a Colima VM on macOS, rootless Podman on Linux, a WSL
+containers session on Windows) and see only the job's folders.
 
 **What happens if a node goes offline mid-job?** Its lease runs out and the coordinator gives the job to another
 node. An answer from the lost lease is not counted.

@@ -213,6 +213,22 @@ def test_console_pages_show_state_and_fingerprints_never_the_value(tmp_path):
                                                                    n["node_id"]))
             assert "GPU in containers</span><span>undetected: krunkit is not installed" in \
                 c.get(f"/nodes/{n['node_id']}").text
+            # a Windows node's WSL containers session: what is missing and how to fix it; a ready one with its GPU APIs
+            missing = {"runtime": "wslc", "state": "missing", "platforms": [], "gpu": "undetected",
+                       "missing": [{"what": "virtual_machine_platform", "detail": "not installed",
+                                    "fix": "run `oarbank-agent containers install`"}]}
+            d.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (json.dumps({**FACTS, "containers": missing}), n["node_id"]))
+            page = c.get(f"/nodes/{n['node_id']}").text
+            assert "wslc missing" in page and "<b>virtual_machine_platform</b>: not installed; run `oarbank-agent containers install`" \
+                in page.replace("&#96;", "`")
+            assert "undetected: the container runtime is not ready" in page
+            ready = {**missing, "state": "ready", "platforms": ["linux/amd64"], "gpu": "cdi:microsoft.com/wslc", "missing": []}
+            doctor = {"modules": {}, "capabilities": [], "gpu_apis": {"host": ["cuda", "directml"], "containers": ["cuda", "directml"],
+                                                                     "evidence": {}}}
+            d.x("UPDATE nodes SET facts_json=?, doctor_json=? WHERE node_id=?",
+                (json.dumps({**FACTS, "containers": ready}), json.dumps(doctor), n["node_id"]))
+            page = c.get(f"/nodes/{n['node_id']}").text
+            assert "wslc ready · linux/amd64" in page and "microsoft.com/wslc (CDI): cuda, directml" in page
     assert KEY.encode() not in everything_stored(d)
 
 

@@ -18,7 +18,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlsplit
 
 import anyio
 import httpx
@@ -76,15 +76,9 @@ def zip_chunks(files: list[tuple[str, Path]]):
 def zip_response(files, filename: str):
     return StreamingResponse(zip_chunks(files), media_type="application/zip",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"', **DOWNLOAD_HEADERS})
+
+
 SSE_PING_S, SSE_HEARTBEAT_S, SSE_MAX_CLIENTS = 15, 5, 16
-def csp(module_origin: str) -> str:
-    """Strict CSP; frames and module media only from the module origin (sandboxed module views, D23; media, UI contract 1.1)."""
-    return ("default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
-            f"img-src 'self' data: {module_origin}; media-src {module_origin}; connect-src 'self'; frame-src {module_origin}; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
-
-
-CSP = csp("http://127.0.0.1:7402")
 
 
 def _secs(s):
@@ -138,7 +132,7 @@ SESSION_PATHS = ("/login", "/logout", "/static/", "/static-ui/", "/healthz")
 
 def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                 module_origin: str = "http://127.0.0.1:7402") -> FastAPI:
-    from oarbank_sdk.render import CSS_PATH, HERE as RENDER_HERE, render_page
+    from oarbank_sdk.render import CSS_PATH, HERE as RENDER_HERE, console_csp, render_page
     from oarbank_sdk import ui as U
     from . import modpages
     http = httpx.AsyncClient(base_url=state.coordinator_url, timeout=3600)
@@ -146,7 +140,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     from .media import Tokens
     tokens = Tokens()
     caches = {"ops": ({}, 0.0), "mods": 0.0}
-    policy = csp(module_origin)
+    policy = console_csp(module_origin)
     @contextlib.asynccontextmanager
     async def lifespan(app):
         state.bind_loop(asyncio.get_running_loop())
@@ -464,7 +458,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         d["result_cols"] = views.result_columns(d["results"], man.results.fields if man else None)
         # the owning module's campaign panel (its own view of what the campaign means)
         d["panels"] = [p for p in await panels("campaign.panel", request, actor,
-                                               {"campaign": cid, "self": d["c"]["module"]}) if p["module"] == d["c"]["module"]]
+                                               {"campaign": {"id": cid, "campaign_id": cid, "module": d["c"]["module"],
+                                                             "state": d["c"]["state"]}})
+                       if p["module"] == d["c"]["module"]]
         return d
 
     @app.get("/campaigns/{cid}", response_class=HTMLResponse)
@@ -509,11 +505,18 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                                                  "actor": actor})
 
     @app.get("/datasets/upload", response_class=HTMLResponse)
-    async def dataset_upload_page(request: Request):
+    async def dataset_upload_page(request: Request, module: str = "", kind: str = "", then: str = "", return_to: str = ""):
+        """The folder upload; a module page's upload link fills in its module and kind, and names the importer operation
+        to offer once the dataset is registered (`then`, checked again by /m/<module>/_import)."""
         actor = who(request)
         await refresh_catalog(actor)
         kinds = {n: list(catalog.manifest(n).datasets.kinds) for n in catalog.rows if catalog.manifest(n)}
-        return render(request, "dataset_upload.html", {"module_kinds": {n: k for n, k in kinds.items() if k}, "actor": actor})
+        kinds = {n: k for n, k in kinds.items() if k}
+        pre = {"module": module, "kind": kind} if kind in kinds.get(module, []) else {}
+        if pre and then.startswith(f"mod.{module.replace('-', '_')}."):
+            pre["next"] = f"/m/{module}/_import?" + urlencode({"op": then, "return_to": return_to if return_to.startswith("/")
+                                                                  and not return_to.startswith("//") else f"/modules/{module}"})
+        return render(request, "dataset_upload.html", {"module_kinds": kinds, "pre": pre, "actor": actor})
 
     @app.get("/datasets/{did:path}/files/{path:path}")
     async def dataset_file(did: str, path: str, request: Request):
@@ -617,27 +620,28 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             except httpx.HTTPError:
                 return ops
             if r.status_code == 200:
-                ops = {o["id"]: {"id": o["id"], "title": o["summary"], "tier": o["tier"], "summary": o["summary"]}
-                       for o in r.json()}
+                ops = {o["id"]: {"id": o["id"], "title": o["summary"], "tier": o["tier"], "summary": o["summary"],
+                                 "min_role": o["min_role"]} for o in r.json()}
                 caches["ops"] = (ops, time.time())
         return ops
 
-    async def render_module(name, decl, request, actor, context):
+    # ------------------------------------------------------------------ module pages, panels and frames (D23, D41)
+    async def render_module(name, decl, request, actor, context, page=None):
+        """A module page or panel (`decl`), or a page the host composes for the module (`page`), as the viewer sees it."""
         ops = await ops_meta(actor)
+        ctx = {"return_to": str(request.url.path) + (f"?{request.url.query}" if request.url.query else ""), **context,
+               "user": {"role": request.state.session["role"]}}
 
         def run(r):
-            page = catalog.page(name, decl)
-            host = modpages.build_host(state, catalog, name, {**context, "return_to": str(request.url.path)},
-                                       ops.get, module_origin, r, tokens)
-            return render_page(page, host)
+            return render_page(page or catalog.page(name, decl),
+                               modpages.build_host(catalog, name, ctx, ops.get, module_origin, r, tokens))
         try:
             return await drill(run) or '<p class="mut">module page unavailable (database busy)</p>'
         except (ValueError, OSError) as e:
-            return f'<p class="mut">module page {decl.id} cannot be rendered ({type(e).__name__})</p>'
+            return f'<p class="mut">module page {decl.id if decl else name} cannot be rendered ({type(e).__name__})</p>'
 
     def ctx_for(request):
-        return {"var": {k[4:]: v for k, v in request.query_params.items() if k.startswith("var.")},
-                "user": {"role": "admin"}}
+        return {"var": {k[4:]: v for k, v in request.query_params.items() if k.startswith("var.")}}
 
     @app.get("/modules", response_class=HTMLResponse)
     async def modules_list(request: Request):
@@ -671,6 +675,27 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             '<p class="mut">This module declares no overview page.</p>'
         return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": "overview", "actor": actor})
 
+    @app.get("/m/{name}/_import", response_class=HTMLResponse)
+    async def module_import(name: str, request: Request, op: str = "", dataset: str = "", return_to: str = ""):
+        """After an upload link's dataset is registered: the module's importer operation offered on it, drawn by the host
+        (registry title, tier, confirmation), returning to the module page."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        prefix = f"mod.{name.replace('-', '_')}."
+        decl = next((o for o in (man.operations if man else []) if op == prefix + o.verb and o.target == "dataset"), None)
+        seen = await drill(lambda r: r.one("SELECT 1 FROM datasets WHERE dataset_id=? AND (module=? OR module IS NULL OR "
+                                           "module='')", (dataset, name)))
+        if decl is None or not seen:
+            return render(request, "error.html", {"message": f"{name} has no importer {op} for dataset {dataset}", "actor": actor}, 404)
+        back = return_to if return_to.startswith("/") and not return_to.startswith("//") else f"/modules/{name}"
+        page = U.Page.model_validate({"title": "Upload registered", "body": [
+            {"type": "text", "text": f"Dataset {dataset} is registered. {name} has not seen it yet: run its importer to use it."},
+            {"type": "action", "action": {"op": f"self.{decl.verb}", "target": dataset}},
+            {"type": "link", "text": f"Dataset {dataset}", "to": {"dataset": dataset}}]})
+        body = await render_module(name, None, request, actor, {"return_to": back}, page=page)
+        return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": "import", "actor": actor})
+
     @app.get("/m/{name}/{page_id}", response_class=HTMLResponse)
     async def module_subpage(name: str, page_id: str, request: Request):
         actor = who(request)
@@ -682,41 +707,97 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         body = await render_module(name, decl, request, actor, ctx_for(request))
         return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": page_id, "actor": actor})
 
-    # the sandboxed frames' bridge (static/ui.js): reads of the module's own data, operation metadata
-    @app.get("/m/{name}/_bridge/view/{view_id}")
-    async def bridge_view(name: str, view_id: str, request: Request):
+    # The sandboxed frames' bridge (oarbank_sdk render/static/ui.js). Every route names the frame, and the frame must
+    # declare the capability ([[ui.iframes]].bridge): ui.js checks it too, this is the host's own check.
+    async def bridge_frame(name: str, frame: str, cap: str, request: Request):
+        """(manifest, frame declaration) for a bridge call, or the JSONResponse refusing it."""
         actor = who(request)
         await refresh_catalog(actor)
         man = catalog.manifest(name)
-        if man is None or view_id not in man.ui.views:
-            return JSONResponse({"error": "unknown view"}, status_code=404)
-        d = await drill(lambda r: modpages.resolve(r, name, man, U.Source(view=view_id)))
-        return JSONResponse(d or {"error": "busy"})
+        decl = modpages.frame_of(man, frame) if man else None
+        if decl is None:
+            return None, JSONResponse({"error": "unknown frame"}, status_code=404)
+        if cap not in decl.bridge:
+            return None, JSONResponse({"error": "capability", "detail": f"frame {frame} does not declare {cap}"}, status_code=403)
+        return man, None
 
-    @app.get("/m/{name}/_bridge/query")
-    async def bridge_query(name: str, spec: str, request: Request):
-        actor = who(request)
-        await refresh_catalog(actor)
-        man = catalog.manifest(name)
+    def frame_ctx(request: Request) -> dict:
         try:
-            src = U.Source.model_validate(json.loads(spec))
-        except Exception:
-            return JSONResponse({"error": "invalid query"}, status_code=400)
-        if man is None or src.view:
-            return JSONResponse({"error": "invalid query"}, status_code=400)
+            ctx = json.loads(request.query_params.get("ctx") or "{}")
+        except ValueError:
+            ctx = {}
+        return ctx if isinstance(ctx, dict) else {}
+
+    @app.get("/m/{name}/_bridge/{frame}/view/{view_id}")
+    async def bridge_view(name: str, frame: str, view_id: str, request: Request):
+        man, refused = await bridge_frame(name, frame, "read.view", request)
+        if refused:
+            return refused
+        if view_id not in man.ui.views:
+            return JSONResponse({"error": "unknown view"}, status_code=404)
+        campaign = frame_ctx(request).get("campaign")
+        src = U.Source(view=view_id, params={"campaign": campaign} if campaign else {})
         return JSONResponse(await drill(lambda r: modpages.resolve(r, name, man, src)) or {"error": "busy"})
 
-    @app.get("/m/{name}/_bridge/op/{op_id}")
-    async def bridge_op(name: str, op_id: str, request: Request):
-        actor = who(request)
-        if not op_id.startswith(f"mod.{name.replace('-', '_')}."):     # a frame may request only its own module's operations
-            return JSONResponse({"error": "not this module's operation"}, status_code=403)
-        meta = (await ops_meta(actor)).get(op_id)
-        return JSONResponse(meta) if meta else JSONResponse({"error": "unknown operation"}, status_code=404)
+    @app.get("/m/{name}/_bridge/{frame}/query")
+    async def bridge_query(name: str, frame: str, spec: str, request: Request):
+        man, refused = await bridge_frame(name, frame, "read.query", request)
+        if refused:
+            return refused
+        try:
+            src = U.Source.model_validate(json.loads(spec))
+        except ValueError:
+            return JSONResponse({"error": "invalid query"}, status_code=400)
+        if src.view:
+            return JSONResponse({"error": "invalid query", "detail": "views are read with read.view"}, status_code=400)
+        ctx = frame_ctx(request)
+        return JSONResponse(await drill(lambda r: modpages.resolve_in(r, name, man, src, ctx)) or {"error": "busy"})
+
+    @app.get("/m/{name}/_bridge/{frame}/media")
+    async def bridge_media(name: str, frame: str, ref: str, kind: str, request: Request):
+        man, refused = await bridge_frame(name, frame, "read.media", request)
+        if refused:
+            return refused
+        try:
+            ref_doc = json.loads(ref)
+        except ValueError:
+            return JSONResponse({"error": "not an artifact reference"}, status_code=400)
+        from . import media
+        hit = await drill(lambda r: media.urls(r, tokens, name, module_origin, ref_doc, kind))
+        return JSONResponse(hit) if hit else JSONResponse({"error": "not this module's artifact"}, status_code=404)
+
+    @app.get("/m/{name}/_bridge/{frame}/link")
+    async def bridge_link(name: str, frame: str, to: str, request: Request):
+        man, refused = await bridge_frame(name, frame, "navigate", request)
+        if refused:
+            return refused
+        try:
+            link = U.Link.model_validate(json.loads(to))
+        except ValueError:
+            return JSONResponse({"error": "not a typed reference"}, status_code=400)
+        ref = urlsplit(request.headers.get("referer") or "")
+        back = (ref.path + (f"?{ref.query}" if ref.query else "")) if ref.netloc == request.headers.get("host") else ""
+        href = None if link.url else modpages.link_url(name, man, link, back)        # typed references only
+        return JSONResponse({"href": href}) if href else JSONResponse({"error": "no such page"}, status_code=404)
+
+    @app.get("/m/{name}/_bridge/{frame}/op/{op_id}")
+    async def bridge_op(name: str, frame: str, op_id: str, request: Request, target: str = ""):
+        """What a page action may name, as the viewer may run it: registry metadata for the host's confirmation."""
+        man, refused = await bridge_frame(name, frame, "request.operation", request)
+        if refused:
+            return refused
+        meta = (await ops_meta(request.state.session["account"])).get(op_id)
+        why = modpages.op_allowed(name, meta, request.state.session["role"])
+        if why:
+            return JSONResponse({"error": why}, status_code=404 if why == "unknown operation" else 403)
+        if not await drill(lambda r: modpages.target_owned(r, name, op_id, target)):
+            return JSONResponse({"error": "not this module's", "detail": f"{target} is not {name}'s"}, status_code=403)
+        return JSONResponse(meta)
 
     async def panels(slot: str, request: Request, actor: str, context: dict) -> list[dict]:
         from oarbank_sdk.render import when_ok
         await refresh_catalog(actor)
+        context = {**context, "user": {"role": request.state.session["role"]}}
         out = []
         for name in catalog.rows:
             man = catalog.manifest(name)
@@ -753,7 +834,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         def load(rd):
             from ..coordinator import datasets, modimages
             return {"events": rd.q("SELECT * FROM events WHERE kind IN ('module_fault','module_restarted','module_disabled',"
-                                   "'module_enabled') AND reason LIKE ? ORDER BY event_id DESC LIMIT 40", (f"%{name}%",)),
+                                   "'module_enabled') AND module=? ORDER BY event_id DESC LIMIT 40", (name,)),
                     "alerts": rd.q("SELECT * FROM alerts WHERE rule=? ORDER BY opened_at DESC LIMIT 20", (f"module_host_down:{name}",)),
                     # bootstrap stages' pinned datasets, and the first run of each container set image (secrets-and-signed-images.md)
                     "pins": datasets.pin_states(rd, name, man) if man else [],

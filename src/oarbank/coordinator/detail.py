@@ -1,6 +1,6 @@
-"""Detail documents: one job, as `oarbank job show` prints it (GET /api/v1/jobs/{id}) and the console's job page renders
-it, and a node's GPU API, enforcement and folder sections, which the console's node page renders. The console calls
-them on its own read connection (D10). One function per document, so the CLI and the console never say different
+"""Detail documents for one node and one job: what `oarbank node show` and `oarbank job show` print (through
+GET /api/v1/nodes/{id} and /api/v1/jobs/{id}) and what the console's node and job pages render. The console calls them
+on its own read connection (D10). One function per document, so the CLI and the console never say different
 things (docs/design/console-parity.md).
 
 Every function here is pure over a reader (q/one/get_setting): oarbankd's DB or the console's query-only pool. Module
@@ -9,7 +9,8 @@ has the catalogue it fetched.
 """
 from collections.abc import Callable
 
-from . import checkpoints, folders, platforms
+from . import checkpoints, folders, nodeservices, platforms
+from . import config as C
 from .db import jl
 
 
@@ -57,15 +58,34 @@ def folder_grants(r, n: dict) -> list[dict]:
     return out
 
 
-def node(r, nid: str, manifest_for: Callable[[str], object]) -> dict | None:
-    """The node page's GPU API, per-capability enforcement and folder sections, by node id or hostname (`oarbank node show`
-    prints the node's facts from the fleet API; these sections are for it to add)."""
+def doctor(doc: dict | None) -> dict | None:
+    """The latest doctor report, per module: its health and the checks that failed."""
+    if not doc:
+        return None
+    mods = [{"module": m, "health": rep.get("health"), "checks": len(rep.get("checks") or []),
+             "failed": [{"name": c.get("name"), "detail": c.get("detail")} for c in rep.get("checks") or [] if not c.get("ok")]}
+            for m, rep in sorted((doc.get("modules") or {}).items())]
+    return {"at": doc.get("at"), "release_id": doc.get("release_id"), "capabilities": list(doc.get("capabilities") or []),
+            "modules": mods}
+
+
+def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict | None:
+    """The node's detail document, by node id or hostname: `oarbank node show` prints it (GET /api/v1/nodes/{id}) and the
+    console's node page renders its GPU API, enforcement and folder sections. `services` are the agent's per-service
+    report (nodeservices.rows), the rows of the node page's Services table."""
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         return None
-    facts = jl(n["facts_json"], {}) or {}
-    mods = sorted((jl(n.get("modules_json"), {}) or {}).keys())
-    return {"gpu": gpu(facts, jl(n["doctor_json"])), "folders": folder_grants(r, n), "sandbox": enforcement(facts, mods, manifest_for)}
+    facts, mods = jl(n["facts_json"], {}) or {}, jl(n.get("modules_json"), {}) or {}
+    hb, doc = n["last_heartbeat_at"] or 0, jl(n["doctor_json"])
+    return {
+        "node": {"node_id": n["node_id"], "hostname": n["hostname"], "platform": platforms.node_platform(n),
+                 "lifecycle": n["lifecycle"], "desired_state": n["desired_state"], "online": bool(hb and now - hb < C.OFFLINE_AFTER),
+                 "agent_version": n.get("agent_version"), "quarantine_reason": n.get("quarantine_reason")},
+        "modules": {m: {"state": st.get("state"), "reason": st.get("reason")} for m, st in sorted(mods.items())},
+        "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),
+        "services": nodeservices.rows(n), "services_at": n.get("services_at"), "folders": folder_grants(r, n),
+        "sandbox": enforcement(facts, sorted(mods), manifest_for)}
 
 
 def job(r, jid: int) -> dict | None:

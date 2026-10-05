@@ -2,7 +2,8 @@
 //! never reach Docker: the broker validates their requests and hands this runtime a finished `RunSpec`. On macOS the
 //! runtime is an agent-owned Colima profile, `oarbank`, whose VM mounts only the agent's work and modules-data
 //! directories (Colima's default profile mounts `$HOME` writable, so its socket is the whole home), and GPU containers
-//! run in a second one, `oarbank-gpu`, on krunkit (docs/design/gpu-placement.md).
+//! run in a second one, `oarbank-gpu`, on krunkit (docs/design/gpu-placement.md). Linux uses the host's engine; Windows
+//! an agent-owned WSL containers session (wslc.rs, docs/design/windows-containers.md).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -140,6 +141,13 @@ pub trait ContainerRuntime: Send + Sync {
     fn gpu_device(&self) -> Option<String> {
         None
     }
+    /// The runtime's own report for the facts' `containers`, when it keeps one (Windows: its session's state). A change
+    /// makes the agent send its facts again.
+    fn report(&self) -> Option<serde_json::Value> {
+        None
+    }
+    /// Check the runtime's prerequisites again when it is not ready (the agent's doctors run again: a release, a restart).
+    fn recheck(&self) {}
 }
 
 /// The node's container runtimes: `cpu` runs every container, `gpu` the containers of jobs that reserved the agent's
@@ -171,6 +179,7 @@ impl Containers {
 
 /// How containers on this node get the GPU (docs/design/gpu-placement.md): the facts' `containers.gpu`, the `--device`
 /// value, and the GPU APIs a container then has.
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passthrough {
     /// `cdi:<kind>` or `virtio-gpu:venus`.
@@ -295,7 +304,7 @@ pub fn image_key(reference: &str) -> (String, String) {
 /// A reference with its registry spelled out as Docker resolves a short name (docker.io, and library/ for a one-part
 /// name), its tag and digest kept. Modules approve images in Docker's form (`genonet/hap-py@sha256:…`), and Podman
 /// refuses a short name unless the host configures unqualified-search registries, which a default install does not.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", windows, test))]
 pub fn qualified(reference: &str) -> String {
     let (name, digest) = match reference.split_once('@') {
         Some((n, d)) => (n, Some(d)),
@@ -338,6 +347,7 @@ impl Exec {
     pub fn ok(&self) -> bool {
         self.code == 0 && !self.timed_out && !self.cancelled
     }
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn stderr_tail(&self, n: usize) -> String {
         let s = String::from_utf8_lossy(&self.stderr);
         let t = s.trim_end();
@@ -372,9 +382,16 @@ pub fn exec(argv: &[String], env: &[(String, String)], timeout: Duration, out: O
     use crate::sys::Sig;
     let (prog, rest) = argv.split_first().ok_or("empty argv")?;
     let mut cmd = Command::new(prog);
-    cmd.args(rest).env_clear().envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null())
+    // Windows: an empty pipe, closed at once, rather than NUL: NUL is a character device, which a console program
+    // (wslc) takes for a console and fails to read (ERROR_INVALID_HANDLE)
+    #[cfg(unix)]
+    let input = Stdio::null();
+    #[cfg(windows)]
+    let input = Stdio::piped();
+    cmd.args(rest).env_clear().envs(env.iter().map(|(k, v)| (k, v))).stdin(input)
         .stdout(stdio(&out).map_err(|e| e.to_string())?).stderr(stdio(&err).map_err(|e| e.to_string())?);
     let mut child = crate::sys::spawn_contained(&mut cmd, false).map_err(|e| format!("{prog}: {e}"))?;
+    drop(child.stdin.take());
     let pid = child.id() as i32;
     let (ro, re) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
@@ -401,17 +418,25 @@ pub fn exec(argv: &[String], env: &[(String, String)], timeout: Duration, out: O
         std::thread::sleep(Duration::from_millis(20));
     };
     crate::sys::release(pid);
-    r.code = status.code().unwrap_or_else(|| 128 + crate::sys::exit_signal(&status).unwrap_or(0));
+    #[cfg(unix)]
+    {
+        r.code = status.code().unwrap_or_else(|| 128 + crate::sys::exit_signal(&status).unwrap_or(0));
+    }
+    #[cfg(windows)]
+    {
+        r.code = status.code().unwrap_or(1);
+    }
     r.stdout = ro.and_then(|h| h.join().ok()).unwrap_or_default();
     r.stderr = re.and_then(|h| h.join().ok()).unwrap_or_default();
     Ok(r)
 }
 
-fn quick(argv: &[String], env: &[(String, String)], timeout_s: u64) -> Result<Exec, String> {
+pub fn quick(argv: &[String], env: &[(String, String)], timeout_s: u64) -> Result<Exec, String> {
     exec(argv, env, Duration::from_secs(timeout_s), Out::Capture, Out::Capture, &AtomicBool::new(false), Duration::from_secs(5))
 }
 
 /// Remove every container `ps` lists for `filter` (a label filter); the ids removed.
+#[cfg(unix)]
 fn remove_labelled(cli: impl Fn(&[&str], u64) -> Result<Exec, String>, filter: &str) -> Vec<String> {
     let Ok(r) = cli(&["ps", "-aq", "--filter", filter], 20) else { return vec![] };
     let ids: Vec<String> = String::from_utf8_lossy(&r.stdout).lines().map(str::trim)
@@ -438,6 +463,7 @@ pub fn tokens(mem_gb: f64) -> u32 {
     ((mem_gb - 1.5) / 2.5).floor().max(0.0) as u32
 }
 
+#[cfg(unix)]
 fn executable(p: &Path) -> bool {
     std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0)
 }
@@ -446,6 +472,7 @@ fn executable(p: &Path) -> bool {
 /// when this process may write it (the personal scope), else the agent's home. A system install's `oarbank` account has
 /// the home /var/lib/oarbank, which is root's: rootless Podman cannot create its configuration there and every command
 /// fails ("stat /var/lib/oarbank/.config: no such file or directory").
+#[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn engine_home(account_home: Option<PathBuf>, agent_home: &Path) -> PathBuf {
     let writable = |p: &Path| p.is_dir() && std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
@@ -862,6 +889,77 @@ impl ContainerRuntime for NativeRuntime {
 }
 
 
+/// Images the doctor's probe runs (digest-pinned multi-platform indexes): busybox for the runtime, and a glibc image for
+/// the GPU (WSL 3.0.1's GPU hook runs the image's `ldconfig` and fails on musl, microsoft/WSL#41791).
+pub const PROBE_IMAGE: &str = "docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
+pub const PROBE_GPU_IMAGE: &str = "docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a";
+
+/// `oarbank-agent containers doctor --probe [--gpu]`: run real containers through this node's runtime with the
+/// broker's argument shape and check what a module relies on: the run, its output, a mount of the work directory, no
+/// network, the CPU and memory limits inside the container, cleanup by label, and (`gpu`) the GPU device. Each check is
+/// `{check, ok, detail}`.
+pub fn probe(rts: &Containers, work: &Path, gpu: bool) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let rt = rts.cpu.as_ref();
+    let mut checks = vec![];
+    let mut check = |name: &str, ok: bool, detail: String| {
+        checks.push(json!({"check": name, "ok": ok, "detail": detail}));
+        ok
+    };
+    if !check("runtime", rt.ensure_started().is_ok(), rt.status().map(|s| s.detail.unwrap_or_default()).unwrap_or_else(|e| e)) {
+        return checks;
+    }
+    let platform = rt.status().ok().and_then(|s| s.platforms.first().cloned()).unwrap_or_default();
+    let pulled = rt.pull(PROBE_IMAGE, &platform);
+    if !check("pull", pulled.is_ok(), pulled.err().unwrap_or_else(|| format!("{PROBE_IMAGE} for {platform}"))) {
+        return checks;
+    }
+    let aid = -(std::process::id() as i64);
+    let dir = work.join(format!("doctor-probe-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let host = std::fs::canonicalize(&dir).unwrap_or(dir.clone());
+    let out = dir.join("stdout.txt");
+    let spec = |image: &str, script: &str| RunSpec {
+        image: image.into(), platform: platform.clone(), args: vec!["sh".into(), "-c".into(), script.into()], entrypoint: None,
+        mounts: vec![Mount { host: host.clone(), dst: "/w".into(), ro: false }], env: vec![("PROBE".into(), "1".into())], workdir: Some("/w".into()),
+        network: false, cpus: 1.0, mem_gb: 0.5, attempt_id: aid, module: "doctor".into(), timeout_s: 300.0,
+        stdout: std::fs::File::create(&out).ok(), stderr: None, gpu_device: None,
+    };
+    let script = "echo probe > /w/written.txt; echo \"mem:$(cat /sys/fs/cgroup/memory.max)\"; echo \"cpu:$(cat /sys/fs/cgroup/cpu.max)\"; \
+                  if wget -q -T 5 -O /dev/null http://example.com 2>/dev/null; then echo net:yes; else echo net:no; fi";
+    let r = rt.run(&spec(PROBE_IMAGE, script), &AtomicBool::new(false));
+    let text = std::fs::read_to_string(&out).unwrap_or_default();
+    let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)).unwrap_or("").trim().to_string();
+    if check("run", r.as_ref().is_ok_and(|r| r.exit_code == 0), format!("{r:?}")) {
+        let written = std::fs::read_to_string(dir.join("written.txt")).unwrap_or_default();
+        check("mount", written.trim() == "probe", format!("{} holds {:?}", dir.join("written.txt").display(), written.trim()));
+        check("memory_limit", field("mem:") == "536870912", format!("memory.max = {}", field("mem:")));
+        check("cpu_limit", field("cpu:") == "100000 100000", format!("cpu.max = {}", field("cpu:")));
+        check("no_network", field("net:") == "no", format!("network none: {}", field("net:")));
+    }
+    if gpu {
+        // the GPU runtime (macOS: the krunkit VM; elsewhere the same one)
+        let rt = rts.for_job(true);
+        let rt = rt.as_ref();
+        let kind = rt.gpu_device();
+        if check("gpu_device", kind.is_some(), kind.clone().unwrap_or_else(|| "this runtime passes no GPU through".into()))
+            && check("gpu_pull", rt.pull(PROBE_GPU_IMAGE, &platform).is_ok(), PROBE_GPU_IMAGE.into()) {
+            let script = "if [ -e /dev/dxg ] || ls /dev/nvidia* >/dev/null 2>&1 || [ -e /dev/kfd ] || [ -d /dev/dri ]; then echo gpu:yes; else echo gpu:no; fi; \
+                          if command -v nvidia-smi >/dev/null; then nvidia-smi -L; fi";
+            let mut gspec = spec(PROBE_GPU_IMAGE, script);
+            gspec.gpu_device = kind;
+            let r = rt.run(&gspec, &AtomicBool::new(false));
+            let _ = rt.remove_attempt(aid);
+            let text = std::fs::read_to_string(&out).unwrap_or_default();
+            check("gpu_run", r.as_ref().is_ok_and(|r| r.exit_code == 0) && text.contains("gpu:yes"), format!("{r:?}: {}", text.trim()));
+        }
+    }
+    let left = rt.remove_attempt(aid);
+    check("cleanup", true, format!("{} container(s) of the probe removed by label", left.len()));
+    let _ = std::fs::remove_dir_all(&dir);
+    checks
+}
+
 /// GPU passthrough on Linux: a container engine and a CDI spec with an `all` device.
 #[cfg(target_os = "linux")]
 pub fn gpu_passthrough() -> Option<Passthrough> {
@@ -873,7 +971,8 @@ pub fn gpu_passthrough() -> Option<Passthrough> {
 }
 
 /// This node's container runtimes, if it has any: the agent's Colima profiles on macOS (the GPU one where krunkit is
-/// installed), the host's engine on Linux (also the GPU runtime where a CDI spec exists).
+/// installed), the host's engine on Linux (also the GPU runtime where a CDI spec exists), the agent's WSL containers
+/// session on Windows (one runtime for both; it reports what is missing itself, so it always exists there).
 #[cfg(target_os = "macos")]
 pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
     let cpu = ColimaRuntime::new(layout, Profile::Cpu);
@@ -890,6 +989,12 @@ pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
     Some(Containers { cpu: rt, gpu })
 }
 
+#[cfg(windows)]
+pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
+    let rt: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(crate::wslc::WslcRuntime::start(layout, crate::host::memory().ram_gb));
+    Some(Containers { cpu: rt.clone(), gpu: Some(rt) })
+}
+
 
 #[cfg(test)]
 pub mod tests {
@@ -898,6 +1003,7 @@ pub mod tests {
     /// The engine's home: the account's own when it may write it, else the agent's (a system install's account home is
     /// root's), and the agent's when there is no HOME at all.
     #[test]
+    #[cfg(unix)]
     fn the_engine_keeps_its_state_where_the_agent_may_write() {
         use std::os::unix::fs::PermissionsExt;
         let (mine, agent, roots) = (temp("eh-mine"), temp("eh-agent"), temp("eh-root"));
@@ -933,6 +1039,65 @@ pub mod tests {
         assert_eq!(binfmt_platform("enabled\ninterpreter /usr/bin/qemu-i386\nflags: \noffset 0\n\
                                     magic 7f454c4601010100000000000000000002000300\n"), None);
         assert_eq!(binfmt_platform("enabled\n"), None);
+    }
+
+    /// Make `home` a rootless Podman home of its own: graph root, run root and temporary directory all inside it. A
+    /// private HOME alone moves only the graph root: the run root and the temporary directory stay the account's
+    /// (`$XDG_RUNTIME_DIR/containers`, `$XDG_RUNTIME_DIR/libpod/tmp`).
+    #[cfg(target_os = "linux")]
+    pub fn private_engine(home: &Path) {
+        let conf = home.join(".config/containers");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(conf.join("storage.conf"), format!("[storage]\ndriver = \"overlay\"\ngraphroot = \"{}\"\nrunroot = \"{}\"\n",
+                                                         home.join("storage").display(), home.join("run").display())).unwrap();
+        std::fs::write(conf.join("containers.conf"), format!("[engine]\ntmp_dir = \"{}\"\n", home.join("tmp").display())).unwrap();
+    }
+
+    /// Delete a private engine's state. Its storage holds files of the user namespace's ids, which only a process in
+    /// that namespace may remove (`podman unshare rm`); never `podman system reset`, which also deletes the account's
+    /// own engine state under `$XDG_RUNTIME_DIR/libpod` whatever the configuration says (the run state of every other
+    /// container the account runs, those of concurrent tests among them).
+    #[cfg(target_os = "linux")]
+    pub fn remove_private_engine(cli: &Path, home: &Path) {
+        if cli.ends_with("podman") {
+            let _ = Command::new(cli).env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin").env("HOME", home)
+                .args(["unshare", "rm", "-rf"]).args(["storage", "run", "tmp"].map(|d| home.join(d))).output();
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A private engine works in its own roots, and removing it leaves the account's engine and its run state alone.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_private_engine_keeps_its_state_to_itself() {
+        let home = temp("private-engine");
+        let layout = crate::paths::Layout::new(home.join("agent"));
+        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
+            eprintln!("no container engine here: skipped");
+            return;
+        };
+        if !rt.cli.ends_with("podman") || !rt.status().is_ok_and(|s| s.running) {
+            eprintln!("no running rootless Podman here: skipped");
+            return;
+        }
+        let shared = rt.cli(&["info", "--format", "{{.Store.RunRoot}}"], 30).unwrap();
+        let shared_run = PathBuf::from(String::from_utf8_lossy(&shared.stdout).trim());
+        let marker = shared_run.join(format!("oarbank-test-{}", std::process::id()));
+        std::fs::write(&marker, "x").unwrap();
+        let account_home = rt.home.clone();
+        rt.home = home.join("engine-home");
+        private_engine(&rt.home);
+        let own = rt.cli(&["info", "--format", "{{.Store.RunRoot}} {{.Store.GraphRoot}}"], 60).unwrap();
+        assert_eq!(String::from_utf8_lossy(&own.stdout).trim(),
+                   format!("{} {}", rt.home.join("run").display(), rt.home.join("storage").display()), "{}", own.stderr_tail(500));
+        remove_private_engine(&rt.cli, &rt.home);
+        let kept = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(kept, "the account's run state ({}) was removed", shared_run.display());
+        assert!(!rt.home.exists(), "the private engine's files are gone");
+        rt.home = account_home;
+        assert!(rt.status().is_ok_and(|s| s.running), "the account's engine still answers");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A root filesystem of this host's `sh` and `cat` with the libraries they load (`ldd`), as a tar to import: an
@@ -1172,6 +1337,7 @@ pub mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exec_captures_times_out_and_cancels_the_whole_group() {
         let sh = |s: &str| vec!["/bin/sh".to_string(), "-c".into(), s.into()];
         let env = [("PATH".to_string(), "/usr/bin:/bin".to_string())];

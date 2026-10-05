@@ -64,7 +64,8 @@ runs only images a module was approved for):
 |---|---|---|
 | Linux CDI, an NVIDIA spec (`nvidia.com/gpu`) | `cdi:nvidia.com/gpu` | `cuda` when the spec mounts `libcuda.so`, `vulkan` when it mounts the NVIDIA Vulkan ICD (`nvidia_icd.json`), `opencl` when it mounts `libnvidia-opencl` |
 | Linux CDI, any other kind (AMD, Intel) | `cdi:<kind>` | `rocm` when it passes `/dev/kfd`, `vulkan` when it passes a DRM render node (the image brings Mesa) |
-| Linux CDI over WSL2 GPU-PV (`/dev/dxg`; the Windows container runtime's path) | `cdi:<kind>` | `cuda` when the spec mounts `libcuda.so` |
+| Linux CDI over WSL2 GPU-PV (`/dev/dxg`, an `nvidia-ctk cdi generate --mode=wsl` spec) | `cdi:<kind>` | `cuda` when the spec mounts `libcuda.so` |
+| Windows, the agent's WSL containers session ([windows-containers.md](windows-containers.md)) | `cdi:microsoft.com/wslc` | from the session VM's host driver libraries: `directml` with WSL's D3D12 and DXCore and a hardware GPU (the image brings `libdirectml.so`), `cuda` when the NVIDIA driver provides `libcuda.so.1` |
 | macOS, krunkit (below) | `virtio-gpu:venus` | `vulkan` (the image brings the libkrun build of Mesa's Venus driver) |
 | none | `undetected` | none |
 
@@ -189,7 +190,7 @@ device is `Virtio-GPU Venus (Apple …)` and that a compute shader's output is r
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Host APIs | `metal`, `opencl` (Apple Silicon and Intel Macs), `vulkan` with a Vulkan loader and MoltenVK installed | `cuda`, `rocm`, `vulkan`, `opencl` as installed and readable by the agent's account | `cuda`, `rocm` (HIP SDK), `vulkan`, `opencl`, `directml` |
-| Container APIs | `vulkan` with krunkit installed (Apple Silicon, macOS 14+) | from the CDI spec | none in this change: the Windows container runtime (a separate change) reuses the CDI rules over WSL2 GPU-PV |
+| Container APIs | `vulkan` with krunkit installed (Apple Silicon, macOS 14+) | from the CDI spec | `directml`, and `cuda` on NVIDIA, from the agent's WSL containers session (D39) |
 | Cannot | Metal in a Linux container (no such device exists) | – | – |
 
 ## SDK

@@ -553,8 +553,9 @@ def cmd_fleet(a):
         mods = ",".join(f"{m}:{st.get('state')}" for m, st in (n.get("mods") or {}).items()) or "-"
         g = (n.get("doctor") or {}).get("gpu_apis") or {}
         gpu = f"gpu {','.join(g.get('host') or []) or '-'} containers {','.join(g.get('containers') or []) or '-'}"
+        # a container runtime that reports its own state (Windows: the agent's WSL containers session), and what it misses
         ct = (n.get("facts") or {}).get("containers") or {}
-        runtime = f" runtime {ct['runtime']} {ct.get('state') or '?'}" if ct.get("runtime") else ""
+        runtime = f" runtime {ct['runtime']} {ct.get('state')}" if ct.get("runtime") else ""
         runtime += "".join(f" MISSING {m.get('what')}" for m in ct.get("missing") or [])
         print(f"{n['hostname']:<20} {n['node_id']:<11} {n['lifecycle']:<11} {n['desired_state']:<9} "
               f"{'online ' if n['online'] else 'OFFLINE'} jobs {n['live']}/{cap.get('cpu_slots', 0)} "
@@ -562,6 +563,10 @@ def cmd_fleet(a):
               f"protecting {','.join((tel.get('protection') or {}).get('active') or []) or '-'} "
               f"modules {mods} {gpu}{runtime} caps {caps}"
               + "".join(f" STOPPED {k} ({why})" for k, why in sorted((tel.get("services_held") or {}).items())))
+        for m in ct.get("missing") or []:
+            print(f"  containers missing {m.get('what')}: {m.get('detail')}  -> {m.get('fix')}")
+        if ct.get("detail"):
+            print(f"  containers {ct.get('state')}: {ct['detail']}")
     for e in d["enrollments"]:
         print(f"PENDING enrollment {e['enrollment_id']} from {e['hostname']} ({e['peer_ip']})  -> oarbank node approve {e['enrollment_id']}")
     for c in d["campaigns"]:
@@ -580,7 +585,62 @@ def _when(t) -> str:
     return time.strftime("%m-%d %H:%M", time.localtime(t)) if t else "-"
 
 
+def node_show(target: str, as_json: bool = False):
+    """A node as the console's node page shows it (detail.node, GET /api/v1/nodes/<node>): its state, modules, the doctor's
+    failed checks, GPU APIs with their evidence, the container runtime and what it misses, module services, folder grants
+    and per-capability sandbox enforcement."""
+    d = api("GET", f"/api/v1/nodes/{target}")
+    if as_json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    n, g = d["node"], d["gpu"]
+    print(f"{n['hostname']} {n['node_id']} {n['platform'] or '-'} {n['lifecycle']} {n['desired_state']} "
+          f"{'online' if n['online'] else 'OFFLINE'} agent {n['agent_version'] or '-'}"
+          + (f" QUARANTINED: {n['quarantine_reason']}" if n["quarantine_reason"] else ""))
+    for m, st in d["modules"].items():
+        print(f"  module {m}: {st['state']}" + (f" ({st['reason']})" if st["reason"] else ""))
+    doc = d["doctor"]
+    if doc is None:
+        print("  doctor: not reported yet")
+    else:
+        print(f"  doctor {_when(doc['at'])}, release {doc['release_id'] or '-'}: capabilities {', '.join(doc['capabilities']) or 'none'}")
+        for m in doc["modules"]:
+            print(f"    {m['module']}: {m['health'] or '?'}, {m['checks']} checks"
+                  + "".join(f"\n      failed {c['name']}" + (f": {c['detail']}" if c["detail"] else "") for c in m["failed"]))
+    if not g["reported"]:
+        print("  gpu apis: not reported yet")
+    else:
+        print(f"  gpu apis: host {', '.join(g['host']) or '-'}; containers {', '.join(g['containers']) or '-'}"
+              + (f" ({g['mechanism']})" if g["mechanism"] else ""))
+        for api_, ev in sorted(g["evidence"].items()):
+            print(f"    {api_}: {ev}")
+    ct = d["containers"]
+    if ct and ct.get("runtime"):
+        print(f"  containers: {ct['runtime']} {ct.get('state')}" + (f" · {', '.join(ct['platforms'])}" if ct.get("platforms") else "")
+              + (f"; {ct['detail']}" if ct.get("detail") else ""))
+    for m in (ct or {}).get("missing") or []:
+        print(f"    missing {m.get('what')}: {m.get('detail')}" + (f"; fix: {m['fix']}" if m.get("fix") else ""))
+    if not d["services"]:
+        print("  services: none reported")
+    for sv in d["services"]:
+        print(f"  service {sv['module']}/{sv['service']}: {sv['state']}, {sv['health'] or 'health unknown'}"
+              + (f", stopped: {sv['stopped_reason']}" if sv["stopped_reason"] else "")
+              + (f" ({sv['gpu_api_missing']})" if sv["gpu_api_missing"] else "")
+              + (f", {sv['users']} jobs using it" if sv["users"] else "") + (f", error: {sv['error']}" if sv["error"] else ""))
+    for f in d["folders"]:
+        print(f"  folder {f['id']}: {f['access'] or '?'} {f['path'] or '(no longer mapped)'}, {f['status']}"
+              + (f" (statement {f['statement_seq']}, {'signed' if f['signed'] else 'unsigned'})" if f["statement_seq"] else ""))
+    sb = d["sandbox"]
+    print(f"  sandbox: {sb['backend'] or 'no backend: no module work'}")
+    for c in sb["capabilities"]:
+        who = f", keeps out {', '.join(c['blocks'])}" if c["blocks"] else \
+            f", needed by {', '.join(c['needed_by'])}" if c["needed_by"] else ""
+        print(f"    {c['capability']}: {c['state']}{who}")
+
+
 def cmd_node(a):
+    if a.action == "show":
+        return node_show(a.target, a.json)
     if a.action == "confirm-identity":
         res = run_op("nodes.confirm_identity", a.target, {}, yes=True)
     elif a.action == "approve":
@@ -916,11 +976,13 @@ def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="oarbank")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fleet").set_defaults(fn=cmd_fleet)
-    n = sub.add_parser("node", help="a node: approve, reject, state, mode, limits, policy, confirm-identity")
-    n.add_argument("action", choices=["approve", "reject", "state", "mode", "limits", "policy", "confirm-identity"])
+    n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, sandbox), "
+                                    "approve, reject, state, mode, limits, policy, confirm-identity")
+    n.add_argument("action", choices=["show", "approve", "reject", "state", "mode", "limits", "policy", "confirm-identity"])
     n.add_argument("target")
     n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES))
     n.add_argument("kv", nargs="*")
+    n.add_argument("--json", action="store_true", help="show: the node's detail document as JSON")
     for k in ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps"):
         n.add_argument("--" + k.replace("_", "-"), dest=k, help="number, or 'off' to remove this cap")
     n.add_argument("--enforce", choices=["soft", "hard"])

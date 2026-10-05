@@ -80,7 +80,7 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Session helpers (the system service) | a LaunchAgent in every GUI login, reporting over `/Library/Application Support/Oarbank/run/session.sock` | a global systemd user unit per person, reporting over `/run/oarbank/session.sock` | started by the elevated helper in each person's session, reporting over `\\.\pipe\oarbank-session` |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
 | Module sandbox | Seatbelt | Landlock and seccomp | AppContainer in a Job Object, plus an elevated helper for the egress allowlist |
-| Containers | agent-owned Colima profiles: one on Virtualization.framework with Rosetta, and one on krunkit for GPU jobs where krunkit is installed | rootless Podman, else Docker Engine | not yet |
+| Containers | agent-owned Colima profiles: one on Virtualization.framework with Rosetta, and one on krunkit for GPU jobs where krunkit is installed | rootless Podman, else Docker Engine | an agent-owned WSL containers session (a VM of its own) |
 
 Host protection runs on every OS ([protection.md](protection.md), "On each OS" and "Whose processes"): the rules,
 their process trees and triggers, presence, the front app, GPU time, the dynamic controller's measured signals and its
@@ -227,8 +227,11 @@ GPU offers the `gpu` pool and runs `gpus = "all"` containers with `--device <kin
 from the spec; a Mac with krunkit runs the containers of jobs that reserved the `gpu` pool in a second agent-owned
 Colima VM, `oarbank-gpu`, whose virtio-gpu device gives them Vulkan on the Mac's GPU (`--device /dev/dri`, Mesa's Venus
 driver in the image, MoltenVK on the host; `containers.gpu = "virtio-gpu:venus"`; [gpu-placement.md](gpu-placement.md)).
-Windows has no runtime yet (planned: an agent-owned WSL2 distribution running Podman, with GPU-PV through the same CDI
-path).
+Windows uses a WSL containers (WSLc) session the agent creates through the WSLc SDK and drives with `wslc.exe`
+([windows-containers.md](windows-containers.md), D39): its own name, storage, VM size and settings, no host loopback,
+Windows paths mounted as they are, its host's architecture only, and GPU-PV through the CDI spec its guest writes
+(`cdi:microsoft.com/wslc`; container APIs `directml`, and `cuda` with NVIDIA's WSL library). The broker's endpoint there
+is a named pipe only the agent's account and the module's AppContainer may open.
 
 ## Packaging and CI
 
@@ -247,6 +250,6 @@ path).
 
 ## Not built yet
 
-- Containers on Windows, and the Windows admin channel (the coordinator runs on macOS and Linux).
+- The Windows admin channel (the coordinator runs on macOS and Linux).
 - Protection measurements on hardware other than Apple Silicon.
 - The apt/dnf repository (its hosting and key are the owner's).

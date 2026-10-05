@@ -17,7 +17,8 @@ from starlette.concurrency import run_in_threadpool
 from . import config as C
 from . import clock
 from . import modcalls
-from . import agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, ops, releases
+from . import (agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, nodeservices,
+               ops, releases)
 from ..contracts import operations as registry
 from .db import DB, DBBusy, jl
 
@@ -643,7 +644,7 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return {**n, "mods": mods,
                 "facts": jl(n["facts_json"], {}), "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
                 "policy": jl(n["policy_json"], {}), "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
-                "hb_age": t - hb if hb else None, "live": live, "done1h": done1h}
+                "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n)}
 
     def fleet_data():
         nodes = [node_view(n) for n in db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]
@@ -871,8 +872,22 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(404, "not_found", f"campaign {cid}")
         return c
 
-    # ---------------- one job, one node's protection: what `oarbank job|protection show` print (detail.py,
+    # ---------------- one node, one job, one node's protection: what `oarbank node|job|protection show` print (detail.py,
     # protection.status; the console renders the same documents from its own read connection; docs/design/console-parity.md)
+    @app.get("/api/v1/nodes/{nid}")
+    def api_node(nid: str, actor=Depends(who)):
+        from . import detail
+        n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+        if n is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+
+        def manifest_for(name: str):                       # the module version this node runs
+            try:
+                return modcalls.info_for(name, modstore.version_for_node(db, name, n["node_id"])).manifest
+            except KeyError:
+                return None
+        return detail.node(db, nid, clock.now(), manifest_for)
+
     @app.get("/api/v1/nodes/{nid}/protection")
     def api_node_protection(nid: str, actor=Depends(who)):
         from . import protection

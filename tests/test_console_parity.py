@@ -1,5 +1,5 @@
-"""The operator's side in parity (docs/design/console-parity.md, PLAN D42): what operators do from the console's job and
-protection pages has `oarbank` commands reading the same documents through the admin API, every command the registry
+"""The operator's side in parity (docs/design/console-parity.md, PLAN D42): what operators read and do on the console's node,
+job and protection pages has `oarbank` commands reading the same documents through the admin API, every command the registry
 names exists, explain's remedies are runnable from both, and the console shows what it left unshown (GPU API evidence,
 per-capability enforcement, folders, pinned datasets, container image first runs, a plan's impact)."""
 import json
@@ -14,7 +14,7 @@ from oarbank.cli import main as cli
 from oarbank.console.app import console_app
 from oarbank.console.state import ConsoleState
 from oarbank.contracts import impact, operations, parity
-from oarbank.coordinator import access, app as coord_app, core, modcalls, protection
+from oarbank.coordinator import access, app as coord_app, core, detail, modcalls, protection
 
 from helpers import FACTS, PARAMS, SEATBELT, certify, create_study, enrolled_node, fresh, make_db, run_op, sign_in
 from test_console import SECRET, Server
@@ -60,7 +60,7 @@ def oarbank(capsys, *args) -> tuple[int, str]:
 
 
 def dress(db, nid):
-    """Give the node everything the node page's sections report."""
+    """Give the node everything the node page and `oarbank node show` report."""
     facts = {**FACTS, "containers": CONTAINERS,
              "sandbox": {"backend": "seatbelt", "enforcement": {**SEATBELT, "ipc": "cooperative"}}}
     tel = {"services_running": [], "services_held": {"relay/scorer": "preempt_memory"}, "services_reserved_gb": 0.0,
@@ -95,7 +95,34 @@ def test_explain_kinds_are_checked_against_the_cli_parser(monkeypatch):
     assert "explain campaign: no CLI path" in parity.gaps()
 
 
-# ------------------------------------------------------------------ oarbank node mode
+# ------------------------------------------------------------------ oarbank node show | mode
+
+def test_node_show_prints_what_the_node_page_shows(fleet, capsys):
+    db, nid = fleet["db"], fleet["nid"]
+    dress(db, nid)
+    db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps({"services": [
+        {"service": "relay/scorer", "health": "healthy", "running": False, "held": "preempt_memory"}]}), time.time(), nid))
+    code, out = oarbank(capsys, "node", "show", nid)
+    assert code == 0, out
+    lines = [x.strip() for x in out.splitlines()]
+    assert lines[0].startswith(f"mini {nid} darwin-arm64 ready active online") and "module relay: certified" in lines
+    assert "toy: undetected, 1 checks" in lines and "failed gpu_apis: needs cuda" in lines
+    assert "gpu apis: host metal, opencl; containers vulkan" in lines         # the facts' containers.gpu says undetected
+    assert "cuda: CUDA does not run on macOS" in lines and "metal: Apple M5 Pro" in lines
+    assert "containers: wslc missing" in lines
+    assert "missing virtual_machine_platform: the Virtual Machine Platform feature is off; fix: oarbank-agent containers install" in lines
+    assert "service relay/scorer: stopped, healthy, stopped: held: preempt_memory" in lines     # the agent's report, once
+    assert out.count("relay/scorer") == 1
+    assert "folder inputs: read /Users/shared/in, ok (statement 1, unsigned)" in lines
+    assert "sandbox: seatbelt" in lines and "ipc: cooperative, keeps out relay, toy" in lines
+    assert "filesystem: enforced, needed by relay, toy" in lines and "no_link_local: unavailable" in lines
+    assert oarbank(capsys, "node", "show", "mini")[1] == out                         # by hostname too
+    doc = json.loads(oarbank(capsys, "node", "show", nid, "--json")[1])
+    same = detail.node(db, nid, time.time(), lambda m: modcalls.info(m).manifest)       # what the console renders
+    for k in ("doctor", "gpu", "containers", "services", "folders", "sandbox"):
+        assert doc[k] == json.loads(json.dumps(same[k])), k
+    assert oarbank(capsys, "node", "show", "nope")[0] == 1
+
 
 def test_node_mode_sets_the_protection_mode(fleet, capsys):
     db, nid = fleet["db"], fleet["nid"]

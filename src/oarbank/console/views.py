@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import time
 
-from ..coordinator import detail
+from ..coordinator import detail, nodeservices
 
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
 CLOCK_SKEW_S = 60.0           # oarbankd core.CLOCK_SKEW_S
@@ -105,6 +105,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
     v["gpu"] = detail.gpu(facts, v["doctor"])
+    v["services"] = nodeservices.rows(n)
     return v
 
 
@@ -176,7 +177,7 @@ def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
     # module secrets with a value of this node's own (names, fingerprints: never a value)
     secrets = r.q("SELECT module, name, fingerprint, set_at FROM secrets WHERE node_id=? AND module!='' ORDER BY module, name",
                   (nid,))
-    return {"n": nv, "d": detail.node(r, nid, manifest_for), "attempts": atts, "fails": fails, "events": events,
+    return {"n": nv, "d": detail.node(r, nid, now, manifest_for), "attempts": atts, "fails": fails, "events": events,
             "history": history, "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions,
             "conditions": node_conditions(nv), "node_secrets": secrets}
 

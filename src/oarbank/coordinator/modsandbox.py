@@ -229,7 +229,7 @@ def approve(db: DB, name: str, version: str, actor: str, reason: str | None) -> 
          "ON CONFLICT(name,version) DO UPDATE SET requests_json=excluded.requests_json, digest=excluded.digest, "
          "approved_by=excluded.approved_by, approved_at=excluded.approved_at, reason=excluded.reason",
          (name, version, json.dumps(st["requests"], sort_keys=True), st["digest"], actor, time.time(), reason))
-    db.event("module_grants_approved", actor=actor, reason=f"{name} {version}: {describe(st['requests'])}"[:300])
+    db.event("module_grants_approved", actor=actor, reason=f"{name} {version}: {describe(st['requests'])}"[:300], module=name)
     return {"name": name, "version": version, "digest": st["digest"], "requests": st["requests"]}
 
 
