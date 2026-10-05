@@ -142,11 +142,14 @@ A Linux coordinator works too: `scripts/build-coordinator.sh` on Linux, then `de
 Windows 10 1809 or later, x64 or arm64.
 
 ```powershell
-scripts\package-windows.ps1                  # on Windows with Rust, uv and WiX 5: dist\oarbank-agent-<v>-windows-<arch>.msi
+scripts\package-windows.ps1 [-Arch arm64]    # on Windows with Rust, uv and WiX 5: dist\oarbank-agent-<v>-windows-<arch>.msi
 msiexec /i oarbank-agent-<v>-windows-arm64.msi /qn JOINCODEFILE=C:\path\join-code.txt
 ```
-The script builds for the machine it runs on: an x64 MSI on x64, an arm64 MSI on arm64. On arm64 the build also needs
-clang (the `ring` crate does not build with MSVC alone there): Visual Studio's "C++ Clang Compiler for Windows"
+The script builds for `-Arch` (`x64` or `arm64`), by default the machine's own architecture, which it asks Windows for
+(`IsWow64Process2`, in `scripts\windows-arch.ps1`): an x64 PowerShell on Windows on Arm still builds the arm64 MSI. The
+binaries are built for that target whatever the Rust toolchain's own host is (`rustup target add` the target's standard
+library), and the node runtime it bundles is checked before packaging (`scripts\check-node-runtime.py`: no links, no
+path of the build machine, and it runs from another directory). For arm64 the build also needs clang (the `ring` crate does not build with MSVC alone there): Visual Studio's "C++ Clang Compiler for Windows"
 component (`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) or a standalone LLVM. The script finds either through
 `scripts\windows-clang.ps1`, which adds the Visual Studio component when run with `-Install`.
 

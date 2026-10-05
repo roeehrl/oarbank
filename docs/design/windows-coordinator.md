@@ -313,8 +313,19 @@ actionlint), x64 Windows (CI only), and Windows Server. An agent installed from 
 was not combined on the VM; the role containers cover it by construction, and the VM's test agent beside the service
 showed the failure and the fix.
 
-**Found on the way, outside this gap.** The elevated helper keeps a job's loopback filters when the shim that asked
-for them is killed; `scripts/build-node-runtime.ps1` copies uv's Python through its junction and, with
-`package-windows.ps1`, reads the architecture from `PROCESSOR_ARCHITECTURE`; the agent's own runner environment
-sets `LOCALAPPDATA` inside the work directory, so tools that ask Windows for a temporary directory find none inside the
-AppContainer.
+**Found on the way, outside this gap, and fixed before 2.5.0.**
+- The elevated helper kept a job's loopback filters and exemption when the shim that asked for them was killed (on the
+  VM: a killed job's filters stayed until the helper restarted, and the module's next job, with its own proxy port,
+  reached nothing, since each opening's filter blocked every port but its own). An opening now lasts exactly as long as
+  the process that asked for it: the helper waits on that process's handle, its filters are a block per container and a
+  permit per port (several jobs of one module at once), persistent and owned by the helper's WFP provider, and a helper
+  that starts keeps the openings whose owner still runs and removes the rest (helper_windows.rs; `helper-clear` on
+  uninstall).
+- `scripts/build-node-runtime.ps1` copies the interpreter's real prefix and refuses a link; the packaging gate
+  (`scripts/check-node-runtime.py`) refuses a runtime with a reparse point or a path of the build machine (uv's
+  `direct_url.json` named the checkout), and runs a copy of it from another directory.
+- The Windows scripts take the architecture from the caller (`-Arch`) or from Windows (`scripts/windows-arch.ps1`,
+  `IsWow64Process2`), build with an explicit Rust target and check the binaries' machine type.
+- A runner's per-user locations, `LOCALAPPDATA` among them, stay in its work directory by design; the module launcher
+  creates the AppContainer folder an AppContainer start points `LOCALAPPDATA`, `TEMP` and `TMP` at (module-sandbox.md,
+  "A runner's home").

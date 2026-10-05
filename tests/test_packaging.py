@@ -335,6 +335,83 @@ def test_windows_launchers_name_the_bundled_python_relative_to_themselves(tmp_pa
     assert r.returncode == 0, r.stderr
 
 
+def test_windows_builds_take_their_architecture_from_the_caller_or_the_machine():
+    # PROCESSOR_ARCHITECTURE is the emulated one under emulation (an x64 PowerShell on Windows on Arm says AMD64): the
+    # scripts ask windows-arch.ps1, which takes -Arch from the caller and asks Windows for the machine otherwise
+    scripts = WXS.parents[2] / "scripts"
+    for ps1 in scripts.glob("*.ps1"):
+        code = [l for l in ps1.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#")]
+        assert not any("PROCESSOR_ARCHITECTURE" in l for l in code), ps1.name
+    for name in ("build-node-runtime.ps1", "package-windows.ps1", "build-coordinator.ps1", "verify-windows-containers.ps1"):
+        assert '"$PSScriptRoot\\windows-arch.ps1"' in (scripts / name).read_text(encoding="utf-8"), name
+    pkg = (scripts / "package-windows.ps1").read_text(encoding="utf-8")
+    assert "-Arch $Arch" in pkg and "--target $Target" in pkg and "check-pe-imports.py\" --machine $Arch" in pkg
+    assert "--target $Target" in (scripts / "build-coordinator.ps1").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="asks Windows for the machine's architecture")
+def test_the_architecture_is_the_machine_s_under_emulation_and_whatever_the_environment_says():
+    from oarbank_sdk import portable
+    script = WXS.parents[2] / "scripts" / "windows-arch.ps1"
+    machine = {"amd64": "x64", "arm64": "arm64"}[portable.host_platform().split("-")[1]]
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    # this machine's own PowerShell, and the 32-bit one, which runs under WOW64 or Windows on Arm's x86 emulation
+    shells = [p for p in (rf"{root}\System32\WindowsPowerShell\v1.0\powershell.exe",
+                          rf"{root}\SysWOW64\WindowsPowerShell\v1.0\powershell.exe") if os.path.exists(p)]
+
+    def arch(shell, *args, env=None):
+        r = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *args],
+                           capture_output=True, text=True, env=env, timeout=120)
+        return r.returncode, r.stdout.strip()
+    assert len(shells) == 2, shells
+    for shell in shells:
+        for claimed in (None, "AMD64", "ARM64", "x86"):
+            env = {**os.environ, **({"PROCESSOR_ARCHITECTURE": claimed} if claimed else {})}
+            assert arch(shell, env=env) == (0, machine), (shell, claimed)
+        assert arch(shell, "-Arch", "x64") == (0, "x64") and arch(shell, "-Arch", "arm64") == (0, "arm64")
+        assert arch(shell, "-Arch", "ia64")[0] != 0
+
+
+def _check_node_runtime():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_node_runtime", WXS.parents[2] / "scripts" / "check-node-runtime.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_node_runtime_check_finds_links_and_build_paths(tmp_path):
+    # uv names its managed Pythons through junctions; a runtime copied through one, or naming the checkout it was built
+    # from (uv's direct_url.json), is refused before the MSI packages it
+    check = _check_node_runtime()
+    rt = tmp_path / "runtime"
+    info = rt / "Lib" / "site-packages" / "oarbank_sdk-1.5.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "RECORD").write_text("oarbank_sdk/__init__.py,sha256=x,1\n", encoding="utf-8")
+    (rt / "python.exe").write_bytes(b"MZ")
+    assert check.links(rt) == [] and check.references(rt, [str(tmp_path / "checkout")]) == []
+    target = tmp_path / "cpython-3.12.15"
+    target.mkdir()
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(rt / "DLLs"))
+    else:
+        (rt / "DLLs").symlink_to(target, target_is_directory=True)
+    assert check.links(rt) == [rt / "DLLs"]
+    checkout = tmp_path / "Checkout" / "vendor" / "oarbank-sdk"
+    (info / "direct_url.json").write_text('{"url": "' + checkout.as_uri() + '", "dir_info": {}}', encoding="utf-8")
+    found = check.references(rt, [str(tmp_path / "Checkout")])
+    assert [f for f, _ in found] == [info / "direct_url.json"], found
+
+
+@pytest.mark.skipif(not os.environ.get("OARBANK_NODE_RUNTIME"),
+                    reason="set OARBANK_NODE_RUNTIME to a node runtime scripts/build-node-runtime.ps1 built to check it")
+def test_a_built_node_runtime_is_fit_to_package():
+    check = _check_node_runtime()
+    root = Path(os.environ["OARBANK_NODE_RUNTIME"])
+    assert check.main([str(root), str(WXS.parents[2])]) == 0
+
+
 def test_build_scripts_relocate_their_bundled_console_scripts():
     scripts = WXS.parents[2] / "scripts"
     coord = (scripts / "build-coordinator.sh").read_text(encoding="utf-8")

@@ -20,9 +20,8 @@ $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
 if (-not $Version) { $Version = (Select-String -Path "$Repo\pyproject.toml" -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value }
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$') { throw "bad version $Version" }
-# the machine's architecture (an x64 PowerShell under Windows on Arm's emulation says AMD64 everywhere else)
-$native = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment").PROCESSOR_ARCHITECTURE
-$Arch = if ($native -eq "ARM64") { "arm64" } else { "amd64" }
+# the machine's architecture (scripts\windows-arch.ps1: never the one this PowerShell runs as under emulation)
+$Arch = if ((& "$PSScriptRoot\windows-arch.ps1") -eq "arm64") { "arm64" } else { "amd64" }
 $Platform = "windows-$Arch"
 $Out = "$Repo\dist"
 $Work = Join-Path $env:TEMP "oarbank-coord-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -72,12 +71,14 @@ try {
 
   # 3b. the agent's launcher confines module processes (AppContainers); uv makes module environments
   if ($Arch -eq "arm64") { $env:PATH = "$(& "$PSScriptRoot\windows-clang.ps1");$env:PATH" }   # ring needs clang here
+  # for the platform's architecture, whatever the toolchain's own host is
+  $Target = if ($Arch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
   Push-Location "$Repo\rust"
-  cargo build -q --release --locked -p oarbank-agent
+  cargo build -q --release --locked --target $Target -p oarbank-agent
   $built = $LASTEXITCODE
   Pop-Location
   if ($built) { throw "cargo build failed" }
-  Copy-Item "$Repo\rust\target\release\oarbank-agent.exe" "$Root\bin\oarbank-sandbox.exe"
+  Copy-Item "$Repo\rust\target\$Target\release\oarbank-agent.exe" "$Root\bin\oarbank-sandbox.exe"
   Copy-Item (Get-Command uv).Source "$Root\bin\uv.exe"
 
   # 4. entry points, relative to the build so it runs from wherever it is unpacked: a two-line launcher per program
