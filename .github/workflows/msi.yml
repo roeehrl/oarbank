@@ -12,6 +12,7 @@ on:
       - scripts/build-node-runtime*
       - scripts/bundle-python*
       - scripts/check-*
+      - scripts/fetch-uv.py
       - rust/crates/oarbank-launcher/**
       - rust/.cargo/config.toml
       - .github/workflows/msi.yml

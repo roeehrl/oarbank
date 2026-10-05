@@ -5,11 +5,11 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 
 ## What you need
 
-- Nodes: macOS 15 or later on Apple silicon (Intel Macs run the universal agent when it is built with the x86_64
-  target), Linux with systemd on x86-64 or arm64 ([Linux nodes](#linux-nodes)), or Windows 10 1809 or later on x64
+- Nodes: macOS 15 or later on Apple silicon or Intel (one package each), Linux with systemd on x86-64 or arm64 ([Linux nodes](#linux-nodes)), or Windows 10 1809 or later on x64
   or arm64 ([Windows nodes](#windows-nodes)).
-- For the coordinator: a Mac, a Linux machine or a Windows machine (Windows 10 1809, Windows 11 or Windows Server
-  2019 or later; [Windows coordinator](#windows-coordinator)) that stays on, reachable by the nodes on one address
+- For the coordinator: a Mac with Apple silicon (an Intel Mac runs it from a checkout, `install-oarbankd.sh
+  --checkout`), a Linux machine or a Windows machine (Windows 10 1809, Windows 11 or Windows Server 2019 or later;
+  [Windows coordinator](#windows-coordinator)) that stays on, reachable by the nodes on one address
   (port 7443/tcp).
 - Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
   agent's own Colima, and so on). On a Mac with Apple silicon, krunkit gives GPU containers Vulkan on the Mac's GPU,
@@ -20,14 +20,16 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 
 | File | Built by | What |
 |---|---|---|
-| `oarbank-coordinator-<v>-darwin-arm64.tar.gz` | `scripts/build-coordinator.sh` | the coordinator: a relocatable Python with the compiled core, `bin/oarbankd`, `bin/oarbank`, `bin/oarbank-console` (and `-linux-<arch>` on Linux) |
+| `oarbank-coordinator-<v>-darwin-arm64.tar.gz` | `scripts/build-coordinator.sh` | the coordinator: a relocatable Python with the compiled core, `bin/oarbankd`, `bin/oarbank`, `bin/oarbank-console`, and `bin/uv`, which installs module dependencies (and `-linux-amd64`, `-linux-arm64` on Linux) |
 | `oarbank-coordinator-<v>-windows-<arch>.tar.gz` | `scripts\build-coordinator.ps1` | the same for Windows: x64 Python with the compiled core, the agent's module launcher, uv, and `bin\*.cmd` |
-| `oarbank-agent-<v>-macos.pkg` | `scripts/package-macos.sh` | the node: `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}` and the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host) |
-| `oarbank-agent-<v>-darwin-<arch>` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
+| `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-macos-x86_64.pkg` | `scripts/package-macos.sh [<v>] [arm64\|x86_64]` | the node, for Macs with Apple silicon or Intel Macs (each refuses the other): `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}` and the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host) |
+| `oarbank-agent-<v>-darwin-arm64`, `oarbank-agent-<v>-darwin-amd64` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
 
 Signing the packages is the owner's: `OARBANK_CODESIGN_IDENTITY` (Developer ID Application) for the binaries,
 `OARBANK_INSTALLER_IDENTITY` (Developer ID Installer) for the pkg, `OARBANK_NOTARY_PROFILE` (a `notarytool` keychain
-profile) to notarize and staple it. Without them the binaries are signed ad hoc, which is fine on your own Macs.
+profile) to notarize and staple it. Without them the binaries are signed ad hoc, which is fine on your own Macs. The
+x86_64 package builds on Apple silicon with the `x86_64-apple-darwin` Rust target (`rustup target add`) and Rosetta 2
+(`softwareupdate --install-rosetta`), which runs its interpreter and agent for the build's checks.
 
 ## 1. The coordinator
 
@@ -36,7 +38,8 @@ deploy/oarbankd/install-oarbankd.sh --build oarbank-coordinator-<v>-darwin-arm64
 ```
 `<address>` is where nodes reach this machine (its LAN, VPN or tailnet address). The script unpacks the build under
 `~/Library/Application Support/Oarbank/coordinator-app/`, points `current` at it, and loads two LaunchAgents:
-`dev.codonic.oarbank.oarbankd` and `dev.codonic.oarbank.console`. The coordinator's state is in
+`dev.codonic.oarbank.oarbankd` and `dev.codonic.oarbank.console`, whose PATH starts with the build's `bin` (its uv
+installs module dependencies; no other uv is needed). The coordinator's state is in
 `~/Library/Application Support/Oarbank/coordinator` (owner-only). `--dry-run` prints every step instead.
 
 **Local Network privacy (macOS 15 and later).** The coordinator announces itself on the local network for
@@ -78,7 +81,7 @@ machine, `OARBANK_NODE_NAME`). Without `--label`, the node takes the name its ag
 ```bash
 sudo mkdir -p /Library/Oarbank/etc
 echo 'OB1-…' | sudo tee /Library/Oarbank/etc/join-code >/dev/null
-sudo installer -pkg oarbank-agent-<v>-macos.pkg -target /
+sudo installer -pkg oarbank-agent-<v>-macos-arm64.pkg -target /     # an Intel Mac: oarbank-agent-<v>-macos-x86_64.pkg
 ```
 The postinstall sets the node up for the console user (a LaunchAgent) and deletes the code file. Add an empty
 `/Library/Oarbank/etc/system` file first to install it as a system service run by a dedicated `_oarbank` account
@@ -151,7 +154,7 @@ render,video oarbank`, then restart the agent). `oarbank-agent gpu-apis` (run as
 oarbank-agent gpu-apis`) prints the GPU APIs the node provides and why any is missing; the node's doctor reports the
 same list, and work is placed by it ([gpu-placement.md](design/gpu-placement.md)).
 
-A Linux coordinator works too: `scripts/build-coordinator.sh` on Linux, then `deploy/oarbankd/install-oarbankd.sh
+A Linux coordinator works too: `oarbank-coordinator-<v>-linux-<arch>.tar.gz` (`scripts/build-coordinator.sh` on Linux), then `deploy/oarbankd/install-oarbankd.sh
 --build … --agent-bind …` writes systemd user units (run `loginctl enable-linger` once so they start at boot).
 
 ## Windows nodes
@@ -165,8 +168,8 @@ msiexec /i oarbank-agent-<v>-windows-arm64.msi /qn JOINCODEFILE=C:\path\join-cod
 The script builds for `-Arch` (`x64` or `arm64`), by default the machine's own architecture, which it asks Windows for
 (`IsWow64Process2`, in `scripts\windows-arch.ps1`): an x64 PowerShell on Windows on Arm still builds the arm64 MSI. The
 binaries are built for that target whatever the Rust toolchain's own host is (`rustup target add` the target's standard
-library), and what it packages is checked first (`scripts\check-package.py`: no links, no path of the build machine, and
-the node runtime runs from another directory). For arm64 the build also needs clang (the `ring` crate does not build
+library), and what it packages is checked first (`scripts\check-package.py`: no links, no path of the build machine, no
+native file for another architecture, and the node runtime runs from another directory). For arm64 the build also needs clang (the `ring` crate does not build
 with MSVC alone there): Visual Studio's "C++ Clang Compiler for Windows" component
 (`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) or a standalone LLVM. The script finds either through
 `scripts\windows-clang.ps1`, which adds the Visual Studio component when run with `-Install`.

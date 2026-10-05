@@ -271,8 +271,9 @@ is a named pipe only the agent's account and the module's AppContainer may open.
 - **One declarative install plan** (`deploy/install-plan.json`: scopes, home, directories with modes, the join code,
   purge), rendered by `oarbank-launcher setup|remove`. The join code goes to an owner-only file the agent consumes
   and deletes, never into a service definition.
-- **Packages:** a macOS pkg (`scripts/package-macos.sh`: universal binaries, Developer ID with hardened runtime or ad
-  hoc, a postinstall that runs the install plan; `deploy/macos/oarbank-uninstall`), deb, rpm and a tarball through
+- **Packages:** a macOS pkg per architecture (`scripts/package-macos.sh`: `-macos-arm64.pkg` and `-macos-x86_64.pkg`,
+  Developer ID with hardened runtime or ad hoc, a postinstall that runs the install plan;
+  `deploy/macos/oarbank-uninstall`), deb, rpm and a tarball through
   nFPM (`scripts/package-linux.sh`, `deploy/linux`), and a WiX MSI (`scripts/package-windows.ps1`,
   `deploy/windows/oarbank-agent.wxs`; `JOINCODEFILE`, `JOINCODE` or `COORDINATOR`). The coordinator is installed from a
   build (`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`) by `deploy/oarbankd/install-oarbankd.sh
@@ -282,11 +283,41 @@ is a named pipe only the agent's account and the module's AppContainer may open.
   Windows (x64 and arm64), the Rust workspace with the agent end-to-end tests and the oarbank-core parity tests on
   macOS, the agent end-to-end tests on Windows (x64 and arm64), the Rust workspace on Linux and Windows (x64 and arm64
   each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags,
-  which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64 and arm64, an x64 and an arm64 MSI,
-  and the Windows coordinator builds. `.github/workflows/msi.yml` installs the MSI for real on a throwaway Windows
+  which the owner signs: the arm64 and x86_64 macOS pkgs and the macOS coordinator build, deb, rpm and the coordinator
+  build for x64 and arm64 Linux, an x64 and an arm64 MSI, and the Windows coordinator builds. `.github/workflows/msi.yml` installs the MSI for real on a throwaway Windows
   runner whenever the package or what it installs changes, and on every tag: both services with their accounts and
   start types, the elevated helper's openings across a major upgrade, and an uninstall that leaves nothing behind
   (`scripts/ci-windows-msi.ps1`).
+- **Every native file in a package is for its platform.** A package is built for one platform (spec/platforms.md),
+  named in its file name, and everything native in it is for that platform: the Rust binaries are built for its target,
+  the interpreter is python-build-standalone's build for it (uv requests name the architecture), the wheels are the
+  ones that interpreter asks uv for, and uv is its release for that platform, pinned by hash (`scripts/fetch-uv.py`,
+  the version CI builds with), which does the installing (uv writes Windows console-script launchers for its own
+  architecture). Coordinator builds ship that uv too, first on the services' PATH, for module dependencies.
+  `scripts/check-package.py --platform` reads every Mach-O (thin or universal), ELF and PE file and every object of a
+  static or import library in what a build ships, and refuses one without code for the platform (an x64 header over
+  Arm64EC code, as in Microsoft's Arm64 runtime libraries, counts as Windows on Arm); its run check then loads every
+  extension module from a moved copy, on the package's platform. Building for another architecture than the build
+  machine's runs that architecture's code: Rosetta 2 on Apple silicon for x86_64, Windows on Arm's emulation for x64.
+  What a release builds:
+
+  | Artifact | Built on | Native files |
+  |---|---|---|
+  | `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-darwin-arm64` | macos-26 (arm64) | arm64: agent, launcher, CPython, extension modules, uv |
+  | `oarbank-agent-<v>-macos-x86_64.pkg`, `oarbank-agent-<v>-darwin-amd64` | macos-26, Rosetta 2 | x86_64: the same |
+  | `oarbank-coordinator-<v>-darwin-arm64.tar.gz` | macos-26 | arm64: CPython, wheels, the Nuitka module, uv |
+  | `oarbank-agent_<v>_<arch>.deb`, `.rpm`, `-linux-<arch>.tar.gz`, `oarbank-coordinator-<v>-linux-<arch>.tar.gz` | ubuntu-24.04 (amd64), ubuntu-24.04-arm | the runner's: everything, the coordinator's module launcher too |
+  | `oarbank-agent-<v>-windows-<arch>.msi` | windows-2025 (x64), windows-11-arm | the MSI's: agent, launcher, `wslcsdk.dll`, CPython, extension modules, uv |
+  | `oarbank-coordinator-<v>-windows-<arch>.tar.gz` | the same | x64 CPython, wheels and Nuitka module (cryptography has no Windows on Arm wheels); the platform's module launcher, uv and console-script launchers |
+
+  There is no universal macOS pkg. A universal one would fuse two python-build-standalone builds and two sets of
+  wheels with `lipo`: PyPI's wheels for the runtime's dependencies are per architecture, so every extension module
+  would be a file no upstream ships or tested, their wheel metadata (`RECORD` hashes, `WHEEL` tags) would no longer
+  describe them, the build configuration exists once per architecture, and every Mac would carry both halves (about
+  twice the runtime). Two native pkgs hold exactly what upstream builds for each architecture, each checked against
+  one platform and run on it; each refuses a Mac of the other architecture (its distribution's `hostArchitectures` and
+  an installation check, so an Apple silicon Mac is not offered Rosetta 2 for the Intel package). The agent binary
+  for the update channel is per platform as on Linux and Windows. The macOS coordinator build stays arm64 only.
 - **A package names nothing of the machine that built it.** Every package build runs `scripts/check-package.py` on
   what it ships: no link out of the tree (on Windows no reparse point at all), no path of the build (the checkout, its
   work directories, the build account's home, `CARGO_HOME`) in any file, metadata, bytecode and binaries included, and

@@ -18,10 +18,11 @@ export ARCH VERSION BIN_DIR="$REPO/rust/target/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/oarbank-deb.XXXXXX")"
 RUNTIME_DIR="$WORK/runtime"
 trap 'rm -rf "$WORK"; rm -f "$REPO/deploy/linux/.nfpm.build.yaml"' EXIT
-"$REPO/scripts/build-node-runtime.sh" "$RUNTIME_DIR"
-# what the packages ship holds no link out of itself and no path of this machine, and the runtime runs from elsewhere
+"$REPO/scripts/build-node-runtime.sh" "$RUNTIME_DIR" "linux-$ARCH"
+# what the packages ship holds no link out of itself, no path of this machine and no native file for another
+# architecture, and the runtime runs from elsewhere
 uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --build-path "$WORK" --build-path "$(uv python dir)" \
-    --run "$RUNTIME_DIR=bin/python3" "$RUNTIME_DIR" "$BIN_DIR/oarbank-agent" "$BIN_DIR/oarbank-launcher"
+    --platform "linux-$ARCH" --run "$RUNTIME_DIR=bin/python3" "$RUNTIME_DIR" "$BIN_DIR/oarbank-agent" "$BIN_DIR/oarbank-launcher"
 cd "$REPO/deploy/linux"
 # nFPM expands variables in some fields only: fill them in a copy beside the scripts it names
 sed -e "s|\${ARCH}|$ARCH|g" -e "s|\${VERSION}|$VERSION|g" -e "s|\${BIN_DIR}|$BIN_DIR|g" -e "s|\${RUNTIME_DIR}|$RUNTIME_DIR|g" nfpm.yaml > .nfpm.build.yaml

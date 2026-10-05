@@ -3,14 +3,20 @@
 # never a virtual environment (uv finds the checkout's .venv first unless told --system) nor the link uv names a managed
 # Python by, no bytecode this machine wrote into uv's store (it names the store's path), its build configuration and on
 # macOS its library naming nothing of the store, as python-build-standalone ships them. scripts/build-node-runtime.sh and
-# scripts/build-coordinator.sh use it; scripts/check-package.py checks what they build.
+# scripts/build-coordinator.sh use it; scripts/check-package.py checks what they build. The request names the
+# architecture, so the copy is for the package's platform whatever this machine's is; the script runs the interpreter
+# (under Rosetta 2 for x86_64 on Apple silicon).
 #
-#   scripts/bundle-python.sh DEST [VERSION]      # VERSION: 3.12 by default (OARBANK_PYTHON)
+#   scripts/bundle-python.sh DEST REQUEST        # REQUEST: cpython-3.12-macos-x86_64-none, cpython-3.12-linux-aarch64-gnu, ...
 set -euo pipefail
-DEST="${1:?scripts/bundle-python.sh DEST [VERSION]}"
-PYVER="${2:-${OARBANK_PYTHON:-3.12}}"
-uv python install -q "$PYVER"
-PYHOME="$("$(uv python find --managed-python --system "$PYVER")" -I -B -c 'import os, sys; print(os.path.realpath(sys.base_prefix))')"
+DEST="${1:?scripts/bundle-python.sh DEST REQUEST}"
+REQUEST="${2:?scripts/bundle-python.sh DEST REQUEST}"
+PYVER="$(cut -d- -f2 <<<"$REQUEST")"
+uv python install -q "$REQUEST"
+# the installation by the name uv gives it (cpython-3.12-macos-x86_64-none links to the newest 3.12 installed): `uv python
+# find` passes over an installation for another architecture on Linux, which binfmt (Rosetta, QEMU) can run
+EXE="$(uv python dir)/$REQUEST/bin/python$PYVER"
+PYHOME="$("$EXE" -I -B -c 'import os, sys; print(os.path.realpath(sys.base_prefix))')"
 case "$PYHOME" in "$(cd "$(uv python dir)" && pwd -P)"/*) ;; *) echo "refusing to bundle $PYHOME: not a uv-managed Python" >&2; exit 1 ;; esac
 rm -rf "$DEST"
 cp -R "$PYHOME" "$DEST"

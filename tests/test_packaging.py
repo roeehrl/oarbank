@@ -141,6 +141,14 @@ def test_the_coordinator_installer_finds_uv_and_reads_builds_on_macos_and_linux(
     r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "127.0.0.1", "--dry-run")
     assert r.returncode == 0, r.stderr
     assert f"coordinator-app/1.2.3-{hashlib.sha256(build.read_bytes()).hexdigest()[:12]}" in r.stdout
+    # a build brings its own uv, first on the services' PATH, so oarbankd installs module dependencies on a machine
+    # without one (it reported "uv is not available on this coordinator")
+    r, bin_dir = _installer(tmp_path, "--build", str(build), "--agent-bind", "127.0.0.1", "--dry-run", uv=False)
+    assert r.returncode == 0, r.stderr
+    data = tmp_path / "home" / ("Library/Application Support/Oarbank" if pf.system() == "Darwin" else ".local/share/oarbank")
+    svc_path = re.search(r"<key>PATH</key><string>([^<]*)</string>|\"PATH=([^\"]*)\"", r.stdout)
+    assert (svc_path.group(1) or svc_path.group(2)).split(":")[0] == f"{data}/coordinator-app/current/bin", r.stdout
+    assert str(bin_dir) not in r.stdout
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
@@ -156,7 +164,7 @@ def test_the_coordinator_installer_writes_systemd_units_on_linux(tmp_path):
     home = tmp_path / "home"
     assert f"# {home}/.config/systemd/user/dev.codonic.oarbank.oarbankd.service" in r.stdout
     assert f'ExecStart="{home}/.local/share/oarbank/coordinator-app/current/bin/oarbankd" "--agent-bind" "10.0.0.1"' in r.stdout
-    assert f'"PATH={bin_dir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"' in r.stdout
+    assert f'"PATH={home}/.local/share/oarbank/coordinator-app/current/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"' in r.stdout
     assert "systemctl --user enable --now" in r.stdout and "launchctl" not in r.stdout
     (fake / "uname").write_text('#!/bin/sh\necho MINGW64_NT-10.0\n')
     r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "10.0.0.1", "--dry-run")
@@ -345,7 +353,7 @@ def test_windows_builds_take_their_architecture_from_the_caller_or_the_machine()
     for name in ("build-node-runtime.ps1", "package-windows.ps1", "build-coordinator.ps1", "verify-windows-containers.ps1"):
         assert '"$PSScriptRoot\\windows-arch.ps1"' in (scripts / name).read_text(encoding="utf-8"), name
     pkg = (scripts / "package-windows.ps1").read_text(encoding="utf-8")
-    assert "-Arch $Arch" in pkg and "--target $Target" in pkg and "check-pe-imports.py\" --machine $Arch" in pkg
+    assert "-Arch $Arch" in pkg and "--target $Target" in pkg and "--platform \"windows-$(if ($Arch -eq 'arm64')" in pkg
     assert "--target $Target" in (scripts / "build-coordinator.ps1").read_text(encoding="utf-8")
 
 
@@ -424,6 +432,161 @@ def test_the_package_check_finds_links_out_and_build_paths(tmp_path):
     assert check.references(rt / "wheel.so", [], [str(account)]) == [(rt / "wheel.so", str(account))]
 
 
+def _macho(cpu: int) -> bytes:
+    return b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little") + bytes(24)
+
+
+def _fat(*cpus: int) -> bytes:
+    return b"\xca\xfe\xba\xbe" + len(cpus).to_bytes(4, "big") + b"".join(c.to_bytes(4, "big") + bytes(16) for c in cpus)
+
+
+def _elf(machine: int, cls: int = 2) -> bytes:
+    return b"\x7fELF" + bytes([cls, 1, 1]) + bytes(9) + (3).to_bytes(2, "little") + machine.to_bytes(2, "little") + bytes(44)
+
+
+def _pe(machine: int, chpe: int = 0) -> bytes:
+    """A PE32+ image with one section holding its load configuration, whose CHPE metadata pointer is `chpe`."""
+    import struct
+    coff = struct.pack("<HHIIIHH", machine, 1, 0, 0, 0, 240, 0x22)
+    dirs = bytearray(16 * 8)
+    struct.pack_into("<II", dirs, 10 * 8, 0x1000, 0x140)
+    opt = struct.pack("<H", 0x20B) + bytes(110) + bytes(dirs)
+    section = struct.pack("<8sIIIIIIHHI", b".rdata", 0x1000, 0x1000, 0x200, 0x400, 0, 0, 0, 0, 0)
+    head = b"MZ" + bytes(0x3A) + struct.pack("<I", 0x40) + b"PE\0\0" + coff + opt + section
+    load_config = bytearray(0x200)
+    struct.pack_into("<I", load_config, 0, 0x140)
+    struct.pack_into("<Q", load_config, 0xC8, chpe)
+    return head.ljust(0x400, b"\0") + bytes(load_config)
+
+
+def _ar(*members: tuple[bytes, bytes]) -> bytes:
+    out = b"!<arch>\n"
+    for name, body in members:
+        out += name.ljust(16) + b"0".ljust(12) + b"0".ljust(6) + b"0".ljust(6) + b"644".ljust(8) + str(len(body)).encode().ljust(10) + b"`\n"
+        out += body + (b"\n" if len(body) % 2 else b"")
+    return out
+
+
+ARM64, X86_64 = 0x0100000C, 0x01000007
+
+
+def test_the_package_check_reads_the_platform_of_every_kind_of_native_file():
+    # the macOS pkg shipped universal binaries beside a node runtime of the build machine's architecture only: every
+    # native file is read for the platforms its code is for, thin or universal, in an executable or a library's objects
+    check = _script("check-package")
+    of = check.platforms_of
+    assert of(_macho(ARM64)) == {"darwin-arm64"} and of(_macho(X86_64)) == {"darwin-amd64"}
+    assert of(_fat(ARM64, X86_64)) == {"darwin-arm64", "darwin-amd64"}
+    assert of(b"\xca\xfe\xba\xbe\x00\x00\x00\x41" + bytes(64)) is None              # a Java class file (major 65)
+    assert of(b"\xce\xfa\xed\xfe" + bytes(28)) == {"darwin-32-bit-or-big-endian"}
+    assert of(_elf(0xB7)) == {"linux-arm64"} and of(_elf(0x3E)) == {"linux-amd64"}
+    assert of(_elf(0x03, cls=1)) == {"linux-32-bit-or-big-endian"}
+    assert of(_pe(0xAA64)) == {"windows-arm64"} and of(_pe(0x8664)) == {"windows-amd64"} and of(_pe(0x14C)) == {"windows-machine-0x14c"}
+    # Arm64EC behind an x64 header (python-build-standalone's Windows on Arm vcruntime140_1.dll, Microsoft's own),
+    # and Arm64X: code for Windows on Arm only
+    assert of(_pe(0x8664, chpe=0x180001000)) == {"windows-arm64"} and of(_pe(0xAA64, chpe=0x180001000)) == {"windows-arm64"}
+    assert of(b"MZ not a program") is None and of(b"#!/bin/sh\n") is None
+    # static libraries: BSD (names in the body, symbol table skipped), GNU, and a Windows import library's entries
+    bsd = _ar((b"#1/12", b"__.SYMDEF\0\0\0"), (b"#1/4", b"a.o\0" + _macho(X86_64)))
+    assert of(bsd) == {"darwin-amd64"}
+    assert of(_ar((b"/", b"\0" * 8), (b"a.o/", _elf(0xB7)))) == {"linux-arm64"}
+    short = b"\0\0\xff\xff\0\0" + (0xAA64).to_bytes(2, "little") + bytes(12)
+    coff = (0x8664).to_bytes(2, "little") + bytes(18)
+    assert of(_ar((b"/", b"\0" * 4), (b"python312.dll/", short))) == {"windows-arm64"}
+    assert of(_ar((b"x.obj/", coff))) == {"windows-amd64"}
+
+
+def test_the_package_check_refuses_native_files_for_another_platform(tmp_path):
+    check = _script("check-package")
+    rt = tmp_path / "runtime"
+    site = rt / "lib" / "site-packages"
+    (site / "pip" / "_vendor" / "distlib").mkdir(parents=True)
+    (rt / "bin").mkdir()
+    (rt / "bin" / "python3.12").write_bytes(_macho(ARM64))
+    (rt / "bin" / "uv").write_bytes(_fat(ARM64, X86_64))                      # code for more platforms: fine
+    (site / "pip" / "_vendor" / "distlib" / "t32.exe").write_bytes(_pe(0x14C))   # a launcher template pip copies out
+    (site / "README.txt").write_text("text", encoding="utf-8")
+    assert check.wrong_platforms(rt, {"": {"darwin-arm64"}}) == []
+    (site / "_core.so").write_bytes(_macho(X86_64))                           # the build machine's wheel, not the package's
+    (site / "lib.a").write_bytes(_ar((b"#1/4", b"b.o\0" + _macho(X86_64))))
+    bad = check.wrong_platforms(rt, {"": {"darwin-arm64"}})
+    assert sorted(b.split(":")[0] for b in bad) == [str(site / "_core.so"), str(site / "lib.a")]
+    assert "code for darwin-amd64, not darwin-arm64" in bad[0]
+    assert len(check.wrong_platforms(rt, {"": {"darwin-arm64", "darwin-amd64"}})) == 3    # universal: python3.12 too
+    (site / "_core.so").unlink()
+    (site / "lib.a").unlink()
+    # a tree of two platforms (the Windows coordinator: an x64 interpreter, the platform's launcher and uv): the longest
+    # directory that holds a file decides
+    (rt / "bin" / "oarbank-sandbox.exe").write_bytes(_pe(0xAA64))
+    (rt / "bin" / "python3.12").write_bytes(_pe(0x8664))
+    (rt / "bin" / "uv").write_bytes(_pe(0xAA64))
+    (site / "core.pyd").write_bytes(_pe(0x8664))
+    rules = check.platform_rules(["windows-amd64", f"{rt / 'bin'}=windows-arm64"])
+    assert [b.split(":")[0] for b in check.wrong_platforms(rt, rules)] == [str(rt / "bin" / "python3.12")]
+    with pytest.raises(SystemExit):
+        check.platform_rules([f"{rt}=windows-amd64"])                         # nothing names the package's own
+
+
+def test_the_package_check_reads_this_interpreter_as_this_machine_s():
+    # a real binary: the interpreter running the tests (an x64 Python under Windows on Arm's emulation is x64)
+    import platform as pf
+    from oarbank_sdk import portable
+    check = _script("check-package")
+    exe = Path(sys.executable).resolve()
+    want = portable.host_platform()
+    if sys.platform == "win32" and pf.machine().lower() in ("amd64", "x86_64"):
+        want = "windows-amd64"
+    assert want in check.platforms_of(exe.read_bytes())
+
+
+def test_uv_is_fetched_for_the_package_s_platform_and_checked_against_its_pin(tmp_path, monkeypatch):
+    # the runtime shipped the build machine's own uv: an arm64 uv in a package for x86_64 Macs
+    import hashlib
+    import io
+    import tarfile
+    from oarbank_sdk import portable
+    fetch = _script("fetch-uv")
+    assert set(fetch.ASSETS) == set(portable.KNOWN_PLATFORMS)
+    target = fetch.ASSETS["darwin-amd64"][0]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(f"uv-{target}/uv")
+        info.size = len(_macho(X86_64))
+        tf.addfile(info, io.BytesIO(_macho(X86_64)))
+    asset = buf.getvalue()
+    urls = []
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", lambda url, timeout: urls.append(url) or Response(asset))
+    with pytest.raises(SystemExit, match="does not match its pin"):
+        fetch.fetch("darwin-amd64", tmp_path / "uv")
+    assert urls == [f"https://github.com/astral-sh/uv/releases/download/{fetch.VERSION}/uv-x86_64-apple-darwin.tar.gz"]
+    assert not (tmp_path / "uv").exists()
+    monkeypatch.setitem(fetch.ASSETS, "darwin-amd64", (target, hashlib.sha256(asset).hexdigest()))
+    fetch.fetch("darwin-amd64", tmp_path / "uv")
+    assert (tmp_path / "uv").read_bytes() == _macho(X86_64) and os.access(tmp_path / "uv", os.X_OK)
+    ci = (WXS.parents[2] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert ci.count(f'version: "{fetch.VERSION}"') >= 5                       # the uv CI builds with is the one shipped
+
+
+def test_each_macos_package_is_for_one_architecture_and_refuses_the_other():
+    # one pkg for both: universal binaries, an arm64 runtime, and productbuild's distribution claiming x86_64 and arm64
+    pkg = (WXS.parents[2] / "scripts" / "package-macos.sh").read_text(encoding="utf-8")
+    assert "lipo" not in pkg and '--target "$TARGET"' in pkg
+    assert 'build-node-runtime.sh" "$PAYLOAD/runtime" "$PLATFORM"' in pkg and '--platform "$PLATFORM"' in pkg
+    assert 'hostArchitectures="$ARCH"' in pkg and '<installation-check script="architecture()"/>' in pkg
+    assert 'system.sysctl("hw.optional.arm64") == 1' in pkg and "--distribution" in pkg and "productbuild --quiet --package" not in pkg
+    assert 'PKG="$OUT/oarbank-agent-$VERSION-macos-$ARCH.pkg"' in pkg
+    assert '"$OUT/oarbank-agent-$VERSION-$PLATFORM"' in pkg
+    ci = (WXS.parents[2] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "for arch in arm64 x86_64" in ci and "--install-rosetta" in ci
+
+
 def test_the_coordinator_archive_names_no_owner(tmp_path):
     # tar writes the build account's user and group names into every entry
     import tarfile
@@ -439,10 +602,15 @@ def test_every_package_build_checks_what_it_ships():
     scripts = WXS.parents[2] / "scripts"
     for name in ("package-linux.sh", "package-macos.sh", "package-windows.ps1", "build-coordinator.sh", "build-coordinator.ps1"):
         text = (scripts / name).read_text(encoding="utf-8")
-        assert "check-package.py" in text and "--run " in text, name
+        assert "check-package.py" in text and "--run " in text and "--platform " in text, name
         assert "remap-path-prefix" in text, name
     for name in ("build-node-runtime.sh", "build-coordinator.sh"):
         assert "bundle-python.sh" in (scripts / name).read_text(encoding="utf-8"), name
+    # what they ship includes uv, the release for the package's platform, which installs into the build
+    for name in ("build-node-runtime.sh", "build-coordinator.sh", "build-node-runtime.ps1", "build-coordinator.ps1"):
+        text = (scripts / name).read_text(encoding="utf-8")
+        assert "fetch-uv.py" in text and text.index("fetch-uv.py\"") < text.index(" pip install"), name
+        assert "(Get-Command uv)" not in text and "command -v uv" not in text, name
     for name in ("build-node-runtime.ps1", "build-coordinator.ps1"):
         assert "bundle-python.ps1" in (scripts / name).read_text(encoding="utf-8"), name
 
@@ -452,7 +620,8 @@ def test_every_package_build_checks_what_it_ships():
 def test_a_built_node_runtime_is_fit_to_package():
     root = Path(os.environ["OARBANK_NODE_RUNTIME"])
     python = "python.exe" if sys.platform == "win32" else "bin/python3"
-    assert _script("check-package").main(["--run", f"{root}={python}", str(root)]) == 0
+    from oarbank_sdk import portable
+    assert _script("check-package").main(["--platform", portable.host_platform(), "--run", f"{root}={python}", str(root)]) == 0
 
 
 def test_the_macos_binaries_say_why_they_use_the_local_network():
@@ -476,13 +645,13 @@ def test_build_scripts_relocate_their_bundled_console_scripts():
     coord = (scripts / "build-coordinator.sh").read_text(encoding="utf-8")
     call = '"$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"'
     assert call in coord and coord.index(call) < coord.index('pack-tar.py" "$TGZ"')
-    assert coord.index("uv pip install") < coord.index(call)
+    assert coord.index(" pip install") < coord.index(call)
     node = (scripts / "build-node-runtime.sh").read_text(encoding="utf-8")
     assert '"$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$OUT/bin"' in node
     windows = (scripts / "build-node-runtime.ps1").read_text(encoding="utf-8")
     call = '& "$Out\\python.exe" -I -B "$Repo\\scripts\\relocate_shebangs.py" "$Out\\Scripts" $Out'
-    assert call in windows and windows.index('Copy-Item (Get-Command uv).Source') < windows.index(call)
-    assert windows.index("uv pip install") < windows.index(call)
+    assert call in windows and windows.index('scripts\\fetch-uv.py') < windows.index(call)
+    assert windows.index(" pip install") < windows.index(call)
 
 
 @pytest.mark.skipif(not __import__("os").environ.get("OARBANK_COORDINATOR_BUILD"),
@@ -493,6 +662,8 @@ def test_a_coordinator_build_runs_from_where_it_is_unpacked(tmp_path):
     with tarfile.open(os.environ["OARBANK_COORDINATOR_BUILD"]) as tf:
         tf.extractall(tmp_path, filter="tar")
     assert _relocate_shebangs().problems(tmp_path) == []
+    uv = tmp_path / "bin" / ("uv.exe" if sys.platform == "win32" else "uv")     # module environments
+    assert subprocess.run([str(uv), "--version"], capture_output=True, text=True).stdout.startswith("uv ")
     for entry in sorted((tmp_path / "bin").iterdir()):
         assert os.access(entry, os.X_OK), entry.name
         head = entry.read_bytes()[:64]

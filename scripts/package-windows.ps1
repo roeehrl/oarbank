@@ -43,9 +43,9 @@ $WslcDll = "$Wslc\runtimes\win-$Arch\native\wslcsdk.dll"
 if ((Get-FileHash -Algorithm SHA256 $WslcDll).Hash.ToLower() -ne $WslcSha256[$Arch]) { throw "wslcsdk.dll does not match its pin" }
 Copy-Item $WslcDll "$Bin\wslcsdk.dll"
 # a clean Windows machine has no Visual C++ runtime: the binaries must not import it (static CRT, rust/.cargo/config.toml);
-# wslcsdk.dll is loaded at run time, never imported; and they are for the package's architecture
-uv run --no-project --python 3.12 python "$Repo\scripts\check-pe-imports.py" --machine $Arch "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
-if ($LASTEXITCODE) { throw "the binaries import a DLL a clean Windows install does not have, or are for another architecture" }
+# wslcsdk.dll is loaded at run time, never imported
+uv run --no-project --python 3.12 python "$Repo\scripts\check-pe-imports.py" "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
+if ($LASTEXITCODE) { throw "the binaries import a DLL a clean Windows install does not have" }
 $Out = "$Repo\dist"
 New-Item -ItemType Directory -Force $Out | Out-Null
 function Sign($path) {
@@ -54,9 +54,11 @@ function Sign($path) {
 Sign "$Bin\oarbank-agent.exe"; Sign "$Bin\oarbank-launcher.exe"
 $Runtime = "$env:TEMP\oarbank-runtime"
 & "$Repo\scripts\build-node-runtime.ps1" -Out $Runtime -Arch $Arch
-# what the MSI copies holds no link and no path of this machine, and the runtime runs from wherever it is installed
+# what the MSI copies holds no link, no path of this machine and no native file for another architecture, and the
+# runtime runs from wherever it is installed
 uv run --no-project --python 3.12 python "$Repo\scripts\check-package.py" --build-path (uv python dir).Trim() `
-  --run "$Runtime=python.exe" $Runtime "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
+  --platform "windows-$(if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' })" --run "$Runtime=python.exe" `
+  $Runtime "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe" "$Bin\wslcsdk.dll"
 if ($LASTEXITCODE) { throw "the package is not fit to ship" }
 $Msi = "$Out\oarbank-agent-$Version-windows-$Arch.msi"
 wix build "$Repo\deploy\windows\oarbank-agent.wxs" -arch $Arch -ext WixToolset.Util.wixext -d "Version=$MsiVersion" -d "BinDir=$Bin" -d "RuntimeDir=$Runtime" -o $Msi
