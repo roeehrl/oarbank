@@ -887,8 +887,9 @@ mod tests {
         server.join().unwrap().unwrap();
     }
 
-    /// Whether a process in the AppContainer `name` (`curl`) gets an answer from 127.0.0.1:`port`.
-    fn reached(name: &str, port: u16) -> bool {
+    /// `curl` in the AppContainer `name` asking 127.0.0.1:`port`: its exit code (0: answered; 7: refused; 28: no answer
+    /// in time; 23: it could not write what it got).
+    fn curl(name: &str, port: u16) -> u32 {
         use windows_sys::Win32::Security::Isolation::CreateAppContainerProfile;
         use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
         use windows_sys::Win32::System::Threading::*;
@@ -906,7 +907,9 @@ mod tests {
         si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         si.lpAttributeList = list;
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-        let mut cmd = wide(&format!(r"{root}\System32\curl.exe -s -o NUL --max-time 10 http://127.0.0.1:{port}/"));
+        // the answer has no body, so curl writes nothing: an AppContainer may not open NUL on some builds (Windows
+        // Server 2025 refuses it), and `-o NUL` failed every answered request there (exit 23, a write error)
+        let mut cmd = wide(&format!(r"{root}\System32\curl.exe -s --max-time 10 http://127.0.0.1:{port}/"));
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let code = unsafe {
             assert!(InitializeProcThreadAttributeList(list, 1, 0, &mut size) != 0);
@@ -924,7 +927,7 @@ mod tests {
             windows_sys::Win32::Security::FreeSid(sid);
             code
         };
-        code == 0
+        code
     }
 
     /// A loopback listener that answers every connection with an empty HTTP response; its port.
@@ -953,20 +956,22 @@ mod tests {
         let t = Scratch::new("ports");
         let helper = Helper::open(t.store.clone()).unwrap();
         let (p1, p2, other) = (answering(), answering(), answering());
-        assert!(!reached(&t.name, p1), "an AppContainer reaches no loopback port by itself");
+        assert_ne!(curl(&t.name, p1), 0, "an AppContainer reaches no loopback port by itself");
         let (mut a, mut b) = (owner_process(), owner_process());
         helper.allow(&t.sid, p1, Owner::open(a.id()).unwrap()).unwrap();
         helper.allow(&t.sid, p2, Owner::open(b.id()).unwrap()).unwrap();
-        assert_eq!((reached(&t.name, p1), reached(&t.name, p2), reached(&t.name, other)), (true, true, false));
+        let codes = (curl(&t.name, p1), curl(&t.name, p2), curl(&t.name, other));
+        assert!(codes.0 == 0 && codes.1 == 0 && codes.2 != 0, "curl's exit codes {codes:?}; the helper's filters {:?}", t.filters());
         a.kill().unwrap();
         a.wait().unwrap();
         assert!(openings(&helper, 1));
-        assert_eq!((reached(&t.name, p1), reached(&t.name, p2)), (false, true), "only the ended job's port closed");
+        let codes = (curl(&t.name, p1), curl(&t.name, p2));
+        assert!(codes.0 != 0 && codes.1 == 0, "only the ended job's port closed: curl's exit codes {codes:?}");
         assert!(t.exempt());
         b.kill().unwrap();
         b.wait().unwrap();
         assert!(openings(&helper, 0));
-        assert!(!reached(&t.name, p2));
+        assert_ne!(curl(&t.name, p2), 0);
         assert_eq!(t.filters(), (0, vec![]));
         assert!(!t.exempt());
         unsafe { windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile(wide(&t.name).as_ptr()) };
