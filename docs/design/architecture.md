@@ -256,8 +256,23 @@ is a named pipe only the agent's account and the module's AppContainer may open.
 - **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the chaos tests on macOS and
   Windows (x64 and arm64), the Rust workspace with the agent end-to-end tests and the oarbank-core parity tests on
   macOS, the agent end-to-end tests on Windows (x64 and arm64), the Rust workspace on Linux and Windows (x64 and arm64
-  each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
-  and arm64, an x64 and an arm64 MSI, and the Windows coordinator builds.
+  each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags,
+  which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64 and arm64, an x64 and an arm64 MSI,
+  and the Windows coordinator builds. `.github/workflows/msi.yml` installs the MSI for real on a throwaway Windows
+  runner whenever the package or what it installs changes, and on every tag: both services with their accounts and
+  start types, the elevated helper's openings across a major upgrade, and an uninstall that leaves nothing behind
+  (`scripts/ci-windows-msi.ps1`).
+- **A package names nothing of the machine that built it.** Every package build runs `scripts/check-package.py` on
+  what it ships: no link out of the tree (on Windows no reparse point at all), no path of the build (the checkout, its
+  work directories, the build account's home, `CARGO_HOME`) in any file, metadata, bytecode and binaries included, and
+  the bundled interpreter runs from another directory. What it found and the builds now do: the interpreter is uv's
+  managed CPython copied as files of its own (`scripts/bundle-python.*`: never the checkout's `.venv`, which `uv python
+  find` returns first, nor uv's link), without the bytecode this machine wrote into uv's store, with its build
+  configuration and (macOS) its library naming nothing of the store; nothing the build runs writes bytecode, and all
+  of it is compiled afresh with relative paths and hash checks; uv's `direct_url.json` for the SDK is dropped; Rust
+  binaries name `CARGO_HOME` as `/cargo` (`--remap-path-prefix`) and Windows binaries their debug database by file
+  name; the Nuitka module loses its debug information and (macOS) its build-directory install name; the coordinator
+  archive names no owner (`scripts/pack-tar.py`).
 
 ## Not built yet
 
