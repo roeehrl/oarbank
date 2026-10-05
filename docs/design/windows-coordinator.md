@@ -258,6 +258,11 @@ Built as designed, with these additions found on the way:
   `IsWow64Process2`.
 - **A managed Python's real prefix**: uv names its interpreters through junctions, and copying a junction left a "copy"
   whose installs landed in the shared interpreter; the build copies `realpath(sys.base_prefix)` and refuses a link.
+- **Environments the module sandbox reads are copies.** uv hard-links files from its cache by default, and a linked
+  file keeps the cache's protected DACL, which the sandbox's inheritable grant on `site-packages` never reaches: a
+  module process could not read the editable SDK's `.pth` and found no `oarbank_sdk`. The agent's checkout install
+  (`uv sync`) and CI set `UV_LINK_MODE=copy` on Windows, as the coordinator's and the agent's dependency installs do.
+  It showed only on the arm64 runner: the x64 runner's workspace is on another volume than uv's cache, so uv copied.
 - **The admin pipe's client** opens it with `CreateFileW`: Python's `open()` goes through the C runtime, which reports
   a busy pipe (one instance being served, the next not made yet) as EINVAL, so a client could not wait for it and the
   CLI took a running coordinator for gone (seen on CI). Its server makes the next instance before it closes one whose

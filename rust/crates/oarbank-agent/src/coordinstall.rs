@@ -245,8 +245,15 @@ fn programs(kind: &str, root: &Path) -> Result<(Vec<String>, Option<Vec<String>>
     let checkout = root.join("oarbank");
     let uv = which("uv").context("uv not found (the checkout bundle needs it)")?;
     let venv = checkout.join(".venv");
-    let s = std::process::Command::new(uv).args(["sync", "--frozen", "-q"]).current_dir(&checkout)
-        .env("UV_PROJECT_ENVIRONMENT", &venv).output()?;
+    let mut sync = std::process::Command::new(uv);
+    sync.args(["sync", "--frozen", "-q"]).current_dir(&checkout).env("UV_PROJECT_ENVIRONMENT", &venv);
+    if cfg!(windows) {
+        // copies, not hard links into uv's cache: a linked file keeps the cache's protected DACL, so the module
+        // sandbox's grant on site-packages never reaches it, and a module process could not read the editable
+        // SDK's .pth (it would not even find oarbank_sdk)
+        sync.env("UV_LINK_MODE", "copy");
+    }
+    let s = sync.output()?;
     if !s.status.success() {
         let e = String::from_utf8_lossy(&s.stderr);
         bail!("uv sync failed: {}", &e[e.len().saturating_sub(400)..]);
