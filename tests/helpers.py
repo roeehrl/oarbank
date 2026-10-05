@@ -242,3 +242,65 @@ def sign_in(client, db, name: str = "owner", role: str = "admin") -> dict:
     client.cookies.set("oarbank_session", s["sid"])
     client.headers["x-csrf-token"] = s["csrf"]
     return s
+
+
+def loosen(p):
+    """Let every account read `p` (a test of owner-only checks): mode 0644 (0755 for a directory) on POSIX, an entry
+    for Everyone on Windows."""
+    import os
+    import subprocess
+    p = Path(p)
+    if os.name == "posix":
+        os.chmod(p, 0o755 if p.is_dir() else 0o644)
+    else:
+        subprocess.run(["icacls", str(p), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True)
+
+
+def alive(pid: int) -> bool:
+    """Whether process `pid` runs (a zombie of ours counts as ended). Never os.kill(pid, 0) on Windows: there it ends the
+    process (TerminateProcess with exit code 0)."""
+    import os
+    if os.name == "posix":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        try:
+            return os.waitpid(pid, os.WNOHANG) == (0, 0)
+        except ChildProcessError:
+            return True
+    from oarbank.platform import _win32 as W
+    h = W.OpenProcess(W.SYNCHRONIZE, False, pid)
+    if not h:
+        return False
+    try:
+        return W.WaitForSingleObject(h, 0) != 0               # WAIT_OBJECT_0: it ended
+    finally:
+        W.CloseHandle(h)
+
+
+def stop_tree(pid: int):
+    """Stop process `pid` and what it started: SIGTERM on POSIX (the process takes its children down), the whole tree
+    on Windows (`taskkill /T`), where an interpreter's launcher would otherwise leave the interpreter running."""
+    import os
+    import signal
+    import subprocess
+    if os.name == "posix":
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    else:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+
+
+def windows_powershell(*args, **run):
+    """Windows PowerShell 5.1 (`powershell.exe`, which every Windows has) without the PSModulePath of the shell that
+    started the suite: under PowerShell 7 (CI's default shell) it names PowerShell 7's modules first, and 5.1 then fails
+    to load its own Microsoft.PowerShell.Utility (`Get-FileHash` is not recognized)."""
+    import os
+    import subprocess
+    env = {k: v for k, v in (run.pop("env", None) or os.environ).items() if k.upper() != "PSMODULEPATH"}
+    return subprocess.run(["powershell", "-NoProfile", *args], env=env, **run)

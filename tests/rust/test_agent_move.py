@@ -67,7 +67,7 @@ def test_the_agent_follows_a_coordinator_move(agent_bin, tmp_path, away):
             if away:
                 wait(lambda: a.api("GET", "/api/v1/coordinator")["role"] == "handed_off", timeout=120)
                 p = agent()
-            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text())
+            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text(encoding="utf-8"))
             wait(lambda: cfg()["coordinator"] == b.url and cfg()["coordinator_trust"]["max_epoch"] == 2, timeout=180)
             trust = cfg()["coordinator_trust"]
             assert trust["retired"] and trust["fallback"] == a.url

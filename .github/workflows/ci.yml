@@ -13,17 +13,51 @@ concurrency:
 
 jobs:
   coordinator:
-    runs-on: macos-26
-    timeout-minutes: 40
+    # the coordinator suite and the chaos tests on every OS the coordinator runs on (docs/design/windows-coordinator.md);
+    # on Windows module processes run in the agent's AppContainers, so the agent (and the elevated helper the MSI
+    # installs, for enforced allowlists) are built first; xdist splits the suite over the runner's cores
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: x64 CPython on both Windows architectures (cryptography publishes no Windows on Arm wheels), copied files
+        if: runner.os == 'Windows'
+        run: |
+          Add-Content $env:GITHUB_ENV "UV_PYTHON=cpython-3.12-windows-x86_64-none"
+          # copies, not hard links into uv's cache (whose files keep a protected DACL the module sandbox's grants never
+          # reach); x64 runners copy anyway, their workspace being on another volume than the cache's
+          Add-Content $env:GITHUB_ENV "UV_LINK_MODE=copy"
+        shell: pwsh
+      - name: clang for ring (Windows on Arm)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        run: scripts/windows-clang.ps1 -Install | Add-Content $env:GITHUB_PATH
+        shell: pwsh
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.12.22"
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2
+        if: runner.os == 'Windows'
+        with:
+          workspaces: rust
+      - name: the agent's module launcher and the elevated helper (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --locked -p oarbank-agent -p oarbank-launcher
+          ../scripts/ci-windows-helper.ps1
+        working-directory: rust
+        shell: pwsh
       - run: uv sync --extra dev --frozen
-      - run: uv run pytest -q -p no:cacheprovider --ignore=tests/rust
+      - run: uv run pytest -q -p no:cacheprovider --ignore=tests/rust -n auto
+      - run: uv run pytest -q -p no:cacheprovider --ignore=tests/rust -m chaos
 
   agent:
     runs-on: macos-26
@@ -50,6 +84,42 @@ jobs:
           uvx maturin@1.15.0 build --locked -i .venv/bin/python -m rust/crates/oarbank-core-py/Cargo.toml -o "$RUNNER_TEMP/ocore-wheels"
           uv pip install --python .venv "$RUNNER_TEMP"/ocore-wheels/oarbank_core-*.whl
           uv run --no-sync pytest -q -p no:cacheprovider rust/crates/oarbank-core-py/tests/test_parity.py
+
+  windows-e2e:
+    # the agent's end-to-end tests against a real oarbankd on Windows, as the macOS agent job runs them
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      UV_PYTHON: cpython-3.12-windows-x86_64-none
+      UV_LINK_MODE: copy                # as in the coordinator job
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: clang for ring (Windows on Arm)
+        if: runner.arch == 'ARM64'
+        run: scripts/windows-clang.ps1 -Install | Add-Content $env:GITHUB_PATH
+        shell: pwsh
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: the agent, the launcher and the elevated helper
+        run: |
+          cargo build --locked -p oarbank-agent -p oarbank-launcher
+          ../scripts/ci-windows-helper.ps1
+        working-directory: rust
+        shell: pwsh
+      - run: uv sync --extra dev --frozen
+      - run: uv run pytest -q -p no:cacheprovider tests/rust
 
   rust-other-os:
     # the agent, launcher and portable crates on Linux and Windows, x64 and arm64: unit tests on the real OS (the
@@ -175,9 +245,10 @@ jobs:
           path: dist/
 
   package-windows:
-    # oarbank-agent-<v>-windows-x64.msi and -arm64.msi: the script builds for the runner's architecture
+    # oarbank-agent-<v>-windows-x64.msi and -arm64.msi, and the coordinator build for windows-amd64 and windows-arm64:
+    # the scripts build for the runner's architecture
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rust-other-os]
+    needs: [rust-other-os, coordinator]
     strategy:
       matrix:
         include:
@@ -201,6 +272,8 @@ jobs:
           dotnet tool install --global wix --version 5.*
           wix extension add --global WixToolset.Util.wixext/5.0.2
       - run: scripts/package-windows.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
+        shell: pwsh
+      - run: scripts/build-coordinator.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:

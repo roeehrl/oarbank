@@ -32,7 +32,7 @@ def make_wheel(d: Path, name="tinydep", version="1.0", value=42) -> Path:
 def module_with_deps(tmp_path, version="0.3.0", req=None) -> Path:
     src = tmp_path / "toy-deps"
     shutil.copytree(TOY_DIR, src)
-    m = (src / "oarbank-module.toml").read_text().replace('version = "0.1.0"', f'version = "{version}"', 1)
+    m = (src / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "0.1.0"', f'version = "{version}"', 1)
     (src / "oarbank-module.toml").write_text(m)
     w = make_wheel(src / "wheels")
     h = hashlib.sha256(w.read_bytes()).hexdigest()
@@ -83,14 +83,17 @@ def test_build_refuses_missing_wheels_wrong_hashes_and_sdists(tmp_path):
         B.build(src, tmp_path / "bad.mfb")
 
 
+def site_packages(venv: Path) -> Path:
+    return next(venv.glob("lib/python*/site-packages"), None) or venv / "Lib" / "site-packages"
+
+
 @pytest.mark.skipif(not shutil.which("uv"), reason="needs uv")
 def test_install_builds_the_environment_offline_inside_the_sandbox(db, tmp_path):
     src = module_with_deps(tmp_path)
     out, _ = B.build(src, tmp_path / "toy-0.3.0.mfb")
     r = modstore.install(db, out, actor="test", self_test=True)
     venv = Path(r["path"]) / ".venv"
-    site = next(venv.glob("lib/python*/site-packages"))
-    assert (site / "tinydep" / "__init__.py").read_text() == "VALUE = 42\n"
+    assert (site_packages(venv) / "tinydep" / "__init__.py").read_text(encoding="utf-8") == "VALUE = 42\n"
     assert modstore.record(db, "toy", "0.3.0")["runtime"] == "venv+wheels"
 
 
@@ -116,18 +119,23 @@ def test_a_venv_an_earlier_coordinator_build_made_is_rebuilt_on_this_interpreter
     src = module_with_deps(tmp_path, "0.5.0")
     out, _ = B.build(src, tmp_path / "toy-0.5.0.mfb")
     venv = Path(modstore.install(db, out, actor="test", self_test=False)["path"]) / ".venv"
-    py = files.venv_python(venv)
-    assert py.resolve() == Path(sys.executable).resolve()
+    assert files.venv_interpreter(venv) == files.running_interpreter()
     assert modlife.runtimes_ok(db) == []                                 # this build's venv: left alone
-    old = tmp_path / "coordinator-app" / "0.1.0-earlier" / "python" / "bin" / "python3.12"   # the earlier build's Python
-    old.parent.mkdir(parents=True)
-    shutil.copyfile(sys.executable, old)
-    py.unlink()
-    os.symlink(old, py)
-    assert modlife.runtimes_ok(db) == ["toy@0.5.0"]
-    assert files.venv_python(venv).resolve() == Path(sys.executable).resolve()
-    site = next(venv.glob("lib/python*/site-packages"))
-    assert (site / "tinydep" / "__init__.py").read_text() == "VALUE = 42\n"
+    old = tmp_path / "coordinator-app" / "0.1.0-earlier" / "python"      # the earlier build's Python
+    old.mkdir(parents=True)
+    if os.name == "posix":
+        shutil.copyfile(sys.executable, old / "python3.12")
+        files.venv_python(venv).unlink()
+        os.symlink(old / "python3.12", files.venv_python(venv))
+    else:                                                                # its pyvenv.cfg names the base interpreter
+        shutil.copyfile(files.running_interpreter(), old / "python.exe")
+        cfg = venv / "pyvenv.cfg"
+        cfg.write_text("".join(f"home = {old}\n" if line.startswith("home") else line + "\n"
+                               for line in cfg.read_text(encoding="utf-8").splitlines()), encoding="utf-8")
+    assert files.venv_interpreter(venv) != files.running_interpreter()
+    assert modlife.runtimes_ok(db) == ["toy@0.5.0"], db.q("SELECT kind, reason FROM events WHERE kind LIKE 'module_runtime%'")
+    assert files.venv_interpreter(venv) == files.running_interpreter()
+    assert (site_packages(venv) / "tinydep" / "__init__.py").read_text(encoding="utf-8") == "VALUE = 42\n"
     assert db.one("SELECT reason FROM events WHERE kind='module_runtime_rebuilt'")["reason"] == "toy@0.5.0"
     shutil.rmtree(venv)                                                  # gone altogether (a move): rebuilt too
     assert modlife.runtimes_ok(db) == ["toy@0.5.0"]

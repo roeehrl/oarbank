@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -26,7 +27,28 @@ def main():
                     help="public origin of the frames listener (default http://127.0.0.1:<frames-port>)")
     ap.add_argument("--console-origin", default=os.environ.get("OARBANKD_CONSOLE_ORIGIN"),
                     help="public origin of the console (frame-ancestors); default http://127.0.0.1:<port>")
+    ap.add_argument("--service", action="store_true",
+                    help="run as a Windows service (the service control manager starts it so: platform/service.py)")
     a = ap.parse_args()
+    if a.service:
+        if sys.platform != "win32":
+            ap.error("--service is for the Windows service control manager; launchd and systemd run the console as it is")
+        from ..platform import service
+        return service.run(lambda: run(a, home), stop_servers)
+    return run(a, home)
+
+
+_SERVERS: list = []           # the uvicorn servers of this process, for a stop from the service manager
+
+
+def stop_servers():
+    for s in _SERVERS:
+        s.should_exit = True
+
+
+def run(a, home):
+    from ..platform import service
+    service.log_to(home / "logs" / "console.log")
     wait_for_schema(a.db)
     state = ConsoleState(a.db, a.oarbankd, secret_path=a.secret_file).start()
     module_origin = a.module_origin or f"http://127.0.0.1:{a.frames_port}"
@@ -36,9 +58,9 @@ def main():
                         reader=Reader(a.db), home=Path(a.db).parent)
 
     async def serve():
-        await asyncio.gather(
-            uvicorn.Server(uvicorn.Config(app, host=a.bind, port=a.port, log_level="warning", access_log=False)).serve(),
-            uvicorn.Server(uvicorn.Config(frames, host=a.bind, port=a.frames_port, log_level="warning", access_log=False)).serve())
+        _SERVERS[:] = [uvicorn.Server(uvicorn.Config(app, host=a.bind, port=a.port, log_level="warning", access_log=False)),
+                       uvicorn.Server(uvicorn.Config(frames, host=a.bind, port=a.frames_port, log_level="warning", access_log=False))]
+        await asyncio.gather(*(s.serve() for s in _SERVERS))
     asyncio.run(serve())
 
 

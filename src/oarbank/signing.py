@@ -12,7 +12,6 @@ have installed (anti-rollback). Rolling back means re-releasing old content unde
 """
 import base64
 import json
-import os
 import time
 from pathlib import Path
 
@@ -33,22 +32,19 @@ def keygen(path: Path = DEFAULT_KEY, overwrite: bool = False) -> str:
     path = Path(path)
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} exists (refusing to overwrite a signing key)")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    from .platform import files
+    files.private_dir(path.parent)
     k = Ed25519PrivateKey.generate()
-    raw = k.private_bytes_raw()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(b64(raw) + "\n")
+    files.write_private(path, b64(k.private_bytes_raw()) + "\n")
     return b64(k.public_key().public_bytes_raw())
 
 
 def load_key(path: Path = DEFAULT_KEY) -> Ed25519PrivateKey:
+    from .platform import files
     path = Path(path)
-    mode = path.stat().st_mode & 0o777
-    if mode & 0o077:
-        raise PermissionError(f"{path} is mode {oct(mode)}; a signing key must be 0600")
-    return Ed25519PrivateKey.from_private_bytes(base64.b64decode(path.read_text().strip()))
+    if not files.owner_only(path):
+        raise PermissionError(f"{path} has {files.access(path)}; a signing key must be readable by its owner only")
+    return Ed25519PrivateKey.from_private_bytes(base64.b64decode(path.read_text(encoding="utf-8").strip()))
 
 
 def public_key_of(path: Path = DEFAULT_KEY) -> str:

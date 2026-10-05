@@ -4,13 +4,12 @@ import base64
 import hashlib
 import json
 import os
-import stat
 import struct
 import time
 
 import pytest
 
-from helpers import make_db
+from helpers import loosen, make_db
 from oarbank.coordinator import access as A
 
 
@@ -77,13 +76,15 @@ def test_admin_token_and_secrets_are_owner_only(tmp_path):
     from oarbank.platform import files
     tok = A.ensure_admin_token(tmp_path)
     assert A.check_admin_token(tmp_path, tok) and not A.check_admin_token(tmp_path, tok + "x")
-    assert stat.S_IMODE((tmp_path / "admin.token").stat().st_mode) == 0o600
+    assert files.owner_only(tmp_path / "admin.token")
     assert A.ensure_admin_token(tmp_path) == tok != A.rotate_admin_token(tmp_path)
     (tmp_path / "oarbank.sqlite3").write_text("x")
-    os.chmod(tmp_path / "oarbank.sqlite3", 0o644)
-    os.chmod(tmp_path, 0o755)
+    loosen(tmp_path / "oarbank.sqlite3")
+    loosen(tmp_path)
+    assert not files.owner_only(tmp_path / "oarbank.sqlite3") and not files.owner_only(tmp_path)
     changed = files.tighten_home(tmp_path)
-    assert str(tmp_path / "oarbank.sqlite3") in changed and stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    assert str(tmp_path / "oarbank.sqlite3") in changed and files.owner_only(tmp_path)
+    assert files.owner_only(tmp_path / "oarbank.sqlite3") and files.owner_only(tmp_path / "admin.token")
 
 
 def test_hosts_and_funnel():
@@ -213,7 +214,7 @@ def test_module_cli_runs_sandboxed_with_its_scoped_token(db, tmp_path):
     from test_console import Server
     src = tmp_path / "toy"
     shutil.copytree(TOY_DIR, src)
-    m = (src / "oarbank-module.toml").read_text().replace('version = "0.1.0"', 'version = "0.5.0"', 1)
+    m = (src / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "0.1.0"', 'version = "0.5.0"', 1)
     (src / "oarbank-module.toml").write_text(m + '\n[cli]\nexec = ["python", "-I", "{bundle}/toy_cli.py"]\n')
     (src / "toy_cli.py").write_text(
         "import json, os, sys, urllib.request\n"
@@ -226,7 +227,7 @@ def test_module_cli_runs_sandboxed_with_its_scoped_token(db, tmp_path):
         "    except urllib.error.HTTPError as e:\n"
         "        return e.code\n"
         "try:\n"
-        "    open('/Users/Shared/oarbank-cli-escape', 'w'); escaped = True\n"
+        f"    open({str(tmp_path / 'escape')!r}, 'w'); escaped = True\n"
         "except OSError:\n"
         "    escaped = False\n"
         "print(json.dumps({'args': sys.argv[1:], 'fleet': call('/api/v1/fleet'), 'pause': call('/api/v1/ops/fleet.pause', {'reason': 'x'}),\n"

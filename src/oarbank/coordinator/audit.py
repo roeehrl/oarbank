@@ -181,7 +181,7 @@ def export_digest(db: DB, d: dict) -> "Path":
     """Append a digest to <home>/audit/digests.jsonl (the file copied off the host)."""
     p = digest_log(db)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a") as f:
+    with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps({k: d[k] for k in ("last_event_id", "hash", "ts", "prev_sig", "sig")}, sort_keys=True) + "\n")
     return p
 

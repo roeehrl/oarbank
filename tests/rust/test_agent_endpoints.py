@@ -8,6 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
+from helpers import alive  # noqa: E402
 from test_agent_jobs import node_modules  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
@@ -16,16 +17,6 @@ MODELSERVER = REPO / "vendor" / "oarbank-sdk" / "examples" / "modelserver"
 
 def node(c):
     return next(iter(c.api("GET", "/api/v1/fleet")["nodes"]), None)
-
-
-def alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
 
 
 def test_jobs_share_one_warm_model_server_and_disabling_the_module_stops_it(agent_bin, coordinator, tmp_path):
@@ -46,7 +37,7 @@ def test_jobs_share_one_warm_model_server_and_disabling_the_module_stops_it(agen
         jobs = wait(lambda: (lambda j: j if j["n"] == 2 and j["d"] == 2 else None)(
             coordinator.api("GET", f"/api/v1/campaigns/{cid}")["jobs"]), timeout=240)
         assert jobs["f"] == 0
-        loads = (data / "model.loads").read_text().split()
+        loads = (data / "model.loads").read_text(encoding="utf-8").split()
         assert len(loads) == 1, loads                     # the golden and both jobs: one load
         daemon = int(loads[0])
         assert alive(daemon)

@@ -233,7 +233,7 @@ class ProtectionConfig(_M):
 
 
 def load(path: str | Path) -> ProtectionConfig:
-    return ProtectionConfig.model_validate(tomllib.loads(Path(path).read_text()))
+    return ProtectionConfig.model_validate(tomllib.loads(Path(path).read_text(encoding="utf-8")))
 
 
 # ------------------------------------------------------------------------------------------ per OS

@@ -135,15 +135,15 @@ def test_the_coordinator_side_reads_it_only_with_the_permission_and_its_log_is_r
     import time
     log = db.root / "logs" / "modules" / "vault.log"
     for _ in range(100):                                  # the host drains the module's stderr on its own thread
-        if log.exists() and "using key" in log.read_text():
+        if log.exists() and "using key" in log.read_text(encoding="utf-8"):
             break
         time.sleep(0.05)
-    text = log.read_text()
+    text = log.read_text(encoding="utf-8")
     assert "vault: using key [secret:api_key]" in text and KEY not in text
     # a module without secrets:read:self is refused the callback (-32002)
     src = tmp_path / "vault2"
     shutil.copytree(VAULT_DIR, src)
-    m = (src / "oarbank-module.toml").read_text()
+    m = (src / "oarbank-module.toml").read_text(encoding="utf-8")
     (src / "oarbank-module.toml").write_text(m.replace('permissions = ["secrets:read:self"]', 'permissions = []'))
     d2 = make_db(tmp_path / "other" / "oarbank.sqlite3", modules=())
     v = install(d2, src, enable=False)
@@ -301,12 +301,11 @@ def test_the_secrets_key_stays_in_the_secret_store(tmp_path, monkeypatch):
     """The key that encrypts module secrets is never in the database: an owner-only file here (Linux, and tests), the
     Keychain on macOS, a DPAPI-wrapped file on Windows (checked on the Windows VM: docs/design/secrets-and-signed-images.md)."""
     import os
-    import stat
-    from oarbank.platform import secrets as store
+    from oarbank.platform import files, secrets as store
     monkeypatch.setenv("OARBANK_SECRET_STORE", "file")
     k = store.get_or_create(modsecrets.KEY_NAME, tmp_path)
     assert len(k) == 32 and store.get_or_create(modsecrets.KEY_NAME, tmp_path) == k
     f = tmp_path / "keys" / f"{modsecrets.KEY_NAME}.key"
-    assert stat.S_IMODE(f.stat().st_mode) == 0o600 and stat.S_IMODE(f.parent.stat().st_mode) == 0o700
+    assert files.owner_only(f) and files.owner_only(f.parent)
     monkeypatch.delenv("OARBANK_SECRET_STORE")
     assert store.backend() == {"darwin": "keychain", "win32": "dpapi"}.get(os.sys.platform, "file")

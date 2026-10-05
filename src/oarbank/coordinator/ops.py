@@ -1112,8 +1112,9 @@ def _coord_cancel(db, req):
          impact=lambda db, r: {"effect": "this oarbankd stops and will not start here again; its data stays for you to archive"})
 def _coord_finalize(db, req):
     out = _coord(lambda db, req, cm: cm.finalize(db, req.actor))(db, req)
-    import threading, os
-    threading.Timer(2.0, lambda: os._exit(0)).start()       # exit 0: launchd leaves it down
+    import threading
+    from ..platform import service
+    threading.Timer(2.0, lambda: service.exit_now(0)).start()    # exit 0: the service manager leaves it down
     return out
 
 
@@ -1786,7 +1787,7 @@ def module_handler(module: str, decl) -> Handler:
         if not decl.params_schema:
             return
         import jsonschema
-        schema = json.loads((info.path / decl.params_schema).read_text())
+        schema = json.loads((info.path / decl.params_schema).read_text(encoding="utf-8"))
         try:
             jsonschema.validate(req.params, schema)
         except jsonschema.ValidationError as e:

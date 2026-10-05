@@ -27,11 +27,11 @@ RETRIES = 8
 
 
 def _client() -> httpx.Client:
-    """A client for the admin API: the local admin socket on the coordinator's own account, else OARBANKD_URL."""
+    """A client for the admin API: the local admin channel on the coordinator's own account, else OARBANKD_URL."""
     from . import main
-    sock = main._local_socket()
-    if sock:
-        return httpx.Client(transport=httpx.HTTPTransport(uds=str(sock)), base_url="http://oarbank", timeout=600)
+    local = main._local_channel()
+    if local:
+        return httpx.Client(transport=local, base_url="http://oarbank", timeout=600)
     return httpx.Client(base_url=main.URL, timeout=600)
 
 
@@ -49,13 +49,13 @@ def sha256_file(path: Path) -> str:
 
 
 def folder_files(root: Path) -> list[tuple[str, Path]]:
-    """(PortablePath, file) for every file under `root`; a symlink, a special file or a path that is not portable stops
+    """(PortablePath, file) for every file under `root`; a link (symlink or junction), a special file or a path that is not portable stops
     the upload, naming every offender."""
     out, bad = [], []
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root).as_posix()
-        if p.is_symlink():
-            bad.append(f"{rel}: a symlink (upload what it points to instead)")
+        if p.is_symlink() or p.is_junction():
+            bad.append(f"{rel}: a link (upload what it points to instead)")
         elif p.is_dir():
             continue
         elif not p.is_file():

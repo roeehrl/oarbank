@@ -208,7 +208,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
             proof = identity.identity_proof(db, nonce, url=f"{request.url.scheme}://{request.headers.get('host', '')}")
             ca = Path(db.path).parent / "tls" / "ca.pem"
             if ca.exists():
-                proof["ca_pem"] = ca.read_text()       # outside the signature: the agent checks it against the signed pin
+                proof["ca_pem"] = ca.read_text(encoding="utf-8")       # outside the signature: the agent checks it against the signed pin
             return proof
         except ValueError as e:
             raise core.ApiError(400, "bad_nonce", str(e))
@@ -442,12 +442,13 @@ class ReadSide:
         return default if v is None else v
 
 
-def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None = None, local_socket: bool = False) -> FastAPI:
+def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None = None, local_channel: bool = False) -> FastAPI:
     """oarbankd's admin listener (127.0.0.1): JSON reads, the operation endpoint, /internal/state and
     /metrics. Pages live in the separate oarbank-console process (D10), which calls this API.
 
-    `local_socket`: the same API on the Unix socket `<home>/run/admin.sock` (architecture.md, "Network and access":
-    the local admin channel). Its directory is owner-only, so reaching the socket is the credential: the caller is the owner."""
+    `local_channel`: the same API on the local admin channel (architecture.md, "Network and access"; a Unix socket in an
+    owner-only directory, a named pipe with an owner-only security descriptor on Windows: platform/localchannel.py), so
+    reaching it is the credential: the caller is the owner."""
     app = FastAPI(title="Oarbank admin API", docs_url="/api/docs", redoc_url=None)
     boot_id = uuid.uuid4().hex[:12]
     ro = ReadSide(db.path)
@@ -489,11 +490,11 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return await call_next(request)
 
     home = Path(db.path).parent
-    if not local_socket:                          # a Unix socket cannot be reached through DNS rebinding
+    if not local_channel:                         # a socket or pipe cannot be reached through DNS rebinding
         host_guard(app, ro, C.ADMIN_PORT)
 
     def who(request: Request):
-        if local_socket:
+        if local_channel:
             request.state.scope = None
             request.state.role = "admin"
             return "owner"

@@ -218,20 +218,27 @@ def _build_runtime(path: Path, man: "mf.Manifest | None" = None) -> str | None:
     if not uv:
         raise InstallError("uv is not available on this coordinator; it installs module dependencies")
     venv = path / ".venv"
-    r = subprocess.run([uv, "venv", "--quiet", "--python", sys.executable, "--system-site-packages", "--no-config",
-                        str(venv)], capture_output=True, text=True, timeout=300, env=_uv_env(path))
+    r = subprocess.run([uv, "venv", "--quiet", "--no-cache", "--python", sys.executable, "--system-site-packages",
+                        "--no-config", str(venv)], capture_output=True, text=True, timeout=300, env=_uv_env(path))
     if r.returncode != 0:
         raise InstallError(f"coordinator environment: {(r.stderr or r.stdout)[-800:]}")
     _link_host_env(venv)
-    argv = [uv, "pip", "install", "--quiet", "--no-config", "--python", str(files.venv_python(venv)),
-            *deps.install_args(path, req)]
     tmp = path.parent / f".{path.name}.install-tmp"
     files.private_dir(tmp)
     try:
         if modsandbox.backend() is None:
             raise InstallError("no module sandbox backend on this OS: dependencies are not installed unconfined")
+        # the interpreter recorded out here, so uv inside the sandbox never starts it (spec/bundles.md)
+        cache = tmp / "uv-cache"
+        q = subprocess.run([uv, "--no-config", *deps.query_args(files.venv_python(venv), cache)], capture_output=True,
+                           text=True, timeout=300, env=_uv_env(tmp), cwd=str(tmp))
+        if q.returncode != 0:
+            raise InstallError(f"coordinator environment: {(q.stderr or q.stdout)[-800:]}")
+        argv = [uv, "pip", "install", "--quiet", "--no-config", "--python", str(files.venv_python(venv)),
+                *deps.install_args(path, req, cache)]
         argv = _sandboxed_install(argv, path, venv, tmp, man.module.id, uv)
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=900, env=_uv_env(tmp), cwd=str(tmp))
+        from ..platform import procs
+        r = procs.run(argv, capture_output=True, text=True, timeout=900, env=_uv_env(tmp), cwd=str(tmp))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if r.returncode != 0:
@@ -250,13 +257,16 @@ def _link_host_env(venv: Path):
         d = sysconfig.get_paths()[k]
         if d not in host and Path(d).resolve() != site_dir.resolve():
             host.append(d)
-    (site_dir / "_oarbank_host.pth").write_text("".join(f"import site; site.addsitedir({d!r})\n" for d in host))
+    (site_dir / "_oarbank_host.pth").write_text("".join(f"import site; site.addsitedir({d!r})\n" for d in host),
+                                                encoding="utf-8", newline="\n")
 
 
 def _uv_env(home: Path) -> dict:
-    """A clean environment for uv: no user configuration, no index, no inherited proxy or credentials."""
-    return {"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home) + "/", "UV_NO_CONFIG": "1",
-            "UV_OFFLINE": "1", "UV_NO_CACHE": "1", "UV_PYTHON_DOWNLOADS": "never", "LANG": "C.UTF-8"}
+    """A clean environment for uv: no user configuration, no index, no inherited proxy or credentials; files copied, never
+    linked from a cache (each install's cache is its own and deleted after it)."""
+    from oarbank_sdk import portable
+    return {**portable.os_env(home, home), "UV_NO_CONFIG": "1", "UV_OFFLINE": "1", "UV_LINK_MODE": "copy",
+            "UV_PYTHON_DOWNLOADS": "never"}
 
 
 def _sandboxed_install(argv: list[str], bundle: Path, venv: Path, tmp: Path, module_id: str, uv: str) -> list[str]:
@@ -265,7 +275,7 @@ def _sandboxed_install(argv: list[str], bundle: Path, venv: Path, tmp: Path, mod
     # the venv's interpreter is a symlink chain into the host's Python: listing it gives each hop a metadata rule
     pol = S.Policy(module=module_id, ro=[str(bundle), *S.interpreter_roots(), str(Path(uv).resolve().parent),
                                          str(files.venv_python(venv))],
-                   rw=[str(venv), str(tmp)], kind="install", exe=uv)
+                   rw=[str(venv), str(tmp)], kind="coordinator-install", exe=uv)
     from . import sandboxexec
     return sandboxexec.wrap(pol, tmp / "install.sb", argv)
 

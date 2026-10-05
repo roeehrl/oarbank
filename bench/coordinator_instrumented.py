@@ -17,7 +17,6 @@ Histogram updates for lock wait/hold happen while the DB lock is held, so they a
 import asyncio
 import math
 import os
-import resource
 import sys
 import threading
 import time
@@ -234,6 +233,27 @@ def _bind(self, loop):
 appmod.EventBus.bind = _bind
 
 
+
+def peak_rss_mb() -> float:
+    """This process's peak resident memory: ru_maxrss (bytes on macOS, KiB on Linux), the peak working set on Windows."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + \
+                       [(n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                       "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                                       "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+        c = Counters(cb=ctypes.sizeof(Counters))
+        info = ctypes.WinDLL("psapi").GetProcessMemoryInfo
+        info.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        info(wintypes.HANDLE(-1), ctypes.byref(c), c.cb)                   # -1: this process
+        return round(c.PeakWorkingSetSize / 2 ** 20, 1)
+    import resource
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(rss / (2 ** 20 if sys.platform == "darwin" else 2 ** 10), 1)
+
 def snapshot(reset: bool) -> dict:
     global S
     with STATS_LOCK:
@@ -245,7 +265,7 @@ def snapshot(reset: bool) -> dict:
         out = {
             "window_s": round(wall, 3),
             "cpu_pct": round(100 * cpu_s / wall, 1),
-            "maxrss_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2 ** 20, 1),   # bytes on macOS
+            "maxrss_mb": peak_rss_mb(),
             "threads": threading.active_count(),
             "lock_wait": st.wait.summary(),
             "lock_hold": st.hold.summary(),

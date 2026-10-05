@@ -263,7 +263,7 @@ def test_module_events_are_the_modules_own_exactly(env):
 
 def test_module_events_name_their_module():
     """Every event about one module carries it (events.module): the events tests above rely on the emitters."""
-    src = "\n".join((Path(__file__).parents[1] / "src" / "oarbank" / "coordinator" / f).read_text()
+    src = "\n".join((Path(__file__).parents[1] / "src" / "oarbank" / "coordinator" / f).read_text(encoding="utf-8")
                     for f in ("ops.py", "modlife.py", "modstore.py", "modsandbox.py", "effects.py", "modimages.py", "campaigns.py"))
     untagged = [line.strip() for line in src.splitlines() if re.search(r'db\.event\("(module_|secret_|dataset_|container_image)', line)
                 and "module=" not in line and "module=" not in src[src.index(line):src.index(line) + 400].split(")\n")[0]]
@@ -325,7 +325,7 @@ def test_secrets_source_shows_state_never_a_value(env):
                     "stages": ["attempt"], "coordinator": False, "unreadable": False}]
     db.x("DELETE FROM secrets WHERE module='taskbench' AND node_id=''")
     assert rows(db, "taskbench", "secrets")[0]["set"] is False
-    code = Path(modpages.__file__).read_text().split('"""', 2)[2]                      # past the module docstring
+    code = Path(modpages.__file__).read_text(encoding="utf-8").split('"""', 2)[2]                      # past the module docstring
     assert "ciphertext" not in code and "secrets WHERE" in code                        # no query reads a value
 
 

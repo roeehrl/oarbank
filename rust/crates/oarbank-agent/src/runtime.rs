@@ -84,7 +84,7 @@ print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) 
     fn clean_env(home: &Path) -> Vec<(String, String)> {
         let mut env = crate::sys::os_env(home, home);
         env.extend([("UV_NO_CONFIG".to_string(), "1".to_string()),
-             ("UV_OFFLINE".into(), "1".into()), ("UV_NO_CACHE".into(), "1".into()),
+             ("UV_OFFLINE".into(), "1".into()), ("UV_LINK_MODE".into(), "copy".into()),
              ("UV_PYTHON_DOWNLOADS".into(), "never".into()), ("LANG".into(), "C.UTF-8".into())]);
         env
     }
@@ -102,7 +102,7 @@ print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) 
         let uv = self.uv.as_ref().context("uv is not available; it installs module dependencies")?;
         let venv = release.join("venvs").join(name);
         crate::fsutil::private_dir(scratch)?;
-        let st = Command::new(uv).args(["venv", "--quiet", "--no-config", "--python"]).arg(&self.python).arg(&venv)
+        let st = Command::new(uv).args(["venv", "--quiet", "--no-config", "--no-cache", "--python"]).arg(&self.python).arg(&venv)
             .env_clear().envs(Self::clean_env(scratch)).current_dir(scratch).status()?;
         if !st.success() {
             bail!("{name}: creating its environment failed");
@@ -113,10 +113,23 @@ print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) 
         })).unwrap_or_else(|| venv.join("Lib").join("site-packages"));
         let pth: String = self.site_dirs.iter().map(|d| format!("import site; site.addsitedir({d:?})\n")).collect();
         std::fs::write(site.join("_oarbank_host.pth"), pth)?;
+        // the interpreter recorded here, outside the sandbox, in this install's own cache: uv inside it then never starts
+        // the interpreter, which it would do with a new NUL device as stdin, and some Windows builds refuse an
+        // AppContainer the NUL device (the SDK's spec/bundles.md, "Install on a host")
+        let cache = scratch.join(format!("{name}-uv-cache"));
+        let _ = std::fs::remove_dir_all(&cache);
+        let q = Command::new(uv).args(["pip", "list", "--quiet", "--no-config", "--offline", "--python"])
+            .arg(Self::venv_python(&venv)).arg("--cache-dir").arg(&cache)
+            .env_clear().envs(Self::clean_env(scratch)).current_dir(scratch).output()?;
+        if !q.status.success() {
+            let _ = std::fs::remove_dir_all(&venv);
+            bail!("{name}: recording its environment's interpreter failed: {}", String::from_utf8_lossy(&q.stderr));
+        }
         let mut argv: Vec<String> = vec![uv.display().to_string(), "pip".into(), "install".into(), "--quiet".into(),
             "--no-config".into(), "--python".into(), Self::venv_python(&venv).display().to_string(), "--offline".into(),
             "--no-index".into(), "--find-links".into(), bundle.join("wheels").display().to_string(), "--require-hashes".into(),
-            "--only-binary".into(), ":all:".into(), "--no-deps".into(), "--no-cache".into(), "-r".into(), req.display().to_string()];
+            "--only-binary".into(), ":all:".into(), "--no-deps".into(), "--cache-dir".into(), cache.display().to_string(),
+            "-r".into(), req.display().to_string()];
         if crate::sandbox::available() {
             let mut pol = oarbank_core::sandbox::Policy::new(entry["module_id"].as_str().unwrap_or(name));
             pol.ro = vec![bundle.display().to_string(), Path::new(uv).parent().unwrap_or(Path::new("/")).display().to_string(),
@@ -127,7 +140,9 @@ print(json.dumps({"site": sorted(set(site)), "roots": sorted(roots | set(extra) 
             pol.exe = Some(uv.display().to_string());
             argv = crate::sandbox::wrap(&pol, &scratch.join(format!("{name}-install.sb")), &argv).map_err(|e| anyhow::anyhow!(e))?;
         }
-        let out = Command::new(&argv[0]).args(&argv[1..]).env_clear().envs(Self::clean_env(scratch)).current_dir(scratch).output()?;
+        let out = Command::new(&argv[0]).args(&argv[1..]).env_clear().envs(Self::clean_env(scratch)).current_dir(scratch).output();
+        let _ = std::fs::remove_dir_all(&cache);
+        let out = out?;
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&venv);
             bail!("{name}: installing its wheels failed: {}", String::from_utf8_lossy(&out.stderr).chars().rev().take(800)

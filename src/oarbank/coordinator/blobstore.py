@@ -28,6 +28,7 @@ from urllib.parse import urljoin, urlsplit
 
 from oarbank_sdk import origins as O
 
+from ..platform import files
 from . import clock
 from .db import DB, jl
 
@@ -73,7 +74,7 @@ def adopt(db: DB, src: Path, digest: str, size: int) -> Path:
     """Move a verified file into the blob directory (read-only) and register it."""
     final = blob_dir(db) / digest[:2] / digest
     final.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(src, 0o444)
+    files.seal(src)
     os.replace(src, final)
     register(db, digest, final, size)
     return final
@@ -124,7 +125,8 @@ def begin(db: DB, uploader: str, digest: str, size) -> dict:
             shutil.disk_usage(upload_dir(db)).free < size - have + DISK_RESERVE_BYTES:
         raise BlobError(507, "upload_space", "not enough room for this upload on the coordinator")
     part.touch()
-    (part.with_suffix(".json")).write_text(json.dumps({"size": size, "uploader": uploader, "at": clock.now()}))
+    (part.with_suffix(".json")).write_text(json.dumps({"size": size, "uploader": uploader, "at": clock.now()}),
+                                           encoding="utf-8", newline="\n")
     return {"offset": have, "complete": False}
 
 
@@ -141,7 +143,7 @@ async def append(db: DB, uploader: str, digest: str, offset: int, chunks) -> dic
         meta = part.with_suffix(".json")
         if not part.exists() or not meta.exists():
             raise BlobError(404, "no_upload", "start the upload first (POST)")
-        size = int(json.loads(meta.read_text())["size"])
+        size = int(json.loads(meta.read_text(encoding="utf-8"))["size"])
         have = part.stat().st_size
         if offset != have:
             raise BlobError(409, "offset_mismatch", f"the upload stands at {have}", offset=have)
@@ -213,7 +215,6 @@ def release(db: DB, digests) -> int:
         p = path(db, d)
         db.x("DELETE FROM blobs WHERE digest=?", (d,))
         if p is not None:
-            p.chmod(0o644)
             p.unlink(missing_ok=True)
         n += 1
     return n
@@ -466,7 +467,7 @@ async def _run_fetch(db: DB, digest: str, urls: list[str], fetch: _Fetch):
         final = blob_dir(db) / digest[:2] / digest
         final.parent.mkdir(parents=True, exist_ok=True)
         os.link(fetch.part, final)                    # followers keep reading the partial they opened
-        os.chmod(final, 0o444)
+        files.seal(final)
         register(db, digest, final, size)
         db.event("origin_fetched", reason=digest[:12], size=size)
         await fetch.finish(True)

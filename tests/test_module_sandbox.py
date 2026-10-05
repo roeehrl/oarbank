@@ -39,7 +39,7 @@ def test_module_coordinator_and_cli_learn_the_coordinators_platform(db, tmp_path
 
 
 def test_the_coordinator_side_runs_its_variant_for_the_coordinators_platform(tmp_path, monkeypatch):
-    doc = tomllib.loads((RELAY_DIR / "oarbank-module.toml").read_text())
+    doc = tomllib.loads((RELAY_DIR / "oarbank-module.toml").read_text(encoding="utf-8"))
     doc["requires"]["core"] = ">=2.3,<3"
     doc["coordinator"].update(timeouts_s={"default": 10.0, "job.plan": 30.0}, concurrency=1, env={"OMP_NUM_THREADS": "4", "A": "base"},
                               variants={"linux": {"exec": ["python", "-I", "{bundle}/relay_linux.py"], "concurrency": 2,
@@ -60,8 +60,8 @@ def test_the_coordinator_side_runs_its_variant_for_the_coordinators_platform(tmp
 def test_the_module_coordinator_runs_sandboxed(db):
     from oarbank.coordinator import sandboxexec
     modcalls.call(db, "toy", "params.check", {"params": {"n": 3}})
-    pid = modcalls.host(db).health("toy")["pid"]
-    assert pid and sandboxexec.is_confined(pid)
+    box = modcalls.host(db)._procs["toy"].box
+    assert box.pid == modcalls.host(db).health("toy")["pid"] and sandboxexec.is_confined(box)
     assert (Path(db.path).parent / "run" / "sandbox" / "toy.sb").exists()
 
 
@@ -77,7 +77,7 @@ t("read_key", lambda: open(home + "/coordinator_key", "rb").read(1))
 t("list_home", lambda: os.listdir(H))
 t("write_bundle", lambda: open(os.path.dirname(__file__) + "/x", "w").write("x"))
 t("write_data", lambda: open(os.environ["OARBANK_MODULE_DATA"] + "/x", "w").write("x"))
-t("write_tmp", lambda: open(os.environ["TMPDIR"] + "x", "w").write("x"))
+t("write_tmp", lambda: open(os.path.join(os.environ.get("TMPDIR") or os.environ["TEMP"], "x"), "w").write("x"))
 import socket
 t("tcp", lambda: socket.create_connection(("1.1.1.1", 443), timeout=3).close())
 print(json.dumps(r))
@@ -92,7 +92,7 @@ def test_a_coordinator_process_cannot_reach_fleetd_state(tmp_path, db):
     bundle.mkdir()
     (bundle / "escape.py").write_text(ESCAPE)
     pol = modsandbox.coordinator_policy(home, "escape", "dev.test.escape", bundle)
-    env = {**modsandbox.coordinator_env(home, "escape"), "PATH": "/usr/bin:/bin", "REAL_HOME": os.path.expanduser("~"),
+    env = {**modsandbox.coordinator_env(home, "escape"), "REAL_HOME": os.path.expanduser("~"),
            "OARBANKD_HOME": str(home.resolve())}
     argv = sandboxexec.wrap(pol, modsandbox.profile_dir(home) / "escape.sb", [sys.executable, "-I", str(bundle / "escape.py")])
     p = subprocess.run(argv, cwd=bundle, env=env,
@@ -105,7 +105,7 @@ def test_a_coordinator_process_cannot_reach_fleetd_state(tmp_path, db):
 def _toy_with_sandbox(tmp_path, version="0.2.0") -> Path:
     src = tmp_path / "toy2"
     shutil.copytree(TOY_DIR, src)
-    m = (src / "oarbank-module.toml").read_text().replace('version = "0.1.0"', f'version = "{version}"', 1)
+    m = (src / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "0.1.0"', f'version = "{version}"', 1)
     m += ('\n[sandbox]\nnet = { mode = "egress-allowlist", allow = ["api.example.org"] }\n'
           'tools = [{ id = "java17", trust = "code-exec" }]\n'
           'containers = [{ image = "docker.io/org/tool:1@sha256:' + "a" * 64 + '", platform = "linux/amd64" }]\n')

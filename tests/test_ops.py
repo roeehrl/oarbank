@@ -1,6 +1,7 @@
 """The operation layer (PLAN D13-D15): one audited path for every mutation, over HTTP."""
 import base64
 import os
+import sys
 import uuid
 
 import pytest
@@ -147,11 +148,12 @@ def test_off_host_digest_copy_detects_a_rewritten_and_resigned_chain(db, api, tm
     signer = Signer(base64.b64encode(os.urandom(32)).decode())
     dest = tmp_path / "offhost"
     dest.mkdir()
-    db.set_setting("audit_digest_copy", ["cp", "{file}", str(dest / "digests.jsonl")])
+    db.set_setting("audit_digest_copy", [sys.executable, "-c", "import shutil, sys; shutil.copy(*sys.argv[1:])", "{file}",
+                                         str(dest / "digests.jsonl")])
     d = audit.write_digest(db, signer)
     audit.export_digest(db, d)
     assert audit.copy_off_host(db)["ok"]
-    copy = [_json.loads(l) for l in (dest / "digests.jsonl").read_text().splitlines()]
+    copy = [_json.loads(l) for l in (dest / "digests.jsonl").read_text(encoding="utf-8").splitlines()]
     r = op(api, "audit.verify", {"target": "audit", "params": {"digests": copy}}).json()["result"]
     assert r["ok"] and r["off_host"] == {"ok": True, "checked": 1, "missing": [], "mismatched": []}
     # rewrite history: edit a row, recompute the chain, re-sign a fresh digest table

@@ -37,7 +37,7 @@ def planned(db, name, target, params, reason="test"):
 
 
 def test_shared_vectors_hold_for_the_python_matcher():
-    v = json.loads(PM.VECTORS.read_text())
+    v = json.loads(PM.VECTORS.read_text(encoding="utf-8"))
     assert len(v["cases"]) >= 10
     for c in v["cases"]:
         assert [p["pid"] for p in PM.group(v["processes"], c["match"], c["tree"])] == c["expected"], c["name"]
@@ -147,7 +147,7 @@ def test_canary_then_promote_after_a_clean_soak(db):
 
 def test_shared_support_vectors_hold_for_the_python_refusals():
     from oarbank.contracts import protection as P
-    v = json.loads(P.SUPPORT_VECTORS.read_text())
+    v = json.loads(P.SUPPORT_VECTORS.read_text(encoding="utf-8"))
     assert len(v["cases"]) >= 10
     for c in v["cases"]:
         P.ProtectionConfig.model_validate({"schema": 1, "rule": [c["rule"]]})

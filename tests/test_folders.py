@@ -24,7 +24,7 @@ def reel_with_folders(tmp_path):
     """reel, asking for an input folder and an outbox."""
     d = tmp_path / "reel"
     shutil.copytree(REEL_DIR, d, ignore=shutil.ignore_patterns("__pycache__"))
-    text = (d / "oarbank-module.toml").read_text()
+    text = (d / "oarbank-module.toml").read_text(encoding="utf-8")
     text += '\n[sandbox]\nfolders = [{ id = "inputs", access = "read" }, { id = "outbox", access = "write" }]\n'
     (d / "oarbank-module.toml").write_text(text)
     assert tomllib.loads(text)["sandbox"]["folders"] == FOLDERS

@@ -101,7 +101,7 @@ def test_notifications_and_the_admin_api_name_the_product_oarbank_with_a_capital
     from oarbank.coordinator import app as coord_app
     titles = []
     for f in Path(oarbank.__file__).parent.rglob("*.py"):
-        for node in ast.walk(ast.parse(f.read_text())):
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "send" \
                     and getattr(node.func.value, "id", None) == "notify":
                 t = next((k.value for k in node.keywords if k.arg == "title"), node.args[1] if len(node.args) > 1 else None)

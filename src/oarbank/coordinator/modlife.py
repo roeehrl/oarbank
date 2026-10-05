@@ -256,23 +256,19 @@ def runtimes_ok(db: DB) -> list[str]:
     running one (built by an earlier coordinator build: an in-place update leaves that build beside the new one, and
     the module sandbox grants only the running interpreter, so the module could not even start). Runs at every start.
     Returns the modules rebuilt; one that cannot be rebuilt is reported and left for its module host to fault."""
-    import shutil
-    import sys
-    from pathlib import Path
     from ..platform import files
-    mine = Path(sys.executable).resolve()
+    mine = files.running_interpreter()
     done = []
     for r in db.q("SELECT name, version, path FROM modules WHERE runtime IS NOT NULL"):
         p = db.abs(r["path"])
         if not (p / "requirements.txt").exists():
             continue
-        py = files.venv_python(p / ".venv")
-        if py.exists() and py.resolve() == mine:
+        if files.venv_interpreter(p / ".venv") == mine:
             continue
-        shutil.rmtree(p / ".venv", ignore_errors=True)
         try:
+            files.remove_tree(p / ".venv")
             modstore._build_runtime(p)
-        except modstore.InstallError as e:
+        except (OSError, modstore.InstallError) as e:
             db.event("module_runtime_failed", reason=f"{r['name']}@{r['version']}: {e}"[:500], module=r["name"])
             continue
         db.event("module_runtime_rebuilt", reason=f"{r['name']}@{r['version']}", module=r["name"])

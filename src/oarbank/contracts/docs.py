@@ -80,8 +80,8 @@ def write() -> list[str]:
     changed = []
     for name, fn in RENDERED.items():
         p, text = DOCS / name, fn()
-        if not p.exists() or p.read_text() != text:
-            p.write_text(text)
+        if not p.exists() or p.read_text(encoding="utf-8") != text:
+            p.write_text(text, encoding="utf-8", newline="\n")
             changed.append(name)
     return changed
 

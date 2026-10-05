@@ -17,6 +17,7 @@ import os
 import re
 from pathlib import Path
 
+from ..platform import files
 from . import clock
 from .db import DB
 
@@ -61,7 +62,7 @@ def store_bytes(db: DB, data: bytes) -> str:
     if not final.is_file():
         tmp = d / f".{digest}.{os.getpid()}.part"
         tmp.write_bytes(data)
-        os.chmod(tmp, 0o444)
+        files.seal(tmp)
         os.replace(tmp, final)
     register_blob(db, digest, str(final), len(data))
     return digest

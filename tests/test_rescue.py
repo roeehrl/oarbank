@@ -62,7 +62,7 @@ def test_a_rescued_fleet_follows_to_the_new_coordinator(lost, tmp_path, monkeypa
     rescue.sign(move, home=new)
 
     # what an agent checks before it records the move (moves.rs): the next epoch, from its key, signed by both
-    mv = json.loads(move.read_text())["coordinator_move"]
+    mv = json.loads(move.read_text(encoding="utf-8"))["coordinator_move"]
     doc = json.loads(mv["statement"])
     assert doc["rescue"] and doc["epoch"] == 2 and doc["from"]["cik"] == old_cik
     assert identity.verify(doc["to"]["cik"], mv["statement"], mv["signatures"]["to"])

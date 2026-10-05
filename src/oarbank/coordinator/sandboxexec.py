@@ -21,8 +21,10 @@ def launcher() -> str | None:
     if env:
         return env if Path(env).is_file() else None
     exe = ".exe" if sys.platform == "win32" else ""
-    here = Path(sys.executable).resolve().parent                     # a coordinator build: python/bin/ beside bin/
-    for cand in (here.parent.parent / "bin" / f"oarbank-sandbox{exe}", here / f"oarbank-sandbox{exe}"):
+    # a coordinator build: bin/ beside python/, whose interpreter is python/bin/python3.x (POSIX) or python\python.exe
+    here = Path(sys.executable).resolve().parent
+    for cand in (here.parent.parent / "bin" / f"oarbank-sandbox{exe}", here.parent / "bin" / f"oarbank-sandbox{exe}",
+                 here / f"oarbank-sandbox{exe}"):
         if cand.is_file():
             return str(cand)
     return shutil.which("oarbank-agent")
@@ -45,6 +47,15 @@ def backend() -> str | None:
     return _status(path).get("backend") if path else None
 
 
+def enforced(capability: str) -> bool:
+    """This coordinator's sandbox enforces `capability` (spec/sandbox.md, "Enforcement"): Seatbelt every one it is asked
+    for; elsewhere what the launcher reports (on Windows `net.egress-allowlist` needs the elevated helper)."""
+    if sys.platform == "darwin":
+        return True
+    path = launcher()
+    return bool(path) and (_status(path).get("enforcement") or {}).get(capability) == "enforced"
+
+
 def policy_json(policy) -> str:
     """The SDK Policy as the launcher reads it."""
     d = dataclasses.asdict(policy) if dataclasses.is_dataclass(policy) else dict(policy)
@@ -64,22 +75,25 @@ def wrap(policy, path: Path, argv: list[str]) -> list[str]:
     if not exe:
         raise RuntimeError("no module sandbox launcher (oarbank-sandbox) on this coordinator")
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(policy_json(policy))
+    tmp.write_text(policy_json(policy), encoding="utf-8", newline="\n")
     tmp.replace(path)
     return [exe, "sandbox-exec", str(path), "--", *argv]
 
 
-def is_confined(pid: int) -> bool:
-    """The process started through `wrap` is confined (checked after it answered, so it is past its exec)."""
+def is_confined(box) -> bool:
+    """The process started through `wrap` in `box` (a platform.procs.Contained) is confined (checked after it answered,
+    so it is past its exec): Seatbelt says so on macOS, no_new_privs and a seccomp filter on Linux, and on Windows every
+    member of its job but the launcher's shim runs in an AppContainer."""
+    pid = box.pid
     if sys.platform == "darwin":
         from oarbank_sdk import sandbox as S
         return S.is_sandboxed(pid)
     if sys.platform.startswith("linux"):
         try:
-            st = Path(f"/proc/{pid}/status").read_text()
+            st = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
         except OSError:
             return False
         fields = dict(line.split(":", 1) for line in st.splitlines() if ":" in line)
         return fields.get("NoNewPrivs", "").strip() == "1" and fields.get("Seccomp", "").strip() == "2"
-    exe = launcher()
-    return bool(exe) and subprocess.run([exe, "sandbox-check", str(pid)], capture_output=True, timeout=20).returncode == 0
+    from ..platform import procs
+    return procs.app_container_members(box)

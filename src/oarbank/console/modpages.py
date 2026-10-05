@@ -40,7 +40,7 @@ class ModuleCatalog:
         return self._man[key]
 
     def page(self, name: str, decl: U.PageDecl) -> U.Page:
-        return U.Page.model_validate(json.loads((Path(self.rows[name]["path"]) / decl.file).read_text()))
+        return U.Page.model_validate(json.loads((Path(self.rows[name]["path"]) / decl.file).read_text(encoding="utf-8")))
 
     def path(self, name: str) -> Path:
         return Path(self.rows[name]["path"])
@@ -378,7 +378,7 @@ def build_host(catalog: ModuleCatalog, module: str, context: dict, ops_meta, mod
         f = (catalog.path(module) / path).resolve()
         if catalog.path(module) not in f.parents:
             return {}
-        return json.loads(f.read_text())
+        return json.loads(f.read_text(encoding="utf-8"))
 
     def frame(view: str) -> dict | None:
         decl = frame_of(man, view)

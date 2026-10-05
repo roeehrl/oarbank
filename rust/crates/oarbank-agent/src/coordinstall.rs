@@ -6,7 +6,10 @@
 //! old coordinator's checkout (`dev-checkout`), never when a release key is pinned. The agent downloads the bundle
 //! (sha256 and size checked), unpacks it under `oarbank-coordinator/<sha12>` (absolute or `..` member paths are
 //! refused), and starts the coordinator with the standby arguments under the service manager (launchd: a
-//! LaunchAgent restarted after a failed exit, as the standby exits 75 to restart on its installed copy). It reports
+//! LaunchAgent restarted after a failed exit, as the standby exits 75 to restart on its installed copy; systemd user
+//! units). On Windows the agent's account is an unprivileged virtual account, which cannot create services: the
+//! install is refused there with the way the owner installs a standby instead (deploy\oarbankd\install-oarbankd.ps1
+//! with the pairing code; docs/design/windows-coordinator.md). It reports
 //! `coordinator_install {plan_id, state: installing|installed|failed, error}`; the final state is sent once.
 
 use crate::api::Api;
@@ -103,7 +106,8 @@ pub fn check_build(d: &Value, signing: &Signing, trust: &Trust, platform: &str) 
 
 async fn install(api: &Api, d: &Value, signing: &Signing, trust: &Trust) -> Result<()> {
     if cfg!(windows) && std::env::var("OARBANK_SERVICE_HOST").as_deref() != Ok("process") {
-        bail!("installing a standby coordinator on Windows is not supported yet");
+        bail!("this node's agent runs under an unprivileged service account, which cannot install services: prepare the \
+               move with this machine's URL and install the standby here with deploy\\oarbankd\\install-oarbankd.ps1 -Pair");
     }
     #[cfg(target_os = "linux")]
     if std::env::var("OARBANK_SERVICE_HOST").as_deref() != Ok("process") && !user_systemd() {
@@ -175,13 +179,26 @@ async fn install(api: &Api, d: &Value, signing: &Signing, trust: &Trust) -> Resu
 }
 
 fn default_coordinator_home() -> PathBuf {
+    if cfg!(windows) {
+        return std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("Oarbank").join("coordinator");
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     if cfg!(target_os = "macos") { home.join("Library/Application Support/Oarbank/coordinator") } else { home.join(".local/share/oarbank/coordinator") }
 }
 
+/// The system's tar: bsdtar on macOS and Windows (System32\tar.exe since Windows 10 1803), GNU tar on Linux.
+fn tar() -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        return root.join("System32").join("tar.exe");
+    }
+    PathBuf::from("/usr/bin/tar")
+}
+
 /// Unpack with the system tar after listing the members: nothing absolute, nothing above the root.
 fn unpack(tgz: &Path, root: &Path) -> Result<()> {
-    let list = std::process::Command::new("/usr/bin/tar").arg("-t").arg("-z").arg("-f").arg(tgz).output()?;
+    let list = std::process::Command::new(tar()).arg("-t").arg("-z").arg("-f").arg(tgz).output()?;
     if !list.status.success() {
         bail!("not a gzipped tar: {}", String::from_utf8_lossy(&list.stderr).trim());
     }
@@ -196,7 +213,7 @@ fn unpack(tgz: &Path, root: &Path) -> Result<()> {
         std::fs::rename(root, aside)?;
     }
     std::fs::create_dir_all(root)?;
-    let x = std::process::Command::new("/usr/bin/tar").arg("-x").arg("-z").arg("-f").arg(tgz).arg("-C").arg(root)
+    let x = std::process::Command::new(tar()).arg("-x").arg("-z").arg("-f").arg(tgz).arg("-C").arg(root)
         .arg("--no-same-owner").output()?;
     if !x.status.success() {
         bail!("unpack failed: {}", String::from_utf8_lossy(&x.stderr).trim());
@@ -228,29 +245,46 @@ fn programs(kind: &str, root: &Path) -> Result<(Vec<String>, Option<Vec<String>>
     let checkout = root.join("oarbank");
     let uv = which("uv").context("uv not found (the checkout bundle needs it)")?;
     let venv = checkout.join(".venv");
-    let s = std::process::Command::new(uv).args(["sync", "--frozen", "-q"]).current_dir(&checkout)
-        .env("UV_PROJECT_ENVIRONMENT", &venv).output()?;
+    let mut sync = std::process::Command::new(uv);
+    sync.args(["sync", "--frozen", "-q"]).current_dir(&checkout).env("UV_PROJECT_ENVIRONMENT", &venv);
+    if cfg!(windows) {
+        // copies, not hard links into uv's cache: a linked file keeps the cache's protected DACL, so the module
+        // sandbox's grant on site-packages never reaches it, and a module process could not read the editable
+        // SDK's .pth (it would not even find oarbank_sdk)
+        sync.env("UV_LINK_MODE", "copy");
+    }
+    let s = sync.output()?;
     if !s.status.success() {
         let e = String::from_utf8_lossy(&s.stderr);
         bail!("uv sync failed: {}", &e[e.len().saturating_sub(400)..]);
     }
-    Ok((vec![venv.join("bin/oarbankd").display().to_string()],
-        Some(vec![venv.join("bin/python").display().to_string(), "-m".into(), "oarbank.console".into()])))
+    let (bin, exe) = if cfg!(windows) { ("Scripts", ".exe") } else { ("bin", "") };
+    Ok((vec![venv.join(bin).join(format!("oarbankd{exe}")).display().to_string()],
+        Some(vec![venv.join(bin).join(format!("python{exe}")).display().to_string(), "-m".into(), "oarbank.console".into()])))
 }
 
 fn which(name: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("OARBANK_UV").filter(|_| name == "uv").map(PathBuf::from).filter(|p| p.exists()) {
         return Some(p);
     }
-    let path = std::env::var("PATH").unwrap_or_default();
-    let found = path.split(':').chain(["/opt/homebrew/bin", "/usr/local/bin"]).map(|d| Path::new(d).join(name)).find(|p| p.exists());
+    let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&path).chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from))
+        .map(|d| d.join(&name)).find(|p| p.exists());
     found
 }
 
 /// Start the standby. `OARBANK_SERVICE_HOST=process` runs it as a supervised child of the agent (tests) instead of
 /// a launchd job: restarted after a failed exit, its pid in `<install>/standby.pid`.
 fn start_services(root: &Path, args: Vec<String>, console: Option<Vec<String>>, home: Option<PathBuf>) -> Result<()> {
-    let mut env = vec![("PATH".to_string(), "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string())];
+    let mut env = if cfg!(windows) {
+        // what a Windows program needs to start, from the agent's own environment
+        ["SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "PATH", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA",
+         "APPDATA", "ProgramData", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"].iter()
+            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v))).collect()
+    } else {
+        vec![("PATH".to_string(), "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string())]
+    };
     if let Some(h) = &home {
         env.push(("OARBANKD_HOME".into(), h.display().to_string()));
     }
@@ -258,9 +292,10 @@ fn start_services(root: &Path, args: Vec<String>, console: Option<Vec<String>>, 
     std::fs::create_dir_all(&logs)?;
     if std::env::var("OARBANK_SERVICE_HOST").as_deref() == Ok("process") {
         for (k, v) in std::env::vars() {
-            let knob = k.starts_with("OARBANKD_") || k == "OARBANK_RELEASE_SIGNING" || k == "OARBANK_SECRET_STORE";
+            let knob = k.starts_with("OARBANKD_") || ["OARBANK_RELEASE_SIGNING", "OARBANK_SECRET_STORE", "OARBANK_SANDBOX_EXEC"]
+                .contains(&k.as_str());
             if knob && !env.iter().any(|(e, _)| *e == k) {
-                env.push((k, v));                                 // test knobs such as the move time lock
+                env.push((k, v));                                 // test knobs: the move time lock, the module launcher
             }
         }
         return supervise(root, args, env, &logs.join("oarbankd.log"));
@@ -355,7 +390,7 @@ fn supervise(root: &Path, args: Vec<String>, env: Vec<(String, String)>, log: &P
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -371,7 +406,7 @@ mod tests {
             std::fs::write(p, body).unwrap();
         }
         let out = dir.join("b.tar.gz");
-        assert!(std::process::Command::new("/usr/bin/tar").arg("-c").arg("-z").arg("-f").arg(&out).arg("-C").arg(&src)
+        assert!(std::process::Command::new(tar()).arg("-c").arg("-z").arg("-f").arg(&out).arg("-C").arg(&src)
             .args(members.iter().map(|m| m.0)).status().unwrap().success());
         out
     }

@@ -186,10 +186,20 @@ pub fn holds(pid: i32) -> bool {
     escape(pid).is_none()
 }
 
-/// The AppContainer name for a module: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most).
-pub fn container_name(module: &str) -> String {
+/// The AppContainer for a module process: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most) for
+/// the agent's processes (runners, doctors, services, probes, dependency installs); the coordinator's own (kinds
+/// `coordinator` and `coordinator-install`) run in `Oarbank.coordinator.<id>` and module CLIs in `Oarbank.cli.<id>`.
+/// A container's named objects live in one directory per session, which the account that first starts the container
+/// there owns, so two accounts never share a container: the agent's and the coordinator's services both run in session 0, on a coordinator that
+/// is also a node, and a person may run a module CLI in the same session as a personal agent of another account.
+pub fn container_name(module: &str, kind: &str) -> String {
+    let role = match kind {
+        "coordinator" | "coordinator-install" => "coordinator.",
+        "cli" => "cli.",
+        _ => "",
+    };
     let clean: String = module.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' }).collect();
-    let mut n = format!("Oarbank.{clean}");
+    let mut n = format!("Oarbank.{role}{clean}");
     n.truncate(64);
     n
 }
@@ -229,10 +239,11 @@ fn own_sid() -> Result<String, String> {
     }
 }
 
-/// The SID string of a module's AppContainer (its profile need not exist yet).
+/// The SID string of the AppContainer a module's jobs run in on this node (`container_name` for a runner; its
+/// profile need not exist yet).
 pub fn container_sid_string(module_id: &str) -> Result<String, String> {
     use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
-    let name = wide(&container_name(module_id));
+    let name = wide(&container_name(module_id, "runner"));
     let mut sid: windows_sys::Win32::Security::PSID = std::ptr::null_mut();
     if unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) } < 0 {
         return Err(format!("the AppContainer SID of {module_id}"));
@@ -682,7 +693,7 @@ pub fn exec(args: &[String]) -> ! {
         Ok(p) => p,
         Err(e) => die(70, &format!("policy {}: {e}", args[0])),
     };
-    let name = container_name(&pol.module);
+    let name = container_name(&pol.module, &pol.kind);
     let sid = match ffi::container_sid(&name) {
         Ok(s) => s,
         Err(e) => die(70, &e),
@@ -809,7 +820,12 @@ mod tests {
 
     #[test]
     fn names_and_quoting() {
-        assert_eq!(container_name("dev.example.render frames"), "Oarbank.dev.example.render-frames");
+        assert_eq!(container_name("dev.example.render frames", "runner"), "Oarbank.dev.example.render-frames");
+        assert_eq!(container_name("dev.example.render", "doctor"), "Oarbank.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "coordinator"), "Oarbank.coordinator.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "coordinator-install"), "Oarbank.coordinator.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "install"), "Oarbank.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "cli"), "Oarbank.cli.dev.example.render");
         assert_eq!(quote_arg("plain"), "plain");
         assert_eq!(quote_arg(r"C:\Program Files\x"), r#""C:\Program Files\x""#);
         assert_eq!(quote_arg(r#"a "b" c\"#), r#""a \"b\" c\\""#);
@@ -849,7 +865,7 @@ mod tests {
         let d = tmp.path().to_path_buf();
         let exe = d.join("python.exe");
         std::fs::write(&exe, b"x").unwrap();
-        let sid = ffi::container_sid(&container_name("dev.test.acl")).unwrap();
+        let sid = ffi::container_sid(&container_name("dev.test.acl", "runner")).unwrap();
         let ro = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
         ffi::grant(&d.display().to_string(), sid, ro).unwrap();
         assert_eq!(entries(&d, sid), (1, 0));
@@ -875,7 +891,7 @@ mod tests {
         use windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile;
         // a profile of this process's own, from none (other copies of the test may run at once)
         let module = format!("dev.test.profile-{}", std::process::id());
-        let (name, sid) = (container_name(&module), container_sid_string(&module).unwrap());
+        let (name, sid) = (container_name(&module, "runner"), container_sid_string(&module).unwrap());
         let forget = || {
             let _lock = ffi::Lock::take(ffi::Lock::PROFILE).unwrap();
             unsafe { DeleteAppContainerProfile(wide(&name).as_ptr()) };
