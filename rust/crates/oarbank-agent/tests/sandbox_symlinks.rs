@@ -68,7 +68,7 @@ fn real_path(p: &str) -> PathBuf {
 fn an_interpreter_behind_symlink_hops_starts_and_reads_no_more() {
     let (py, roots) = python();
     let real = real_path(&py);
-    let (brew, bundle, ws) = (scratch("brew"), scratch("links-bundle"), scratch("links-ws"));
+    let ((_brew, brew), (_bundle, bundle), (_ws, ws)) = (scratch("brew"), scratch("links-bundle"), scratch("links-ws"));
     let (exe, link_dir, beside) = brew_layout(&brew, &real);
     std::fs::write(bundle.join("probe.py"), PROBE).unwrap();
     let exe = exe.display().to_string();
@@ -82,7 +82,4 @@ fn an_interpreter_behind_symlink_hops_starts_and_reads_no_more() {
         want["real"] = real.display().to_string().into();
     }
     assert_eq!(got, want);
-    for d in [&brew, &bundle, &ws] {
-        let _ = std::fs::remove_dir_all(d);
-    }
 }

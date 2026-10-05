@@ -52,6 +52,13 @@ mod wslc;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// A test's scratch directory: a fresh name under the system's temporary directory (one named after the process alone
+/// can be a dead process's, with its files, once Windows reuses the id), removed when dropped.
+#[cfg(test)]
+pub fn scratch(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new().prefix(&format!("oarbank-{tag}-")).tempdir().unwrap()
+}
+
 /// The agent's version: the crate's, unless a build sets OARBANK_AGENT_VERSION (release builds of one source tree with
 /// distinct versions, and the update tests).
 pub const VERSION: &str = match option_env!("OARBANK_AGENT_VERSION") {
@@ -343,5 +350,23 @@ fn discover_one() -> anyhow::Result<String> {
         [] => anyhow::bail!("no coordinator announces itself on the local network: give --coordinator <url> or --join <code>"),
         many => anyhow::bail!("{} coordinators announce themselves here: give --coordinator <url> ({})", many.len(),
                               many.iter().filter_map(|f| f["url"].as_str()).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// What a dead process left never reaches a test that runs under its reused process id: a scratch directory is new
+    /// and empty even beside the one such a process left under a name made of the tag and the id (as the CDI test's
+    /// did, which then read a dead run's nvidia.yaml), and it goes with its guard.
+    #[test]
+    fn a_scratch_directory_is_new_and_goes_with_its_guard() {
+        let left = std::env::temp_dir().join(format!("oarbank-cdi-{}", std::process::id()));
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join("nvidia.yaml"), "kind: nvidia.com/gpu\n").unwrap();
+        let d = super::scratch("cdi");
+        let (path, found) = (d.path().to_path_buf(), std::fs::read_dir(d.path()).unwrap().count());
+        drop(d);
+        let _ = std::fs::remove_dir_all(&left);
+        assert_eq!((found, path.exists()), (0, false), "(files found in a new scratch directory, still there once dropped)");
     }
 }

@@ -352,22 +352,26 @@ fn serve_requests() -> Result<()> {
     serve_pipe(PIPE, Some(&sa), &|| crate::STOP.load(std::sync::atomic::Ordering::SeqCst), |req| h.handle(req))
 }
 
-/// Answer one request a connection, a line of JSON each way, until `stop()`. The reply is flushed before the pipe is
-/// disconnected: DisconnectNamedPipe throws away whatever the client has not read yet, so without the flush a client
-/// that reads a moment later gets nothing.
+/// Answer one request a connection, a line of JSON each way, until `stop()`. A stop is a flag and then a connection of
+/// the stopper's own (svc_windows.rs `control`), so `stop()` is asked once the next pipe instance exists: a connection
+/// made after the flag then always reaches it, or finds the flag already seen. Asked before the instance exists, a stop
+/// landing between the two found no pipe to connect to, and ConnectNamedPipe waited for ever. The reply is flushed
+/// before the pipe is disconnected: DisconnectNamedPipe throws away whatever the client has not read yet, so without the
+/// flush a client that reads a moment later gets nothing.
 fn serve_pipe(name: &str, sa: Option<&SECURITY_ATTRIBUTES>, stop: &dyn Fn() -> bool,
               mut handle: impl FnMut(&Value) -> Result<Value>) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
     let name = wide(name);
     loop {
-        if stop() {
-            return Ok(());
-        }
         let pipe = unsafe { CreateNamedPipeW(name.as_ptr(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                                              PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0,
                                              sa.map_or(std::ptr::null(), |sa| sa as *const SECURITY_ATTRIBUTES)) };
         if pipe == INVALID_HANDLE_VALUE {
             bail!("creating the pipe: {}", std::io::Error::last_os_error());
+        }
+        if stop() {
+            unsafe { CloseHandle(pipe) };
+            return Ok(());
         }
         let connected = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } != 0
             || std::io::Error::last_os_error().raw_os_error() == Some(535);        // ERROR_PIPE_CONNECTED
@@ -429,6 +433,30 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         let _ = std::fs::OpenOptions::new().read(true).write(true).open(&name);
         server.join().unwrap().unwrap();
+    }
+
+    /// A stop that arrives right after the server last asked (the flag, then the stopper's own connection, both before
+    /// the next pipe instance exists, if the server asks first) still ends it: here the stop is asked for from inside
+    /// the server's first check, as if it had come a moment after it.
+    #[test]
+    fn a_stop_right_after_the_check_ends_the_server() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let name = format!(r"\\.\pipe\oarbank-helper-stop-{}", std::process::id());
+        let (stopped, n) = (Arc::new(AtomicBool::new(false)), name.clone());
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let stop = || {
+                if stopped.load(Ordering::SeqCst) {
+                    return true;
+                }
+                stopped.store(true, Ordering::SeqCst);
+                let _ = std::fs::OpenOptions::new().read(true).write(true).open(&n);
+                false
+            };
+            let _ = done.send(serve_pipe(&n, None, &stop, |_| Ok(json!({"ok": true}))).is_ok());
+        });
+        assert_eq!(ended.recv_timeout(std::time::Duration::from_secs(20)).ok(), Some(true), "the server still waits for a connection");
     }
 
     /// As LocalSystem (a scheduled task run as SYSTEM): the agent's session helper runs in every session a person is

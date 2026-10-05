@@ -824,8 +824,8 @@ mod tests {
     fn reads_a_procfs_tree() {
         use std::collections::HashSet;
         use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!("oarbank-procfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::Builder::new().prefix("oarbank-procfs-").tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
         let mk = |pid: i32, stat: &str, uid: u32, exe: Option<&str>, cmdline: &[u8]| {
             let d = root.join(pid.to_string());
             std::fs::create_dir_all(d.join("task").join(pid.to_string())).unwrap();
@@ -890,6 +890,5 @@ mod tests {
         assert_eq!(r.list(|_| true, &HashSet::new()).unwrap().len(), 3);
         // gone: no stat, no start time
         assert_eq!(r.start_time_us(9999), None);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

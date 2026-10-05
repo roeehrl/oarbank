@@ -493,11 +493,11 @@ pub mod tests {
                        platform: "linux/amd64".into(), key_pem: key.pem(), index }
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oarbank-imageset-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d.join("image-sets.json")
+    /// (what removes the scratch directory when dropped, the seq file in it)
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let d = crate::scratch(&format!("imageset-{tag}"));
+        let f = d.path().join("image-sets.json");
+        (d, f)
     }
 
     #[tokio::test]
@@ -517,7 +517,8 @@ pub mod tests {
             s.sign(&key, &reg, "org/other", &o, false);
             (a, b, c, o)
         };
-        let v = Verifier::new(scratch("formats")).unwrap();
+        let (_d, seqs) = scratch("formats");
+        let v = Verifier::new(seqs).unwrap();
         let s = set(&reg, &key, None);
         v.verify(&s, &format!("{reg}/org/tasks/a@{a}"), "linux/amd64").await.unwrap();
         v.verify(&s, &format!("{reg}/org/tasks/b@{b}"), "linux/amd64").await.unwrap();
@@ -543,7 +544,8 @@ pub mod tests {
                                                  "manifests": refs})).unwrap();
             st.manifests.insert(("org/tasks/a".into(), a.replace(':', "-")), idx);
         }
-        Verifier::new(scratch("fallback")).unwrap().verify(&s, &format!("{reg}/org/tasks/a@{a}"), "linux/amd64").await.unwrap();
+        let (_f, seqs) = scratch("fallback");
+        Verifier::new(seqs).unwrap().verify(&s, &format!("{reg}/org/tasks/a@{a}"), "linux/amd64").await.unwrap();
     }
 
     #[tokio::test]
@@ -558,7 +560,7 @@ pub mod tests {
             s.index(&key, &reg, "org/tasks-index", "current", 5, std::slice::from_ref(&a));
             (a, b)
         };
-        let seqs = scratch("index");
+        let (_d, seqs) = scratch("index");
         let v = Verifier::new(seqs.clone()).unwrap();
         let s = set(&reg, &key, Some(format!("{reg}/org/tasks-index:current")));
         v.verify(&s, &format!("{reg}/org/tasks/a@{a}"), "linux/amd64").await.unwrap();
@@ -572,7 +574,8 @@ pub mod tests {
         assert!(e.detail.contains("older than seq 6"), "{e:?}");
         // an index signed by another key is refused
         store.lock().unwrap().index(&Key::new(), &reg, "org/tasks-index", "current", 9, std::slice::from_ref(&a));
-        let e = Verifier::new(scratch("index-forged")).unwrap().verify(&s, &format!("{reg}/org/tasks/a@{a}"), "linux/amd64")
+        let (_f, forged) = scratch("index-forged");
+        let e = Verifier::new(forged).unwrap().verify(&s, &format!("{reg}/org/tasks/a@{a}"), "linux/amd64")
             .await.unwrap_err();
         assert!(e.detail.starts_with("the set's index"), "{e:?}");
     }
@@ -581,7 +584,8 @@ pub mod tests {
     async fn an_unreachable_registry_is_unavailable_not_a_refusal() {
         let key = Key::new();
         let s = set("127.0.0.1:9", &key, None);
-        let e = Verifier::new(scratch("down")).unwrap()
+        let (_d, seqs) = scratch("down");
+        let e = Verifier::new(seqs).unwrap()
             .verify(&s, &format!("127.0.0.1:9/org/tasks/a@sha256:{}", "2".repeat(64)), "linux/amd64").await.unwrap_err();
         assert_eq!(e.code, "registry_unavailable");
     }

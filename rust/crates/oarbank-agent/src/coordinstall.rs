@@ -387,19 +387,8 @@ fn supervise(root: &Path, args: Vec<String>, env: Vec<(String, String)>, log: &P
 mod tests {
     use super::*;
 
-    struct Scratch(PathBuf);
-    impl Scratch {
-        fn path(&self) -> &Path { &self.0 }
-    }
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    fn scratch() -> Scratch {
-        let p = std::env::temp_dir().join(format!("coordinstall-{}-{}", std::process::id(), rand::random::<u64>()));
-        std::fs::create_dir_all(&p).unwrap();
-        Scratch(p)
+    fn scratch() -> tempfile::TempDir {
+        crate::scratch("coordinstall")
     }
 
     fn tgz(dir: &Path, members: &[(&str, &str)]) -> PathBuf {

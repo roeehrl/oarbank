@@ -5,7 +5,7 @@ mod common;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use common::{controller, no_cpu, proc_fp, tick, TempDir};
+use common::{controller, no_cpu, proc_fp, tick, scratch};
 use oarbank_protection::*;
 use serde_json::{json, Value};
 
@@ -69,7 +69,7 @@ fn a_reserving_rule_holds_memory_and_a_memory_hog_co_tenant_evicts_only_fleet_wo
 
 #[test]
 fn broken_local_file_never_loosens_the_central_config() {
-    let dir = TempDir::new("local");
+    let dir = scratch("local");
     let local = dir.path().join("protection.json");
     std::fs::write(&local, "{not json").unwrap();
     let mut ctl = ProtectionController::new(None, Host::unavailable());
@@ -352,7 +352,7 @@ fn journal_pending_acknowledge_and_bounds() {
 
 #[test]
 fn journal_file_sink_writes_daily_jsonl() {
-    let dir = TempDir::new("journal");
+    let dir = scratch("journal");
     let j = DecisionJournal::new(
         Box::new(SystemClock),
         Some(Box::new(FileJournalSink::new(dir.path().join("journal")))),

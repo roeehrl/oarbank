@@ -4,17 +4,18 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("oarbank-sbx-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A fresh directory under the system temp dir: (what removes it when dropped, its path).
+fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let d = tempfile::Builder::new().prefix(&format!("oarbank-sbx-{name}-")).tempdir().unwrap();
+    let p = d.path().to_path_buf();
+    (d, p)
 }
 
 fn sandboxed(module: &str, rw: &std::path::Path, argv: &[&str]) -> Output {
     let policy = serde_json::json!({"module": module, "ro": [], "rw": [rw.display().to_string()], "net": "none",
                                     "proxy_port": null, "broker_socket": null, "gpu": false, "exec_rw": false,
                                     "kind": "runner", "exe": argv[0]});
-    let p = rw.with_extension("policy.json");
+    let p = rw.join("policy.json");
     std::fs::write(&p, policy.to_string()).unwrap();
     Command::new(env!("CARGO_BIN_EXE_oarbank-agent")).arg("sandbox-exec").arg(&p).arg("--").args(argv).output().unwrap()
 }
@@ -27,7 +28,7 @@ fn system32(exe: &str) -> String {
 fn a_contained_program_can_load_user32() {
     // whoami.exe imports user32: without read access to the window station and desktop it inherits, a contained
     // process dies at start with 0xC0000142 (and Python's ctypes, COM and platform module fail the same way)
-    let d = scratch("user32");
+    let (_d, d) = scratch("user32");
     let out = sandboxed("dev.test.user32", &d, &[&system32("whoami.exe")]);
     assert!(out.status.success(), "{:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
     assert!(!out.stdout.is_empty());
@@ -35,15 +36,39 @@ fn a_contained_program_can_load_user32() {
 
 #[test]
 fn a_contained_program_writes_its_rw_root_only() {
-    let d = scratch("rw");
+    let (_d, d) = scratch("rw");
     let inside = d.join("inside.txt");
-    let outside = std::env::temp_dir().join(format!("oarbank-sbx-outside-{}.txt", std::process::id()));
+    let (_elsewhere, elsewhere) = scratch("outside");
+    let outside = elsewhere.join("outside.txt");
     let cmd = system32("cmd.exe");
     // no quotes around the paths: the shim quotes argv the CRT way, which cmd does not unquote (temp paths have no spaces)
     let ok = sandboxed("dev.test.rw", &d, &[&cmd, "/c", &format!("echo x> {}", inside.display())]);
     assert!(ok.status.success() && inside.exists(), "{}", String::from_utf8_lossy(&ok.stderr));
     let denied = sandboxed("dev.test.rw", &d, &[&cmd, "/c", &format!("echo x> {}", outside.display())]);
     assert!(!denied.status.success() && !outside.exists());
+}
+
+/// Launches of one module at once all start. Every shim makes sure the module's AppContainer profile exists, and
+/// CreateAppContainerProfile races itself: a call on an existing profile, beside another, can delete it until a later
+/// call creates it again, and a CreateProcess for the container in that window fails with ERROR_FILE_NOT_FOUND, which
+/// the shim reports against the program it starts.
+#[test]
+fn launches_of_one_module_at_once_all_start() {
+    let cmd = system32("cmd.exe");
+    let failed: Vec<String> = std::thread::scope(|s| {
+        let threads: Vec<_> = (0..16).map(|t| {
+            let cmd = &cmd;
+            s.spawn(move || {
+                let (_d, d) = scratch(&format!("together-{t}"));
+                (0..10).filter_map(|_| {
+                    let out = sandboxed("dev.test.together", &d, &[cmd, "/c", "exit 0"]);
+                    (!out.status.success()).then(|| format!("{:?} {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+                }).collect::<Vec<_>>()
+            })
+        }).collect();
+        threads.into_iter().flat_map(|t| t.join().unwrap()).collect()
+    });
+    assert!(failed.is_empty(), "{} of 160 launches failed: {failed:?}", failed.len());
 }
 
 /// The test's Python (OARBANK_TEST_PYTHON, else the node runtime's, else the one on PATH) and the directories the
@@ -89,12 +114,12 @@ fn a_contained_runner_is_alone_in_its_job_with_the_shim() {
     use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
                                                  QueryInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
-    let d = scratch("job");
+    let (_d, d) = scratch("job");
     let (py, roots) = python();
     let policy = serde_json::json!({"module": "dev.test.job", "ro": roots, "rw": [d.display().to_string()], "net": "none",
                                     "proxy_port": null, "broker_socket": null, "gpu": false, "exec_rw": false,
                                     "kind": "runner", "exe": py});
-    let p = d.with_extension("policy.json");
+    let p = d.join("policy.json");
     std::fs::write(&p, policy.to_string()).unwrap();
     let mut shim = Command::new(env!("CARGO_BIN_EXE_oarbank-agent")).arg("sandbox-exec").arg(&p).arg("--")
         .args([py.as_str(), "-I", "-c", "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text('up'); time.sleep(60)",
@@ -138,7 +163,7 @@ fn a_runner_reads_its_read_folder_and_writes_only_into_its_outbox() {
     // folder grants (spec/sandbox.md, "Folders"): entries for the module's runner capability SID, which the shim adds to
     // the runner's token; a read folder is read and listed, never written; an outbox takes new files, never a read, a
     // listing or a delete
-    let d = scratch("folders");
+    let (_d, d) = scratch("folders");
     let (inbox, outbox) = (d.join("inbox"), d.join("outbox"));
     std::fs::create_dir_all(&inbox).unwrap();
     std::fs::create_dir_all(&outbox).unwrap();
@@ -269,7 +294,7 @@ fn only_its_modules_appcontainer_opens_a_broker_pipe() {
     let client = format!("import sys\ntry:\n    f = open(r'\\\\.\\pipe\\{name}', 'r+b', buffering=0)\nexcept OSError as e:\n    \
                           print('refused', e.errno); sys.exit(0)\nf.write(b'ping\\n')\nprint(f.read(64).decode().strip())\n");
     let run = |module: &str, tag: &str| {
-        let d = scratch(tag);
+        let (_d, d) = scratch(tag);
         let policy = serde_json::json!({"module": module, "ro": roots, "rw": [d.display().to_string()], "net": "none",
                                         "proxy_port": null, "broker_socket": format!("npipe://./pipe/{name}"), "gpu": false,
                                         "exec_rw": false, "kind": "runner", "exe": py});

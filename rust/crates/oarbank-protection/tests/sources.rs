@@ -6,7 +6,7 @@ mod common;
 use std::fs::OpenOptions;
 use std::io::Write;
 
-use common::TempDir;
+use common::scratch;
 use oarbank_protection::sources::newest;
 use oarbank_protection::*;
 use serde_json::json;
@@ -23,7 +23,7 @@ fn append(path: &std::path::Path, text: &str) {
 
 #[test]
 fn jsonl_progress_counts_events_per_second_after_the_first_read() {
-    let dir = TempDir::new("progress");
+    let dir = scratch("progress");
     let f = dir.path().join("events-1.jsonl");
     append(&f, "{\"event\": \"step\"}\n");
     let mut s = FileOwnerSources::new();
@@ -42,7 +42,7 @@ fn jsonl_progress_counts_events_per_second_after_the_first_read() {
 
 #[test]
 fn log_regex_and_exec_progress() {
-    let dir = TempDir::new("logrx");
+    let dir = scratch("logrx");
     let f = dir.path().join("train.log");
     append(&f, "start\n");
     let mut s = FileOwnerSources::new();
@@ -63,7 +63,7 @@ fn log_regex_and_exec_progress() {
 
 #[test]
 fn phase_follows_the_newest_enter_or_exit_event() {
-    let dir = TempDir::new("phase");
+    let dir = scratch("phase");
     let f = dir.path().join("phase.jsonl");
     append(&f, "{\"e\": \"upload_start\"}\n");
     let spec =
@@ -78,7 +78,7 @@ fn phase_follows_the_newest_enter_or_exit_event() {
 
 #[test]
 fn newest_matches_a_glob_in_the_last_component() {
-    let dir = TempDir::new("glob");
+    let dir = scratch("glob");
     append(&dir.path().join("a-1.log"), "x");
     std::thread::sleep(std::time::Duration::from_millis(20));
     append(&dir.path().join("a-2.log"), "x");
