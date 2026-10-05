@@ -8,9 +8,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 
 | Operation | Tier | API | CLI | Console |
 |---|---|---|---|---|
-| `fleet.pause` | T0 | yes | `oarbank op fleet.pause` | yes |
-| `fleet.halt` | T1 | yes | `oarbank op fleet.halt` | yes |
-| `fleet.resume` | T1 | yes | `oarbank op fleet.resume` | yes |
+| `fleet.pause` | T0 | yes | `oarbank pause --all` | yes |
+| `fleet.halt` | T1 | yes | `oarbank halt --all` | yes |
+| `fleet.resume` | T1 | yes | `oarbank resume --all` | yes |
 | `nodes.admit` | T2 | yes | `oarbank node approve <eid>` | yes |
 | `nodes.join_code` | T2 | yes | `oarbank join-code [--label NAME]` | yes |
 | `nodes.reject_enrollment` | T1 | yes | `oarbank node reject <eid>` | yes |
@@ -25,8 +25,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `nodes.recertify` | T0 | yes | `oarbank op nodes.recertify` | yes |
 | `nodes.retire` | T3 | yes | `oarbank op nodes.retire` | yes |
 | `nodes.set_mode` | T1 | yes | `oarbank node mode <nid> <mode>` | yes |
-| `jobs.retry` | T0 | yes | `oarbank op jobs.retry` | yes |
-| `jobs.cancel` | T1 | yes | `oarbank op jobs.cancel` | yes |
+| `jobs.retry` | T0 | yes | `oarbank job retry <jid>` | yes |
+| `jobs.cancel` | T1 | yes | `oarbank job cancel <jid>` | yes |
 | `jobs.set_priority` | T0 | yes | `oarbank op jobs.set_priority` | yes |
 | `campaigns.pause` | T0 | yes | `oarbank campaign pause <id>` | yes |
 | `campaigns.resume` | T0 | yes | `oarbank campaign resume <id>` | yes |
@@ -38,7 +38,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `campaigns.rebind_platform` | T2 | yes | `oarbank campaign rebind <id> --platform <token>` | yes |
 | `datasets.register` | T1 | yes | `oarbank dataset upload <dir> --kind <kind>`<br>`oarbank dataset register <file.json>` | yes |
 | `settings.origins.update` | T2 | yes | `oarbank op settings.origins.update -p hosts=...` | yes |
-| `modules.set_pipeline` | T2 | yes | `oarbank pipeline <module> single|split` | yes |
+| `modules.set_pipeline` | T2 | yes | `oarbank pipeline single|split --module <module>` | yes |
 | `modules.install` | T2 | yes | `oarbank module install <bundle.mfb>` | yes |
 | `modules.uninstall` | T2 | yes | `oarbank module uninstall <name>@<version>` | yes |
 | `modules.verify` | T0 | yes | `oarbank module verify [name]` | yes |
@@ -71,7 +71,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `coordinator.builds.sign` | T1 | yes | `oarbank coordinator-build sign <build>` | yes |
 | `releases.promote` | T2 | yes | `oarbank release promote <rid>` | yes |
 | `releases.pin_key` | T3 | yes | `oarbank release keygen` | yes |
-| `protection.rules.update` | T2 | yes | `oarbank protection set <nid> <file>` | yes |
+| `protection.rules.update` | T2 | yes | `oarbank protection set <nid> <file>`<br>`oarbank protection preview <nid> <file>` | yes |
 | `protection.rules.restore` | T2 | yes | `oarbank protection restore <nid> <version>` | yes |
 | `protection.rules.canary` | T2 | yes | `oarbank protection canary <nid> <file>`<br>`oarbank protection promote` | yes |
 | `protection.probe_now` | T0 | yes | `oarbank protection probe <nid>` | yes |

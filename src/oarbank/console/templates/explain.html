@@ -16,5 +16,10 @@
 <td class="mono">{{ r.predicate }}</td><td class="mut">{{ r.layer }}</td><td class="mono">{{ r.observed }}</td><td class="mono">{{ r.required }}</td><td class="mono">{{ r.code if r.outcome != 'pass' else '' }}</td></tr>{% endfor %}</table>
 </details>{% endfor %}{% endif %}
 {% if doc.clauses %}<h2>Clauses</h2><table class="small">{% for c in doc.clauses %}<tr><td class="mono">{{ c.predicate }}</td><td class="num">{{ c.matched }}/{{ c.of }}</td></tr>{% endfor %}</table>{% endif %}
-{% if doc.remedies %}<h2>Remedies</h2><div class="row">{% for r in doc.remedies %}<span class="chip">{{ r.op }}</span>{% endfor %}</div>{% endif %}
+{% if remedies %}<h2>Remedies</h2><div class="row">{% for r in remedies %}
+  {% if r.href %}<a class="btn" href="{{ r.href }}" title="{{ OPS[r.op].summary }}">{{ r.label }} →</a>
+  {% elif r.button %}{% call m.op_form(r.op, r.target, r.label, cls="pri", return_to="/explain/" ~ doc.subject.kind ~ "/" ~ doc.subject.id,
+                                       confirm=r.label ~ " " ~ r.target ~ "?") %}{% if r.input %}<input name="{{ r.input }}" type="number" style="width:70px" aria-label="{{ r.input }}">{% endif %}{% endcall %}
+  {% else %}<span class="chip" title="{{ OPS[r.op].summary }}">{{ r.label }}</span> <code class="small">{{ r.command }}</code>{% endif %}
+{% endfor %}</div>{% endif %}
 {% endblock %}

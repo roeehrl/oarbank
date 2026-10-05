@@ -16,8 +16,8 @@ from urllib.parse import quote, urlencode
 from oarbank_sdk import manifest as mf, portable, ui as U
 from oarbank_sdk.render import ROLE_RANK, Host, filter_params, interpolate, shape
 
-from ..coordinator import folders as F, nodeservices, placement, platforms as P
-from .views import OFFLINE_AFTER, gpu_view, jl
+from ..coordinator import detail, folders as F, nodeservices, placement, platforms as P
+from .views import OFFLINE_AFTER, jl
 
 
 class ModuleCatalog:
@@ -60,7 +60,7 @@ def _online(n: dict, now: float) -> bool:
 
 def _node_row(n: dict, module: str, man: mf.Manifest, now: float) -> dict:
     facts = jl(n["facts_json"], {}) or {}
-    gpu = gpu_view(facts, jl(n["doctor_json"]))
+    gpu = detail.gpu(facts, jl(n["doctor_json"]))
     cont = facts.get("containers") or {}
     missing = [m for m in cont.get("missing") or [] if isinstance(m, dict)]
     svcs = nodeservices.rows(n, module)

@@ -232,6 +232,25 @@ def request_probe(db: DB, nid: str, actor: str):
     db.event("protection_probe_requested", actor=actor, node_id=nid)
 
 
+# ------------------------------------------------------------------ status (`oarbank protection show`)
+
+def status(db: DB, ident: str, history_limit: int = 20) -> dict | None:
+    """A node's protection as the console's protection page shows it: the current version, its mode and rules, the
+    version history, what the agent reports live (active rules, controller, guard), what protection cannot read or do
+    there now, and the running canary with whether it is promotable. By node id or hostname."""
+    n = db.one("SELECT node_id, hostname, telemetry_json FROM nodes WHERE node_id=? OR hostname=?", (ident, ident))
+    if not n:
+        return None
+    ver, cfg = current(db, n["node_id"])
+    tel = jl(n["telemetry_json"], {}) or {}
+    hist = [{"version": h["version"], "created_at": h["created_at"], "actor": h["actor"], "source": h["source"],
+             "reason": h["reason"], "rules": [x.get("id") for x in h["config"].get("rule") or []],
+             "mode": (h["config"].get("node") or {}).get("mode", "moderate")} for h in history(db, n["node_id"], history_limit)]
+    return {"node_id": n["node_id"], "hostname": n["hostname"], "version": ver, "config": cfg,
+            "mode": (cfg.get("node") or {}).get("mode", "moderate"), "history": hist, "live": tel.get("protection") or {},
+            "guard": tel.get("guard"), "conditions": runtime_conditions(tel), "canary": canary_health(db)}
+
+
 # ------------------------------------------------------------------ alerts (from the journals)
 
 FLAP_MAX_PER_HOUR = 12        # lower/pause escalations per node-hour (judgement; docs/design/protection.md)

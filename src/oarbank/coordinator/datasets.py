@@ -101,3 +101,32 @@ def list_by(db: DB, kind: str | None = None) -> list[dict]:
     rows = db.q("SELECT dataset_id, kind, module, meta_json FROM datasets" + (" WHERE kind=?" if kind else "")
                 + " ORDER BY dataset_id", (kind,) if kind else ())
     return [{**r, "meta": jl(r.pop("meta_json"), {})} for r in rows]
+
+
+# ------------------------------------------------------------------ a module's pinned datasets (bootstrap stages)
+
+def holds_pin(row: dict, module: str, pin) -> bool:
+    """Whether a registered dataset row is exactly this pinned dataset of `module` (oarbank-sdk PinnedDataset): the
+    module's, of the pin's kind and platform, with the pinned files (path, digest, size)."""
+    have = sorted(({k: f.get(k) for k in ("path", "digest", "size")} for f in jl(row["files_json"], [])), key=lambda f: f["path"])
+    return (row["module"], row["kind"], have, row["platform"]) == (module, pin.kind, pin.dataset_files(), pin.platform)
+
+
+def pin_states(r, module: str, manifest) -> list[dict]:
+    """Each pinned dataset of the module (docs/design/bootstrap-stages.md) as the console and `oarbank module show` say it:
+    `registered` (exactly as pinned), `waiting` (no dataset of that id yet: a bootstrap job brings it) or `conflict`
+    (another dataset holds the id; never overwritten), with the open `pinned_dataset_conflict` alert's detail. `r` is any
+    reader (q/one)."""
+    out = []
+    for p in manifest.datasets.pinned:
+        row = r.one("SELECT * FROM datasets WHERE dataset_id=?", (p.dataset_id,))
+        alert = r.one("SELECT detail, opened_at FROM alerts WHERE rule=? AND state!='resolved' ORDER BY opened_at DESC LIMIT 1",
+                      (f"pinned_dataset_conflict:{p.dataset_id}",))
+        state = "waiting" if row is None else "registered" if holds_pin(row, module, p) else "conflict"
+        held = None if row is None or state == "registered" else \
+            f"{row['module'] or 'the operator'}'s dataset of kind {row['kind']} with {len(jl(row['files_json'], []))} file(s)"
+        out.append({"dataset_id": p.dataset_id, "kind": p.kind, "platform": p.platform, "files": len(p.files),
+                    "bytes": sum(f.size for f in p.files), "state": state, "held_by": held,
+                    "registered_at": row["created_at"] if row else None,
+                    "detail": alert["detail"] if alert and state == "conflict" else None})
+    return out

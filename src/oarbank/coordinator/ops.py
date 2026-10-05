@@ -485,7 +485,16 @@ def _canary_impact(db, r):
             "then": "promote after a clean soak of %d s" % protection.CANARY_MIN_SOAK_S}
 
 
-@handler("protection.rules.canary", target_type="node", impact=_canary_impact,
+def _canary_target(db, req):
+    """Promoting names no node: the running canary's node is the target."""
+    if req.params.get("promote"):
+        c = db.get_setting(protection.CANARY_KEY)
+        if not c:
+            raise OpError(409, "no_canary", "no protection canary is running: oarbank protection canary <node> <file>")
+        req.target = c["node_id"]
+
+
+@handler("protection.rules.canary", target_type="node", impact=_canary_impact, target=_canary_target,
          snapshot=lambda db, r: {"canary": db.get_setting(protection.CANARY_KEY)})
 def _prot_canary(db, req):
     try:

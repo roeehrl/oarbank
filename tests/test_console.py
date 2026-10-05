@@ -353,7 +353,8 @@ def test_a_node_without_telemetry_shows_only_what_it_reported(env):
 
 
 def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
-    """The doctor's GPU APIs (with each API's evidence on hover) and the containers' mechanism and APIs (gpu-placement.md)."""
+    """The doctor's GPU APIs with each API's evidence (a table, not a tooltip) and the containers' mechanism and APIs
+    (gpu-placement.md)."""
     import json as _json
     from helpers import FACTS
     db, n = env["db"], env["node"]
@@ -364,8 +365,7 @@ def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
     _, page = node_html(env)
     assert_clean(page)
     assert "GPU APIs metal, opencl" in page and "GPU in containers Venus over virtio-gpu (krunkit): vulkan" in page
-    raw = env["c"].get(f"/nodes/{n['node_id']}").text
-    assert 'title="cuda: CUDA does not run on macOS&#10;metal: Apple M5 Pro&#10;"' in raw
+    assert "GPU APIs API on the host in containers evidence cuda no no CUDA does not run on macOS metal yes no Apple M5 Pro" in page
     db.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (_json.dumps({**FACTS, "containers": {"gpu": "cdi:nvidia.com/gpu"}}),
                                                            n["node_id"]))
     assert "GPU in containers nvidia.com/gpu (CDI): vulkan" in node_html(env)[1]
@@ -607,16 +607,23 @@ def test_fragments_are_never_shared_between_sessions(env):
 
 def test_oarbank_node_show_prints_the_services_report(monkeypatch, capsys):
     from oarbank.cli import main as cli
-    from oarbank.coordinator import nodeservices
+    from oarbank.coordinator import detail, nodeservices
     n = {"node_id": "n_1", "hostname": "mini", "services_at": 1.0, "services_json": json.dumps({"services": [
         {"service": "modelserver/model", "health": "healthy", "running": False, "held": "preempt_memory", "endpoint": True},
         {"service": "gpuinfo/probe", "health": "unhealthy", "running": False, "gpu_api_missing": "needs one of cuda on the host",
          "error": "exit 3"},
         {"service": "relay/vm", "health": "healthy", "running": True, "ready": True, "users": 2}]})}
-    node = {**n, "platform": "linux-amd64", "lifecycle": "ready", "desired_state": "active", "online": True, "agent_version": "2.5.0",
-            "doctor": {"gpu_apis": {"host": ["cuda"], "containers": []}}, "mods": {"relay": {"state": "certified"}},
-            "services": nodeservices.rows(n)}
-    monkeypatch.setattr(cli, "api", lambda *a, **k: {"nodes": [node]})
+    doc = {"node": {"node_id": "n_1", "hostname": "mini", "platform": "linux-amd64", "lifecycle": "ready", "desired_state": "active",
+                    "online": True, "agent_version": "2.5.0", "quarantine_reason": None},
+           "modules": {"relay": {"state": "certified", "reason": None}}, "doctor": None,
+           "gpu": detail.gpu({}, {"gpu_apis": {"host": ["cuda"], "containers": []}}), "containers": None,
+           "services": nodeservices.rows(n), "services_at": 1.0, "folders": [], "sandbox": {"backend": None, "capabilities": []}}
+
+    def api(method, path, *a, **k):            # GET /api/v1/nodes/<node> (detail.node)
+        if path != "/api/v1/nodes/mini":
+            raise SystemExit(f"GET {path}: 404")
+        return doc
+    monkeypatch.setattr(cli, "api", api)
     cli.node_show("mini")
     out = capsys.readouterr().out
     assert "mini n_1 linux-amd64 ready active online agent 2.5.0" in out and "gpu apis: host cuda; containers -" in out

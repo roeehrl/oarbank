@@ -293,8 +293,8 @@ Built as designed in oarbank-sdk 1.5.0 and core 2.5.0 (UI contract 1.2), with th
 - **Column `download`** (1.2): a `dataset_ref` or `campaign_ref` column with `"download": true` links each cell to its
   download, which is what a table of datasets needs (a link component names one fixed target).
 - **The node page's services**: the "services running" and "services stopped by protection" lines became one Services
-  table from the report; `oarbank node show <node>` is new (the CLI had no per-node view) and reads `/api/v1/fleet`,
-  whose node rows now carry `services`. `coordinator/nodeservices.py` is the one reading of the report.
+  table from the report; `oarbank node show <node>` is new (the CLI had no per-node view); it reads the node's detail
+  document, `GET /api/v1/nodes/{id}` (D42, console-parity.md), and `/api/v1/fleet`'s node rows carry `services` too. `coordinator/nodeservices.py` is the one reading of the report.
 - **The service report** is the agent's former test-only `ServiceManager::report` (now with `endpoint`, without the
   capabilities the doctor report already carries), merged into every heartbeat as `services` and `probes`.
 - **`check_page` takes the manifest** (it needs the dataset kinds and operation targets for upload links).

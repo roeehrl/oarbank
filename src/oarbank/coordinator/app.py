@@ -873,6 +873,45 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(404, "not_found", f"campaign {cid}")
         return c
 
+    # ---------------- one node, one job, one node's protection: what `oarbank node|job|protection show` print (detail.py,
+    # protection.status; the console renders the same documents from its own read connection; docs/design/console-parity.md)
+    @app.get("/api/v1/nodes/{nid}")
+    def api_node(nid: str, actor=Depends(who)):
+        from . import detail
+        n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+        if n is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+
+        def manifest_for(name: str):                       # the module version this node runs
+            try:
+                return modcalls.info_for(name, modstore.version_for_node(db, name, n["node_id"])).manifest
+            except KeyError:
+                return None
+        return detail.node(db, nid, clock.now(), manifest_for)
+
+    @app.get("/api/v1/nodes/{nid}/protection")
+    def api_node_protection(nid: str, actor=Depends(who)):
+        from . import protection
+        d = protection.status(db, nid)
+        if d is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+        return d
+
+    @app.get("/api/v1/jobs/{jid}")
+    def api_job(jid: int, actor=Depends(who)):
+        """The job, its attempts, the checkpoint its next attempt resumes from, its results and its explain document."""
+        from . import detail, explain as explainer
+        d = detail.job(db, jid)
+        if d is None:
+            raise core.ApiError(404, "not_found", f"job {jid}")
+        if not explain_slots.acquire(timeout=2):
+            raise core.ApiError(503, "busy", "explain is at capacity", headers={"Retry-After": "2"})
+        try:
+            d["explain"] = explainer.explain(db, "job", str(jid)).model_dump(mode="json")
+        finally:
+            explain_slots.release()
+        return d
+
     @app.get("/api/v1/modules/{name}/views/{view_id}")
     def api_module_view(name: str, view_id: str, campaign: str = "", actor=Depends(who)):
         """A materialized module view (oarbankd computes them; nobody waits on the module)."""

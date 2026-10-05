@@ -17,7 +17,7 @@
   <div class="kv small" style="margin-top:6px">
     {% if hw.cpu or hw.cores %}<span class="mut">CPU</span><span>{{ [hw.cpu, ('(' ~ hw.cores ~ ')' if hw.cpu else hw.cores) if hw.cores] | select | join(' ') }}</span>{% endif %}
     {% if hw.gpus %}<span class="mut">GPU</span><span>{{ hw.gpus | join(', ') }}</span>{% endif %}
-    {% if n.gpu.reported %}<span class="mut">GPU APIs</span><span title="{% for a, e in n.gpu.evidence | dictsort %}{{ a }}: {{ e }}&#10;{% endfor %}">{{ n.gpu.host | join(', ') or 'none' }}</span>{% endif %}
+    {% if n.gpu.reported %}<span class="mut">GPU APIs</span><span><a href="#gpu-apis">{{ n.gpu.host | join(', ') or 'none' }}</a></span>{% endif %}
     {% if hw.memory_gb is known %}<span class="mut">memory</span><span>{{ hw.memory_gb | num(1) }} GB</span>{% endif %}
     {% if hw.os %}<span class="mut">system</span><span>{{ hw.os }}{% if hw.arch %} · {{ hw.arch }}{% endif %}</span>{% endif %}
     {% if T0.disk_free_gb is known %}<span class="mut">disk free</span><span>{{ T0.disk_free_gb | num(0) }} GB</span>{% endif %}
@@ -66,6 +66,30 @@
 </div>
 </div>
 
+{# coordinator/detail.py: GPU APIs, per-capability enforcement, folders #}
+<h2 id="gpu-apis">GPU APIs</h2>
+{% if not d.gpu.reported %}<p class="small mut">not reported yet: the agent reports them with its next doctor run</p>
+{% else %}<table class="small"><tr><th>API</th><th>on the host</th><th>in containers</th><th>evidence</th></tr>
+{% for a, e in d.gpu.evidence | dictsort if a != 'containers' %}<tr><td class="mono">{{ a }}</td>
+  <td>{% if a in d.gpu.host %}<span class="chip ok">yes</span>{% else %}<span class="mut">no</span>{% endif %}</td>
+  <td>{% if a in d.gpu.containers %}<span class="chip ok">yes</span>{% else %}<span class="mut">no</span>{% endif %}</td><td>{{ e }}</td></tr>
+{% endfor %}</table>
+{% if d.gpu.evidence.containers %}<p class="small">Containers: {{ d.gpu.evidence.containers }}</p>{% endif %}{% endif %}
+
+<h2>Sandbox enforcement <span class="small mut">({{ d.sandbox.backend or 'no backend: no module work' }})</span></h2>
+<table class="small"><tr><th>capability</th><th>here</th><th>needed by</th><th>keeps out</th></tr>
+{% for c in d.sandbox.capabilities %}<tr><td class="mono">{{ c.capability }}</td>
+  <td><span class="chip {{ 'ok' if c.state == 'enforced' else ('bad' if c.blocks else '') }}">{{ c.state }}</span></td>
+  <td>{{ c.needed_by | join(', ') }}</td><td>{% if c.blocks %}<b>{{ c.blocks | join(', ') }}</b> <span class="mono small">CAPABILITY_NOT_ENFORCED</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="4" class="mut">not reported</td></tr>{% endfor %}</table>
+
+<h2>Folders</h2>
+<table class="small"><tr><th>folder</th><th>access</th><th>path</th><th>status</th><th>statement</th></tr>
+{% for f in d.folders %}<tr><td class="mono">{{ f.id }}</td><td>{{ f.access or '' }}</td><td class="mono">{{ f.path or '(no longer mapped)' }}</td>
+  <td><span class="chip {{ 'ok' if f.status == 'ok' else 'warn' }}">{{ f.status }}</span></td>
+  <td class="mut">{% if f.statement_seq %}seq {{ f.statement_seq }} · {{ 'signed' if f.signed else 'unsigned' }}{% endif %}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">no folder is mapped to this node (Settings, folders)</td></tr>{% endfor %}</table>
+
 <h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
 {% set P = n.policy.protection or {} %}{% set T = n.tel.protection or {} %}
 <div class="card">
@@ -89,7 +113,7 @@
   {% else %}<tr><td class="mut">no decisions journaled yet</td></tr>{% endfor %}</table></details>
 </div>
 
-<h2>Limits (user caps)</h2>
+<h2 id="limits">Limits (user caps)</h2>
 <div class="card">
 <p class="small mut" style="margin-top:0">Every cap is off by default; the node then runs at its automatic capacity (which already honours the owner's protection
 rules, the memory guard, heat, battery and a present user). A cap can only lower capacity.{% if n.slots.reported %} Current binding limit: <b>{{ n.slots.binding or 'automatic capacity' }}</b>.{% endif %}</p>

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from oarbank.coordinator import config as C, core, invariants
+from oarbank.coordinator import config as C, core, invariants, modcalls
 
 from helpers import certify, enrolled_node, fresh, make_db
 
@@ -202,7 +202,7 @@ def test_node_page_shows_protection_and_conditions(db, tmp_path):
                                                        "footprint_gb": 4.1, "reason": "active"}],
                                             "constraint": {"reserved_mem_gb": 6.1, "reserved_cpu": 0, "binding": {"reserve_mem": "rule:gpu-trainer"}}}}
     db.x("UPDATE nodes SET policy_json=?, telemetry_json=? WHERE node_id=?", (json.dumps(pol), json.dumps(tel), node["node_id"]))
-    d = views.node_page(db, node["node_id"], time.time())
+    d = views.node_page(db, node["node_id"], time.time(), lambda m: modcalls.info(m).manifest)
     assert [c["code"] for c in d["conditions"]] == ["PROTECTION_RESERVED"]
 
 

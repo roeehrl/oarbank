@@ -367,11 +367,11 @@ def test_a_skewed_node_clock_is_flagged_and_grants_carry_the_coordinators_time(d
     node = fresh(db, node)
     assert abs(node["clock_offset_s"] - skew) < 5
     assert [s.detail for s in explain.node_doc(db, node["node_id"]).summary if s.code == "CLOCK_SKEW"]
-    cond = [c for c in views.node_page(db, node["node_id"], time.time())["conditions"] if c["code"] == "CLOCK_SKEW"]
+    cond = [c for c in views.node_page(db, node["node_id"], time.time(), lambda m: None)["conditions"] if c["code"] == "CLOCK_SKEW"]
     assert cond and ("ahead of" if skew > 0 else "behind") in cond[0]["message"]
     create_study(db, "s", [], ["scene:s1"], {"label": "base", "params": PARAMS})
     g = core.claim(db, node, {"free_cpu": 4, "free_mem_gb": 8, "ready_datasets": READY})["grants"][0]
     assert abs(g["issued_at"] - clock.now()) < 5 and g["hard_deadline"] - g["issued_at"] == max(600, g["spec"]["timeout_s"])
     core.heartbeat(db, node, {"capacity": CAPACITY, "attempts": [], "ready_datasets": READY, "clock": clock.now() + 3})
     assert not [s for s in explain.node_doc(db, node["node_id"]).summary if s.code == "CLOCK_SKEW"]
-    assert not [c for c in views.node_page(db, node["node_id"], time.time())["conditions"] if c["code"] == "CLOCK_SKEW"]
+    assert not [c for c in views.node_page(db, node["node_id"], time.time(), lambda m: None)["conditions"] if c["code"] == "CLOCK_SKEW"]

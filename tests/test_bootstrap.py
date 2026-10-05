@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from oarbank.coordinator import core, effects, explain, invariants, modcalls, modsandbox, modstore, releases
+from oarbank.coordinator import core, datasets, effects, explain, invariants, modcalls, modsandbox, modstore, releases
 from oarbank.coordinator.db import jl
 
 from helpers import FACTS, FIXTURES, enrolled_node, fresh, install, make_db, run_op
@@ -187,6 +187,22 @@ def test_a_pinned_id_registered_with_other_contents_is_never_overwritten(db):
     assert jl(db.one("SELECT files_json FROM datasets WHERE dataset_id=?", (TOOL,))["files_json"])[0]["path"] == "gatk.jar"
     a = db.one("SELECT * FROM alerts WHERE rule=?", (f"pinned_dataset_conflict:{TOOL}",))
     assert a["state"] == "open" and "the operator" in a["detail"]
+    (pin,) = datasets.pin_states(db, "depot", modcalls.info("depot").manifest)      # the module health page's pins card
+    assert (pin["state"], pin["held_by"], pin["detail"]) == ("conflict", "the operator's dataset of kind tool with 1 file(s)",
+                                                             a["detail"])
+
+
+def test_pinned_datasets_are_waiting_until_a_bootstrap_job_registers_them(db):
+    man = modcalls.info("depot").manifest
+    (pin,) = datasets.pin_states(db, "depot", man)
+    assert (pin["dataset_id"], pin["kind"], pin["state"], pin["files"], pin["detail"]) == (TOOL, "tool", "waiting", 2, None)
+    assert pin["bytes"] == sum(len(b) for b in FILES.values())
+    node = fresh_node(db)
+    provision(db)
+    (g,) = claim(db, node)
+    core.complete(db, fresh(db, node), g["attempt_id"], fetch_result(db))
+    (pin,) = datasets.pin_states(db, "depot", man)
+    assert pin["state"] == "registered" and pin["held_by"] is None and pin["registered_at"]
 
 
 def test_bootstrap_jobs_run_only_where_the_doctor_is_healthy_and_the_agent_applies_the_bootstrap_grants(db, monkeypatch):

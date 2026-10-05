@@ -62,7 +62,9 @@ class MatrixRow(_M):
 
 class Remedy(_M):
     op: str = Field(description="Operation id from the registry.")
-    params: dict[str, Any] = Field(default_factory=dict)
+    target: str | None = Field(None, description="The operation's target, when the subject names it: the node, the job, the "
+                               "job's campaign, or `fleet`.")
+    params: dict[str, Any] = Field(default_factory=dict, description="The subject's ids (node, job_id, campaign_id, module).")
     label: str
 
 
