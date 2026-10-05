@@ -5,7 +5,7 @@ mod common;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common::{FakeActuator, SeededRandom, TempDir};
+use common::{FakeActuator, SeededRandom, scratch};
 use oarbank_protection::*;
 use serde_json::json;
 
@@ -134,7 +134,7 @@ fn pid_reuse_fuzz() {
 fn persists_and_adopts_across_restarts() {
     let f = FakeActuator::new();
     f.set_start(300, Some(42));
-    let dir = TempDir::new("reg");
+    let dir = scratch("reg");
     let path = dir.path().join("spawn-registry.json");
     let store = || Some(Box::new(FileRegistryStore::new(&path)) as Box<dyn RegistryStore>);
     SpawnRegistry::new(Box::new(f.clone()), None, store()).register(300, Some(9), None);

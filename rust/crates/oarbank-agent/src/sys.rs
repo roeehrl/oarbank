@@ -363,6 +363,41 @@ mod imp {
         }
     }
 
+    /// A container's processes, held by handle: a process leaves its job's list as soon as it is killed but holds its
+    /// working directory and open files until it has ended, so a test that removes its scratch directory takes them
+    /// before it ends the container (or before the agent does) and waits for them.
+    #[cfg(test)]
+    pub struct Members(Vec<usize>);
+
+    #[cfg(test)]
+    impl Members {
+        pub fn of(pgid: i32) -> Members {
+            use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+            Members(group_pids(pgid).into_iter().map(|p| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, p as u32) })
+                .filter(|h| !h.is_null()).map(|h| h as usize).collect())
+        }
+
+        /// Wait (up to `limit`) until each has ended.
+        pub fn wait(self, limit: std::time::Duration) -> bool {
+            use windows_sys::Win32::System::Threading::WaitForMultipleObjects;
+            let handles: Vec<HANDLE> = self.0.iter().map(|h| *h as HANDLE).collect();
+            let deadline = std::time::Instant::now() + limit;
+            handles.chunks(64).fold(true, |gone, chunk| {
+                let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis() as u32;
+                gone & (unsafe { WaitForMultipleObjects(chunk.len() as u32, chunk.as_ptr(), 1, left) } < 64)
+            })
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for Members {
+        fn drop(&mut self) {
+            for h in &self.0 {
+                unsafe { CloseHandle(*h as HANDLE) };
+            }
+        }
+    }
+
     /// How many processes have ever been in the container (alive or not): its job's accounting.
     #[cfg(test)]
     pub fn processes_ever(pgid: i32) -> Option<u32> {
@@ -698,8 +733,8 @@ mod tests {
     /// resets a handled signal to it) ends them.
     #[test]
     fn the_nudge_reaches_the_leader_and_spares_its_children() {
-        let dir = std::env::temp_dir().join(format!("oarbank-nudge-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = crate::scratch("nudge");
+        let dir = tmp.path().to_path_buf();
         let (mut leader, nudge) = python(&dir, "import pathlib, signal, subprocess, sys, time\n\
             d = pathlib.Path(sys.argv[1])\n\
             signal.signal(signal.SIGUSR1, lambda *_: (d / 'runner.log').write_text('nudged'))\n\
@@ -713,14 +748,13 @@ mod tests {
         assert!(alive(child), "the child must survive the nudge");
         signal_group(pgid, Sig::Kill);
         let _ = leader.wait();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A nudge before the runner has installed its handler is lost, not fatal: the runner starts with SIGUSR1 ignored.
     #[test]
     fn a_nudge_before_the_handler_is_harmless() {
-        let dir = std::env::temp_dir().join(format!("oarbank-early-nudge-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = crate::scratch("early-nudge");
+        let dir = tmp.path().to_path_buf();
         let (mut leader, nudge) = python(&dir, "import pathlib, signal, sys, time\n\
             d = pathlib.Path(sys.argv[1])\n\
             (d / 'started').write_text('1')\n\
@@ -737,7 +771,6 @@ mod tests {
         assert!(wait_for(&dir.join("runner.log")).contains("nudged"));
         signal_group(pid, Sig::Kill);
         let _ = leader.wait();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -788,9 +821,8 @@ mod tests {
     /// file a second later; once contained it runs, and it is in the job.
     #[test]
     fn a_contained_process_runs_nothing_before_its_job() {
-        let d = std::env::temp_dir().join(format!("oarbank-suspended-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let tmp = crate::scratch("suspended");
+        let d = tmp.path().to_path_buf();
         let mark = d.join("ran");
         let cmd_exe = format!(r"{}\System32\cmd.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()));
         let mut cmd = std::process::Command::new(cmd_exe);
@@ -807,6 +839,5 @@ mod tests {
         assert!(child.wait().unwrap().success());
         assert!(mark.exists());
         release(pid as i32);
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

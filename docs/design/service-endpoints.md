@@ -296,3 +296,8 @@ Built as designed, in oarbank-sdk 1.5.0 and core 2.5.0. Where the build adds to 
   service that becomes ready again is past its failures, so such a service backs off and is withdrawn, with its error
   in the report. The Windows sandbox also stopped rewriting a granted interpreter's ACL at every launch (a file's
   entries carry no inheritance flags, so an existing grant was never seen).
+- **Found on CI (windows-2025, windows-11-arm), now and then:** a job, a service op or a fingerprint failed to start with
+  ERROR_FILE_NOT_FOUND naming the interpreter. Every shim called CreateAppContainerProfile, which races itself: a call
+  on an existing profile beside another can delete the profile until a later call creates it again, and CreateProcess
+  for a container with no profile fails with ERROR_FILE_NOT_FOUND. A shim now creates the profile only when Windows
+  does not know it, one shim at a time.

@@ -171,12 +171,13 @@ pub async fn stage_resume(api: &Api, layout: &Layout, grant: &Value, ws: &Path) 
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> (Layout, PathBuf) {
-        let d = std::env::temp_dir().join(format!("oarbank-ckpt-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let ws = d.join("work").join("1");
+    /// (what removes the scratch directory when dropped, a home in it, a work directory in it)
+    fn scratch(name: &str) -> (tempfile::TempDir, Layout, PathBuf) {
+        let d = crate::scratch(&format!("ckpt-{name}"));
+        let ws = d.path().join("work").join("1");
         std::fs::create_dir_all(&ws).unwrap();
-        (Layout::new(d.join("home")), ws)
+        let l = Layout::new(d.path().join("home"));
+        (d, l, ws)
     }
 
     fn write_event(ws: &Path, line: &str) {
@@ -196,7 +197,7 @@ mod tests {
 
     #[test]
     fn the_latest_complete_checkpoint_event_is_taken_out_of_the_workdir() {
-        let (l, ws) = scratch("take");
+        let (_d, l, ws) = scratch("take");
         let mut c = Checkpointer::new(&l, 1, &ws, Limits { max_mb: 1, min_interval: Duration::from_secs(3600) });
         assert!(c.latest_event().is_none());
         std::fs::create_dir_all(ws.join("ckpt/000001")).unwrap();
@@ -213,12 +214,11 @@ mod tests {
         assert!(c.take(&ev2, false).unwrap().is_none());                               // the upload-rate cap
         assert!(c.take(&ev2, true).unwrap().is_some());                                // a requested one is always taken
         c.clean();
-        let _ = std::fs::remove_dir_all(l.home.parent().unwrap());
     }
 
     #[test]
     fn symlinks_outside_files_duplicates_and_oversized_checkpoints_are_refused() {
-        let (l, ws) = scratch("refuse");
+        let (_d, l, ws) = scratch("refuse");
         let mut c = Checkpointer::new(&l, 2, &ws, Limits { max_mb: 1, min_interval: Duration::ZERO });
         let outside = ws.parent().unwrap().join("secret");
         std::fs::write(&outside, b"s").unwrap();
@@ -236,6 +236,5 @@ mod tests {
         }
         drop(err);
         assert!(c.take(&json!({"kind": "checkpoint", "files": [{"path": "a"}], "data": {"x": "y".repeat(5000)}}), true).is_err());
-        let _ = std::fs::remove_dir_all(l.home.parent().unwrap());
     }
 }

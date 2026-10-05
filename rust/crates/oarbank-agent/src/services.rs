@@ -1485,14 +1485,14 @@ mod tests {
     struct Fx {
         root: PathBuf,
         release: Release,
+        /// removes `root` when the fixture goes
+        _tmp: tempfile::TempDir,
     }
 
     impl Fx {
         fn new(tag: &str, services: Value, probes: Value) -> Fx {
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
-            let root = std::env::temp_dir().join(format!("oarbank-svc-{tag}-{}-{nanos}", std::process::id()));
-            std::fs::create_dir_all(&root).unwrap();
-            let root = std::fs::canonicalize(&root).unwrap();
+            let tmp = crate::scratch(&format!("svc-{tag}"));
+            let root = std::fs::canonicalize(tmp.path()).unwrap();
             let dir = root.join("releases/r_test");
             let bundle = dir.join("modules/mod");
             std::fs::create_dir_all(&bundle).unwrap();
@@ -1509,7 +1509,7 @@ mod tests {
                                "probes": probes, "sandbox": {"contract": 1, "net": {"mode": "none"}, "tools": [],
                                                             "devices": {"gpu": "none"}, "exec_writable": false}});
             let release = Release { id: "r_test".into(), dir, modules: vec![entry] };
-            Fx { root, release }
+            Fx { root, release, _tmp: tmp }
         }
 
         fn layout(&self) -> Layout {
@@ -1541,12 +1541,6 @@ mod tests {
         fn touch(&self, name: &str, text: &str) {
             std::fs::create_dir_all(self.data()).unwrap();
             std::fs::write(self.data().join(name), text).unwrap();
-        }
-    }
-
-    impl Drop for Fx {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 

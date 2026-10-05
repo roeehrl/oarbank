@@ -146,27 +146,9 @@ impl Actuator for FakeActuator {
 }
 
 /// A unique scratch directory under the system temp dir, removed on drop.
-pub struct TempDir(pub std::path::PathBuf);
-
-impl TempDir {
-    pub fn new(tag: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p =
-            std::env::temp_dir().join(format!("oarbank-prot-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+pub fn scratch(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("oarbank-prot-{tag}-"))
+        .tempdir()
+        .unwrap()
 }

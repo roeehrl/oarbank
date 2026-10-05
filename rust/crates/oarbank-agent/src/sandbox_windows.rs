@@ -341,17 +341,41 @@ mod ffi {
     use windows_sys::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT};
     use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName};
 
-    /// The profile's SID, creating the profile on first use.
-    pub fn container_sid(name: &str) -> Result<PSID, String> {
-        let n = wide(name);
-        let display = wide("Oarbank module");
-        let mut sid: PSID = std::ptr::null_mut();
-        let hr = unsafe { CreateAppContainerProfile(n.as_ptr(), display.as_ptr(), display.as_ptr(), std::ptr::null(), 0, &mut sid) };
+    /// Whether an AppContainer profile is registered: Windows knows its folder.
+    pub fn registered(sid: &str) -> bool {
+        use windows_sys::Win32::Security::Isolation::GetAppContainerFolderPath;
+        let w = wide(sid);
+        let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+        let hr = unsafe { GetAppContainerFolderPath(w.as_ptr(), &mut path) };
         if hr >= 0 {
+            unsafe { windows_sys::Win32::System::Com::CoTaskMemFree(path as _) };
+        }
+        hr >= 0
+    }
+
+    /// The profile's SID, creating the profile when it is not registered, one shim at a time. CreateAppContainerProfile
+    /// races itself: a call on an existing profile beside another can delete it until a later call creates it again,
+    /// and a shim starting the container meanwhile fails with ERROR_FILE_NOT_FOUND, as if its program were missing.
+    pub fn container_sid(name: &str) -> Result<PSID, String> {
+        const EXISTS: i32 = 0x8007_00B7_u32 as i32;          // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
+        let n = wide(name);
+        let mut sid: PSID = std::ptr::null_mut();
+        let _lock = Lock::take(Lock::PROFILE).map_err(|e| format!("the profile lock: {e}"))?;
+        if unsafe { DeriveAppContainerSidFromAppContainerName(n.as_ptr(), &mut sid) } < 0 {
+            return Err(format!("the AppContainer SID of {name}"));
+        }
+        if sid_string(sid).is_ok_and(|s| registered(&s)) {
             return Ok(sid);
         }
-        let hr2 = unsafe { DeriveAppContainerSidFromAppContainerName(n.as_ptr(), &mut sid) };
-        if hr2 >= 0 { Ok(sid) } else { Err(format!("AppContainer profile {name}: 0x{:08x}", hr as u32)) }
+        let display = wide("Oarbank module");
+        let mut created: PSID = std::ptr::null_mut();
+        let hr = unsafe { CreateAppContainerProfile(n.as_ptr(), display.as_ptr(), display.as_ptr(), std::ptr::null(), 0, &mut created) };
+        if hr >= 0 {
+            unsafe { windows_sys::Win32::Security::FreeSid(created) };
+        } else if hr != EXISTS {
+            return Err(format!("AppContainer profile {name}: 0x{:08x}", hr as u32));
+        }
+        Ok(sid)
     }
 
     /// Let the container read the window station and desktop it inherits. Without it user32 fails to initialise
@@ -403,29 +427,29 @@ mod ffi {
         Ok(())
     }
 
-    /// The machine's lock on ACL edits by shims (a named mutex in this session, which every shim of one agent shares),
-    /// held until dropped. A shim that dies holding it abandons it, and the next one takes it.
-    pub struct AclLock(HANDLE);
+    /// A machine lock shims take (a named mutex in this session, which every shim of one agent shares), held until
+    /// dropped. A shim that dies holding one abandons it, and the next one takes it.
+    pub struct Lock(HANDLE);
 
-    impl AclLock {
-        /// The shim's: a lock it cannot take ends the launch.
-        pub fn take() -> AclLock {
-            Self::try_take().unwrap_or_else(|e| die(70, &format!("the ACL lock: {e}")))
-        }
+    impl Lock {
+        /// ACL edits.
+        pub const ACL: &str = "Local\\oarbank-sandbox-acl";
+        /// Creating AppContainer profiles.
+        pub const PROFILE: &str = "Local\\oarbank-sandbox-profile";
 
-        pub fn try_take() -> std::io::Result<AclLock> {
+        pub fn take(name: &str) -> std::io::Result<Lock> {
             use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
-            let name = wide("Local\\oarbank-sandbox-acl");
+            let name = wide(name);
             let m = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
             if m.is_null() {
                 return Err(std::io::Error::last_os_error());
             }
             unsafe { WaitForSingleObject(m, INFINITE) };
-            Ok(AclLock(m))
+            Ok(Lock(m))
         }
     }
 
-    impl Drop for AclLock {
+    impl Drop for Lock {
         fn drop(&mut self) {
             use windows_sys::Win32::System::Threading::ReleaseMutex;
             unsafe {
@@ -620,7 +644,7 @@ pub fn reconcile_folder_grants(layout: &crate::paths::Layout, release: Option<&c
     if keep.len() == have.len() {
         return;
     }
-    let Ok(lock) = ffi::AclLock::try_take() else { return };
+    let Ok(lock) = ffi::Lock::take(ffi::Lock::ACL) else { return };
     for (module, path, _) in have.iter().filter(|g| !want.contains(g)) {
         match ffi::capability_sid(&runner_capability(module)) {
             Ok(mut cap) => {
@@ -677,7 +701,7 @@ pub fn exec(args: &[String]) -> ! {
     let ro = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
     // one shim at a time edits ACLs: an edit reads the ACL and writes it back with its entry, so two shims granting the
     // same path (the runtime's Python, a tool) at once could each drop the other's entry
-    let acl_lock = ffi::AclLock::take();
+    let acl_lock = ffi::Lock::take(ffi::Lock::ACL).unwrap_or_else(|e| die(70, &format!("the ACL lock: {e}")));
     // read-only roots the agent does not own (a Python under Program Files) cannot take a new entry, and every
     // AppContainer can already read the system's: a failed read grant only means the module may not read that path
     for p in pol.ro.iter().chain(pol.exe.iter()) {
@@ -821,9 +845,8 @@ mod tests {
     #[test]
     fn a_file_granted_through_its_folder_is_not_rewritten() {
         use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ};
-        let d = std::env::temp_dir().join(format!("oarbank-acl-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let tmp = crate::scratch("acl");
+        let d = tmp.path().to_path_buf();
         let exe = d.join("python.exe");
         std::fs::write(&exe, b"x").unwrap();
         let sid = ffi::container_sid(&container_name("dev.test.acl")).unwrap();
@@ -834,13 +857,50 @@ mod tests {
         ffi::grant(&exe.display().to_string(), sid, ro).unwrap();
         assert_eq!(entries(&exe, sid), (0, 1), "the file's ACL was rewritten");
         // a file outside any granted folder takes one explicit entry, once
-        let lone = std::env::temp_dir().join(format!("oarbank-acl-lone-{}.exe", std::process::id()));
+        let elsewhere = crate::scratch("acl-lone");
+        let lone = elsewhere.path().join("lone.exe");
         std::fs::write(&lone, b"x").unwrap();
         ffi::grant(&lone.display().to_string(), sid, ro).unwrap();
         ffi::grant(&lone.display().to_string(), sid, ro).unwrap();
         assert_eq!(entries(&lone, sid).0, 1);
-        let _ = std::fs::remove_file(&lone);
-        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Shims of one module make sure of its profile at once, the first of them creating it. CreateAppContainerProfile
+    /// races itself: beside another call, one on an existing profile can delete it until a later call creates it
+    /// again, and a process started in the container meanwhile fails with ERROR_FILE_NOT_FOUND. Once made, the profile
+    /// stays registered.
+    #[test]
+    fn a_profile_many_shims_make_sure_of_at_once_stays() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile;
+        // a profile of this process's own, from none (other copies of the test may run at once)
+        let module = format!("dev.test.profile-{}", std::process::id());
+        let (name, sid) = (container_name(&module), container_sid_string(&module).unwrap());
+        let forget = || {
+            let _lock = ffi::Lock::take(ffi::Lock::PROFILE).unwrap();
+            unsafe { DeleteAppContainerProfile(wide(&name).as_ptr()) };
+        };
+        forget();
+        let (made, stop) = (AtomicBool::new(false), AtomicBool::new(false));
+        let (gaps, failed) = std::thread::scope(|s| {
+            let watch = s.spawn(|| {
+                let mut gaps = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    gaps += usize::from(made.load(Ordering::SeqCst) && !ffi::registered(&sid));
+                }
+                gaps
+            });
+            let shims: Vec<_> = (0..16).map(|_| s.spawn(|| (0..100).filter(|_| {
+                let ok = ffi::container_sid(&name).is_ok();
+                made.store(true, Ordering::SeqCst);
+                !ok
+            }).count())).collect();
+            let failed: usize = shims.into_iter().map(|t| t.join().unwrap()).sum();
+            stop.store(true, Ordering::SeqCst);
+            (watch.join().unwrap(), failed)
+        });
+        forget();
+        assert_eq!((gaps, failed), (0, 0), "(times the profile was missing once made, calls that failed)");
     }
 
     /// The test binary answers `sandbox-exec` itself, as the agent's main does (sandbox_linux.rs and services.rs do
@@ -865,19 +925,20 @@ mod tests {
         (py, home)
     }
 
-    /// A Python runner through the shim, contained as the agent contains it: (the shim, its work directory, its stderr
-    /// file). `script` gets the work directory as argv[1].
-    fn runner(tag: &str, script: &str) -> (std::process::Child, std::path::PathBuf) {
+    /// A Python runner through the shim, contained as the agent contains it: (the shim, what removes its scratch
+    /// directory when dropped, its work directory there, which holds its stderr file). `script` gets the work directory
+    /// as argv[1].
+    fn runner(tag: &str, script: &str) -> (std::process::Child, tempfile::TempDir, std::path::PathBuf) {
         use crate::sandbox::{Came, ConfinedSignal, CONFINE_GUARD};
         let (py, home) = python();
-        let d = std::env::temp_dir().join(format!("oarbank-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let tmp = crate::scratch(tag);
+        let d = tmp.path().join("work");
         std::fs::create_dir_all(&d).unwrap();
         let mut pol = Policy::new(format!("dev.test.{tag}"));
         pol.ro = vec![home];
         pol.rw = vec![d.display().to_string()];
         pol.exe = Some(py.display().to_string());
-        let pf = d.with_extension("policy.json");
+        let pf = tmp.path().join("policy.json");
         std::fs::write(&pf, serde_json::to_vec(&pol).unwrap()).unwrap();
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.arg("sandbox-exec").arg(&pf).arg("--").arg(&py).args(["-I", "-c", script]).arg(&d).current_dir(&d)
@@ -887,7 +948,7 @@ mod tests {
         signal.prepare(&mut cmd);
         let shim = crate::sys::spawn_contained(&mut cmd, false).unwrap();
         assert_eq!(signal.wait(shim.id(), CONFINE_GUARD), Came::Confined);
-        (shim, d)
+        (shim, tmp, d)
     }
 
     /// The runner's `name` file, once written (up to 120 s on a loaded host), or None if the shim ended first.
@@ -905,15 +966,15 @@ mod tests {
         None
     }
 
+    /// The runner's job ends (all of it, before its directory goes): its stderr.
     fn end(mut shim: std::process::Child, d: &std::path::Path) -> String {
         let pid = shim.id() as i32;
+        let members = crate::sys::Members::of(pid);
         crate::sys::signal_group(pid, crate::sys::Sig::Kill);
+        members.wait(std::time::Duration::from_secs(30));
         let _ = shim.wait();
         crate::sys::release(pid);
-        let err = std::fs::read_to_string(d.join("stderr")).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(d);
-        let _ = std::fs::remove_file(d.with_extension("policy.json"));
-        err
+        std::fs::read_to_string(d.join("stderr")).unwrap_or_default()
     }
 
     /// A runner whose first statement starts 20 processes (plain console ones, as a module would): the runner and
@@ -929,7 +990,7 @@ mod tests {
                       open(sys.argv[1] + '/pids.tmp', 'w').write(' '.join([str(os.getpid())] + [str(p.pid) for p in ps if p.poll() is None]))\n\
                       os.replace(sys.argv[1] + '/pids.tmp', sys.argv[1] + '/pids')\n\
                       time.sleep(120)";
-        let (mut shim, d) = runner("born", script);
+        let (mut shim, _tmp, d) = runner("born", script);
         let shim_pid = shim.id() as i32;
         let started: Vec<i32> = read(&mut shim, &d, "pids").unwrap_or_default().split_whitespace().filter_map(|p| p.parse().ok()).collect();
         let members = crate::sys::group_pids(shim_pid);
@@ -971,7 +1032,7 @@ import os
 os.replace(sys.argv[1] + "/r.tmp", sys.argv[1] + "/r")
 time.sleep(120)
 "#;
-        let (mut shim, d) = runner("consoles", script);
+        let (mut shim, _tmp, d) = runner("consoles", script);
         let shim_pid = shim.id() as i32;
         let got = read(&mut shim, &d, "r");
         let mut escapes = vec![];
@@ -990,7 +1051,7 @@ time.sleep(120)
     /// Anything in the job outside the AppContainer is an escape: here a plain process the test puts there itself.
     #[test]
     fn a_member_outside_the_appcontainer_is_an_escape() {
-        let (mut shim, d) = runner("intruder", "import sys, time\nopen(sys.argv[1] + '/up', 'w').write('1')\ntime.sleep(120)");
+        let (mut shim, _tmp, d) = runner("intruder", "import sys, time\nopen(sys.argv[1] + '/up', 'w').write('1')\ntime.sleep(120)");
         let shim_pid = shim.id() as i32;
         assert!(read(&mut shim, &d, "up").is_some());
         assert_eq!(escape(shim_pid), None);
