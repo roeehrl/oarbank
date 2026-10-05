@@ -411,6 +411,8 @@ impl Agent {
         if self.release.as_ref().is_some_and(|r| r.id == id) {
             return;
         }
+        // a service the previous release dropped is stopped with that release's files, which this install may prune
+        self.settle_services().await;
         let result = async {
             let rt = self.runtime()?;
             release::install(self.api()?, &self.layout, &rt, d, &self.signing).await
@@ -897,7 +899,22 @@ impl Agent {
 
     /// The session loop: connect (enrolling first if needed), hello, then heartbeats; errors back off. Returns the
     /// process exit code: 0 stopped, 75 a staged update or a rollback for the launcher.
+    /// The agent's life: its rounds with the coordinator until a stop, a swap or a fatal error, and then the stops of
+    /// services a release dropped, which the process's exit would cut short.
     pub async fn run(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
+        let r = self.rounds(stop).await;
+        self.settle_services().await;
+        r
+    }
+
+    /// Wait for the stops of services a release no longer has (services.rs `Stops`).
+    async fn settle_services(&self) {
+        let Some(svc) = &self.services else { return };
+        let stops = svc.lock().unwrap().stops();
+        let _ = tokio::task::spawn_blocking(move || stops.wait()).await;
+    }
+
+    async fn rounds(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
         staging::sweep_partials(&self.layout);
         jobs::clear_workdirs(&self.layout);
         self.reap_containers().await;
