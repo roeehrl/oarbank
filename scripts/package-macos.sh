@@ -50,6 +50,11 @@ for b in oarbank-agent oarbank-launcher; do
         codesign --force --options runtime --timestamp --identifier "dev.codonic.$b" --sign "$ID" "$PAYLOAD/$b"
     fi
     codesign --verify --strict "$PAYLOAD/$b"
+    # the Info.plist the binary carries (build.rs) is bound to its signature, under its identifier: Local Network
+    # privacy names the program by it and shows its usage text (docs/design/architecture.md, "Network and access")
+    signed="$(codesign -dv "$PAYLOAD/$b" 2>&1)"
+    [[ "$signed" == *"Identifier=dev.codonic.$b"* && "$signed" == *"Info.plist entries="* ]] \
+        || { echo "$b is not signed with its Info.plist as dev.codonic.$b" >&2; exit 1; }
 done
 # every Mach-O file of the runtime, signed like the binaries
 find "$PAYLOAD/runtime" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0 | while IFS= read -r -d '' f; do

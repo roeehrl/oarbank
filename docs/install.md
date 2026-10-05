@@ -39,6 +39,13 @@ deploy/oarbankd/install-oarbankd.sh --build oarbank-coordinator-<v>-darwin-arm64
 `dev.codonic.oarbank.oarbankd` and `dev.codonic.oarbank.console`. The coordinator's state is in
 `~/Library/Application Support/Oarbank/coordinator` (owner-only). `--dry-run` prints every step instead.
 
+**Local Network privacy (macOS 15 and later).** The coordinator announces itself on the local network for
+`oarbank-agent discover`. LaunchAgents are not exempt from Local Network privacy, so a macOS that applies it to them
+asks once whether the program may use the local network (macOS 27.0.1 did not ask for these standalone programs). If
+macOS refuses, the coordinator's log says so: allow it in System Settings, Privacy & Security, Local Network, or
+enroll nodes with join codes, which name the coordinator's address and need no discovery
+([architecture.md](design/architecture.md#network-and-access)).
+
 Then, on the coordinator:
 ```bash
 B=~/Library/Application\ Support/Oarbank/coordinator-app/current/bin
@@ -88,6 +95,14 @@ The node enrolls with its own key (it never leaves the node), gets a client cert
 runs each module's doctor and golden jobs, and then takes work. Host protection starts in `moderate` with no
 rules; add rules on the node's Protection page. `oarbank-agent discover` lists coordinators announcing themselves
 on the local network, a hint for the URL only.
+
+**Local Network privacy (macOS 15 and later).** The personal scope's LaunchAgent is not exempt: a macOS that applies
+Local Network privacy to it asks once, naming `oarbank-launcher` and saying why, before the agent first reaches a
+coordinator at a LAN address or browses for one. A tailnet or VPN address is not "local network". The system scope (a
+launchd daemon) is exempt. If macOS refuses, `oarbank-agent discover` says so; allow the launcher in System Settings,
+Privacy & Security, Local Network. On Macs no one is at, macOS 15.5 and later accept an administrator's exemption for
+whole networks (`sudo defaults write com.apple.network.local-network AllowedEthernetLocalNetworkAddresses -array
+"<cidr>"`, then restart), and the system scope avoids the question.
 
 ## Updating
 

@@ -198,10 +198,29 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
 - **The local admin channel** is the admin API on `<home>/run/admin.sock`, whose owner-only directory is the
   credential, and on Windows on the named pipe `\\.\pipe\oarbank-admin-<home id>`, whose owner-only security
   descriptor is (an elevated prompt reaches it); the CLI on the coordinator's account uses it without a token.
-- **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (dns-sd, Avahi,
-  `DnsServiceRegister` on Windows); an agent
-  finds it with `oarbank-agent discover` or `run --coordinator discover`, verifies the identity proof, and the owner
-  still admits the node. `tailscale status` peers appear in the console as candidates.
+- **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (the system responder's API
+  in its own process on macOS, Avahi on Linux, `DnsServiceRegister` on Windows), so the announcement ends with the
+  coordinator however it ends; an agent finds it with `oarbank-agent discover` or `run --coordinator discover`
+  (`DNSServiceBrowse` on macOS), verifies the identity proof, and the owner still admits the node. `tailscale status`
+  peers appear in the console as candidates.
+- **Local Network privacy (macOS 15 and later).** macOS asks the person before a program uses the local network:
+  Bonjour (announcing, browsing, resolving) and connections to addresses on a Wi-Fi or Ethernet network, not listening
+  and not VPN or tailnet addresses. It exempts launchd daemons, root and programs started from Terminal or SSH, but not
+  LaunchAgents (Apple's TN3179): the coordinator and the agent's personal scope run as LaunchAgents, the system scope
+  as a daemon (exempt), and the session helpers use only a local socket. Measured on macOS 27.0.1, a LaunchAgent whose
+  program is a standalone executable (no app bundle) registered, browsed and connected on the LAN with no alert and no
+  refusal, Oarbank's binaries and fresh, never-seen ones alike, with or without an embedded Info.plist; the alert
+  attaches to apps. For a macOS that does ask, the agent and the launcher (the personal LaunchAgent's program, which
+  the agent's requests are attributed to) carry an Info.plist in the binary (`__TEXT,__info_plist`) with
+  `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_oarbank._tcp`): the alert names the program and says why,
+  once per person and program, and the answer is kept in System Settings, Privacy & Security, Local Network. The
+  coordinator runs on its build's Python, which carries none, so an alert would name the interpreter. Bonjour goes
+  through the system responder's API, not a `dns-sd` child, so a refusal is reported as one
+  (`kDNSServiceErr_PolicyDenied`: the agent's `discover` and the coordinator's log say what to allow) and the request
+  is the program's own. `AssociatedBundleIdentifiers` is not set: it ties a LaunchAgent to an app, and Oarbank ships
+  none. Where no one can answer an alert, macOS 15.5 and later let an administrator exempt networks
+  (`AllowedEthernetLocalNetworkAddresses`, `AllowedWiFiLocalNetworkAddresses` in `com.apple.network.local-network`,
+  then a restart); MDM cannot set Local Network privacy, and a join code or tailnet address avoids it.
 - **Ports**: the agent listener 7443 (TLS), the admin API 7401 and the console 7400 on loopback, module frames 7402.
   Agents are outbound-only.
 - **Coordinator moves** ([coordinator-move.md](coordinator-move.md)) work across operating systems: the data is

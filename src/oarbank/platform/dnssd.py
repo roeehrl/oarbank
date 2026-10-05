@@ -1,13 +1,21 @@
 """Announcing a DNS-SD service on the local network (coordinator/discovery.py says what and when): macOS through the
-system responder (`dns-sd -R`), Linux through Avahi when it is installed, Windows through its own DNS-SD API
-(`DnsServiceRegister`, Windows 10 1903 and later), the one the agent browses with. `announce` returns an object whose
-`terminate()` withdraws the announcement, or None when there is no way to announce here."""
+system responder's API in this process (`DNSServiceRegister`), Linux through Avahi when it is installed, Windows through
+its own DNS-SD API (`DnsServiceRegister`, Windows 10 1903 and later), the one the agent browses with. `announce` returns
+an object whose `terminate()` withdraws the announcement, or None when there is no way to announce here.
+
+On macOS the registration belongs to this process: it ends with it however it ends (a `dns-sd -R` child outlived a
+killed coordinator and went on announcing it), and Local Network privacy judges this program, whose refusal
+(`kDNSServiceErr_PolicyDenied`) is logged as such (docs/design/architecture.md, "Local Network privacy")."""
+import logging
 import os
+import select
 import shutil
 import socket
 import subprocess
 import sys
 import threading
+
+log = logging.getLogger("oarbank.dnssd")
 
 
 def announce(name: str, service_type: str, port: int, txt: list[str]):
@@ -16,16 +24,86 @@ def announce(name: str, service_type: str, port: int, txt: list[str]):
             return _Registration(name, service_type, port, txt)
         except AttributeError:                    # before Windows 10 1903 dnsapi has no DNS-SD registration
             return None
-    if sys.platform == "darwin" and os.path.exists("/usr/bin/dns-sd"):
-        argv = ["/usr/bin/dns-sd", "-R", name, service_type, "local", str(port), *txt]
-    elif shutil.which("avahi-publish-service"):
-        argv = [shutil.which("avahi-publish-service"), name, service_type, str(port), *txt]
-    else:
+    if sys.platform == "darwin":
+        return _Responder(name, service_type, port, txt)
+    if not shutil.which("avahi-publish-service"):
         return None
+    argv = [shutil.which("avahi-publish-service"), name, service_type, str(port), *txt]
     try:
-        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # it ends with this process however that ends (PR_SET_PDEATHSIG: with the thread that starts it, the coordinator's
+        # main thread), or it would go on announcing a dead one
+        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                preexec_fn=_die_with_parent)
     except OSError:
         return None
+
+
+def _die_with_parent():
+    import ctypes
+    import signal
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)           # PR_SET_PDEATHSIG
+
+
+POLICY_DENIED = -65570                  # kDNSServiceErr_PolicyDenied: macOS refused this program local network access
+
+
+class _Responder:
+    """A service registered with the macOS system responder until terminate() deregisters it. The responder's replies
+    are handled on a thread of its own as they arrive; `error` is the responder's refusal, if any."""
+
+    def __init__(self, name: str, service_type: str, port: int, txt: list[str]):
+        import ctypes
+        from ctypes import POINTER, byref, c_char_p, c_int32, c_uint16, c_uint32, c_void_p
+        lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        reply = ctypes.CFUNCTYPE(None, c_void_p, c_uint32, c_int32, c_char_p, c_char_p, c_char_p, c_void_p)
+        lib.DNSServiceRegister.argtypes = [POINTER(c_void_p), c_uint32, c_uint32, c_char_p, c_char_p, c_char_p, c_char_p,
+                                           c_uint16, c_uint16, c_char_p, reply, c_void_p]
+        lib.DNSServiceRegister.restype = c_int32
+        lib.DNSServiceRefSockFD.argtypes, lib.DNSServiceRefSockFD.restype = [c_void_p], ctypes.c_int
+        lib.DNSServiceProcessResult.argtypes, lib.DNSServiceProcessResult.restype = [c_void_p], c_int32
+        lib.DNSServiceRefDeallocate.argtypes, lib.DNSServiceRefDeallocate.restype = [c_void_p], None
+        self._lib, self.error, self.name = lib, None, name
+        self._reply = reply(self._on_reply)                       # kept alive while the responder may call it
+        record = b"".join(bytes([len(kv)]) + kv for kv in (t.encode() for t in txt))
+        self._ref = c_void_p()
+        err = lib.DNSServiceRegister(byref(self._ref), 0, 0, name.encode(), service_type.encode(), None, None,
+                                     socket.htons(port), len(record), record, self._reply, None)
+        if err:
+            self._refused(err)
+            raise OSError(f"DNSServiceRegister refused {name}: {err}")
+        self._wake_r, self._wake_w = os.pipe()
+        self._thread = threading.Thread(target=self._serve, name="dnssd", daemon=True)
+        self._thread.start()
+
+    def _refused(self, err: int):
+        self.error = err
+        if err == POLICY_DENIED:
+            log.warning("macOS refuses this program local network access, so agents cannot find the coordinator by "
+                        "DNS-SD: allow it in System Settings, Privacy & Security, Local Network, or enroll agents with "
+                        "a join code or --coordinator <url>")
+        else:
+            log.warning("announcing %s on the local network failed (DNS-SD error %s)", self.name, err)
+
+    def _on_reply(self, ref, flags, err, name, regtype, domain, ctx):
+        if err:
+            self._refused(err)
+
+    def _serve(self):
+        fd = self._lib.DNSServiceRefSockFD(self._ref)
+        while True:
+            ready, _, _ = select.select([fd, self._wake_r], [], [])
+            if self._wake_r in ready or self._lib.DNSServiceProcessResult(self._ref):
+                return
+
+    def terminate(self):
+        if self._ref is None:
+            return
+        os.write(self._wake_w, b"x")
+        self._thread.join()
+        self._lib.DNSServiceRefDeallocate(self._ref)
+        self._ref = None
+        os.close(self._wake_r)
+        os.close(self._wake_w)
 
 
 class _Registration:

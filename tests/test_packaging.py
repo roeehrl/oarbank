@@ -455,6 +455,22 @@ def test_a_built_node_runtime_is_fit_to_package():
     assert _script("check-package").main(["--run", f"{root}={python}", str(root)]) == 0
 
 
+def test_the_macos_binaries_say_why_they_use_the_local_network():
+    # Local Network privacy does not exempt LaunchAgents, which the personal scope runs (the launcher, whose children's
+    # requests are attributed to it): the binaries carry an Info.plist (build.rs) with the usage text and the Bonjour
+    # service, under the identifier package-macos.sh signs them with, which checks it is bound
+    import plistlib
+    rust = WXS.parents[2] / "rust" / "crates"
+    for crate in ("oarbank-agent", "oarbank-launcher"):
+        info = plistlib.loads((rust / crate / "Info.plist").read_bytes())
+        assert info["CFBundleIdentifier"] == f"dev.codonic.{crate}"
+        assert info["NSLocalNetworkUsageDescription"].strip() and info["NSBonjourServices"] == ["_oarbank._tcp"]
+        build = (rust / crate / "build.rs").read_text(encoding="utf-8")
+        assert "-Wl,-sectcreate,__TEXT,__info_plist," in build and '"Info.plist"' in build
+    pkg = (WXS.parents[2] / "scripts" / "package-macos.sh").read_text(encoding="utf-8")
+    assert '--identifier "dev.codonic.$b"' in pkg and "Info.plist entries=" in pkg
+
+
 def test_build_scripts_relocate_their_bundled_console_scripts():
     scripts = WXS.parents[2] / "scripts"
     coord = (scripts / "build-coordinator.sh").read_text(encoding="utf-8")

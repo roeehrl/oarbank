@@ -274,7 +274,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }),
         Cmd::Discover { wait } => {
-            println!("{}", serde_json::to_string_pretty(&discover::browse(wait))?);
+            println!("{}", serde_json::to_string_pretty(&discover::browse(wait).map_err(anyhow::Error::msg)?)?);
             Ok(())
         }
         Cmd::Facts => {
@@ -340,7 +340,7 @@ fn main() -> anyhow::Result<()> {
 
 /// `--coordinator discover`: exactly one coordinator must be announcing itself.
 fn discover_one() -> anyhow::Result<String> {
-    let found = discover::browse(4.0);
+    let found = discover::browse(4.0).map_err(anyhow::Error::msg)?;
     match found.as_slice() {
         [one] => {
             let url = one["url"].as_str().unwrap_or_default().to_string();
