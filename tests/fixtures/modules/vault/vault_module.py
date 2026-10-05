@@ -55,6 +55,7 @@ def _job(stage: str, spec: dict, **kw) -> dict:
 @module.verb("op.apply")
 def op_apply(p: mp.OpApplyParams, ctx):
     """call: one job of the call stage and one of the probe stage (params.leak: the call runner logs the key);
+    home: one job of the probe stage (what its runner's environment points at);
     queue_tasks: a task job per image in params.images, each listing its image; key_check: reads the key through
     host.secrets.get and keeps only its hash (params.log: writes the key to stderr, which the host redacts)."""
     if p.verb == "key_check":
@@ -68,6 +69,8 @@ def op_apply(p: mp.OpApplyParams, ctx):
     cid = p.params.get("campaign_id", "c_" + p.verb)
     if p.verb == "call":
         jobs = [_job("call", {"call": 1, "leak": bool(p.params.get("leak"))}), _job("probe", {"probe": 1})]
+    elif p.verb == "home":
+        jobs = [_job("probe", {"probe": 1, "home": 1})]
     else:
         jobs = [_job("task", {"task": i}, images=[img]) for i, img in enumerate(p.params.get("images") or [])]
     return mp.OpApplyResult(effects=[mp.Effect(kind="campaigns.create", args={"campaign_id": cid, "name": p.verb}),

@@ -84,6 +84,13 @@ target = "none"
 effects = ["campaigns.create", "jobs.enqueue"]
 
 [[operations]]
+verb = "home"
+title = "Show where a runner's home is"
+tier = "T1"
+target = "none"
+effects = ["campaigns.create", "jobs.enqueue"]
+
+[[operations]]
 verb = "queue_tasks"
 title = "Queue container tasks"
 tier = "T1"

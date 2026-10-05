@@ -681,16 +681,20 @@ pub fn group_pids(pgid: i32) -> Vec<i32> {
 
 /// The minimal environment a child process needs from the OS, beyond what the agent sets: a system PATH, the home,
 /// the temporary directory. Windows programs (Python included) also need SystemRoot and friends to start at all.
+///
+/// Every per-user location points into `home` (spec/platforms.md, "Environment per OS"): a job's is its work directory,
+/// so whatever tools keep there (caches, configuration, history) lives for one attempt and goes with it
+/// (docs/design/module-sandbox.md, "A runner's home"). On Windows an AppContainer start points LOCALAPPDATA, TEMP and
+/// TMP at the container's folder under the given LOCALAPPDATA, which the launcher creates (sandbox_windows.rs).
 pub fn os_env(home: &Path, tmp: &Path) -> Vec<(String, String)> {
+    let at = |p: &str| home.join(p).display().to_string();
     if cfg!(windows) {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let mut v = vec![("PATH".to_string(), format!(r"{root}\System32;{root};{root}\System32\WindowsPowerShell\v1.0")),
                          ("SystemRoot".into(), root.clone()), ("windir".into(), root),
-                         ("USERPROFILE".into(), home.display().to_string()), ("TEMP".into(), tmp.display().to_string()),
-                         ("TMP".into(), tmp.display().to_string()),
-                         // CreateProcess for an AppContainer rewrites LOCALAPPDATA to the container's folder and fails
-                         // with ERROR_ENVVAR_NOT_FOUND (203) when it is missing.
-                         ("LOCALAPPDATA".into(), home.join(r"AppData\Local").display().to_string())];
+                         ("USERPROFILE".into(), home.display().to_string()), ("APPDATA".into(), at(r"AppData\Roaming")),
+                         ("LOCALAPPDATA".into(), at(r"AppData\Local")), ("TEMP".into(), tmp.display().to_string()),
+                         ("TMP".into(), tmp.display().to_string())];
         for k in ["SystemDrive", "ComSpec", "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"] {
             if let Ok(val) = std::env::var(k) {
                 v.push((k.into(), val));
@@ -699,10 +703,11 @@ pub fn os_env(home: &Path, tmp: &Path) -> Vec<(String, String)> {
         v
     } else {
         vec![("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()), ("HOME".into(), home.display().to_string()),
-             ("TMPDIR".into(), format!("{}/", tmp.display()))]
+             ("TMPDIR".into(), format!("{}/", tmp.display())), ("XDG_CONFIG_HOME".into(), at(".config")),
+             ("XDG_CACHE_HOME".into(), at(".cache")), ("XDG_DATA_HOME".into(), at(".local/share")),
+             ("XDG_STATE_HOME".into(), at(".local/state"))]
     }
 }
-
 
 #[cfg(all(test, unix))]
 mod tests {

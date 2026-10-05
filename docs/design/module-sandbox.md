@@ -63,7 +63,8 @@ hardware details. ENOENT and EPERM differ, which reveals whether a path exists. 
   - `oarbank-agent sandbox-exec PROFILE K=V -- argv` is the launcher.
   - Runners, `doctor`, services and probes all start through it, with the module's approved grants from the
     release's `modules.json`.
-  - The runner environment is the job's: `HOME` and `TMPDIR` inside the work dir, plus `OARBANK_MODULE_DATA`.
+  - The runner environment is the job's: its home and temporary directory inside the work dir, plus
+    `OARBANK_MODULE_DATA` ([A runner's home](#a-runners-home-decision-2026-10-05)).
   - The launcher tells the agent when its sandbox holds, just before the module runs: one byte on a pipe it inherits
     (an event on Windows), named in `OARBANK_CONFINED` and closed before the module starts. The agent waits for that
     or the launcher's exit, never a fixed window, then checks the confinement (`sandbox_check` here) and kills a
@@ -78,6 +79,48 @@ hardware details. ENOENT and EPERM differ, which reveals whether a path exists. 
     agent's WSL containers session on Windows) provide the `containers` pool.
 - **Conformance.** `oarbank-sdk conform` runs the runner and `doctor` under the module's sandbox, so violations show
   up before install.
+
+## A runner's home (decision, 2026-10-05)
+
+**Decision.** A job's home is its work directory and its temporary directory `<W>/tmp`, on every OS, and every per-user
+location a runner's environment names points into it, set explicitly (`sys.rs` `os_env` in the agent,
+`oarbank_sdk.portable.os_env` on the coordinator; the SDK's spec/platforms.md, "What the home is"):
+
+| | macOS, Linux | Windows |
+|---|---|---|
+| home | `HOME=<W>` | `USERPROFILE=<W>` |
+| configuration, data, state | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` under `<W>` | `APPDATA=<W>\AppData\Roaming` |
+| caches | `XDG_CACHE_HOME=<W>/.cache` | `LOCALAPPDATA=<W>\AppData\Local` |
+| temporary files | `TMPDIR=<W>/tmp` | `TEMP`, `TMP`; inside the AppContainer `<W>\AppData\Local\Packages\<container>\AC\Temp` |
+
+All of it is deleted with the work directory after the attempt. A module's env may not set any of these names. A
+doctor, a service, a probe and the coordinator side's processes have the module's data directory as their home: they
+are the module's long-lived parts on a node, not attempts.
+
+**Why per attempt.** The sandbox's intent is that an attempt starts from the same state wherever and whenever it runs:
+certification by goldens and exact result digests rely on it, and a replayed job must not depend on what an earlier one
+left. Anything one attempt leaves for the next is also a channel between attempts, and across releases between
+versions of a module (a cache poisoned by one version read by the next). What a module means to keep on a node has a
+place of its own, `OARBANK_MODULE_DATA`: explicit, per module, removed with the module. A runner that wants a warm cache
+points the tool there itself (`UV_CACHE_DIR`, `HF_HOME`).
+
+**Evidence.** Tools that keep caches or configuration in per-user locations (pip, uv, npm, Hugging Face, matplotlib,
+anything following XDG) create them when they are missing, so an empty home costs a cold cache, not a failure. The one breakage found was Windows'
+own: starting a process in an AppContainer rewrites `LOCALAPPDATA`, `TEMP` and `TMP` to
+`<LOCALAPPDATA>\Packages\<container lower-cased>\AC` (and its `Temp`) under whatever `LOCALAPPDATA` the parent passed,
+and Windows creates that folder only under a profile's own. Under a work directory it did not exist, so `GetTempPath`
+named a missing directory: on the Windows VM `uv venv` failed with os error 3, and Python's `tempfile` quietly fell back
+to the working directory. That is a missing folder, not a reason to keep state: the module launcher (`sandbox-exec`)
+creates it before the start. The coordinator had worked around the same rewrite by passing the host account's
+`LOCALAPPDATA`, which shared the container's real profile folder between every run and install of a module; it now
+follows the same rule. The rejected alternative, a module-scoped cache the agent manages, would carry state between
+attempts that no grant shows and no approval covers.
+
+**Tests.** The agent's `doctor::tests::every_per_user_location_lies_in_the_home` and the SDK's
+`test_every_per_user_location_lies_in_the_home` pin the variables per OS; `tests/rust/test_agent_jobs.py
+::test_a_runner_s_home_and_temporary_files_are_its_work_directory_s_and_go_with_it` runs a real job on macOS, Linux
+and Windows (in its AppContainer there): every location lies in the work directory, the OS's temporary directory exists
+and takes a file, and the work directory is gone after the attempt.
 
 ## Rollout
 
