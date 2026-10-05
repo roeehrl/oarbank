@@ -891,7 +891,7 @@ mod tests {
         use windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile;
         // a profile of this process's own, from none (other copies of the test may run at once)
         let module = format!("dev.test.profile-{}", std::process::id());
-        let (name, sid) = (container_name(&module), container_sid_string(&module).unwrap());
+        let (name, sid) = (container_name(&module, "runner"), container_sid_string(&module).unwrap());
         let forget = || {
             let _lock = ffi::Lock::take(ffi::Lock::PROFILE).unwrap();
             unsafe { DeleteAppContainerProfile(wide(&name).as_ptr()) };
