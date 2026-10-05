@@ -571,7 +571,29 @@ def cmd_fleet(a):
 NODE_STATE_OPS = {"paused": "nodes.pause", "active": "nodes.resume", "draining": "nodes.drain"}
 
 
+def node_show(target: str):
+    """A node's summary and its module services, as the console's node page shows them."""
+    n = next((x for x in api("GET", "/api/v1/fleet")["nodes"] if target in (x["node_id"], x["hostname"])), None)
+    if n is None:
+        sys.exit(f"no node {target}")
+    g = (n.get("doctor") or {}).get("gpu_apis") or {}
+    print(f"{n['hostname']} {n['node_id']} {n.get('platform') or '-'} {n['lifecycle']} {n['desired_state']} "
+          f"{'online' if n['online'] else 'OFFLINE'} agent {n.get('agent_version') or '-'}")
+    print(f"  gpu apis: host {', '.join(g.get('host') or []) or '-'}; containers {', '.join(g.get('containers') or []) or '-'}")
+    for m, st in sorted((n.get("mods") or {}).items()):
+        print(f"  module {m}: {st.get('state')}" + (f" ({st['reason']})" if st.get("reason") else ""))
+    if not n.get("services"):
+        print("  services: none reported")
+    for sv in n.get("services") or []:
+        print(f"  service {sv['module']}/{sv['service']}: {sv['state']}, {sv['health'] or 'health unknown'}"
+              + (f", stopped: {sv['stopped_reason']}" if sv["stopped_reason"] else "")
+              + (f" ({sv['gpu_api_missing']})" if sv["gpu_api_missing"] else "")
+              + (f", {sv['users']} jobs using it" if sv["users"] else "") + (f", error: {sv['error']}" if sv["error"] else ""))
+
+
 def cmd_node(a):
+    if a.action == "show":
+        return node_show(a.target)
     if a.action == "confirm-identity":
         res = run_op("nodes.confirm_identity", a.target, {}, yes=True)
     elif a.action == "approve":
@@ -806,7 +828,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fleet").set_defaults(fn=cmd_fleet)
     n = sub.add_parser("node")
-    n.add_argument("action", choices=["approve", "reject", "state", "limits", "policy", "confirm-identity"])
+    n.add_argument("action", choices=["show", "approve", "reject", "state", "limits", "policy", "confirm-identity"])
     n.add_argument("target")
     n.add_argument("value", nargs="?")
     n.add_argument("kv", nargs="*")

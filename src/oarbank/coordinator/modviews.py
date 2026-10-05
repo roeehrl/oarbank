@@ -15,6 +15,8 @@ from .modulehost import ModuleError, ModuleUnavailable
 
 DEBOUNCE_S = 30.0
 INPUT_ROWS = 5000
+# the datasets a module sees (as host.datasets.query): its own and the operator's, never another module's
+VISIBLE = "(module=? OR module IS NULL OR module='')"
 
 
 def _crc(*parts) -> int:
@@ -45,7 +47,8 @@ def _data_version(db: DB, module: str, inputs: list[str], campaign: str | None =
                 r = db.one("SELECT COUNT(*) m, COALESCE(MAX(updated_at),0) n FROM module_store WHERE module=? AND collection=?",
                            (module, coll))
         elif inp.startswith("datasets:"):
-            r = db.one("SELECT COUNT(*) m, COALESCE(MAX(created_at),0) n FROM datasets WHERE kind=?", (inp.split(":", 1)[1],))
+            r = db.one("SELECT COUNT(*) m, COALESCE(MAX(created_at),0) || '/' || COALESCE(SUM(length(meta_json)),0) n FROM datasets "
+                       "WHERE kind=? AND " + VISIBLE, (inp.split(":", 1)[1], module))
         elif inp == "module_settings":
             r = {"m": zlib.crc32(json.dumps(db.get_setting(f"module_settings:{module}", {}), sort_keys=True).encode()), "n": 0}
         else:
@@ -83,32 +86,12 @@ def _inputs(db: DB, module: str, inputs: list[str], campaign: str | None = None)
                         (module, coll, *( [campaign] if campaign else [] ), INPUT_ROWS))
             out[inp] = [{**json.loads(r["doc_json"]), "_key": r["key"]} for r in rows]
         elif inp.startswith("datasets:"):
-            out[inp] = [{**d, "meta": jl(d.pop("meta_json", None), {})} for d in
-                        db.q("SELECT dataset_id, kind, meta_json, created_at FROM datasets WHERE kind=? ORDER BY created_at DESC LIMIT ?",
-                             (inp.split(":", 1)[1], INPUT_ROWS))]
+            out[inp] = [{**d, "meta": jl(d.pop("meta_json", None), {}), "owner": "module" if d.pop("module") else "operator"}
+                        for d in db.q("SELECT dataset_id, kind, module, meta_json, created_at FROM datasets WHERE kind=? AND "
+                                      + VISIBLE + " ORDER BY created_at DESC LIMIT ?", (inp.split(":", 1)[1], module, INPUT_ROWS))]
         elif inp == "module_settings":
             out["module_settings"] = db.get_setting(f"module_settings:{module}", {})
     return out
-
-
-def _validate(decl: U.ViewDecl, doc: dict) -> dict:
-    shape = decl.shape
-    val = doc.get(shape)
-    if val is None:
-        raise ValueError(f"view returned no {shape!r}")
-    if shape == "rows":
-        if not isinstance(val, list) or not all(isinstance(r, dict) for r in val):
-            raise ValueError("rows must be a list of objects")
-        if len(val) > decl.max_rows:
-            raise ValueError(f"{len(val)} rows > max_rows {decl.max_rows}")
-        keys = {c.key for c in decl.columns}
-        if keys:
-            val = [{k: r.get(k) for k in keys} for r in val]      # only declared columns reach the console
-    elif shape in ("kv", "stat") and not isinstance(val, dict):
-        raise ValueError(f"{shape} must be an object")
-    elif shape == "series" and not isinstance(val, dict):
-        raise ValueError("series must be an object of lists")
-    return {shape: val}
 
 
 CAMPAIGN_VIEW_LIMIT = 40          # campaign-scoped views are kept for the most recent campaigns (and every running one)
@@ -153,7 +136,7 @@ def _refresh_one(db: DB, name: str, vid: str, decl: U.ViewDecl, scope: str, forc
         res = modcalls.host(db).call(name, "ui.view.compute",
                                      {"view_id": vid, "params": {"campaign": campaign} if campaign else {},
                                       "inputs": _inputs(db, name, decl.inputs, campaign), "data_version": dv})
-        doc = _validate(decl, res)
+        doc = U.validate_view(decl, res)
     except (ModuleUnavailable, ModuleError, ValueError) as e:
         with db.tx():
             db.x("INSERT INTO module_views(module,view_id,params_hash,data_version,computed_at,doc_json,error,error_at) "

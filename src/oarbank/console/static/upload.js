@@ -124,7 +124,10 @@
     var id = document.getElementById("up-id").value.trim() || (kind + ":" + top.replace(/[^A-Za-z0-9_.+-]+/g, "-"));
     var params = {dataset_id: id, kind: kind, files: entries};
     if (module) params.module = module;
-    document.getElementById("up-params").value = JSON.stringify(params);
+    var params_el = document.getElementById("up-params");
+    params_el.value = JSON.stringify(params);
+    // from a module page's upload link: once registered, go on to the module's importer for this dataset
+    if (root.dataset.next) params_el.form.querySelector('input[name="return_to"]').value = root.dataset.next + "&dataset=" + encodeURIComponent(id);
     say(files.length + " files uploaded: review and register the dataset");
   });
 })();

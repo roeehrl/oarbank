@@ -325,7 +325,7 @@ def install(db: DB, bundle_path, actor: str = "oarbank", self_test: bool = True)
              (info.name, info.version, info.module_id, info.compat, info.content_digest, db.rel(dest),
               json.dumps(info.manifest.model_dump(mode="json", by_alias=True)), time.time(), actor, runtime,
               len(info.files), size))
-        db.event("module_installed", actor=actor, reason=f"{info.name} {info.version}", digest=info.content_digest)
+        db.event("module_installed", actor=actor, reason=f"{info.name} {info.version}", digest=info.content_digest, module=info.name)
     return {"name": info.name, "version": info.version, "content_digest": info.content_digest, "path": str(dest)}
 
 

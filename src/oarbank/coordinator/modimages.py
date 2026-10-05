@@ -91,7 +91,7 @@ def record_runs(db: DB, module: str, node_id: str, attempt_id: int, ran: list) -
         db.x("INSERT INTO module_images(module,digest,image,set_name,key_sha256,first_run_at,node_id,attempt_id) "
              "VALUES(?,?,?,?,?,?,?,?)", (module, digest, image, set_name, keys[set_name], time.time(), node_id, attempt_id))
         db.event("container_image_first_run", node_id=node_id, attempt_id=attempt_id,
-                 reason=f"{module} {image} (set {set_name}, key {keys[set_name][:16]})"[:300])
+                 reason=f"{module} {image} (set {set_name}, key {keys[set_name][:16]})"[:300], module=module)
         audit.append(db, actor=f"node:{node_id}", source="system", operation="containers.first_run", category="create",
                      target_type="module", target_id=module, outcome="ok", request_id=audit.request_id(),
                      after={"image": image, "digest": digest, "set": set_name, "key_sha256": keys[set_name],

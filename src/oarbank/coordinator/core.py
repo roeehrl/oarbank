@@ -376,6 +376,10 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
                  (json.dumps(body["doctor"]), t, nid))
         if isinstance(body.get("folders"), dict):           # the folders of the statement the agent applied (folders.py)
             db.x("UPDATE nodes SET folders_json=? WHERE node_id=?", (json.dumps(body["folders"])[:100_000], nid))
+        if isinstance(body.get("services"), list):          # the agent's service report (protocol.md, "Services")
+            rep = {"services": [x for x in body["services"][:200] if isinstance(x, dict)],
+                   "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
+            db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps(rep), t, nid))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
@@ -484,7 +488,7 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
             if st.get("certified_at") and now() - st["certified_at"] > C.RECERT_EVERY:
                 reasons.append("periodic")
             if reasons:
-                db.event("recertify", node_id=nid, reason=f"{name}: {','.join(reasons)}")
+                db.event("recertify", node_id=nid, reason=f"{name}: {','.join(reasons)}", module=name)
                 queue_goldens(db, nid, name)
 
 
@@ -503,7 +507,7 @@ def _golden_failed(db: DB, node_id: str, module: str, failures: int, reason: str
     _cancel_goldens(db, node_id, module, "golden_failed")
     _set_module_state(db, node_id, module, state="golden_failed", golden_failures=failures, generation=-1,
                       reason=f"{failures} golden failures (last: {reason})")
-    db.event("golden_failed", node_id=node_id, reason=f"{module}: {failures} failures, last {reason}")
+    db.event("golden_failed", node_id=node_id, reason=f"{module}: {failures} failures, last {reason}", module=module)
     _alert(db, f"golden_failed:{module}", node_id,
            f"{module}: golden jobs failed {failures} times on this node (last: {reason}); not certified", priority="high")
 
@@ -533,7 +537,7 @@ def run_pending_goldens(db: DB, node_id: str | None = None) -> int:
             try:
                 goldens = modcalls.goldens(db, module, node, ver)
             except (ModuleUnavailable, ModuleError) as e:
-                db.event("module_fault", node_id=node["node_id"], reason=f"{module} golden.list: {e}")
+                db.event("module_fault", node_id=node["node_id"], reason=f"{module} golden.list: {e}", module=module)
                 continue
             with db.tx():
                 cur = node_modules(db.one("SELECT modules_json FROM nodes WHERE node_id=?", (node["node_id"],))).get(module, {})
@@ -558,7 +562,7 @@ def _insert_goldens(db: DB, node_id: str, module: str, goldens: list[dict], vers
              "datasets_json,created_at,module,resources_json,name,stage,spec_version) VALUES(?,?, 'golden',?,1000,'pending',?,?,?,?,?,?,?,?)",
              (key, (g.get("datasets") or [None])[-1], node_id, json.dumps(spec), json.dumps(g.get("datasets") or []),
               now(), module, json.dumps(mi.stage_resources(g.get("stage"))), g["name"], g.get("stage"), g.get("spec_version") or 1))
-    db.event("golden_queued", node_id=node_id, reason=module, n=len(goldens))
+    db.event("golden_queued", node_id=node_id, reason=module, n=len(goldens), module=module)
     _set_module_state(db, node_id, module, goldens_pending=False)
     if not goldens:
         # every module requires golden evidence before it gets work
@@ -576,7 +580,7 @@ def _certify(db: DB, node_id: str, module: str, note: str = ""):
                       platform=fp["platform"], os_version=fp["os_version"], certified_at=now(), reason=None, golden_failures=0)
     db.x("UPDATE nodes SET cert_os_version=? WHERE node_id=?", (fp["os_version"], node_id))
     db.x("UPDATE nodes SET breaker_failures=0 WHERE node_id=?", (node_id,))
-    db.event("certified", node_id=node_id, reason=f"{module} generation {gen} {note}".strip())
+    db.event("certified", node_id=node_id, reason=f"{module} generation {gen} {note}".strip(), module=module)
     _resolve_alert(db, f"certifying_stuck:{module}", node_id)
     _resolve_alert(db, f"golden_failed:{module}", node_id)  # the goldens pass now
     _resolve_alert(db, "breaker", node_id)                 # re-doctored and re-certified: recovered
@@ -597,7 +601,7 @@ def _revoke_quiet(db: DB, node_id: str, module: str, reason: str):
                   "AND a.state='live' AND j.module=?", (node_id, module)):
         _end_attempt(db, a["attempt_id"], "revoked", "module_revoked", count_failure=False)
         _push(db, node_id, "revoke", a["attempt_id"])
-    db.event("module_revoked", node_id=node_id, reason=f"{module}: {reason}")
+    db.event("module_revoked", node_id=node_id, reason=f"{module}: {reason}", module=module)
 
 
 def revoke_module(db: DB, node_id: str, module: str, reason: str):
@@ -716,7 +720,7 @@ def set_pipeline(db: DB, module: str, mode: str, actor: str) -> dict:
                           "AND stage IS NULL AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.job_id=jobs.job_id)", (module,)):
                 if expand_pipeline(db, j["job_id"]):
                     out["expanded"] += 1
-    db.event("pipeline_changed", actor=actor, reason=f"{module}: {mode} ({out['expanded']} queued jobs split)")
+    db.event("pipeline_changed", actor=actor, reason=f"{module}: {mode} ({out['expanded']} queued jobs split)", module=module)
     return out
 
 
@@ -987,7 +991,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
                 grant["checkpoint"] = {"files": jl(ckpt["files_json"], [])}
             grants.append(grant)
     for g in grants:
-        db.event("granted", node_id=nid, job_id=g["job_id"], attempt_id=g["attempt_id"], reason=g["module"])
+        db.event("granted", node_id=nid, job_id=g["job_id"], attempt_id=g["attempt_id"], reason=g["module"], module=g["module"])
     return {"grants": grants}
 
 
@@ -1393,7 +1397,7 @@ def _register_pinned(db: DB, module: str, pins, node_id: str, job_id: int, post:
             db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at,platform) VALUES(?,?,?,?,?,?,?)",
                  (p.dataset_id, p.kind, module, json.dumps(meta), json.dumps([{**f, "origins": []} for f in files]), now(),
                   p.platform))
-            db.event("dataset_imported", actor="bootstrap", node_id=node_id, job_id=job_id, reason=p.dataset_id)
+            db.event("dataset_imported", actor="bootstrap", node_id=node_id, job_id=job_id, reason=p.dataset_id, module=module)
             continue
         have = [{k: f.get(k) for k in ("path", "digest", "size")} for f in jl(ex["files_json"], [])]
         if (ex["module"], ex["kind"], sorted(have, key=lambda f: f["path"]), ex["platform"]) != (module, p.kind, files, p.platform):
@@ -1411,7 +1415,7 @@ def _await_module(db: DB, attempt_id: int, e: Exception):
     with db.tx():
         db.x("UPDATE attempts SET phase='awaiting_module', expires_at=MAX(expires_at, ?) WHERE attempt_id=? "
              "AND state IN ('live','expired')", (t + AWAIT_MODULE_TTL, attempt_id))
-        db.event("module_fault", attempt_id=attempt_id, reason=str(e)[:300])
+        db.event("module_fault", attempt_id=attempt_id, reason=str(e)[:300], module=getattr(e, "module", None))
     retry = getattr(e, "retry_after", 5.0)
     raise ApiError(503, "module_unavailable", str(e)[:300], headers={"Retry-After": str(max(1, int(retry)))})
 

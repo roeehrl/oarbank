@@ -120,7 +120,7 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
              " VALUES(?,?,?,'running',?,?,?,?,?,?)",
              (cid, module, str(a.get("name") or cid)[:120], int(a.get("priority") or 0), float(a.get("weight") or 1.0),
               json.dumps(a.get("labels") or {}), actor, clock.now(), json.dumps(pol) if pol else None))
-        db.event("campaign_created", actor=actor, campaign_id=cid, reason=f"{module}: {a.get('name') or cid}")
+        db.event("campaign_created", actor=actor, campaign_id=cid, reason=f"{module}: {a.get('name') or cid}", module=module)
         if pol and pol["unit"] == "campaign":
             placement.open_campaign_unit(db, module, cid, pol)        # pinned now, or bound by capacity
         rec["campaign_id"] = cid
@@ -269,7 +269,7 @@ def _datasets_create(db: DB, module: str, a: dict, actor: str) -> dict:
                           "new files need a new id")
     db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at,platform) VALUES(?,?,?,?,?,?,?)",
          (did, kind, module, json.dumps(meta), json.dumps(files), clock.now(), plat))
-    db.event("dataset_imported", actor=actor, reason=did)
+    db.event("dataset_imported", actor=actor, reason=did, module=module)
     return {"dataset_id": did}
 
 
@@ -291,7 +291,7 @@ def _datasets_update(db: DB, module: str, a: dict, actor: str) -> dict:
         else:
             cur[k] = v
     db.x("UPDATE datasets SET meta_json=? WHERE dataset_id=?", (json.dumps(cur), did))
-    db.event("dataset_updated", actor=actor, reason=did)
+    db.event("dataset_updated", actor=actor, reason=did, module=module)
     return {"dataset_id": did, "keys": sorted(meta)}
 
 
@@ -308,5 +308,5 @@ def _datasets_delete(db: DB, module: str, a: dict, actor: str) -> dict:
               "(SELECT 1 FROM json_each(jobs.datasets_json) WHERE value=?)) LIMIT 1", (did, did)):
         raise EffectError(409, "dataset_in_use", f"{did}: pending or leased jobs name it")
     db.x("DELETE FROM datasets WHERE dataset_id=?", (did,))
-    db.event("dataset_deleted", actor=actor, reason=did)
+    db.event("dataset_deleted", actor=actor, reason=did, module=module)
     return {"dataset_id": did}
