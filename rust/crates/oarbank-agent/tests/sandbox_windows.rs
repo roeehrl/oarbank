@@ -46,6 +46,29 @@ fn a_contained_program_writes_its_rw_root_only() {
     assert!(!denied.status.success() && !outside.exists());
 }
 
+/// Launches of one module at once all start. Every shim makes sure the module's AppContainer profile exists, and
+/// CreateAppContainerProfile races itself: a call on an existing profile, beside another, can delete it until a later
+/// call creates it again, and a CreateProcess for the container in that window fails with ERROR_FILE_NOT_FOUND, which
+/// the shim reports against the program it starts.
+#[test]
+fn launches_of_one_module_at_once_all_start() {
+    let cmd = system32("cmd.exe");
+    let failed: Vec<String> = std::thread::scope(|s| {
+        let threads: Vec<_> = (0..16).map(|t| {
+            let cmd = &cmd;
+            s.spawn(move || {
+                let d = scratch(&format!("together-{t}"));
+                (0..10).filter_map(|_| {
+                    let out = sandboxed("dev.test.together", &d, &[cmd, "/c", "exit 0"]);
+                    (!out.status.success()).then(|| format!("{:?} {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+                }).collect::<Vec<_>>()
+            })
+        }).collect();
+        threads.into_iter().flat_map(|t| t.join().unwrap()).collect()
+    });
+    assert!(failed.is_empty(), "{} of 160 launches failed: {failed:?}", failed.len());
+}
+
 /// The test's Python (OARBANK_TEST_PYTHON, else the node runtime's, else the one on PATH) and the directories the
 /// sandbox must let it read.
 fn python() -> (String, Vec<String>) {
