@@ -347,7 +347,9 @@ fn discover_one() -> anyhow::Result<String> {
             tracing::warn!(url = %url, fleet = %one["fleet_id"], "found a coordinator on the local network; the owner must approve this node");
             Ok(url)
         }
-        [] => anyhow::bail!("no coordinator announces itself on the local network: give --coordinator <url> or --join <code>"),
+        [] => anyhow::bail!("no coordinator announces itself on the local network{}: give --coordinator <url> or --join <code>",
+                            if cfg!(target_os = "macos") { " (or macOS holds this program's local network requests until a person \
+                                allows them: System Settings, Privacy & Security, Local Network)" } else { "" }),
         many => anyhow::bail!("{} coordinators announce themselves here: give --coordinator <url> ({})", many.len(),
                               many.iter().filter_map(|f| f["url"].as_str()).collect::<Vec<_>>().join(", ")),
     }

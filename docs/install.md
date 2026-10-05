@@ -41,9 +41,11 @@ deploy/oarbankd/install-oarbankd.sh --build oarbank-coordinator-<v>-darwin-arm64
 
 **Local Network privacy (macOS 15 and later).** The coordinator announces itself on the local network for
 `oarbank-agent discover`. LaunchAgents are not exempt from Local Network privacy, so a macOS that applies it to them
-asks once whether the program may use the local network (macOS 27.0.1 did not ask for these standalone programs). If
-macOS refuses, the coordinator's log says so: allow it in System Settings, Privacy & Security, Local Network, or
-enroll nodes with join codes, which name the coordinator's address and need no discovery
+asks once whether the program may use the local network (macOS 27.0.1 did not ask for these standalone programs; a
+coordinator run from a checkout on python.org's or Homebrew's Python, which runs as an app, makes macOS ask about
+"Python"). If macOS refuses, or holds the request because no one has answered yet, the coordinator's log says so: allow
+it in System Settings, Privacy & Security, Local Network, or enroll nodes with join codes, which name the coordinator's
+address and need no discovery
 ([architecture.md](design/architecture.md#network-and-access)).
 
 Then, on the coordinator:

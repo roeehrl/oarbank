@@ -45,6 +45,7 @@ def _die_with_parent():
 
 
 POLICY_DENIED = -65570                  # kDNSServiceErr_PolicyDenied: macOS refused this program local network access
+PENDING_S = 10.0                        # the responder answers a registration in about a second
 
 
 class _Responder:
@@ -62,7 +63,7 @@ class _Responder:
         lib.DNSServiceRefSockFD.argtypes, lib.DNSServiceRefSockFD.restype = [c_void_p], ctypes.c_int
         lib.DNSServiceProcessResult.argtypes, lib.DNSServiceProcessResult.restype = [c_void_p], c_int32
         lib.DNSServiceRefDeallocate.argtypes, lib.DNSServiceRefDeallocate.restype = [c_void_p], None
-        self._lib, self.error, self.name = lib, None, name
+        self._lib, self.error, self.name, self._answered = lib, None, name, False
         self._reply = reply(self._on_reply)                       # kept alive while the responder may call it
         record = b"".join(bytes([len(kv)]) + kv for kv in (t.encode() for t in txt))
         self._ref = c_void_p()
@@ -85,15 +86,25 @@ class _Responder:
             log.warning("announcing %s on the local network failed (DNS-SD error %s)", self.name, err)
 
     def _on_reply(self, ref, flags, err, name, regtype, domain, ctx):
+        self._answered = True
         if err:
             self._refused(err)
 
     def _serve(self):
         fd = self._lib.DNSServiceRefSockFD(self._ref)
+        wait = PENDING_S                                          # for the responder's first answer, then for ever
         while True:
-            ready, _, _ = select.select([fd, self._wake_r], [], [])
+            ready, _, _ = select.select([fd, self._wake_r], [], [], wait)
+            if not ready:
+                log.warning("the system responder has not answered for %s s: macOS holds a program's local network "
+                            "requests until a person allows them (System Settings, Privacy & Security, Local Network), "
+                            "and an interpreter that runs as an app (python.org's, Homebrew's) is such a program", wait)
+                wait = None
+                continue
             if self._wake_r in ready or self._lib.DNSServiceProcessResult(self._ref):
                 return
+            if self._answered:
+                wait = None
 
     def terminate(self):
         if self._ref is None:

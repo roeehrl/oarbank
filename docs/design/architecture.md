@@ -207,14 +207,20 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
   Bonjour (announcing, browsing, resolving) and connections to addresses on a Wi-Fi or Ethernet network, not listening
   and not VPN or tailnet addresses. It exempts launchd daemons, root and programs started from Terminal or SSH, but not
   LaunchAgents (Apple's TN3179): the coordinator and the agent's personal scope run as LaunchAgents, the system scope
-  as a daemon (exempt), and the session helpers use only a local socket. Measured on macOS 27.0.1, a LaunchAgent whose
-  program is a standalone executable (no app bundle) registered, browsed and connected on the LAN with no alert and no
-  refusal, Oarbank's binaries and fresh, never-seen ones alike, with or without an embedded Info.plist; the alert
-  attaches to apps. For a macOS that does ask, the agent and the launcher (the personal LaunchAgent's program, which
-  the agent's requests are attributed to) carry an Info.plist in the binary (`__TEXT,__info_plist`) with
-  `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_oarbank._tcp`): the alert names the program and says why,
-  once per person and program, and the answer is kept in System Settings, Privacy & Security, Local Network. The
-  coordinator runs on its build's Python, which carries none, so an alert would name the interpreter. Bonjour goes
+  as a daemon (exempt), and the session helpers use only a local socket. What was measured: on macOS 27.0.1, a
+  LaunchAgent whose program is a standalone executable (no app bundle) registered, browsed and connected on the LAN
+  with no alert and no refusal, Oarbank's ad hoc signed binaries and fresh ones alike, with or without an embedded
+  Info.plist. On macOS 26.6.2 (GitHub's runner, a session no one answers alerts in) the same registration from
+  python.org's interpreter, which runs as an app (Python.app, `org.python.python`), was held with no answer, while
+  Apple's interpreter, `dns-sd` and a standalone executable built there went through: macOS asks about programs that
+  belong to an app. The coordinator build's Python (uv's standalone CPython) and Oarbank's binaries are standalone
+  executables; a coordinator run from a checkout on an app-like interpreter (python.org's, Homebrew's) makes macOS ask
+  about "Python", and the coordinator logs that the responder has not answered after 10 s. For a macOS that asks about
+  standalone programs too (Developer ID–signed ones were not tested), the agent and the launcher (the personal
+  LaunchAgent's program, which the agent's requests are attributed to) carry an Info.plist in the binary
+  (`__TEXT,__info_plist`) with `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_oarbank._tcp`): the alert
+  names the program and says why, once per person and program, and the answer is kept in System Settings, Privacy &
+  Security, Local Network. Bonjour goes
   through the system responder's API, not a `dns-sd` child, so a refusal is reported as one
   (`kDNSServiceErr_PolicyDenied`: the agent's `discover` and the coordinator's log say what to allow) and the request
   is the program's own. `AssociatedBundleIdentifiers` is not set: it ties a LaunchAgent to an app, and Oarbank ships

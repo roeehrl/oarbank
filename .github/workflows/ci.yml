@@ -62,6 +62,10 @@ jobs:
   agent:
     runs-on: macos-26
     timeout-minutes: 60
+    env:
+      # the coordinator the end-to-end tests start runs on uv's standalone CPython, as a coordinator build does: the
+      # runner's python.org interpreter runs as an app, whose local network requests macOS holds for a person to allow
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v4
         with:
