@@ -83,7 +83,7 @@ NVIDIA_LINUX = {
     "Full output": "doctor: ok",
     "Redaction": ["I removed host names, user names, paths, serial numbers and addresses from everything above."],
 }
-ISSUE = {"url": "https://github.com/roeehrl/oarbank/issues/42", "author": {"login": "a-reporter"}, "createdAt": "2026-10-05T09:00:00Z"}
+ISSUE = {"url": "https://github.com/roeehrl/oarbank/issues/42", "author": {"login": "a-reporter"}, "createdAt": "2026-10-01T09:00:00Z"}
 
 
 def issue(**change) -> dict:
@@ -106,7 +106,7 @@ def test_a_report_becomes_a_row_the_sdk_accepts():
         "gpu_apis": {"host": ["cuda", "opencl", "vulkan"], "containers": ["cuda"]},
         "tests": [{"id": "doctor_probe_gpu", "result": "passed"}, {"id": "test_gpu_apis", "result": "passed"}],
         "commit": "1dc15f7",
-        "date": "2026-10-05",
+        "date": "2026-10-01",
         "source": {"kind": "issue", "url": ISSUE["url"], "reporter": "a-reporter"},
     }
     data = GEN.load()
