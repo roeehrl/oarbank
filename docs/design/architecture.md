@@ -151,7 +151,7 @@ confinement and fails closed. Grants are whole directories or files, approved pe
 |---|---|---|
 | macOS | Seatbelt through the launcher's `sandbox-exec`, with a loopback deny and the proxy route | macOS 15 (docs/install.md) |
 | Linux | Landlock for the detected ABI (files; TCP connect only to the proxy port from ABI 4; abstract sockets and signals scoped from ABI 6), seccomp (socket families, no listen, ptrace, mounts, namespaces, BPF or keyrings) and no_new_privs, checked through `/proc`; `egress-any` is unavailable | full parity from kernel 6.12 (ABI 6); older kernels report network enforcement unavailable |
-| Windows | a per-module AppContainer started by a shim inside the Job Object (ACL grants, `internetClient` only for `egress-any`, loopback isolation); the enforced allowlist needs the elevated helper, a LocalSystem service that exempts one job's container from loopback isolation and filters every loopback port but its proxy | Windows 10 1809 |
+| Windows | a per-module AppContainer started by a shim inside the Job Object (ACL grants, `internetClient` only for `egress-any`, loopback isolation); the enforced allowlist needs the elevated helper, a LocalSystem service that exempts the container from loopback isolation and filters its loopback connections to its jobs' proxy ports, each opening for as long as the job's shim runs | Windows 10 1809 |
 
 ## Job control
 

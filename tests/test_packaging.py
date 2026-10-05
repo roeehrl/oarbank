@@ -27,6 +27,19 @@ def test_msi_upgrade_keeps_the_node():
     assert "NOT UPGRADINGPRODUCTCODE" in remove.get("Condition")
 
 
+def test_an_uninstall_removes_what_the_helper_installed_and_an_upgrade_keeps_it():
+    # the helper's filters and loopback exemptions outlive its service, so running jobs keep their openings across a
+    # restart or an upgrade (helper_windows.rs); only an uninstall clears them, after the node's own removal
+    root = ET.parse(WXS).getroot()
+    assert root.find(".//w:SetProperty[@Id='ClearHelper']", NS).get("Value") == '"[INSTALLFOLDER]oarbank-launcher.exe" helper-clear'
+    ca = root.find(".//w:CustomAction[@Id='ClearHelper']", NS)
+    assert (ca.get("Execute"), ca.get("Impersonate")) == ("deferred", "no")
+    seq = root.find("w:Package/w:InstallExecuteSequence", NS)
+    steps = {c.get("Action"): c for c in seq.findall("w:Custom", NS)}
+    assert steps["ClearHelper"].get("Condition") == 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'
+    assert (steps["RemoveNode"].get("Before"), steps["ClearHelper"].get("Before")) == ("ClearHelper", "RemoveFiles")
+
+
 def test_the_helper_service_starts_after_the_filtering_engine_and_is_configured_by_the_launcher():
     # the agent's service gets its delayed start and recovery from `oarbank-launcher service install`, the helper's from
     # `oarbank-launcher helper-config` (tests/rust/test_launcher_service.py); the MSI's own ServiceConfig tables failed
