@@ -3,7 +3,8 @@ JavaScript and module media never reach the console origin.
 
 Each response carries a CSP with the `sandbox` directive (scripts and forms only; never same-origin),
 `frame-ancestors` limited to the console, no network access (`connect-src 'none'`; data comes only over
-the MessagePort bridge), `nosniff`, and no cookies. Only files under the iframe entry's own directory are
+the MessagePort bridge), images and media only from this origin (the bridge's `read.media` capability URLs, UI contract
+1.2), `nosniff`, and no cookies. Only files under the iframe entry's own directory are
 served, with an extension whitelist; paths are resolved and confined.
 
 Media (`/b/<token>`, UI contract 1.1): a capability URL the console minted after it checked that the artifact belongs to
@@ -16,19 +17,10 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from oarbank_sdk import media as M
+from oarbank_sdk.render import frame_csp, media_csp
 
 ALLOWED = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json",
            ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2"}
-
-
-def frame_csp(console_origin: str) -> str:
-    return ("sandbox allow-scripts allow-forms; default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; "
-            f"frame-ancestors {console_origin}")
-
-
-def media_csp(console_origin: str) -> str:
-    return f"sandbox; default-src 'none'; frame-ancestors {console_origin}"
 
 
 def frames_app(catalog, console_origin: str, refresh=None, tokens=None, reader=None, home: Path | None = None) -> FastAPI:

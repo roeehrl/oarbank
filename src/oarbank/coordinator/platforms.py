@@ -105,12 +105,11 @@ def tool_paths(db: DB, tool_ids, os_: str) -> tuple[list[str], list[str]]:
     return paths, missing
 
 
-def sandbox_gaps(manifest, facts: dict) -> list[str]:
-    """Sandbox capabilities this module needs that the node's backend does not enforce (spec/sandbox.md, "Placement").
-    Every module needs the always-on rules; grants add their own capability names. Denying execution of written files
+def sandbox_needs(manifest) -> list[str]:
+    """The sandbox capabilities a module needs enforced where it runs (spec/sandbox.md, "Placement"). Every module needs
+    the always-on rules; grants add their own capability names. Denying execution of written files
     (`exec_writable = false`) is best effort: Windows cannot enforce it without application control. A module with an
     endpoint service needs an agent that hands out service endpoints (`endpoints`, docs/design/service-endpoints.md)."""
-    enf = ((facts or {}).get("sandbox") or {}).get("enforcement") or {}
     sb = manifest.sandbox
     need = ["filesystem", "ipc", f"net.{sb.net.mode}"]
     if sb.net.mode != "none":
@@ -119,8 +118,18 @@ def sandbox_gaps(manifest, facts: dict) -> list[str]:
         need.append(f"gpu.{sb.devices.gpu}")
     if any(s.endpoint for s in manifest.services):
         need.append("endpoints")
-    need += sorted({f"folders.{f.access}" for f in sb.folders})
-    return [c for c in need if enf.get(c) != "enforced"]
+    return need + sorted({f"folders.{f.access}" for f in sb.folders})
+
+
+def enforcement(facts: dict) -> dict:
+    """The node's sandbox enforcement per capability, as its facts report it."""
+    return ((facts or {}).get("sandbox") or {}).get("enforcement") or {}
+
+
+def sandbox_gaps(manifest, facts: dict) -> list[str]:
+    """Sandbox capabilities this module needs that the node's backend does not enforce."""
+    enf = enforcement(facts)
+    return [c for c in sandbox_needs(manifest) if enf.get(c) != "enforced"]
 
 
 def unsupported(db: DB, manifest, node: dict) -> str | None:

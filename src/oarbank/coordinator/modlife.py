@@ -162,7 +162,7 @@ def _apply(db: DB, name: str, verb: str, effs: list[dict], move_id: str, message
     except effects.EffectError as e:
         audit.append(db, actor=f"module:{name}", source="system", operation=verb, category="modify", target_type="coordinator",
                      target_id=move_id, outcome="rejected", request_id=rid, error=f"{e.code}: {e.detail}"[:300])
-        db.event("module_fault", reason=f"{name} {verb}: {e.code}: {e.detail}"[:300])
+        db.event("module_fault", reason=f"{name} {verb}: {e.code}: {e.detail}"[:300], module=name)
         return []
 
 
@@ -213,7 +213,7 @@ def cancelled(db: DB, move_id: str, reason: str) -> dict:
             r = modcalls.call(db, name, "move.cancelled", {"move_id": move_id, "reason": reason, "now": clock.now()})
             out[name] = _apply(db, name, "move.cancelled", r.get("effects") or [], move_id, r.get("message", ""))
         except (ModuleUnavailable, ModuleError) as e:
-            db.event("module_fault", reason=f"{name} move.cancelled: {e}"[:300])
+            db.event("module_fault", reason=f"{name} move.cancelled: {e}"[:300], module=name)
     return out
 
 
@@ -234,7 +234,7 @@ def postflight(db: DB) -> dict:
                                                              "epoch": int(pend.get("epoch") or 0), "skipped": skipped, "now": clock.now()})
         except (ModuleUnavailable, ModuleError) as e:
             left.append(name)                      # asked again on the next tick
-            db.event("module_fault", reason=f"{name} move.postflight: {e}"[:300])
+            db.event("module_fault", reason=f"{name} move.postflight: {e}"[:300], module=name)
             continue
         applied = _apply(db, name, "move.postflight", r.get("effects") or [], pend["move_id"], r.get("message", ""))
         checks = r.get("checks") or []
@@ -273,8 +273,8 @@ def runtimes_ok(db: DB) -> list[str]:
         try:
             modstore._build_runtime(p)
         except modstore.InstallError as e:
-            db.event("module_runtime_failed", reason=f"{r['name']}@{r['version']}: {e}"[:500])
+            db.event("module_runtime_failed", reason=f"{r['name']}@{r['version']}: {e}"[:500], module=r["name"])
             continue
-        db.event("module_runtime_rebuilt", reason=f"{r['name']}@{r['version']}")
+        db.event("module_runtime_rebuilt", reason=f"{r['name']}@{r['version']}", module=r["name"])
         done.append(f"{r['name']}@{r['version']}")
     return done
