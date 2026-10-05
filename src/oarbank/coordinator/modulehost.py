@@ -252,6 +252,8 @@ class ModuleHost:
         if h.consecutive_failures >= FAULT_AFTER:
             h.state, h.fault_until = "fault", self.clock() + backoff
             log.warning("module %s in fault for %.0f s after %d failures: %s", name, backoff, h.consecutive_failures, detail)
+        else:
+            log.warning("module %s %s (%d in a row): %s", name, kind, h.consecutive_failures, detail)
         h.alerting = True
         self._emit(name, "fault" if h.state == "fault" else "crash", h.last_error)
         return ModuleUnavailable(name, kind, detail, retry_after=backoff)

@@ -53,7 +53,10 @@ def test_the_agent_installs_the_standby_and_follows_the_move(agent_bin, tmp_path
             p.terminate()
             out = p.communicate(timeout=30)[0]
             print(out[-6000:])
-            log = b_home / "logs" / "oarbankd.log"
-            if log.exists():
-                print(log.read_text(encoding="utf-8")[-3000:])
+            try:                                                # the move's phases and why it stopped, if it did
+                print(json.dumps(a.api("GET", "/api/v1/coordinator"), indent=1)[-6000:])
+            except Exception as e:
+                print(f"the old coordinator's status: {e}")
+            for log in sorted(b_home.glob("logs/*")) + sorted(install.glob("*/*.log")):
+                print(f"--- {log}\n" + log.read_text(encoding="utf-8", errors="replace")[-3000:])
     assert "standby coordinator installed" in out

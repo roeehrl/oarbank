@@ -136,6 +136,40 @@ def test_descriptors_are_compared_by_sid_not_by_how_sddl_spells_it(tmp_path):
     assert files.owner_only(f) == (me == admin)          # the built-in Administrator is trusted only when it is the owner
 
 
+@windows
+def test_the_admin_pipe_stays_reachable_while_clients_come_and_go(tmp_path):
+    """A reachability check connects and leaves at once; the next instance exists before the departed client's is
+    closed, so the pipe's name never vanishes and the next check (the CLI deciding how to reach oarbankd) finds it."""
+    import asyncio
+    import threading
+    import httpx
+    from fastapi import FastAPI
+    from oarbank.platform import localchannel
+    app = FastAPI()
+    app.get("/ping")(lambda: {"ok": True})
+    srv = localchannel.server(app, tmp_path, log_level="warning")
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    try:
+        assert wait_for(lambda: localchannel.reachable(tmp_path), 20)
+        assert all(localchannel.reachable(tmp_path) for _ in range(300))
+        with httpx.Client(transport=localchannel.transport(tmp_path), base_url="http://oarbank") as c:
+            assert c.get("/ping").json() == {"ok": True}
+    finally:
+        srv.should_exit = True
+        t.join(20)
+
+
+def wait_for(pred, timeout):
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _elevated() -> bool:
     return sys.platform == "win32" and bool(ctypes.windll.shell32.IsUserAnAdmin())
 

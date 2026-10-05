@@ -47,8 +47,10 @@ class Listener:
             try:
                 await self.loop._proactor.accept_pipe(pipe)
             except (BrokenPipeError, ConnectionError):
-                pipe.close()                                   # the client left before it was served
+                # the client left before it was served (a reachability check): the next instance first, so the name
+                # never has no instance, when it would vanish and a client would take the coordinator for gone
                 self.pending = self._instance(first=False)
+                pipe.close()
                 continue
             self.pending = self._instance(first=False)
             self.loop._make_duplex_pipe_transport(pipe, self.factory(), extra={"addr": self.name})
