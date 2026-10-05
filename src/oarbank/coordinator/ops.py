@@ -751,7 +751,7 @@ def _pipeline(db, req):
 def _restart_host(db, req):
     from . import modcalls
     modcalls.host(db).restart(req.target)
-    db.event("module_restarted", actor=req.actor, reason=req.target)
+    db.event("module_restarted", actor=req.actor, reason=req.target, module=req.target)
     return {"restarted": req.target}
 
 
@@ -840,7 +840,7 @@ def _uninstall(db, req):
     db.x("DELETE FROM modules WHERE name=? AND version=?", (n, v))
     import shutil
     shutil.rmtree(r["path"], ignore_errors=True)
-    db.event("module_uninstalled", actor=req.actor, reason=f"{n} {v}")
+    db.event("module_uninstalled", actor=req.actor, reason=f"{n} {v}", module=n)
     return {"uninstalled": f"{n}@{v}"}
 
 
@@ -896,7 +896,7 @@ def _enable(db, req):
         from . import modstore
         n, v = _name_ver(req)
         ch = modstore.enable(db, n, v)
-        db.event("module_enabled", actor=req.actor, reason=f"{n} {ch['current']}")
+        db.event("module_enabled", actor=req.actor, reason=f"{n} {ch['current']}", module=n)
         req.target = n
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
@@ -911,7 +911,7 @@ def _canary(db, req):
         n, v = _name_ver(req)
         nodes = [core_node_id(db, x) for x in (req.params.get("nodes") or [])]
         ch = modstore.canary(db, n, v, nodes)
-        db.event("module_canary", actor=req.actor, reason=f"{n} {v} on {', '.join(nodes)}")
+        db.event("module_canary", actor=req.actor, reason=f"{n} {v} on {', '.join(nodes)}", module=n)
         req.target = n
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
@@ -957,7 +957,7 @@ def _mpromote(db, req):
             raise modstore.LifecycleError(f"{req.target} {imp['to']} is not certified on every canary node yet ({waiting}); "
                                           "promote once its goldens pass there")
         ch = modstore.promote(db, req.target)
-        db.event("module_promoted", actor=req.actor, reason=f"{req.target} {ch['current']}")
+        db.event("module_promoted", actor=req.actor, reason=f"{req.target} {ch['current']}", module=req.target)
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 
@@ -967,7 +967,7 @@ def _mrollback(db, req):
     def fn(db, req):
         from . import modstore
         ch = modstore.rollback(db, req.target)
-        db.event("module_rolled_back", actor=req.actor, reason=f"{req.target} -> {ch['current']}")
+        db.event("module_rolled_back", actor=req.actor, reason=f"{req.target} -> {ch['current']}", module=req.target)
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 
@@ -982,7 +982,7 @@ def _disable(db, req):
                       "WHERE a.state='live' AND j.module=?", (req.target,)):
             core._end_attempt(db, a["attempt_id"], "released", "module_disabled", count_failure=False)
             core._push(db, a["node_id"], "revoke", a["attempt_id"])
-        db.event("module_disabled", actor=req.actor, reason=req.target)
+        db.event("module_disabled", actor=req.actor, reason=req.target, module=req.target)
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 
@@ -994,7 +994,7 @@ def _mpin(db, req):
         n, v = _name_ver(req)
         node = core_node_id(db, req.params.get("node") or "")
         out = modstore.pin(db, n, node, v if not req.params.get("clear") else None)
-        db.event("module_pinned", actor=req.actor, node_id=node, reason=f"{n} {v or '(cleared)'}")
+        db.event("module_pinned", actor=req.actor, node_id=node, reason=f"{n} {v or '(cleared)'}", module=n)
         req.target = n
         return out
     return _lifecycle(fn)(db, req)
@@ -1738,7 +1738,7 @@ def _secret_set(db, req):
         out = modsecrets.put(db, module, name, node, req.secret, req.actor)
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
-    db.event("secret_set", actor=req.actor, node_id=node or None, reason=f"{module}/{name} {out['fingerprint']}")
+    db.event("secret_set", actor=req.actor, node_id=node or None, reason=f"{module}/{name} {out['fingerprint']}", module=module)
     return {"module": module, "name": name, "node": node or None, **out}
 
 
@@ -1750,7 +1750,7 @@ def _secret_clear(db, req):
         out = modsecrets.clear(db, module, name, node)
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
-    db.event("secret_cleared", actor=req.actor, node_id=node or None, reason=f"{module}/{name}")
+    db.event("secret_cleared", actor=req.actor, node_id=node or None, reason=f"{module}/{name}", module=module)
     return {"module": module, "name": name, "node": node or None, **out}
 
 

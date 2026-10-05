@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   cik_pinned TEXT, cik_confirmed TEXT, cik_confirmed_by TEXT, cik_confirmed_at REAL,   -- the coordinator key the agent pinned
   install_coordinator_json TEXT, coordinator_move_json TEXT,
   folders_json TEXT,              -- the folders of the statement the agent applied: {id: {access, status}} (folders.py)
+  services_json TEXT, services_at REAL,   -- the agent's service report: {services: [...], probes: [...]} (protocol.md)
   clock_offset_s REAL);           -- the node's wall clock minus oarbankd's, at its last hello or heartbeat (protocol.md, "Clocks")
 
 CREATE TABLE IF NOT EXISTS node_samples (
@@ -126,9 +127,11 @@ CREATE INDEX IF NOT EXISTS checkpoints_node ON checkpoints(node_id);
 
 CREATE TABLE IF NOT EXISTS events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, actor TEXT, node_id TEXT,
-  campaign_id TEXT, job_id INT, attempt_id INT, reason TEXT, payload_json TEXT);
+  campaign_id TEXT, job_id INT, attempt_id INT, reason TEXT, payload_json TEXT,
+  module TEXT);                   -- the module an event is about (its pages' module_events and its Health tab read it)
 
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS events_module ON events(module, event_id) WHERE module IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, response_json TEXT, at REAL);
 
@@ -366,11 +369,11 @@ class DB:
 
     # -- events ------------------------------------------------------------
     def event(self, kind, actor="system", node_id=None, campaign_id=None, job_id=None,
-              attempt_id=None, reason=None, **payload):
-        eid = self.x("INSERT INTO events(ts,kind,actor,node_id,campaign_id,job_id,attempt_id,reason,payload_json)"
-                     " VALUES(?,?,?,?,?,?,?,?,?)",
+              attempt_id=None, reason=None, module=None, **payload):
+        eid = self.x("INSERT INTO events(ts,kind,actor,node_id,campaign_id,job_id,attempt_id,reason,payload_json,module)"
+                     " VALUES(?,?,?,?,?,?,?,?,?,?)",
                      (clock.now(), kind, actor, node_id, campaign_id, job_id, attempt_id, reason,
-                      json.dumps(payload) if payload else None))
+                      json.dumps(payload) if payload else None, module))
         for cb in list(self.event_listeners):
             try:
                 cb(eid)

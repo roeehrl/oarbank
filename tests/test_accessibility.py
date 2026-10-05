@@ -1,8 +1,9 @@
 """Accessibility: axe-core (WCAG 2.0/2.1 A and AA, best practices) over every console page as
 rendered, and WCAG contrast for every text/background pair the stylesheet uses, in both colour schemes.
 
-axe runs in Node with jsdom; point OARBANK_A11Y_NODE_MODULES at a node_modules holding axe-core and jsdom
-(the nightly job installs them). Without it the axe test is skipped; the contrast test always runs."""
+axe runs in Node with jsdom, through the SDK's harness (the one `oarbank-sdk preview --check` runs); point
+OARBANK_A11Y_NODE_MODULES at a node_modules holding axe-core and jsdom (the nightly job installs them). Without it the axe
+test is skipped; the contrast test always runs."""
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CSS = ROOT / "src" / "oarbank" / "console" / "static" / "app.css"
+AXE_RUN = ROOT / "vendor" / "oarbank-sdk" / "src" / "oarbank_sdk" / "render" / "axe_run.cjs"
 NODE_MODULES = os.environ.get("OARBANK_A11Y_NODE_MODULES")
 
 
@@ -67,13 +69,18 @@ def test_text_contrast_meets_wcag_aa(scheme):
 @pytest.mark.skipif(not NODE_MODULES, reason="set OARBANK_A11Y_NODE_MODULES to a node_modules with axe-core and jsdom")
 def test_every_console_page_has_no_serious_axe_violations(tmp_path):
     from fastapi.testclient import TestClient
-    from helpers import SCENES, PARAMS, certify, create_study, enrolled_node, fresh, make_db, sign_in
+    from helpers import SCENES, PARAMS, certify, create_study, enrolled_node, fresh, install, make_db, sign_in
     from oarbank.console.app import console_app
     from oarbank.console.state import ConsoleState
-    from oarbank.coordinator import app as coord_app, core, modviews
+    from oarbank.coordinator import app as coord_app, core, modcalls, modviews
     from test_console import SECRET, Server
     db = make_db(tmp_path / "oarbank.sqlite3")
+    install(db, ROOT / "vendor" / "oarbank-sdk" / "examples" / "reel")             # module pages with UI contract 1.2 sources
+    modcalls.use(db)
     node = certify(db, enrolled_node(db)[1])
+    core.heartbeat(db, fresh(db, node), {"attempts": [], "services": [                 # the node page's Services table
+        {"service": "relay/vm", "health": "healthy", "running": True, "ready": True, "users": 1},
+        {"service": "relay/scorer", "health": "unhealthy", "running": False, "withdrawn": True, "error": "exit 3"}]})
     cid = create_study(db, "a11y", [{"label": "c1", "params": {**PARAMS, "samples": 25}}], SCENES[:1],
                        {"label": "base", "params": PARAMS})
     modviews.refresh(db, force=True)
@@ -81,9 +88,10 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
     nid = node["node_id"]
     # the Agent page with two builds, a canary on the node, and a failed update (every control renders)
     for sha, v in (("a" * 64, "0.4.0"), ("b" * 64, "0.4.1")):
-        db.x("INSERT INTO agent_builds(sha256, version, path, size, uploaded_at, uploaded_by) VALUES(?,?,?,?,?,?)",
-             (sha, v, "/dev/null", 2_900_000, 0, "test"))
-    db.x("INSERT INTO agent_channel(id, current, canary, canary_nodes_json) VALUES(1, ?, ?, ?)", ("a" * 64, "b" * 64, json.dumps([nid])))
+        db.x("INSERT INTO agent_builds(sha256, version, path, size, uploaded_at, uploaded_by, platform) VALUES(?,?,?,?,?,?,?)",
+             (sha, v, "/dev/null", 2_900_000, 0, "test", "darwin-arm64"))
+    db.x("INSERT INTO agent_channel(platform, current, canary, canary_nodes_json) VALUES('darwin-arm64', ?, ?, ?)",
+         ("a" * 64, "b" * 64, json.dumps([nid])))
     db.x("UPDATE nodes SET agent_build=?, agent_update_json=? WHERE node_id=?",
          ("a" * 64, json.dumps({"state": "failed", "error": "sha256 mismatch"}), nid))
     db.x("INSERT INTO coordinator_plans(plan_id,target_url,state,created_at) VALUES('mvp_1','http://100.64.0.2:7443','paired',0)")
@@ -91,7 +99,7 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
          ("mv_1", "mvp_1", 2, json.dumps({"to": {"url": "http://100.64.0.2:7443"}}), "pending", 0, 2e9, "test", "a11y"))
     db.x("UPDATE nodes SET cik_pinned='ab'||substr(hex(randomblob(31)),1,62) WHERE node_id=?", (nid,))
     pages = ["/", "/agent", "/coordinator", f"/nodes/{nid}", f"/nodes/{nid}/protection", "/campaigns", f"/campaigns/{cid}", "/jobs", f"/jobs/{job}",
-             "/events", "/audit", "/settings", "/verify", "/modules", "/modules/relay", "/modules/toy", "/m/relay/scores",
+             "/events", "/audit", "/settings", "/verify", "/modules", "/modules/relay", "/modules/toy", "/m/relay/scores", "/modules/reel", "/m/reel/data",
              f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health", "/datasets", "/datasets/upload"]
     files = []
     with Server(coord_app.admin_app(db, console_secret=SECRET)) as oarbankd:
@@ -108,7 +116,7 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
             r = c.post("/do/releases.promote", data={"target": "x", "return_to": "/", "idem": "a"})     # a plan page
             (tmp_path / "plan.html").write_text(r.text)
             files.append(tmp_path / "plan.html")
-    out = subprocess.run(["node", str(ROOT / "tests" / "a11y" / "run_axe.cjs"), *map(str, files)], capture_output=True, text=True,
+    out = subprocess.run(["node", str(AXE_RUN), *map(str, files)], capture_output=True, text=True,
                          env={**os.environ, "NODE_PATH": NODE_MODULES}, timeout=600)
     assert out.returncode == 0, out.stderr[-2000:]
     report = json.loads(out.stdout)

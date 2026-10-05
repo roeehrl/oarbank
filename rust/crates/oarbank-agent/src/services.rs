@@ -1094,22 +1094,21 @@ impl ServiceManager {
         lock(&self.shared).services.iter().filter(|(_, s)| s.running).map(|(k, _)| k.clone()).collect()
     }
 
-    /// Every service's and probe's state (what the tests assert on).
-    #[cfg(test)]
+    /// Every service's and probe's state: the heartbeat's `services` and `probes` (docs/protocol.md, "Services and
+    /// probes"), which the node page, `oarbank node show` and module pages show.
     pub fn report(&self) -> Value {
         let sh = lock(&self.shared);
         let services: Vec<Value> = sh.services.iter().map(|(k, s)| json!({
             "service": k, "health": s.health.as_str(), "running": s.running, "ready": s.ready, "pools": s.pools,
             "reserve_mem_gb": (s.reserve_mem_gb * 100.0).round() / 100.0, "disabled": s.disabled, "users": s.users,
             "failures": s.failures, "withdrawn": s.withdrawn, "error": s.last_error, "held": s.held, "busy": s.busy,
-            "gpu_api_missing": s.gpu_api_missing,
+            "gpu_api_missing": s.gpu_api_missing, "endpoint": s.decl.endpoint,
             "accepting": s.decl.endpoint && s.accepting(),
             "lifecycle": match s.decl.lifecycle { Lifecycle::OnDemand => "on_demand", Lifecycle::Always => "always",
                                                   Lifecycle::Manual => "manual" }})).collect();
         let probes: Vec<Value> = sh.probes.iter().map(|(k, p)| json!({"probe": k, "health": p.health.as_str(), "attrs": p.attrs}))
             .collect();
-        drop(sh);
-        json!({"services": services, "probes": probes, "capabilities": self.capabilities()})
+        json!({"services": services, "probes": probes})
     }
 
     /// Stop everything (agent shutdown/drain): waits for ops in flight, then stops every running service the agent

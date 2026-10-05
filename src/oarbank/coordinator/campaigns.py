@@ -73,7 +73,7 @@ def _fault(db: DB, cid: str, module: str, e: Exception):
     t = time.monotonic()
     if t - _last_fault.get(cid, -1e9) >= FAULT_EVENT_EVERY_S:
         _last_fault[cid] = t
-        db.event("module_fault", campaign_id=cid, reason=f"{module} campaign.tick: {e}"[:300])
+        db.event("module_fault", campaign_id=cid, reason=f"{module} campaign.tick: {e}"[:300], module=module)
 
 
 def tick_one(db: DB, c: dict, now: float | None = None) -> list[dict]:

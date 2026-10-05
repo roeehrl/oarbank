@@ -275,6 +275,9 @@ impl Agent {
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
                               "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
+        if let Some(svc) = &self.services {
+            merge(&mut body, svc.lock().unwrap().report());              // `services` and `probes`
+        }
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
         merge(&mut body, self.update.report());

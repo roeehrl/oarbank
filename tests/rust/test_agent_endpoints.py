@@ -43,10 +43,15 @@ def test_jobs_share_one_warm_model_server_and_disabling_the_module_stops_it(agen
         assert alive(daemon)
         tel = json.loads(node(coordinator)["telemetry_json"] or "{}")
         assert tel.get("services_running") == ["modelserver/model"] and tel.get("services_held") == {}
+        # the agent's service report reaches the node (the node page, `oarbank node show`, the `services` host query)
+        svc = node(coordinator)["services"]
+        assert [(s["module"], s["service"], s["state"], s["endpoint"]) for s in svc] == [("modelserver", "model", "ready", True)]
         # disabling the module takes the service down with it
         coordinator.api("POST", "/api/v1/ops/modules.disable", json={"target": "modelserver", "reason": "e2e"})
         wait(lambda: not (data / "model.up").exists() and not alive(daemon), timeout=120)
         wait(lambda: json.loads(node(coordinator)["telemetry_json"] or "{}").get("services_running") == [], timeout=60)
+        wait(lambda: [(s["state"], s["stopped_reason"]) for s in node(coordinator)["services"]] == [("stopped", "disabled")],
+             timeout=60)
     finally:
         p.terminate()
         out = p.communicate(timeout=30)[0]

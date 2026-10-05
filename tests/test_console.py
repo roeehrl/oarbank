@@ -1,5 +1,7 @@
 """oarbank-console (PLAN D10): a separate read-only process that forwards every change to oarbankd's
 operation endpoint. Runs a real oarbankd admin API on a loopback port and drives the console over HTTP."""
+import json
+import re
 import socket
 import threading
 import time
@@ -390,18 +392,30 @@ def test_a_guarded_node_says_why_it_takes_no_jobs(env):
     assert "mem 6.9 / 7.6 GB" in card and "pressure warning" in card and "thermal nominal" in card
     assert "4 cores" in page and "Windows 10.0 · arm64" in page and "no new jobs: memory guard" in page
     assert "6.9 GB used · 9% free · fleet jobs 0.0 GB" in page and "swap" not in page and "on AC power" in page
-    assert "services running none" in page and "binding" not in page.split("Controls")[0]
+    assert "binding" not in page.split("Controls")[0]
 
 
-def test_services_host_protection_stopped_are_shown_with_why(env):
+def test_services_are_shown_with_their_state_and_why_they_stopped(env):
+    """The agent's service report (heartbeat `services`, docs/protocol.md) is the node page's Services table."""
     import json as _json
+    from oarbank.coordinator import core
     db, n = env["db"], env["node"]
     tel = {"services_running": [], "services_held": {"modelserver/model": "preempt_memory"}, "guard": "hard"}
-    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (_json.dumps(tel), n["node_id"]))
-    card, page = node_html(env)
-    assert_clean(card, page)
+    core.heartbeat(db, fresh(db, n), {"telemetry": tel, "attempts": [], "probes": [{"probe": "relay/java", "health": "healthy"}],
+                                      "services": [
+        {"service": "modelserver/model", "health": "healthy", "running": False, "ready": False, "held": "preempt_memory",
+         "endpoint": True, "lifecycle": "on_demand", "users": 0},
+        {"service": "relay/vm", "health": "healthy", "running": True, "ready": True, "lifecycle": "always", "users": 2},
+        {"service": "relay/scorer", "health": "unhealthy", "running": False, "ready": False, "withdrawn": True,
+         "error": "start: exit 3", "lifecycle": "on_demand", "users": 0}]})
+    assert _json.loads(fresh(db, n)["services_json"])["probes"] == [{"probe": "relay/java", "health": "healthy"}]
+    card, _ = node_html(env)
     assert "service stopped: modelserver/model" in card
-    assert "services stopped by protection modelserver/model (preempt_memory)" in page
+    page = env["c"].get(f"/nodes/{n['node_id']}").text
+    table = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page[page.index("<h2>Services"):page.index("<h2>Recent attempts")]))
+    assert_clean(table)
+    assert "modelserver model endpoint healthy stopped held: preempt_memory 0" in table
+    assert "relay vm healthy ready 2" in table and "relay scorer unhealthy stopped withdrawn 0 start: exit 3" in table
 
 
 def test_slots_show_the_automatic_count_and_what_binds(env):
@@ -589,3 +603,25 @@ def test_fragments_are_never_shared_between_sessions(env):
     first = _form_fields(c.get("/frag/fleet").text, "nodes.pause")["csrf"]
     other = sign_in(c, env["db"], "second")
     assert _form_fields(c.get("/frag/fleet").text, "nodes.pause")["csrf"] == other["csrf"] != first
+
+
+def test_oarbank_node_show_prints_the_services_report(monkeypatch, capsys):
+    from oarbank.cli import main as cli
+    from oarbank.coordinator import nodeservices
+    n = {"node_id": "n_1", "hostname": "mini", "services_at": 1.0, "services_json": json.dumps({"services": [
+        {"service": "modelserver/model", "health": "healthy", "running": False, "held": "preempt_memory", "endpoint": True},
+        {"service": "gpuinfo/probe", "health": "unhealthy", "running": False, "gpu_api_missing": "needs one of cuda on the host",
+         "error": "exit 3"},
+        {"service": "relay/vm", "health": "healthy", "running": True, "ready": True, "users": 2}]})}
+    node = {**n, "platform": "linux-amd64", "lifecycle": "ready", "desired_state": "active", "online": True, "agent_version": "2.5.0",
+            "doctor": {"gpu_apis": {"host": ["cuda"], "containers": []}}, "mods": {"relay": {"state": "certified"}},
+            "services": nodeservices.rows(n)}
+    monkeypatch.setattr(cli, "api", lambda *a, **k: {"nodes": [node]})
+    cli.node_show("mini")
+    out = capsys.readouterr().out
+    assert "mini n_1 linux-amd64 ready active online agent 2.5.0" in out and "gpu apis: host cuda; containers -" in out
+    assert "service modelserver/model: stopped, healthy, stopped: held: preempt_memory" in out
+    assert "service gpuinfo/probe: stopped, unhealthy, stopped: gpu api missing (needs one of cuda on the host), error: exit 3" in out
+    assert "service relay/vm: ready, healthy, 2 jobs using it" in out and "module relay: certified" in out
+    with pytest.raises(SystemExit):
+        cli.node_show("nope")
