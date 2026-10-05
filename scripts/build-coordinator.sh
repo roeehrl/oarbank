@@ -94,7 +94,7 @@ JSON
 if [[ "$(uname -s)" == Darwin ]]; then
     ID="${OARBANK_CODESIGN_IDENTITY:--}"
     find "$ROOT" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
-        file -b "$f" | grep -q Mach-O || continue
+        file -b "$f" | grep Mach-O >/dev/null || continue
         if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
         else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
     done
