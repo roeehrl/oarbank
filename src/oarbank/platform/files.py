@@ -12,7 +12,6 @@ deleted, which is how every stored file is renewed or collected.
 """
 import hashlib
 import os
-import re
 import struct
 import sys
 import tempfile
@@ -30,11 +29,12 @@ def service_sid(name: str) -> str:
 
 
 def trusted_sids(p=None) -> list[str]:
-    """Who an owner-only object admits on Windows: SYSTEM, Administrators and this account, and in the coordinator's
-    home (`p` inside it) the coordinator's two service accounts, whichever account writes it (an owner running a
-    rescue in an elevated prompt writes files the service must read)."""
+    """Who an owner-only object admits on Windows, as S-1-… strings: SYSTEM, Administrators and this account (which may
+    be one of the two), and in the coordinator's home (`p` inside it) the coordinator's two service accounts, whichever
+    account writes it (an owner running a rescue in an elevated prompt writes files the service must read)."""
     from . import _win32 as W
-    out = ["SY", "BA", W.current_user_sid()]
+    out = [W.canonical_sid("SY"), W.canonical_sid("BA")]
+    out += [s for s in [W.current_user_sid()] if s not in out]
     if p is not None:
         from ..coordinator import config as C
         try:
@@ -117,9 +117,6 @@ def _create_private(d: Path, prefix: str) -> tuple[int, str]:
     raise FileExistsError(f"no free temporary name in {d}")
 
 
-_ACE = re.compile(r"\((A|D|OA|OD);([^;]*);([^;]*);[^;]*;[^;]*;([^)]*)\)")
-
-
 def owner_only(p) -> bool:
     """Only the owner can read `p`: no group or other bits on POSIX; on Windows every entry that allows anything names
     a trusted account (trusted_sids)."""
@@ -127,11 +124,8 @@ def owner_only(p) -> bool:
     if POSIX:
         return not (p.stat().st_mode & 0o077)
     from . import _win32 as W
-    # SY and BA as SIDs, and OWNER RIGHTS (the file's owner: CPython's mkdir(mode=0o700) grants it)
-    trusted = set(trusted_sids(p)) | {"S-1-5-18", "S-1-5-32-544", "OW", "S-1-3-4"}
-    sddl = W.dacl_sddl(str(p))
-    dacl = sddl.split("D:", 1)[1] if "D:" in sddl else ""
-    return all(sid in trusted for kind, _, _, sid in _ACE.findall(dacl) if kind in ("A", "OA"))
+    # and OWNER RIGHTS: the file's owner, which CPython's mkdir(mode=0o700) grants
+    return W.allowed_sids(str(p)) <= set(trusted_sids(p)) | {"S-1-3-4"}
 
 
 def access(p) -> str:

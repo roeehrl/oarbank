@@ -294,3 +294,13 @@ def stop_tree(pid: int):
             pass
     else:
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+
+
+def windows_powershell(*args, **run):
+    """Windows PowerShell 5.1 (`powershell.exe`, which every Windows has) without the PSModulePath of the shell that
+    started the suite: under PowerShell 7 (CI's default shell) it names PowerShell 7's modules first, and 5.1 then fails
+    to load its own Microsoft.PowerShell.Utility (`Get-FileHash` is not recognized)."""
+    import os
+    import subprocess
+    env = {k: v for k, v in (run.pop("env", None) or os.environ).items() if k.upper() != "PSMODULEPATH"}
+    return subprocess.run(["powershell", "-NoProfile", *args], env=env, **run)

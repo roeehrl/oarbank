@@ -98,17 +98,22 @@ def test_owner_only_files_carry_their_own_protected_descriptor(tmp_path, monkeyp
     loosen(tmp_path)                                          # a parent anyone may read: nothing is inherited from it
     f = tmp_path / "secret.key"
     files.write_private(f, "k")
-    sddl = W.dacl_sddl(str(f))
-    assert sddl.startswith("D:P") and "S-1-1-0" not in sddl and "WD" not in sddl and me in sddl
+    # exactly SYSTEM, Administrators and this account (CI runs as the built-in Administrator, which SDDL writes `LA`)
+    assert W.dacl_sddl(str(f)).startswith("D:P") and W.allowed_sids(str(f)) == {"S-1-5-18", "S-1-5-32-544", me}
     assert files.owner_only(f)
+    loosen(f)                                                 # Everyone may read it: no longer owner-only
+    assert "S-1-1-0" in W.allowed_sids(str(f)) and not files.owner_only(f)
+    f.unlink()
     with pytest.raises(FileExistsError):
         files.write_private(f, "again", exclusive=True)
     # inside the coordinator's home the two service accounts are trusted too, whoever writes the file
     monkeypatch.setattr(C, "HOME", tmp_path / "home")
     g = C.HOME / "keys" / "audit.key"
     files.write_private(g, "k")
-    sids = [files.service_sid(n) for n in files.COORDINATOR_SERVICES]
-    assert all(s in W.dacl_sddl(str(g)) for s in sids) and all(s not in sddl for s in sids)
+    sids = {files.service_sid(n) for n in files.COORDINATOR_SERVICES}
+    assert W.allowed_sids(str(g)) == {"S-1-5-18", "S-1-5-32-544", me, *sids} and files.owner_only(g)
+    files.write_private(f, "k")
+    assert W.allowed_sids(str(f)) == {"S-1-5-18", "S-1-5-32-544", me}               # outside the home: no service
     assert files.service_sid("dev.codonic.oarbank.oarbankd") == files.service_sid("DEV.CODONIC.OARBANK.OARBANKD")
 
 

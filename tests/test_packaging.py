@@ -154,8 +154,9 @@ WINDOWS_INSTALLER = WXS.parents[1] / "oarbankd" / "install-oarbankd.ps1"
 
 
 def _ps_installer(*argv):
-    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(WINDOWS_INSTALLER), *argv],
-                          capture_output=True, text=True)
+    from helpers import windows_powershell
+    return windows_powershell("-ExecutionPolicy", "Bypass", "-File", str(WINDOWS_INSTALLER), *argv, capture_output=True,
+                              text=True)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the Windows coordinator installer (PowerShell, sc.exe, icacls)")

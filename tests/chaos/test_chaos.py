@@ -109,9 +109,9 @@ def processes() -> list[tuple[int, int, str]]:
     """(pid, parent pid, command line) of every process: ps on POSIX, the CIM process list on Windows."""
     if os.name == "nt":
         import json
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process | "
-                              "Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress"],
-                             capture_output=True, text=True, check=True).stdout
+        from helpers import windows_powershell
+        out = windows_powershell("-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,"
+                                 "CommandLine | ConvertTo-Json -Compress", capture_output=True, text=True, check=True).stdout
         return [(p["ProcessId"], p["ParentProcessId"], p["CommandLine"] or "") for p in json.loads(out)]
     rows = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True, text=True, check=True).stdout
     return [(int(pid), int(ppid), cmd) for pid, ppid, cmd in ((line.split(None, 2) + [""])[:3] for line in rows.splitlines())

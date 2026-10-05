@@ -187,14 +187,14 @@ pub fn holds(pid: i32) -> bool {
 }
 
 /// The AppContainer for a module process: `Oarbank.` and the id's letters, digits, dots and dashes (64 at most) for
-/// the agent's processes (runners, doctors, services, probes); the coordinator's own (its module process and dependency
-/// installs) run in `Oarbank.coordinator.<id>` and module CLIs in `Oarbank.cli.<id>`. A container's named objects
-/// live in one directory per session, which the account that first starts the container there owns, so two accounts
-/// never share a container: the agent's and the coordinator's services both run in session 0, on a coordinator that
+/// the agent's processes (runners, doctors, services, probes, dependency installs); the coordinator's own (kinds
+/// `coordinator` and `coordinator-install`) run in `Oarbank.coordinator.<id>` and module CLIs in `Oarbank.cli.<id>`.
+/// A container's named objects live in one directory per session, which the account that first starts the container
+/// there owns, so two accounts never share a container: the agent's and the coordinator's services both run in session 0, on a coordinator that
 /// is also a node, and a person may run a module CLI in the same session as a personal agent of another account.
 pub fn container_name(module: &str, kind: &str) -> String {
     let role = match kind {
-        "coordinator" | "install" => "coordinator.",
+        "coordinator" | "coordinator-install" => "coordinator.",
         "cli" => "cli.",
         _ => "",
     };
@@ -799,7 +799,8 @@ mod tests {
         assert_eq!(container_name("dev.example.render frames", "runner"), "Oarbank.dev.example.render-frames");
         assert_eq!(container_name("dev.example.render", "doctor"), "Oarbank.dev.example.render");
         assert_eq!(container_name("dev.example.render", "coordinator"), "Oarbank.coordinator.dev.example.render");
-        assert_eq!(container_name("dev.example.render", "install"), "Oarbank.coordinator.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "coordinator-install"), "Oarbank.coordinator.dev.example.render");
+        assert_eq!(container_name("dev.example.render", "install"), "Oarbank.dev.example.render");
         assert_eq!(container_name("dev.example.render", "cli"), "Oarbank.cli.dev.example.render");
         assert_eq!(quote_arg("plain"), "plain");
         assert_eq!(quote_arg(r"C:\Program Files\x"), r#""C:\Program Files\x""#);

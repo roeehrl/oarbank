@@ -2,6 +2,7 @@
 tokens (procs.py), security descriptors (files.py, localchannel.py), named pipes (localchannel.py), the service
 control manager (service.py) and DNS-SD registration (dnssd.py)."""
 import ctypes
+import re
 from ctypes import wintypes
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -98,6 +99,7 @@ ConvertSecurityDescriptorToStringSecurityDescriptorW = _fn(
     advapi32, "ConvertSecurityDescriptorToStringSecurityDescriptorW", BOOL, LPVOID, DWORD, DWORD,
     ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(DWORD))
 ConvertSidToStringSidW = _fn(advapi32, "ConvertSidToStringSidW", BOOL, LPVOID, ctypes.POINTER(wintypes.LPWSTR))
+ConvertStringSidToSidW = _fn(advapi32, "ConvertStringSidToSidW", BOOL, wintypes.LPCWSTR, ctypes.POINTER(LPVOID))
 GetSecurityDescriptorDacl = _fn(advapi32, "GetSecurityDescriptorDacl", BOOL, LPVOID, ctypes.POINTER(BOOL),
                                 ctypes.POINTER(LPVOID), ctypes.POINTER(BOOL))
 SetNamedSecurityInfoW = _fn(advapi32, "SetNamedSecurityInfoW", DWORD, wintypes.LPWSTR, ctypes.c_int, DWORD, LPVOID, LPVOID,
@@ -116,6 +118,32 @@ def token_info(token, cls: int) -> ctypes.Array:
     buf = ctypes.create_string_buffer(max(n.value, 4))
     check(GetTokenInformation(token, cls, buf, n.value or 4, ctypes.byref(n)), "GetTokenInformation")
     return buf
+
+
+def canonical_sid(s: str) -> str:
+    """A SID as its S-1-… string, whichever way SDDL wrote it: SDDL names well-known accounts by alias (`SY`, `BA`, and
+    `LA` for the built-in Administrator, the account CI runners use), so comparing SDDL text compares spellings."""
+    sid = LPVOID()
+    check(ConvertStringSidToSidW(s, ctypes.byref(sid)), f"the SID {s}")
+    try:
+        out = wintypes.LPWSTR()
+        check(ConvertSidToStringSidW(sid, ctypes.byref(out)), "ConvertSidToStringSidW")
+        try:
+            return out.value
+        finally:
+            LocalFree(out)
+    finally:
+        LocalFree(sid)
+
+
+_ALLOW = re.compile(r"\((?:A|OA);[^;]*;[^;]*;[^;]*;[^;]*;([^;)]*)[^)]*\)")
+
+
+def allowed_sids(path: str | None = None, handle=None) -> set[str]:
+    """Every account an entry of a file's (or an open handle's) DACL allows anything, as S-1-… strings."""
+    sddl = dacl_sddl(path, handle)
+    dacl = sddl.split("D:", 1)[1] if "D:" in sddl else ""
+    return {canonical_sid(sid) for sid in _ALLOW.findall(dacl)}
 
 
 def current_user_sid() -> str:

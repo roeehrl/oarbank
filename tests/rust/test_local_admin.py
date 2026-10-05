@@ -16,13 +16,12 @@ def test_cli_uses_the_owner_only_channel(coordinator):
         assert files.owner_only(Path(localchannel.address(coordinator.home)).parent)
     else:                                       # the pipe's own descriptor admits only the trusted accounts
         import msvcrt
-        import re
         from oarbank.platform import _win32 as W
         with open(localchannel.address(coordinator.home), "r+b", buffering=0) as pipe:
             sddl = W.dacl_sddl(handle=msvcrt.get_osfhandle(pipe.fileno()))
-        sids = re.findall(r"\(A;[^;]*;[^;]*;;;([^)]*)\)", sddl)
-        trusted = {"SY", "BA", W.current_user_sid(), *(files.service_sid(n) for n in files.COORDINATOR_SERVICES)}
-        assert sddl.startswith("D:P") and W.current_user_sid() in sids and set(sids) <= trusted, sddl
+            sids = W.allowed_sids(handle=msvcrt.get_osfhandle(pipe.fileno()))
+        assert sddl.startswith("D:P") and W.current_user_sid() in sids and sids <= set(files.trusted_sids()) | {
+            files.service_sid(n) for n in files.COORDINATOR_SERVICES}, sddl
     env = {k: v for k, v in os.environ.items() if k not in ("OARBANKD_URL", "OARBANK_TOKEN")}
     env.update(OARBANKD_HOME=str(coordinator.home))
     r = subprocess.run([sys.executable, "-m", "oarbank.cli.main", "fleet"], env=env, capture_output=True, text=True, timeout=60)
