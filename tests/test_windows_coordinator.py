@@ -101,9 +101,10 @@ def test_owner_only_files_carry_their_own_protected_descriptor(tmp_path, monkeyp
     # exactly SYSTEM, Administrators and this account (CI runs as the built-in Administrator, which SDDL writes `LA`)
     assert W.dacl_sddl(str(f)).startswith("D:P") and W.allowed_sids(str(f)) == {"S-1-5-18", "S-1-5-32-544", me}
     assert files.owner_only(f)
-    loosen(f)                                                 # Everyone may read it: no longer owner-only
-    assert "S-1-1-0" in W.allowed_sids(str(f)) and not files.owner_only(f)
-    f.unlink()
+    loose = tmp_path / "loose.key"
+    files.write_private(loose, "k")
+    loosen(loose)                                             # Everyone may read it: no longer owner-only
+    assert "S-1-1-0" in W.allowed_sids(str(loose)) and not files.owner_only(loose)
     with pytest.raises(FileExistsError):
         files.write_private(f, "again", exclusive=True)
     # inside the coordinator's home the two service accounts are trusted too, whoever writes the file
@@ -115,6 +116,24 @@ def test_owner_only_files_carry_their_own_protected_descriptor(tmp_path, monkeyp
     files.write_private(f, "k")
     assert W.allowed_sids(str(f)) == {"S-1-5-18", "S-1-5-32-544", me}               # outside the home: no service
     assert files.service_sid("dev.codonic.oarbank.oarbankd") == files.service_sid("DEV.CODONIC.OARBANK.OARBANKD")
+
+
+@windows
+def test_descriptors_are_compared_by_sid_not_by_how_sddl_spells_it(tmp_path):
+    """SDDL writes well-known accounts by alias: `LA` is the built-in Administrator (RID 500), the account GitHub's
+    Windows runners run as, so an owner-only file of theirs reads (A;;FA;;;LA), not their S-1-5-21-… SID."""
+    from oarbank.platform import _win32 as W
+    me = W.current_user_sid()
+    assert W.canonical_sid("SY") == "S-1-5-18" and W.canonical_sid("BA") == "S-1-5-32-544" and W.canonical_sid(me) == me
+    admin = W.canonical_sid("LA")
+    assert admin.startswith("S-1-5-21-") and admin.endswith("-500")
+    f = tmp_path / "f"
+    f.write_text("x", encoding="utf-8")
+    sd = W.SecurityDescriptor("D:P(A;;FA;;;SY)(A;;FA;;;LA)(A;;FA;;;OW)")
+    assert not W.SetNamedSecurityInfoW(str(f), W.SE_FILE_OBJECT, W.DACL_SECURITY_INFORMATION |
+                                       W.PROTECTED_DACL_SECURITY_INFORMATION, None, None, sd.dacl(), None)
+    assert ";;;LA)" in W.dacl_sddl(str(f)) and W.allowed_sids(str(f)) == {"S-1-5-18", admin, "S-1-3-4"}
+    assert files.owner_only(f) == (me == admin)          # the built-in Administrator is trusted only when it is the owner
 
 
 def _elevated() -> bool:
