@@ -1,0 +1,57 @@
+# The Windows agent package installed, upgraded and removed for real on a throwaway runner (scripts/ci-windows-msi.ps1):
+# both services with their accounts and start types, the elevated helper's loopback openings across a major upgrade,
+# and an uninstall that leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
+name: msi
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths: &paths
+      - deploy/windows/**
+      - scripts/*windows*
+      - scripts/build-node-runtime*
+      - scripts/bundle-python*
+      - scripts/check-*
+      - rust/crates/oarbank-launcher/**
+      - rust/.cargo/config.toml
+      - .github/workflows/msi.yml
+  pull_request:
+    paths: *paths
+
+concurrency:
+  group: msi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msi:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: |
+          dotnet tool install --global wix --version 5.*
+          wix extension add --global WixToolset.Util.wixext/5.0.2
+      - name: two builds of the same tree, the second a patch version later (a major upgrade)
+        run: |
+          scripts/package-windows.ps1 -Version 2.5.900 -Arch x64
+          scripts/package-windows.ps1 -Version 2.5.901 -Arch x64
+        shell: pwsh
+      - name: install, upgrade, uninstall
+        run: scripts/ci-windows-msi.ps1 -First dist/oarbank-agent-2.5.900-windows-x64.msi -Second dist/oarbank-agent-2.5.901-windows-x64.msi -Logs dist/msi-logs
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: msi-logs
+          path: dist/msi-logs/

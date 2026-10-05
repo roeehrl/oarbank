@@ -309,6 +309,8 @@ fn main() -> Result<()> {
         Some("helper-main") => return svc::helper_main(),
         #[cfg(windows)]
         Some("helper-config") => return svc::helper_config(&rest),
+        #[cfg(windows)]
+        Some("helper-clear") => return helper_windows::helper_clear(),
         Some("--version") => {
             println!("oarbank-launcher {}", env!("CARGO_PKG_VERSION"));
             return Ok(());

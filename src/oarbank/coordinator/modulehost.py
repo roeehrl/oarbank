@@ -36,7 +36,9 @@ log = logging.getLogger("oarbank.modulehost")
 BACKOFF_INITIAL_S, BACKOFF_MAX_S = 1.0, 60.0
 FAULT_AFTER = 3                       # consecutive failures (crash, handshake failure, timeouts) -> fault
 TIMEOUTS_BEFORE_RESTART = 3           # consecutive timeouts on one process -> kill and respawn
-HANDSHAKE_TIMEOUT_S = 15.0
+# a module's first start on a cold machine: 4.5 s on a fresh windows-2025 runner (the sandboxed interpreter loading files
+# the antivirus scans the first time), and once past 15 s; a warm start answers in 0.3 s
+HANDSHAKE_TIMEOUT_S = 60.0
 LOG_MAX_BYTES = 8 * 1024 * 1024
 
 
@@ -162,6 +164,8 @@ class _Proc:
                          max_workers=4, name=f"mod-{spec.name}").start()
         self._log_path = log_path
         self.delivered: dict[str, str] = {}        # secret values this process received (host.secrets.get)
+        # what it wrote to stderr last, which a failed start reports (a self-test's host keeps no log)
+        self.stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
         threading.Thread(target=self._drain_stderr, name=f"mod-{spec.name}-stderr", daemon=True).start()
 
     def _on_request(self, req: Request):
@@ -198,7 +202,9 @@ class _Proc:
 
     def _drain_stderr(self):
         for raw in iter(self.proc.stderr.readline, b""):
-            self._write_log(raw.decode(errors="replace"))
+            line = raw.decode(errors="replace")
+            self.stderr_tail.append(line.rstrip("\n"))
+            self._write_log(line)
 
     def alive(self) -> bool:
         return self.proc.poll() is None and not self.peer.closed
@@ -294,7 +300,8 @@ class ModuleHost:
                 p.peer.notify("initialized")
             except Exception as e:
                 p.kill(0.5)
-                raise self._fail(name, "handshake", f"{type(e).__name__}: {e}")
+                said = "; ".join(p.stderr_tail)[-1500:]
+                raise self._fail(name, "handshake", f"{type(e).__name__}: {e}" + (f" (its stderr: {said})" if said else ""))
             from . import sandboxexec
             if not sandboxexec.is_confined(p.box):       # it answered, so it is past exec: it must be confined
                 p.kill(0.5)

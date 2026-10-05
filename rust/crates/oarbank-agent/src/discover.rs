@@ -1,71 +1,33 @@
 //! Finding coordinators on the local network (docs/design/architecture.md, "Network and access"): a hint, never trust.
 //! A URL found this way is only where to enroll; the owner still approves the node (or a join code carries the CA pin).
 //!
-//! macOS browses through the system responder (`dns-sd -B`, then `-L` for each instance), Linux through Avahi
-//! (`avahi-browse -rpt`) when it is installed, Windows through its own DNS-SD API (`DnsServiceBrowse`, Windows 10
-//! 1809 and later). `OARBANK_DISCOVERY_TYPE` changes the service type (tests).
+//! macOS browses through the system responder's API in this process (`DNSServiceBrowse`, then `DNSServiceResolve` for
+//! each instance), so Local Network privacy attributes the request to this program, whose embedded Info.plist says what
+//! it is for, and a refusal (`kDNSServiceErr_PolicyDenied`) is reported as such (docs/design/architecture.md, "Local
+//! Network privacy"). Linux browses through Avahi (`avahi-browse -rpt`) when it is installed, Windows through its own
+//! DNS-SD API (`DnsServiceBrowse`, Windows 10 1809 and later). `OARBANK_DISCOVERY_TYPE` changes the service type
+//! (tests).
 
 use serde_json::{json, Value};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
 pub fn service_type() -> String {
     std::env::var("OARBANK_DISCOVERY_TYPE").unwrap_or_else(|_| "_oarbank._tcp".into())
-}
-
-/// Run a browsing command for `secs`, then stop it and return what it printed.
-fn collect(argv: &[&str], secs: f64) -> String {
-    let Ok(mut child) = Command::new(argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped())
-        .stderr(Stdio::null()).spawn() else { return String::new() };
-    std::thread::sleep(Duration::from_secs_f64(secs));
-    let _ = child.kill();
-    child.wait_with_output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
 }
 
 fn txt_map(line: &str) -> serde_json::Map<String, Value> {
     line.split_whitespace().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), json!(v))).collect()
 }
 
-/// `dns-sd -B` lines: the instance name is everything after the sixth column of an `Add` row.
-pub fn parse_browse(out: &str) -> Vec<String> {
-    let mut names: Vec<String> = vec![];
-    for l in out.lines() {
-        let cols: Vec<&str> = l.split_whitespace().collect();
-        if cols.len() >= 7 && cols[1] == "Add" {
-            let name = cols[6..].join(" ");
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-    names
-}
-
-/// `dns-sd -L` output: "… can be reached at <host>.:<port> (interface N)" and the TXT record on the next line.
-pub fn parse_lookup(out: &str) -> Option<(String, u16, serde_json::Map<String, Value>)> {
-    let lines: Vec<&str> = out.lines().collect();
-    for (i, l) in lines.iter().enumerate() {
-        if let Some(rest) = l.split(" can be reached at ").nth(1) {
-            let hp = rest.split_whitespace().next()?;
-            let (host, port) = hp.rsplit_once(':')?;
-            let txt = lines.get(i + 1).map(|t| txt_map(t)).unwrap_or_default();
-            return Some((host.trim_end_matches('.').to_string(), port.parse().ok()?, txt));
-        }
-    }
-    None
-}
-
-/// The coordinators announcing themselves: `[{name, url, fleet_id, ca_prefix}]`.
-pub fn browse(secs: f64) -> Vec<Value> {
+/// The coordinators announcing themselves: `[{name, url, fleet_id, ca_prefix}]`. An error says why there could be no
+/// answer at all (macOS refusing this program local network access).
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(unused_variables))]     // avahi-browse -t ends on its own
+pub fn browse(secs: f64) -> Result<Vec<Value>, String> {
     let ty = service_type();
     let mut found = vec![];
-    if cfg!(target_os = "macos") && std::path::Path::new("/usr/bin/dns-sd").exists() {
-        for name in parse_browse(&collect(&["/usr/bin/dns-sd", "-B", &ty, "local."], secs)) {
-            if let Some((host, port, txt)) = parse_lookup(&collect(&["/usr/bin/dns-sd", "-L", &name, &ty, "local."], 1.5)) {
-                found.push(json!({"name": name, "url": format!("https://{host}:{port}"), "fleet_id": txt.get("fleet"),
-                                  "ca_prefix": txt.get("ca")}));
-            }
-        }
+    if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        found.extend(mac::browse(&ty, secs).map_err(mac::explain)?);
     } else if cfg!(windows) {
         #[cfg(windows)]
         found.extend(win::browse(&ty, secs));
@@ -82,7 +44,171 @@ pub fn browse(secs: f64) -> Vec<Value> {
             }
         }
     }
-    found
+    Ok(found)
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use serde_json::{json, Value};
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::time::{Duration, Instant};
+
+    pub type Ref = *mut c_void;
+    type BrowseReply = extern "C" fn(Ref, u32, u32, i32, *const c_char, *const c_char, *const c_char, *mut c_void);
+    type ResolveReply = extern "C" fn(Ref, u32, u32, i32, *const c_char, *const c_char, u16, u16, *const u8, *mut c_void);
+
+    // dns_sd.h, in libSystem
+    unsafe extern "C" {
+        fn DNSServiceBrowse(r: *mut Ref, flags: u32, iface: u32, regtype: *const c_char, domain: *const c_char, cb: BrowseReply,
+                            ctx: *mut c_void) -> i32;
+        fn DNSServiceResolve(r: *mut Ref, flags: u32, iface: u32, name: *const c_char, regtype: *const c_char,
+                             domain: *const c_char, cb: ResolveReply, ctx: *mut c_void) -> i32;
+        pub fn DNSServiceRefSockFD(r: Ref) -> i32;
+        pub fn DNSServiceProcessResult(r: Ref) -> i32;
+        pub fn DNSServiceRefDeallocate(r: Ref);
+    }
+
+    /// kDNSServiceErr_PolicyDenied: macOS refused the request (Local Network privacy)
+    pub const POLICY_DENIED: i32 = -65570;
+    const FLAG_ADD: u32 = 0x2;
+
+    pub fn explain(e: i32) -> String {
+        if e == POLICY_DENIED {
+            "macOS refuses this program local network access, so it cannot look for coordinators: allow it in System Settings, \
+             Privacy & Security, Local Network, or give --coordinator <url> or --join <code>".into()
+        } else {
+            format!("looking for coordinators failed (DNS-SD error {e})")
+        }
+    }
+
+    /// Handle the replies on `r` as they arrive, waiting on its socket, until `stop()` or `deadline`; a failed reply
+    /// processing is returned.
+    pub fn pump(r: Ref, deadline: Instant, stop: &dyn Fn() -> bool) -> Result<(), i32> {
+        let fd = unsafe { DNSServiceRefSockFD(r) };
+        while !stop() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let n = unsafe { libc::poll(&mut p, 1, left.as_millis().clamp(1, i32::MAX as u128) as i32) };
+            if n > 0 {
+                let e = unsafe { DNSServiceProcessResult(r) };
+                if e != 0 {
+                    return Err(e);
+                }
+            } else if n < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct Browsing {
+        names: Vec<(String, String)>,            // (instance, domain)
+        error: i32,
+    }
+
+    extern "C" fn on_browse(_: Ref, flags: u32, _iface: u32, err: i32, name: *const c_char, _ty: *const c_char,
+                            domain: *const c_char, ctx: *mut c_void) {
+        // SAFETY: ctx is the Browsing that `browse` keeps alive while it processes this reference's replies
+        let b = unsafe { &mut *(ctx as *mut Browsing) };
+        if err != 0 {
+            b.error = err;
+            return;
+        }
+        let (n, d) = unsafe { (CStr::from_ptr(name).to_string_lossy().into_owned(), CStr::from_ptr(domain).to_string_lossy().into_owned()) };
+        if flags & FLAG_ADD == 0 {
+            b.names.retain(|x| x.0 != n);
+        } else if !b.names.iter().any(|x| x.0 == n) {
+            b.names.push((n, d));
+        }
+    }
+
+    /// A resolved instance: host, port and TXT record.
+    type Instance = (String, u16, serde_json::Map<String, Value>);
+
+    #[derive(Default)]
+    struct Resolving {
+        found: Option<Instance>,
+        error: i32,
+    }
+
+    extern "C" fn on_resolve(_: Ref, _flags: u32, _iface: u32, err: i32, _full: *const c_char, host: *const c_char, port: u16,
+                             txt_len: u16, txt: *const u8, ctx: *mut c_void) {
+        // SAFETY: ctx is the Resolving that `resolve` keeps alive while it processes this reference's replies
+        let r = unsafe { &mut *(ctx as *mut Resolving) };
+        if err != 0 {
+            r.error = err;
+            return;
+        }
+        let host = unsafe { CStr::from_ptr(host).to_string_lossy() }.trim_end_matches('.').to_string();
+        let record = if txt.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(txt, txt_len as usize) } };
+        r.found = Some((host, u16::from_be(port), txt_record(record)));
+    }
+
+    /// A TXT record's `key=value` strings (each preceded by its length byte).
+    pub fn txt_record(mut b: &[u8]) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        while let Some((&n, rest)) = b.split_first() {
+            let (s, tail) = rest.split_at((n as usize).min(rest.len()));
+            if let Some((k, v)) = String::from_utf8_lossy(s).split_once('=') {
+                out.insert(k.to_string(), json!(v));
+            }
+            b = tail;
+        }
+        out
+    }
+
+    pub fn browse(ty: &str, secs: f64) -> Result<Vec<Value>, i32> {
+        let cty = CString::new(ty).map_err(|_| -65540)?;                              // kDNSServiceErr_BadParam
+        let st = Box::into_raw(Box::<Browsing>::default());
+        let mut r: Ref = std::ptr::null_mut();
+        let e = unsafe { DNSServiceBrowse(&mut r, 0, 0, cty.as_ptr(), std::ptr::null(), on_browse, st as *mut c_void) };
+        let names = if e != 0 {
+            Err(e)
+        } else {
+            let pumped = pump(r, Instant::now() + Duration::from_secs_f64(secs), &|| unsafe { (*st).error != 0 });
+            unsafe { DNSServiceRefDeallocate(r) };
+            let got = unsafe { &*st };
+            match (pumped, got.error) {
+                (Err(e), _) | (_, e @ ..=-1) => Err(e),
+                _ => Ok(got.names.clone()),
+            }
+        };
+        drop(unsafe { Box::from_raw(st) });
+        let mut found = vec![];
+        for (name, domain) in names? {
+            if let Some((host, port, txt)) = resolve(&name, ty, &domain)? {
+                found.push(json!({"name": name, "url": format!("https://{host}:{port}"), "fleet_id": txt.get("fleet"),
+                                  "ca_prefix": txt.get("ca")}));
+            }
+        }
+        Ok(found)
+    }
+
+    fn resolve(name: &str, ty: &str, domain: &str) -> Result<Option<Instance>, i32> {
+        let (cn, ct, cd) = (CString::new(name).map_err(|_| -65540)?, CString::new(ty).map_err(|_| -65540)?,
+                            CString::new(domain).map_err(|_| -65540)?);
+        let st = Box::into_raw(Box::<Resolving>::default());
+        let mut r: Ref = std::ptr::null_mut();
+        let e = unsafe { DNSServiceResolve(&mut r, 0, 0, cn.as_ptr(), ct.as_ptr(), cd.as_ptr(), on_resolve, st as *mut c_void) };
+        let out = if e != 0 {
+            Err(e)
+        } else {
+            let pumped = pump(r, Instant::now() + Duration::from_millis(1500),
+                              &|| unsafe { (*st).found.is_some() || (*st).error != 0 });
+            unsafe { DNSServiceRefDeallocate(r) };
+            let got = unsafe { &mut *st };
+            match (pumped, got.error) {
+                (Err(e), _) | (_, e @ ..=-1) => Err(e),
+                _ => Ok(got.found.take()),
+            }
+        };
+        drop(unsafe { Box::from_raw(st) });
+        out
+    }
 }
 
 #[cfg(windows)]
@@ -180,19 +306,42 @@ mod win {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
+    unsafe extern "C" {
+        fn DNSServiceRegister(r: *mut mac::Ref, flags: u32, iface: u32, name: *const std::ffi::c_char,
+                              regtype: *const std::ffi::c_char, domain: *const std::ffi::c_char, host: *const std::ffi::c_char,
+                              port: u16, txt_len: u16, txt: *const u8,
+                              cb: Option<extern "C" fn(mac::Ref, u32, i32, *const std::ffi::c_char, *const std::ffi::c_char,
+                                                       *const std::ffi::c_char, *mut std::ffi::c_void)>,
+                              ctx: *mut std::ffi::c_void) -> i32;
+    }
+
+    /// The agent finds a coordinator announced on this Mac through the responder's API, URL and TXT record included.
     #[test]
-    fn parses_the_system_responder() {
-        let b = "Browsing for _oarbank._tcp.local.\nTimestamp     A/R    Flags  if Domain               Service Type         Instance Name\n \
-                 4:14:55.068  Add        3   1 local.               _oarbank._tcp.   Oarbank ab12cd34\n \
-                 4:14:55.068  Add        2  27 local.               _oarbank._tcp.   Oarbank ab12cd34\n";
-        assert_eq!(parse_browse(b), vec!["Oarbank ab12cd34".to_string()]);
-        let l = "Lookup Oarbank ab12cd34._oarbank._tcp.local.\n 4:14:57.079  Oarbank\\032ab12cd34._oarbank._tcp.local. can be \
-                 reached at coordinator.local.:7443 (interface 27) Flags: 1\n fleet=f_ab12cd34 ca=0011223344556677 v=1\n";
-        let (h, p, t) = parse_lookup(l).unwrap();
-        assert_eq!((h.as_str(), p, t["fleet"].as_str()), ("coordinator.local", 7443, Some("f_ab12cd34")));
+    fn finds_an_announced_coordinator() {
+        let ty = format!("_oarbt{:x}._tcp", std::process::id() as u64 * 7919 % 0xffffff);
+        let txt: Vec<u8> = ["fleet=fleet_ab12cd34", "ca=0011223344556677", "v=1"].iter()
+            .flat_map(|kv| std::iter::once(kv.len() as u8).chain(kv.bytes())).collect();
+        let (name, cty) = (std::ffi::CString::new("Oarbank ab12cd34").unwrap(), std::ffi::CString::new(ty.clone()).unwrap());
+        let mut r: mac::Ref = std::ptr::null_mut();
+        let e = unsafe { DNSServiceRegister(&mut r, 0, 0, name.as_ptr(), cty.as_ptr(), std::ptr::null(), std::ptr::null(),
+                                            7443u16.to_be(), txt.len() as u16, txt.as_ptr(), None, std::ptr::null_mut()) };
+        assert_eq!(e, 0);
+        let found = mac::browse(&ty, 3.0).unwrap();
+        unsafe { mac::DNSServiceRefDeallocate(r) };
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["name"], "Oarbank ab12cd34");
+        assert!(found[0]["url"].as_str().unwrap().ends_with(":7443"), "{found:?}");
+        assert_eq!((found[0]["fleet_id"].as_str(), found[0]["ca_prefix"].as_str()), (Some("fleet_ab12cd34"), Some("0011223344556677")));
+    }
+
+    #[test]
+    fn reads_a_txt_record_and_explains_a_refusal() {
+        let m = mac::txt_record(b"\x0bfleet=f_abc\x03v=1\x04flag");
+        assert_eq!((m["fleet"].as_str(), m["v"].as_str(), m.len()), (Some("f_abc"), Some("1"), 2));
+        assert!(mac::explain(mac::POLICY_DENIED).contains("Local Network"));
     }
 }

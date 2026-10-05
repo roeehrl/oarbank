@@ -39,8 +39,9 @@ pub fn grant_files(dir: &Path, entry: &Value, settings: &Value) -> std::io::Resu
 /// `RESERVED_ENV_PREFIX` and `RESERVED_ENV`, pinned by a test). Compared case-insensitively, as Windows compares them.
 pub const RESERVED_ENV_PREFIX: &str = "OARBANK_";
 pub const RESERVED_ENV: &[&str] = &["PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA",
-    "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PROCESSOR_ARCHITECTURE",
-    "NUMBER_OF_PROCESSORS", "LANG", "LC_ALL", "PYTHONUTF8", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"];
+    "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "LANG", "LC_ALL",
+    "PYTHONUTF8", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"];
 
 pub fn reserved(name: &str) -> bool {
     let up = name.to_ascii_uppercase();
@@ -193,6 +194,19 @@ mod tests {
         names.extend(["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "OARBANK_WORKDIR"].map(String::from));
         let open: Vec<&String> = names.iter().filter(|k| !reserved(k)).collect();
         assert!(open.is_empty(), "set by the agent but not reserved: {open:?}");
+    }
+
+    /// Every per-user location a runner's environment names lies in its home, a job's work directory, so nothing a
+    /// tool keeps there outlives the attempt (spec/platforms.md, "Environment per OS").
+    #[test]
+    fn every_per_user_location_lies_in_the_home() {
+        let home = std::env::temp_dir().join("w");
+        let env: std::collections::HashMap<String, String> = base_env("m", &home, &home.join("tmp")).into_iter().collect();
+        let names: &[&str] = if cfg!(windows) { &["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"] }
+                             else { &["HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] };
+        for n in names {
+            assert!(env.get(*n).is_some_and(|v| Path::new(v).starts_with(&home)), "{n}: {:?}", env.get(*n));
+        }
     }
 
     #[test]

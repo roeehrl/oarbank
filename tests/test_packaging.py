@@ -27,6 +27,19 @@ def test_msi_upgrade_keeps_the_node():
     assert "NOT UPGRADINGPRODUCTCODE" in remove.get("Condition")
 
 
+def test_an_uninstall_removes_what_the_helper_installed_and_an_upgrade_keeps_it():
+    # the helper's filters and loopback exemptions outlive its service, so running jobs keep their openings across a
+    # restart or an upgrade (helper_windows.rs); only an uninstall clears them, after the node's own removal
+    root = ET.parse(WXS).getroot()
+    assert root.find(".//w:SetProperty[@Id='ClearHelper']", NS).get("Value") == '"[INSTALLFOLDER]oarbank-launcher.exe" helper-clear'
+    ca = root.find(".//w:CustomAction[@Id='ClearHelper']", NS)
+    assert (ca.get("Execute"), ca.get("Impersonate")) == ("deferred", "no")
+    seq = root.find("w:Package/w:InstallExecuteSequence", NS)
+    steps = {c.get("Action"): c for c in seq.findall("w:Custom", NS)}
+    assert steps["ClearHelper"].get("Condition") == 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'
+    assert (steps["RemoveNode"].get("Before"), steps["ClearHelper"].get("Before")) == ("ClearHelper", "RemoveFiles")
+
+
 def test_the_helper_service_starts_after_the_filtering_engine_and_is_configured_by_the_launcher():
     # the agent's service gets its delayed start and recovery from `oarbank-launcher service install`, the helper's from
     # `oarbank-launcher helper-config` (tests/rust/test_launcher_service.py); the MSI's own ServiceConfig tables failed
@@ -322,16 +335,152 @@ def test_windows_launchers_name_the_bundled_python_relative_to_themselves(tmp_pa
     assert r.returncode == 0, r.stderr
 
 
+def test_windows_builds_take_their_architecture_from_the_caller_or_the_machine():
+    # PROCESSOR_ARCHITECTURE is the emulated one under emulation (an x64 PowerShell on Windows on Arm says AMD64): the
+    # scripts ask windows-arch.ps1, which takes -Arch from the caller and asks Windows for the machine otherwise
+    scripts = WXS.parents[2] / "scripts"
+    for ps1 in scripts.glob("*.ps1"):
+        code = [l for l in ps1.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#")]
+        assert not any("PROCESSOR_ARCHITECTURE" in l for l in code), ps1.name
+    for name in ("build-node-runtime.ps1", "package-windows.ps1", "build-coordinator.ps1", "verify-windows-containers.ps1"):
+        assert '"$PSScriptRoot\\windows-arch.ps1"' in (scripts / name).read_text(encoding="utf-8"), name
+    pkg = (scripts / "package-windows.ps1").read_text(encoding="utf-8")
+    assert "-Arch $Arch" in pkg and "--target $Target" in pkg and "check-pe-imports.py\" --machine $Arch" in pkg
+    assert "--target $Target" in (scripts / "build-coordinator.ps1").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="asks Windows for the machine's architecture")
+def test_the_architecture_is_the_machine_s_under_emulation_and_whatever_the_environment_says():
+    from oarbank_sdk import portable
+    script = WXS.parents[2] / "scripts" / "windows-arch.ps1"
+    machine = {"amd64": "x64", "arm64": "arm64"}[portable.host_platform().split("-")[1]]
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    # this machine's own PowerShell, and the 32-bit one, which runs under WOW64 or Windows on Arm's x86 emulation
+    shells = [p for p in (rf"{root}\System32\WindowsPowerShell\v1.0\powershell.exe",
+                          rf"{root}\SysWOW64\WindowsPowerShell\v1.0\powershell.exe") if os.path.exists(p)]
+
+    def arch(shell, *args, env=None):
+        r = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *args],
+                           capture_output=True, text=True, env=env, timeout=120)
+        return r.returncode, r.stdout.strip()
+    assert len(shells) == 2, shells
+    for shell in shells:
+        for claimed in (None, "AMD64", "ARM64", "x86"):
+            env = {**os.environ, **({"PROCESSOR_ARCHITECTURE": claimed} if claimed else {})}
+            assert arch(shell, env=env) == (0, machine), (shell, claimed)
+        assert arch(shell, "-Arch", "x64") == (0, "x64") and arch(shell, "-Arch", "arm64") == (0, "arm64")
+        assert arch(shell, "-Arch", "ia64")[0] != 0
+
+
+def _script(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), WXS.parents[2] / "scripts" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_package_check_finds_links_out_and_build_paths(tmp_path):
+    # uv names its managed Pythons through junctions (links), records the checkout it installed from (direct_url.json),
+    # writes its store's path into bytecode and build configuration; rustc embeds CARGO_HOME: none of it may ship
+    check = _script("check-package")
+    rt = tmp_path / "runtime"
+    info = rt / "lib" / "site-packages" / "oarbank_sdk-1.5.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "RECORD").write_text("oarbank_sdk/__init__.py,sha256=x,1\n", encoding="utf-8")
+    (rt / "python3.12").write_bytes(b"\x7fELF")
+    build = tmp_path / "Builder" / "checkout"
+    assert check.bad_links(rt) == [] and check.references(rt, [str(build)], []) == []
+    target = tmp_path / "cpython-3.12.15"
+    target.mkdir()
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(rt / "DLLs"))
+        assert len(check.bad_links(rt)) == 1
+    else:
+        (rt / "python3").symlink_to("python3.12")                     # inside the tree: kept
+        assert check.bad_links(rt) == []
+        (rt / "DLLs").symlink_to(target, target_is_directory=True)     # absolute: refused
+        (rt / "up").symlink_to(os.path.join("..", target.name))        # relative but outside: refused
+        assert sorted(b.split(":")[0] for b in check.bad_links(rt)) == sorted([str(rt / "DLLs"), str(rt / "up")])
+        (rt / "DLLs").unlink()
+        (rt / "up").unlink()
+    (info / "direct_url.json").write_text('{"url": "' + (build / "vendor" / "oarbank-sdk").as_uri() + '"}', encoding="utf-8")
+    (rt / "module.so").write_bytes(b"\0\1" + str(build / "target" / "x.o").encode() + b"\0")      # a compiled file
+    found = sorted({f for f, _ in check.references(rt, [str(build)], [])})
+    assert found == sorted([info / "direct_url.json", rt / "module.so"]), found
+    if sys.platform == "win32":                                        # as a PE resource stores it, any case
+        (rt / "res.dll").write_bytes(str(build).upper().encode("utf-16-le"))
+        assert rt / "res.dll" in {f for f, _ in check.references(rt, [str(build)], [])}
+    # the account's home: refused in what the build writes, not in a native binary built elsewhere (a wheel's, uv's,
+    # often on a CI machine with the same account name), except a binary the build made and names itself
+    for f in ("module.so", "res.dll"):
+        (rt / f).unlink(missing_ok=True)
+    (info / "direct_url.json").unlink()
+    account = tmp_path / "Users" / "runneradmin"
+    (rt / "wheel.so").write_bytes(b"\x7fELF" + str(account / ".cargo" / "registry").encode())
+    (rt / "lib" / "site-packages" / "x.pth").write_text(str(account / "lib"), encoding="utf-8")
+    assert {f for f, _ in check.references(rt, [str(build)], [str(account)])} == {rt / "lib" / "site-packages" / "x.pth"}
+    assert check.references(rt / "wheel.so", [], [str(account)]) == [(rt / "wheel.so", str(account))]
+
+
+def test_the_coordinator_archive_names_no_owner(tmp_path):
+    # tar writes the build account's user and group names into every entry
+    import tarfile
+    (tmp_path / "root" / "bin").mkdir(parents=True)
+    (tmp_path / "root" / "bin" / "x").write_text("x", encoding="utf-8")
+    out = tmp_path / "b.tar.gz"
+    assert _script("pack-tar").main([str(out), str(tmp_path / "root"), "bin"]) == 0
+    with tarfile.open(out) as tf:
+        assert {(m.name, m.uid, m.gid, m.uname, m.gname) for m in tf} == {("bin", 0, 0, "", ""), ("bin/x", 0, 0, "", "")}
+
+
+def test_every_package_build_checks_what_it_ships():
+    scripts = WXS.parents[2] / "scripts"
+    for name in ("package-linux.sh", "package-macos.sh", "package-windows.ps1", "build-coordinator.sh", "build-coordinator.ps1"):
+        text = (scripts / name).read_text(encoding="utf-8")
+        assert "check-package.py" in text and "--run " in text, name
+        assert "remap-path-prefix" in text, name
+    for name in ("build-node-runtime.sh", "build-coordinator.sh"):
+        assert "bundle-python.sh" in (scripts / name).read_text(encoding="utf-8"), name
+    for name in ("build-node-runtime.ps1", "build-coordinator.ps1"):
+        assert "bundle-python.ps1" in (scripts / name).read_text(encoding="utf-8"), name
+
+
+@pytest.mark.skipif(not os.environ.get("OARBANK_NODE_RUNTIME"),
+                    reason="set OARBANK_NODE_RUNTIME to a node runtime scripts/build-node-runtime.* built to check it")
+def test_a_built_node_runtime_is_fit_to_package():
+    root = Path(os.environ["OARBANK_NODE_RUNTIME"])
+    python = "python.exe" if sys.platform == "win32" else "bin/python3"
+    assert _script("check-package").main(["--run", f"{root}={python}", str(root)]) == 0
+
+
+def test_the_macos_binaries_say_why_they_use_the_local_network():
+    # Local Network privacy does not exempt LaunchAgents, which the personal scope runs (the launcher, whose children's
+    # requests are attributed to it): the binaries carry an Info.plist (build.rs) with the usage text and the Bonjour
+    # service, under the identifier package-macos.sh signs them with, which checks it is bound
+    import plistlib
+    rust = WXS.parents[2] / "rust" / "crates"
+    for crate in ("oarbank-agent", "oarbank-launcher"):
+        info = plistlib.loads((rust / crate / "Info.plist").read_bytes())
+        assert info["CFBundleIdentifier"] == f"dev.codonic.{crate}"
+        assert info["NSLocalNetworkUsageDescription"].strip() and info["NSBonjourServices"] == ["_oarbank._tcp"]
+        build = (rust / crate / "build.rs").read_text(encoding="utf-8")
+        assert "-Wl,-sectcreate,__TEXT,__info_plist," in build and '"Info.plist"' in build
+    pkg = (WXS.parents[2] / "scripts" / "package-macos.sh").read_text(encoding="utf-8")
+    assert '--identifier "dev.codonic.$b"' in pkg and "Info.plist entries=" in pkg
+
+
 def test_build_scripts_relocate_their_bundled_console_scripts():
     scripts = WXS.parents[2] / "scripts"
     coord = (scripts / "build-coordinator.sh").read_text(encoding="utf-8")
-    call = '"$PY" -I "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"'
-    assert call in coord and coord.index(call) < coord.index('tar -czf "$TGZ"')
+    call = '"$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"'
+    assert call in coord and coord.index(call) < coord.index('pack-tar.py" "$TGZ"')
     assert coord.index("uv pip install") < coord.index(call)
     node = (scripts / "build-node-runtime.sh").read_text(encoding="utf-8")
-    assert '"$PY" -I "$REPO/scripts/relocate_shebangs.py" "$OUT/bin"' in node
+    assert '"$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$OUT/bin"' in node
     windows = (scripts / "build-node-runtime.ps1").read_text(encoding="utf-8")
-    call = '& "$Out\\python.exe" -I "$Repo\\scripts\\relocate_shebangs.py" "$Out\\Scripts" $Out'
+    call = '& "$Out\\python.exe" -I -B "$Repo\\scripts\\relocate_shebangs.py" "$Out\\Scripts" $Out'
     assert call in windows and windows.index('Copy-Item (Get-Command uv).Source') < windows.index(call)
     assert windows.index("uv pip install") < windows.index(call)
 

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in the macOS binary (__TEXT,__info_plist; build.rs). Local Network privacy names the program by it and
+     shows the usage text if macOS asks the person whether it may use the local network: in its personal scope the
+     agent runs as a LaunchAgent, which macOS does not exempt (docs/design/architecture.md, "Local Network privacy"). The
+     identifier is the one the packages sign it with (scripts/package-macos.sh). -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.codonic.oarbank-launcher</string>
+  <key>CFBundleName</key><string>oarbank-launcher</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Oarbank's launcher runs the agent, which finds its coordinator on the local network and connects to it, to run the jobs it is given.</string>
+  <key>NSBonjourServices</key><array><string>_oarbank._tcp</string></array>
+</dict>
+</plist>

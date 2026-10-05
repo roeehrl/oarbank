@@ -274,7 +274,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }),
         Cmd::Discover { wait } => {
-            println!("{}", serde_json::to_string_pretty(&discover::browse(wait))?);
+            println!("{}", serde_json::to_string_pretty(&discover::browse(wait).map_err(anyhow::Error::msg)?)?);
             Ok(())
         }
         Cmd::Facts => {
@@ -340,14 +340,16 @@ fn main() -> anyhow::Result<()> {
 
 /// `--coordinator discover`: exactly one coordinator must be announcing itself.
 fn discover_one() -> anyhow::Result<String> {
-    let found = discover::browse(4.0);
+    let found = discover::browse(4.0).map_err(anyhow::Error::msg)?;
     match found.as_slice() {
         [one] => {
             let url = one["url"].as_str().unwrap_or_default().to_string();
             tracing::warn!(url = %url, fleet = %one["fleet_id"], "found a coordinator on the local network; the owner must approve this node");
             Ok(url)
         }
-        [] => anyhow::bail!("no coordinator announces itself on the local network: give --coordinator <url> or --join <code>"),
+        [] => anyhow::bail!("no coordinator announces itself on the local network{}: give --coordinator <url> or --join <code>",
+                            if cfg!(target_os = "macos") { " (or macOS holds this program's local network requests until a person \
+                                allows them: System Settings, Privacy & Security, Local Network)" } else { "" }),
         many => anyhow::bail!("{} coordinators announce themselves here: give --coordinator <url> ({})", many.len(),
                               many.iter().filter_map(|f| f["url"].as_str()).collect::<Vec<_>>().join(", ")),
     }

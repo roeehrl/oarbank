@@ -145,3 +145,39 @@ def test_a_secret_reaches_only_its_stage_runner_and_no_log_shows_it(agent_bin, c
         out += p.communicate(timeout=10)[0]
         print(out[-5000:])
     assert key not in out                                                        # nor in the agent's own log
+
+
+def test_a_runner_s_home_and_temporary_files_are_its_work_directory_s_and_go_with_it(agent_bin, coordinator, tmp_path):
+    """docs/design/module-sandbox.md, "A runner's home": every per-user location a runner's environment names (HOME or
+    USERPROFILE, the XDG directories or APPDATA and LOCALAPPDATA, the temporary directory) lies in its work directory;
+    the temporary directory the OS gives programs exists and takes files (on Windows inside the AppContainer, whose
+    start moves TEMP into the container's folder); and the work directory is removed with the attempt."""
+    import json
+    import sqlite3
+    from pathlib import Path
+    install_module(coordinator, VAULT, tmp_path, approve=True)
+    home = tmp_path / "agent"
+    p = subprocess.Popen([str(agent_bin), "--home", str(home), "run", "--coordinator", coordinator.url], env=agent_env(),
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    db = coordinator.home / "oarbank.sqlite3"
+
+    def q(sql, *args):
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return c.execute(sql, args).fetchall()
+        finally:
+            c.close()
+    try:
+        pending = wait(lambda: [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"])
+        coordinator.admit(pending[0]["enrollment_id"])
+        wait(lambda: node_modules(coordinator).get("vault", {}).get("state") == "certified", timeout=120)
+        coordinator.api("POST", "/api/v1/ops/mod.vault.home", json={"params": {}, "reason": "e2e"}, headers={"idempotency-key": "e2e-home"})
+        wait(lambda: coordinator.api("GET", "/api/v1/campaigns/c_home")["jobs"]["d"] == 1, timeout=120)
+        (r,), = q("SELECT r.result_json FROM results r JOIN jobs j ON j.job_id=r.job_id WHERE j.campaign_id='c_home'")
+        seen = json.loads(r)["payload"]["home"]
+        assert seen["outside"] == [] and seen["user_home_inside"], seen
+        assert seen["temp_dir_inside"] and seen["temp_dir_writable"], seen
+        assert wait(lambda: not Path(seen["workdir"]).exists()), "the work directory goes with the attempt"
+    finally:
+        p.terminate()
+        print(p.communicate(timeout=10)[0][-5000:])

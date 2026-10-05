@@ -151,7 +151,7 @@ confinement and fails closed. Grants are whole directories or files, approved pe
 |---|---|---|
 | macOS | Seatbelt through the launcher's `sandbox-exec`, with a loopback deny and the proxy route | macOS 15 (docs/install.md) |
 | Linux | Landlock for the detected ABI (files; TCP connect only to the proxy port from ABI 4; abstract sockets and signals scoped from ABI 6), seccomp (socket families, no listen, ptrace, mounts, namespaces, BPF or keyrings) and no_new_privs, checked through `/proc`; `egress-any` is unavailable | full parity from kernel 6.12 (ABI 6); older kernels report network enforcement unavailable |
-| Windows | a per-module AppContainer started by a shim inside the Job Object (ACL grants, `internetClient` only for `egress-any`, loopback isolation); the enforced allowlist needs the elevated helper, a LocalSystem service that exempts one job's container from loopback isolation and filters every loopback port but its proxy | Windows 10 1809 |
+| Windows | a per-module AppContainer started by a shim inside the Job Object (ACL grants, `internetClient` only for `egress-any`, loopback isolation); the enforced allowlist needs the elevated helper, a LocalSystem service that exempts the container from loopback isolation and filters its loopback connections to its jobs' proxy ports, each opening for as long as the job's shim runs | Windows 10 1809 |
 
 ## Job control
 
@@ -198,10 +198,35 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
 - **The local admin channel** is the admin API on `<home>/run/admin.sock`, whose owner-only directory is the
   credential, and on Windows on the named pipe `\\.\pipe\oarbank-admin-<home id>`, whose owner-only security
   descriptor is (an elevated prompt reaches it); the CLI on the coordinator's account uses it without a token.
-- **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (dns-sd, Avahi,
-  `DnsServiceRegister` on Windows); an agent
-  finds it with `oarbank-agent discover` or `run --coordinator discover`, verifies the identity proof, and the owner
-  still admits the node. `tailscale status` peers appear in the console as candidates.
+- **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (the system responder's API
+  in its own process on macOS, Avahi on Linux, `DnsServiceRegister` on Windows), so the announcement ends with the
+  coordinator however it ends; an agent finds it with `oarbank-agent discover` or `run --coordinator discover`
+  (`DNSServiceBrowse` on macOS), verifies the identity proof, and the owner still admits the node. `tailscale status`
+  peers appear in the console as candidates.
+- **Local Network privacy (macOS 15 and later).** macOS asks the person before a program uses the local network:
+  Bonjour (announcing, browsing, resolving) and connections to addresses on a Wi-Fi or Ethernet network, not listening
+  and not VPN or tailnet addresses. It exempts launchd daemons, root and programs started from Terminal or SSH, but not
+  LaunchAgents (Apple's TN3179): the coordinator and the agent's personal scope run as LaunchAgents, the system scope
+  as a daemon (exempt), and the session helpers use only a local socket. What was measured: on macOS 27.0.1, a
+  LaunchAgent whose program is a standalone executable (no app bundle) registered, browsed and connected on the LAN
+  with no alert and no refusal, Oarbank's ad hoc signed binaries and fresh ones alike, with or without an embedded
+  Info.plist. On macOS 26.6.2 (GitHub's runner, a session no one answers alerts in) the same registration from
+  python.org's interpreter, which runs as an app (Python.app, `org.python.python`), was held with no answer, while
+  Apple's interpreter, `dns-sd` and a standalone executable built there went through: macOS asks about programs that
+  belong to an app. The coordinator build's Python (uv's standalone CPython) and Oarbank's binaries are standalone
+  executables; a coordinator run from a checkout on an app-like interpreter (python.org's, Homebrew's) makes macOS ask
+  about "Python", and the coordinator logs that the responder has not answered after 10 s. For a macOS that asks about
+  standalone programs too (Developer ID–signed ones were not tested), the agent and the launcher (the personal
+  LaunchAgent's program, which the agent's requests are attributed to) carry an Info.plist in the binary
+  (`__TEXT,__info_plist`) with `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_oarbank._tcp`): the alert
+  names the program and says why, once per person and program, and the answer is kept in System Settings, Privacy &
+  Security, Local Network. Bonjour goes
+  through the system responder's API, not a `dns-sd` child, so a refusal is reported as one
+  (`kDNSServiceErr_PolicyDenied`: the agent's `discover` and the coordinator's log say what to allow) and the request
+  is the program's own. `AssociatedBundleIdentifiers` is not set: it ties a LaunchAgent to an app, and Oarbank ships
+  none. Where no one can answer an alert, macOS 15.5 and later let an administrator exempt networks
+  (`AllowedEthernetLocalNetworkAddresses`, `AllowedWiFiLocalNetworkAddresses` in `com.apple.network.local-network`,
+  then a restart); MDM cannot set Local Network privacy, and a join code or tailnet address avoids it.
 - **Ports**: the agent listener 7443 (TLS), the admin API 7401 and the console 7400 on loopback, module frames 7402.
   Agents are outbound-only.
 - **Coordinator moves** ([coordinator-move.md](coordinator-move.md)) work across operating systems: the data is
@@ -256,8 +281,23 @@ is a named pipe only the agent's account and the module's AppContainer may open.
 - **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the chaos tests on macOS and
   Windows (x64 and arm64), the Rust workspace with the agent end-to-end tests and the oarbank-core parity tests on
   macOS, the agent end-to-end tests on Windows (x64 and arm64), the Rust workspace on Linux and Windows (x64 and arm64
-  each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
-  and arm64, an x64 and an arm64 MSI, and the Windows coordinator builds.
+  each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags,
+  which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64 and arm64, an x64 and an arm64 MSI,
+  and the Windows coordinator builds. `.github/workflows/msi.yml` installs the MSI for real on a throwaway Windows
+  runner whenever the package or what it installs changes, and on every tag: both services with their accounts and
+  start types, the elevated helper's openings across a major upgrade, and an uninstall that leaves nothing behind
+  (`scripts/ci-windows-msi.ps1`).
+- **A package names nothing of the machine that built it.** Every package build runs `scripts/check-package.py` on
+  what it ships: no link out of the tree (on Windows no reparse point at all), no path of the build (the checkout, its
+  work directories, the build account's home, `CARGO_HOME`) in any file, metadata, bytecode and binaries included, and
+  the bundled interpreter runs from another directory. What it found and the builds now do: the interpreter is uv's
+  managed CPython copied as files of its own (`scripts/bundle-python.*`: never the checkout's `.venv`, which `uv python
+  find` returns first, nor uv's link), without the bytecode this machine wrote into uv's store, with its build
+  configuration and (macOS) its library naming nothing of the store; nothing the build runs writes bytecode, and all
+  of it is compiled afresh with relative paths and hash checks; uv's `direct_url.json` for the SDK is dropped; Rust
+  binaries name `CARGO_HOME` as `/cargo` (`--remap-path-prefix`) and Windows binaries their debug database by file
+  name; the Nuitka module loses its debug information and (macOS) its build-directory install name; the coordinator
+  archive names no owner (`scripts/pack-tar.py`).
 
 ## Not built yet
 

@@ -594,6 +594,10 @@ struct Shared {
     probes: BTreeMap<String, ProbeSt>,
     /// After `stop_all`: nothing starts until `resume`.
     halted: bool,
+    /// Services and probes a release no longer has, kept until the op in flight on each has finished and a service that
+    /// runs (or was starting) has been stopped (`configure`; `Stops` waits until none is left).
+    dropped: BTreeMap<String, Svc>,
+    dropped_probes: BTreeMap<String, ProbeSt>,
     changed: Arc<Changed>,
 }
 
@@ -610,6 +614,20 @@ impl Changed {
         *lock(&self.seq) += 1;
         self.cv.notify_all();
         self.notify.notify_waiters();
+    }
+
+    /// Return once `f` holds, waiting for changes in between.
+    fn wait_until(&self, mut f: impl FnMut() -> bool) {
+        loop {
+            let seen = *lock(&self.seq);
+            if f() {
+                return;
+            }
+            let g = lock(&self.seq);
+            if *g == seen {
+                drop(self.cv.wait(g).unwrap_or_else(|e| e.into_inner()));
+            }
+        }
     }
 
     /// `f` once it answers, waiting for changes in between (never past `deadline`).
@@ -675,6 +693,22 @@ pub struct ServiceManager {
     reap_every: Duration,
     /// The GPU APIs the host provides (the agent's latest probe, gpuapi.rs).
     gpu_apis: Vec<String>,
+}
+
+/// The work left on services and probes a release no longer has (`configure`): an op still in flight on one, and the
+/// stop of a service that runs, on a thread of its own. The agent waits for it before it removes an old release (whose
+/// files that work runs) and before it exits (which would cut a stop short).
+pub struct Stops(SharedRef);
+
+impl Stops {
+    /// Return once all of it has finished (each op and stop is bounded by its timeout).
+    pub fn wait(&self) {
+        let changed = lock(&self.0).changed.clone();
+        changed.wait_until(|| {
+            let g = lock(&self.0);
+            g.dropped.is_empty() && g.dropped_probes.is_empty()
+        });
+    }
 }
 
 impl ServiceManager {
@@ -767,7 +801,8 @@ impl ServiceManager {
 
     /// A new release or policy: (re)read services/probes from the release's module entries, honour disabled_services
     /// and module_settings. Runtime state (running, failures, adoption) carries over for services that stay; a running
-    /// service the release no longer has is stopped with its old executable.
+    /// service the release no longer has is stopped with its old executable, on a thread of its own (`stops` waits for
+    /// those).
     pub fn configure(&mut self, release: &Release, policy: &Value, node_id: Option<&str>) {
         if let Some(n) = node_id {
             self.node_id = n.to_string();
@@ -799,7 +834,9 @@ impl ServiceManager {
             for (name, sd, pd) in decls {
                 for d in sd {
                     let key = format!("{name}/{}", d.name);
-                    let mut st = old_services.remove(&key).unwrap_or_else(|| Svc::new(&name, d.clone()));
+                    // (one the previous release dropped is taken back: its stop, if not under way yet, is off)
+                    let mut st = old_services.remove(&key).or_else(|| sh.dropped.remove(&key))
+                        .unwrap_or_else(|| Svc::new(&name, d.clone()));
                     st.decl = d;
                     st.disabled = disabled.contains(&key);
                     st.gpu_api_missing = st.gpu_shortfall(&self.gpu_apis);
@@ -807,37 +844,31 @@ impl ServiceManager {
                 }
                 for d in pd {
                     let key = format!("{name}/{}", d.name);
-                    let mut st = old_probes.remove(&key).unwrap_or_else(|| ProbeSt { module: name.clone(), decl: d.clone(),
-                        health: Health::Unknown, attrs: Value::Null, busy: false, last_run: None });
+                    let mut st = old_probes.remove(&key).or_else(|| sh.dropped_probes.remove(&key))
+                        .unwrap_or_else(|| ProbeSt { module: name.clone(), decl: d.clone(), health: Health::Unknown,
+                                                     attrs: Value::Null, busy: false, last_run: None });
                     st.decl = d;
                     sh.probes.insert(key, st);
                 }
             }
+            // a dropped probe's run in flight is waited for; its outcome is not kept
+            sh.dropped_probes.extend(old_probes.into_iter().filter(|(_, p)| p.busy));
             old_services
         };
         let old_modules = std::mem::replace(&mut self.modules, modules);
         self.proxies.retain(|m, _| self.modules.get(m).is_some_and(|c| c.proxy.is_some()));
         for (key, s) in old_services {
-            if !(self.manage && s.running && s.decl.lifecycle != Lifecycle::Manual) {
-                continue;
-            }
-            if let Some(ctx) = old_modules.get(&s.module) {
-                info!(service = %key, "stopping a service the release no longer has");
-                let x = Exec { ctx: ctx.clone(), name: s.decl.name.clone(), kind: "service", exec: s.decl.exec.clone(),
-                               registry: self.registry.clone() };
-                let (timeout, pgid, reg, channel) = (s.decl.stop_timeout, s.pgid, self.registry.clone(), s.channel);
-                std::thread::spawn(move || {
-                    let _ = x.run(&["stop"], timeout, false);
-                    if let Some(c) = channel {
-                        c.close();
-                    }
-                    if let Some(g) = pgid {
-                        end_group(g);
-                        if let Some(r) = reg {
-                            r.unregister(g);
-                        }
-                    }
-                });
+            let stop = self.manage && (s.running || s.busy) && s.decl.lifecycle != Lifecycle::Manual;
+            let Some(ctx) = old_modules.get(&s.module).filter(|_| stop || s.busy) else { continue };
+            let x = Exec { ctx: ctx.clone(), name: s.decl.name.clone(), kind: "service", exec: s.decl.exec.clone(),
+                           registry: self.registry.clone() };
+            let (sh, reg) = (self.shared.clone(), self.registry.clone());
+            lock(&sh).dropped.insert(key.clone(), s);
+            let k = key.clone();
+            let unload = move || unload_job(&x, &sh, &k, stop, reg.as_deref());
+            if let Err(e) = std::thread::Builder::new().name(format!("unload {key}")).spawn(unload) {
+                warn!(service = %key, error = %e, "cannot start a thread to stop a service the release no longer has");
+                lock(&self.shared).dropped.remove(&key);
             }
         }
     }
@@ -957,14 +988,7 @@ impl ServiceManager {
             self.modules.get(&module).map(|ctx| Exec { ctx: ctx.clone(), name, kind, exec, registry: self.registry.clone() })
         };
         let Some(x) = exec else {
-            let mut g = lock(&sh);
-            if let Some(p) = g.probes.get_mut(&key) {
-                p.busy = false;
-            }
-            if let Some(s) = g.services.get_mut(&key) {
-                s.busy = false;
-                s.reaping = false;
-            }
+            idle(&sh, &key);
             return;
         };
         let (reg, sh2, key2) = (self.registry.clone(), sh.clone(), key.clone());
@@ -981,14 +1005,7 @@ impl ServiceManager {
         });
         if spawned.is_err() {
             warn!(service = %key2, "cannot start a service worker thread");
-            let mut g = lock(&sh2);
-            if let Some(p) = g.probes.get_mut(&key2) {
-                p.busy = false;
-            }
-            if let Some(s) = g.services.get_mut(&key2) {
-                s.busy = false;
-                s.reaping = false;
-            }
+            idle(&sh2, &key2);
         }
     }
 
@@ -1123,10 +1140,8 @@ impl ServiceManager {
         if !self.manage {
             return;
         }
-        let deadline = Instant::now() + wait;
-        while lock(&self.shared).services.values().any(|s| s.busy) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let changed = lock(&self.shared).changed.clone();
+        changed.wait_for(Instant::now() + wait, || (!lock(&self.shared).services.values().any(|s| s.busy)).then_some(()));
         let mut handles = Vec::new();
         let todo: Vec<(String, Option<i32>)> = {
             let mut sh = lock(&self.shared);
@@ -1150,6 +1165,11 @@ impl ServiceManager {
         for h in handles {
             let _ = h.join();
         }
+    }
+
+    /// What waits for the stops `configure` started for services a release no longer has.
+    pub fn stops(&self) -> Stops {
+        Stops(self.shared.clone())
     }
 
     /// Undo `stop_all` (a drain ended): services start again as their lifecycle says.
@@ -1187,10 +1207,27 @@ fn want(s: &Svc, now: Instant, memory_soft: bool, halted: bool) -> Option<bool> 
     w
 }
 
+/// A job that could not run: the probe or service is free again.
+fn idle(sh: &SharedRef, key: &str) {
+    {
+        let mut g = lock(sh);
+        if let Some(p) = g.probes.get_mut(key) {
+            p.busy = false;
+        }
+        g.dropped_probes.remove(key);
+    }
+    with_svc(sh, key, |s| {
+        s.busy = false;
+        s.reaping = false;
+    });
+}
+
+/// Change a service's state (one the release dropped while an op ran on it included) and wake whatever waits on it.
 fn with_svc(sh: &SharedRef, key: &str, f: impl FnOnce(&mut Svc)) {
     let changed = {
         let mut g = lock(sh);
-        if let Some(s) = g.services.get_mut(key) {
+        let g = &mut *g;
+        if let Some(s) = g.services.get_mut(key).or_else(|| g.dropped.get_mut(key)) {
             f(s);
         }
         g.changed.clone()
@@ -1201,18 +1238,25 @@ fn with_svc(sh: &SharedRef, key: &str, f: impl FnOnce(&mut Svc)) {
 fn probe_job(x: &Exec, sh: &SharedRef, key: &str) {
     let r = x.run(&["fingerprint"], FINGERPRINT_TIMEOUT, false);
     let health = if r.ok { Health::parse(r.doc.as_ref().and_then(|d| d["health"].as_str())) } else { Health::Unhealthy };
-    if let Some(p) = lock(sh).probes.get_mut(key) {
-        if p.health != health && p.health != Health::Unknown {
-            info!(probe = key, health = health.as_str(), "probe health changed");
+    let changed = {
+        let mut g = lock(sh);
+        if let Some(p) = g.probes.get_mut(key) {
+            if p.health != health && p.health != Health::Unknown {
+                info!(probe = key, health = health.as_str(), "probe health changed");
+            }
+            p.health = health;
+            p.attrs = r.doc.as_ref().map(|d| d["attrs"].clone()).unwrap_or(Value::Null);
+            p.busy = false;
+            let now = Instant::now();
+            p.last_run = Some(if r.ok || r.doc.is_some() { now } else {
+                now.checked_sub(p.decl.period.saturating_sub(PROBE_RETRY)).unwrap_or(now)
+            });
+        } else {
+            g.dropped_probes.remove(key);                           // the release dropped it meanwhile
         }
-        p.health = health;
-        p.attrs = r.doc.as_ref().map(|d| d["attrs"].clone()).unwrap_or(Value::Null);
-        p.busy = false;
-        let now = Instant::now();
-        p.last_run = Some(if r.ok || r.doc.is_some() { now } else {
-            now.checked_sub(p.decl.period.saturating_sub(PROBE_RETRY)).unwrap_or(now)
-        });
-    }
+        g.changed.clone()
+    };
+    changed.bump();
 }
 
 /// `fingerprint`, and `status` when the fingerprint does not say whether the service runs (adoption).
@@ -1395,6 +1439,29 @@ fn wait_ready(x: &Exec, sh: &SharedRef, key: &str, deadline: Instant) {
         }
         std::thread::sleep(READY_POLL.min(deadline - now));
     }
+}
+
+/// A service the release no longer has: once the op in flight on it has finished, stop it if it runs (`stop`: the
+/// agent manages it and it is not manual), then forget it.
+fn unload_job(x: &Exec, sh: &SharedRef, key: &str, stop: bool, reg: Option<&SpawnRegistry>) {
+    let changed = lock(sh).changed.clone();
+    changed.wait_until(|| !lock(sh).dropped.get(key).is_some_and(|s| s.busy));
+    let todo = lock(sh).dropped.get_mut(key).filter(|s| stop && s.running).map(|s| (s.decl.stop_timeout, s.pgid, s.channel.take()));
+    if let Some((timeout, pgid, channel)) = todo {
+        info!(service = key, "stopping a service the release no longer has");
+        let _ = x.run(&["stop"], timeout, false);
+        if let Some(c) = channel {
+            c.close();
+        }
+        if let Some(g) = pgid {
+            end_group(g);
+            if let Some(r) = reg {
+                r.unregister(g);
+            }
+        }
+    }
+    lock(sh).dropped.remove(key);
+    changed.bump();
 }
 
 /// `stop`, then end whatever the service left in its process group.

@@ -846,6 +846,12 @@ pub mod tests {
             m
         }
 
+        /// Remove the fixture's directory now, failing if anything still holds a part of it (on Windows, a process's
+        /// working directory).
+        fn remove(self) -> std::io::Result<()> {
+            self._tmp.close()
+        }
+
         fn data(&self, name: &str) -> PathBuf {
             self.root.join("home").join("modules-data").join("modelserver").join(name)
         }
@@ -1088,10 +1094,16 @@ pub mod tests {
         let members = crate::sys::Members::of(m.fleet_view()[0].pgid.unwrap());
         let empty = Release { id: "r_none".into(), dir: fx.release.dir.clone(), modules: vec![] };
         m.configure(&empty, &json!({}), None);
+        // what is left for the dropped service (an op still in flight on it, then its stop) runs on threads of the
+        // manager's, their processes in the fixture's directory: the test waits for that, as the agent does, before the
+        // directory goes (on Windows a process still running there kept a folder of it)
+        m.stops().wait();
         assert!(gone(pid), "the module's service is stopped with the module");
         #[cfg(windows)]
         assert!(members.wait(Duration::from_secs(30)), "the service's processes end with it");
         assert!(m.running().is_empty() && !fx.data("model.ready").exists());
+        drop(m);
+        fx.remove().expect("nothing of the service still runs in the fixture's directory");
     }
 
     /// A connect names the requesting process; on Windows the agent places a handle only in a member of the attempt's

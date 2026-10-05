@@ -62,6 +62,10 @@ jobs:
   agent:
     runs-on: macos-26
     timeout-minutes: 60
+    env:
+      # the coordinator the end-to-end tests start runs on uv's standalone CPython, as a coordinator build does: the
+      # runner's python.org interpreter runs as an app, whose local network requests macOS holds for a person to allow
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v4
         with:
@@ -246,14 +250,14 @@ jobs:
 
   package-windows:
     # oarbank-agent-<v>-windows-x64.msi and -arm64.msi, and the coordinator build for windows-amd64 and windows-arm64:
-    # the scripts build for the runner's architecture
+    # the agent's package for the architecture named, the coordinator build for the runner's
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [rust-other-os, coordinator]
     strategy:
       matrix:
         include:
-          - {os: windows-2025, arch: x64}
-          - {os: windows-11-arm, arch: arm64}
+          - {os: windows-2025, arch: x64, target: x86_64-pc-windows-msvc}
+          - {os: windows-11-arm, arch: arm64, target: aarch64-pc-windows-msvc}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -268,10 +272,12 @@ jobs:
         run: scripts/windows-clang.ps1 -Install | Add-Content $env:GITHUB_PATH
         shell: pwsh
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - run: |
           dotnet tool install --global wix --version 5.*
           wix extension add --global WixToolset.Util.wixext/5.0.2
-      - run: scripts/package-windows.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
+      - run: scripts/package-windows.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))" -Arch ${{ matrix.arch }}
         shell: pwsh
       - run: scripts/build-coordinator.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
         shell: pwsh

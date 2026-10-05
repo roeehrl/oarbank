@@ -1,27 +1,35 @@
 # Build the Windows agent package on a Windows host: dist\oarbank-agent-<version>-windows-<arch>.msi and the agent
-# binary for the coordinator's update channel, for the host's architecture (x64 or arm64). Needs Rust, uv and WiX 5
-# (dotnet tool install --global wix, then wix extension add WixToolset.Util.wixext); on arm64 also clang, which
-# scripts\windows-clang.ps1 finds (Visual Studio's C++ Clang component or LLVM).
+# binary for the coordinator's update channel, for -Arch (x64 or arm64; the machine's architecture by default, never the
+# architecture this PowerShell happens to run as). Needs Rust with the target's standard library (rustup target add
+# aarch64-pc-windows-msvc or x86_64-pc-windows-msvc), uv and WiX 5 (dotnet tool install --global wix, then wix extension
+# add WixToolset.Util.wixext); for arm64 also clang, which scripts\windows-clang.ps1 finds (Visual Studio's C++ Clang
+# component or LLVM).
 #
-#   scripts\package-windows.ps1 [-Version 1.0.0]
+#   scripts\package-windows.ps1 [-Version 1.0.0] [-Arch x64|arm64]
 #
 # Signing is the owner's: OARBANK_SIGNTOOL_ARGS (for example "/fd SHA256 /tr http://timestamp.acs.microsoft.com /td
 # SHA256 /dlib ... /dmdf ...", Azure Artifact Signing) signs the binaries and the MSI with signtool; without it they
 # stay unsigned (Smart App Control blocks unsigned programs on machines that enforce it).
-param([string]$Version = "")
+param([string]$Version = "", [string]$Arch = "")
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
 if (-not $Version) { $Version = (Select-String -Path "$Repo\rust\Cargo.toml" -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value }
 $MsiVersion = ($Version -split '[-+]')[0]                         # MSI versions are numeric only
-$Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$Arch = & "$PSScriptRoot\windows-arch.ps1" -Arch $Arch
 $env:OARBANK_AGENT_VERSION = $Version
 if ($Arch -eq "arm64") { $env:PATH = "$(& "$PSScriptRoot\windows-clang.ps1");$env:PATH" }   # ring needs clang here
+# the target named, so the binaries are for $Arch whatever the toolchain's own host is (an x64 toolchain on Windows on
+# Arm builds x64 by default)
+$Target = @{ x64 = "x86_64-pc-windows-msvc"; arm64 = "aarch64-pc-windows-msvc" }[$Arch]
+# the crates' source paths the binaries embed name CARGO_HOME as /cargo, not this machine's
+$CargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$HOME\.cargo" }
+Set-Item "env:CARGO_TARGET_$($Target.ToUpper().Replace('-', '_'))_RUSTFLAGS" "--remap-path-prefix=$CargoHome=/cargo"
 Push-Location "$Repo\rust"
-cargo build -q --release --locked -p oarbank-agent -p oarbank-launcher
+cargo build -q --release --locked --target $Target -p oarbank-agent -p oarbank-launcher
 $built = $LASTEXITCODE
 Pop-Location
 if ($built) { throw "cargo build failed" }        # never package the binaries an earlier build left behind
-$Bin = "$Repo\rust\target\release"
+$Bin = "$Repo\rust\target\$Target\release"
 # the WSL containers SDK library the agent loads at run time for its Windows container runtime (Microsoft.WSL.Containers,
 # MIT, docs/design/windows-containers.md); pinned by the library's own SHA-256 per architecture
 $WslcVersion = "3.0.1"
@@ -35,9 +43,9 @@ $WslcDll = "$Wslc\runtimes\win-$Arch\native\wslcsdk.dll"
 if ((Get-FileHash -Algorithm SHA256 $WslcDll).Hash.ToLower() -ne $WslcSha256[$Arch]) { throw "wslcsdk.dll does not match its pin" }
 Copy-Item $WslcDll "$Bin\wslcsdk.dll"
 # a clean Windows machine has no Visual C++ runtime: the binaries must not import it (static CRT, rust/.cargo/config.toml);
-# wslcsdk.dll is loaded at run time, never imported
-uv run --no-project --python 3.12 python "$Repo\scripts\check-pe-imports.py" "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
-if ($LASTEXITCODE) { throw "the binaries import a DLL a clean Windows install does not have" }
+# wslcsdk.dll is loaded at run time, never imported; and they are for the package's architecture
+uv run --no-project --python 3.12 python "$Repo\scripts\check-pe-imports.py" --machine $Arch "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
+if ($LASTEXITCODE) { throw "the binaries import a DLL a clean Windows install does not have, or are for another architecture" }
 $Out = "$Repo\dist"
 New-Item -ItemType Directory -Force $Out | Out-Null
 function Sign($path) {
@@ -46,6 +54,10 @@ function Sign($path) {
 Sign "$Bin\oarbank-agent.exe"; Sign "$Bin\oarbank-launcher.exe"
 $Runtime = "$env:TEMP\oarbank-runtime"
 & "$Repo\scripts\build-node-runtime.ps1" -Out $Runtime -Arch $Arch
+# what the MSI copies holds no link and no path of this machine, and the runtime runs from wherever it is installed
+uv run --no-project --python 3.12 python "$Repo\scripts\check-package.py" --build-path (uv python dir).Trim() `
+  --run "$Runtime=python.exe" $Runtime "$Bin\oarbank-agent.exe" "$Bin\oarbank-launcher.exe"
+if ($LASTEXITCODE) { throw "the package is not fit to ship" }
 $Msi = "$Out\oarbank-agent-$Version-windows-$Arch.msi"
 wix build "$Repo\deploy\windows\oarbank-agent.wxs" -arch $Arch -ext WixToolset.Util.wixext -d "Version=$MsiVersion" -d "BinDir=$Bin" -d "RuntimeDir=$Runtime" -o $Msi
 if ($LASTEXITCODE) { throw "wix build failed" }

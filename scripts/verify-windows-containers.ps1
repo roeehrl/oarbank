@@ -12,7 +12,7 @@
 param([switch]$Gpu, [switch]$InstallWsl)
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
-$Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$Arch = & "$PSScriptRoot\windows-arch.ps1"
 New-Item -ItemType Directory -Force "$Repo\dist" | Out-Null
 $Log = "$Repo\dist\verify-windows-containers.log"
 Start-Transcript -Path $Log -Force | Out-Null

@@ -78,9 +78,11 @@ worse, pass while doing something else:
 
 5. **The module environment comes from one SDK function**, `portable.os_env(home, tmp)`, the table in the SDK's
    spec/platforms.md ("Environment per OS"), which the conformance kit, the kit's service runner, the coordinator's
-   module processes, the dependency install and module CLIs all use. On Windows `LOCALAPPDATA` stays the host account's:
-   an AppContainer start points it, `TEMP` and `TMP` at the container's own profile folder below it, which exists only
-   there (with a made-up `LOCALAPPDATA`, uv found no temporary directory). The spec table says so.
+   module processes, the dependency install and module CLIs all use. An AppContainer start points `LOCALAPPDATA`,
+   `TEMP` and `TMP` at the container's folder below the given `LOCALAPPDATA`, which Windows creates only under a
+   profile's own (with a made-up `LOCALAPPDATA`, uv found no temporary directory). The first build kept the host
+   account's `LOCALAPPDATA` for it; now the home's own is used everywhere and the module launcher creates the folder
+   (module-sandbox.md, "A runner's home").
 
 6. **Owner-only files** (`platform/files.py`). On Windows "owner-only" is a protected DACL (nothing inherited)
    granting full control to SYSTEM, Administrators and the writing account, and inside the coordinator's home also the
@@ -273,8 +275,6 @@ Built as designed, with these additions found on the way:
   or run: a tenth of a second on an idle machine, 29 to 38 s with every core of a 4-core VM busy, with nothing to wait
   on. Before, the rebuild found half an environment and failed; it matters after a move, which writes the environment
   just before oarbankd rebuilds it.
-- **The sandbox's environment** keeps the host account's `LOCALAPPDATA` (decision 5): with the module's own, uv found
-  no temporary directory inside an AppContainer.
 - **Tests and the suite**: module hosts a test file opened end with it (their processes held files open on Windows);
   the simulator closes its module host before deleting its home; the e2e tests give their nodes no memory reserves
   (an 8 GB VM with an unknown presence reserved more than it had), build the agent versions they need in one target
@@ -313,8 +313,19 @@ actionlint), x64 Windows (CI only), and Windows Server. An agent installed from 
 was not combined on the VM; the role containers cover it by construction, and the VM's test agent beside the service
 showed the failure and the fix.
 
-**Found on the way, outside this gap.** The elevated helper keeps a job's loopback filters when the shim that asked
-for them is killed; `scripts/build-node-runtime.ps1` copies uv's Python through its junction and, with
-`package-windows.ps1`, reads the architecture from `PROCESSOR_ARCHITECTURE`; the agent's own runner environment
-sets `LOCALAPPDATA` inside the work directory, so tools that ask Windows for a temporary directory find none inside the
-AppContainer.
+**Found on the way, outside this gap, and fixed before 2.5.0.**
+- The elevated helper kept a job's loopback filters and exemption when the shim that asked for them was killed (on the
+  VM: a killed job's filters stayed until the helper restarted, and the module's next job, with its own proxy port,
+  reached nothing, since each opening's filter blocked every port but its own). An opening now lasts exactly as long as
+  the process that asked for it: the helper waits on that process's handle, its filters are a block per container and a
+  permit per port (several jobs of one module at once), persistent and owned by the helper's WFP provider, and a helper
+  that starts keeps the openings whose owner still runs and removes the rest (helper_windows.rs; `helper-clear` on
+  uninstall).
+- `scripts/build-node-runtime.ps1` copies the interpreter's real prefix and refuses a link; the packaging gate
+  (`scripts/check-package.py`) refuses a runtime with a reparse point or a path of the build machine (uv's
+  `direct_url.json` named the checkout), and runs a copy of it from another directory.
+- The Windows scripts take the architecture from the caller (`-Arch`) or from Windows (`scripts/windows-arch.ps1`,
+  `IsWow64Process2`), build with an explicit Rust target and check the binaries' machine type.
+- A runner's per-user locations, `LOCALAPPDATA` among them, stay in its work directory by design; the module launcher
+  creates the AppContainer folder an AppContainer start points `LOCALAPPDATA`, `TEMP` and `TMP` at (module-sandbox.md,
+  "A runner's home").

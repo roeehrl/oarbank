@@ -21,9 +21,11 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$OUT"
 
 targets=(aarch64-apple-darwin)
-rustup target list --installed 2>/dev/null | grep -qx x86_64-apple-darwin && targets+=(x86_64-apple-darwin)
+rustup target list --installed 2>/dev/null | grep -x x86_64-apple-darwin >/dev/null && targets+=(x86_64-apple-darwin)
+# the crates' source paths the binaries embed name CARGO_HOME as /cargo, not this machine's
 for t in "${targets[@]}"; do
-    (cd "$REPO/rust" && OARBANK_AGENT_VERSION="$VERSION" cargo build -q --release --locked --target "$t" -p oarbank-agent -p oarbank-launcher)
+    (cd "$REPO/rust" && OARBANK_AGENT_VERSION="$VERSION" cargo build -q --release --locked --target "$t" -p oarbank-agent -p oarbank-launcher \
+        --config "build.rustflags=['--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo']")
 done
 
 PAYLOAD="$WORK/root/Library/Oarbank/bin"
@@ -36,6 +38,9 @@ done
 install -m 755 "$REPO/deploy/macos/oarbank-uninstall" "$PAYLOAD/oarbank-uninstall"
 # the node runtime beside the launcher (CPython 3.12 with the module SDK, and uv; scripts/build-node-runtime.sh)
 "$REPO/scripts/build-node-runtime.sh" "$PAYLOAD/runtime"
+# the payload holds no link out of itself and no path of this machine, and the runtime runs from elsewhere
+uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --build-path "$WORK" --build-path "$(uv python dir)" \
+    --run "$PAYLOAD/runtime=bin/python3" "$WORK/root" "$PAYLOAD/oarbank-agent" "$PAYLOAD/oarbank-launcher"
 
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
 for b in oarbank-agent oarbank-launcher; do
@@ -45,10 +50,15 @@ for b in oarbank-agent oarbank-launcher; do
         codesign --force --options runtime --timestamp --identifier "dev.codonic.$b" --sign "$ID" "$PAYLOAD/$b"
     fi
     codesign --verify --strict "$PAYLOAD/$b"
+    # the Info.plist the binary carries (build.rs) is bound to its signature, under its identifier: Local Network
+    # privacy names the program by it and shows its usage text (docs/design/architecture.md, "Network and access")
+    signed="$(codesign -dv "$PAYLOAD/$b" 2>&1)"
+    [[ "$signed" == *"Identifier=dev.codonic.$b"* && "$signed" == *"Info.plist entries="* ]] \
+        || { echo "$b is not signed with its Info.plist as dev.codonic.$b" >&2; exit 1; }
 done
 # every Mach-O file of the runtime, signed like the binaries
 find "$PAYLOAD/runtime" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0 | while IFS= read -r -d '' f; do
-    file -b "$f" | grep -q Mach-O || continue
+    file -b "$f" | grep Mach-O >/dev/null || continue
     if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
     else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
 done
@@ -57,11 +67,17 @@ grep -aq "oarbank-agent-version:$VERSION" "$PAYLOAD/oarbank-agent" || { echo "th
 # no extended attributes: pkgbuild would carry them as ._ AppleDouble files
 cp -R "$REPO/deploy/macos/scripts" "$WORK/scripts"
 xattr -cr "$WORK/root" "$WORK/scripts"
+# pkgbuild (macOS 27.0.1) compresses the bill of materials it writes in place (decmpfs: an extended attribute, the data
+# truncated, the compressed flag set) while its writer still holds the file, after the complete bill was written and
+# synced; the writer's last header writes are then refused, and it prints "write: Permission denied" once each. Those
+# lines go, and the finished package's bill is checked against the payload below instead.
 pkgbuild --quiet --root "$WORK/root" --scripts "$WORK/scripts" --identifier dev.codonic.oarbank.agent \
-    --version "$VERSION" --install-location / --ownership recommended "$WORK/agent.pkg"
+    --version "$VERSION" --install-location / --ownership recommended "$WORK/agent.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
 # a provenance attribute macOS will not let us clear still comes through as ._ entries: rebuild the payload without
-# them (libarchive's cpio honours COPYFILE_DISABLE) and its bill of materials
-if pkgutil --payload-files "$WORK/agent.pkg" | grep -q '/\._'; then
+# them (libarchive's cpio honours COPYFILE_DISABLE) and its bill of materials. grep reads the whole listing (not -q):
+# under pipefail a pkgutil cut off by an early exit fails the pipeline, and the test took a payload full of ._ entries
+# for a clean one
+if pkgutil --payload-files "$WORK/agent.pkg" | grep '/\._' >/dev/null; then
     pkgutil --expand "$WORK/agent.pkg" "$WORK/x"
     (cd "$WORK/root" && find . | COPYFILE_DISABLE=1 cpio -o --format odc -R 0:0 --quiet | gzip -9 -c) > "$WORK/x/Payload"
     (cd "$WORK/root" && find . | while read -r f; do
@@ -73,8 +89,12 @@ if pkgutil --payload-files "$WORK/agent.pkg" | grep -q '/\._'; then
     sed -i '' "s/numberOfFiles=\"[0-9]*\"/numberOfFiles=\"$n\"/" "$WORK/x/PackageInfo"
     rm "$WORK/agent.pkg"
     pkgutil --flatten "$WORK/x" "$WORK/agent.pkg"
-    ! pkgutil --payload-files "$WORK/agent.pkg" | grep -q '/\._' || { echo "._ entries remain in the payload" >&2; exit 1; }
+    ! pkgutil --payload-files "$WORK/agent.pkg" | grep '/\._' >/dev/null || { echo "._ entries remain in the payload" >&2; exit 1; }
 fi
+# the bill of materials lists exactly what the payload holds
+pkgutil --expand "$WORK/agent.pkg" "$WORK/bom-check"
+diff <(lsbom -s "$WORK/bom-check/Bom" | sort) <(cd "$WORK/root" && find . | sort) >/dev/null \
+    || { echo "the package's bill of materials does not list its payload" >&2; exit 1; }
 PKG="$OUT/oarbank-agent-$VERSION-macos.pkg"
 if [[ -n "${OARBANK_INSTALLER_IDENTITY:-}" ]]; then
     productbuild --quiet --package "$WORK/agent.pkg" --sign "$OARBANK_INSTALLER_IDENTITY" --timestamp "$PKG"

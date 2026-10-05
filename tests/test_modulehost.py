@@ -107,6 +107,18 @@ def test_respawn_after_crash(tmp_path, mod_file):
         h.close()
 
 
+def test_a_module_that_cannot_start_shows_what_it_said(tmp_path, mod_file):
+    # a self-test's host keeps no log: the failure carries the module's stderr (a CI failure said only "TimeoutError")
+    argv = ["python", "-c", "import sys; sys.stderr.write('vault: cannot read its settings\\n'); sys.exit(1)"]
+    h = ModuleHost([confined_spec(tmp_path, mod_file.parent, argv)], home=None)
+    try:
+        with pytest.raises(ModuleUnavailable) as ei:
+            h.call("m", "params.check", {"params": {}})
+        assert ei.value.kind == "handshake" and "vault: cannot read its settings" in str(ei.value), str(ei.value)
+    finally:
+        h.close()
+
+
 def test_fault_fails_fast_and_restart_recovers(tmp_path, mod_file):
     h = ModuleHost([confined_spec(tmp_path, mod_file.parent, ["python", "-c", "import sys; sys.exit(1)"])], home=tmp_path)
     try:

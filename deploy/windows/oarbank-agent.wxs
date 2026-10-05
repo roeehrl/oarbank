@@ -70,6 +70,8 @@
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-config" />
     <SetProperty Id="RemoveNode" Before="RemoveNode" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; remove --scope system" />
+    <SetProperty Id="ClearHelper" Before="ClearHelper" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-clear" />
     <CustomAction Id="SetupWithFile" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="SetupWithCode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
     <CustomAction Id="SetupWithUrl" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
@@ -77,6 +79,9 @@
     <CustomAction Id="InstallContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
     <CustomAction Id="ConfigureHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="RemoveNode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
+    <!-- the helper's filters and loopback exemptions outlive its service (helper_windows.rs): an uninstall removes them,
+         once the service has stopped and the node's jobs have ended; an upgrade keeps them for the new helper -->
+    <CustomAction Id="ClearHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
 
     <InstallExecuteSequence>
       <Custom Action="ConfigureHelper" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
@@ -84,7 +89,8 @@
       <Custom Action="SetupWithFile" After="InstallFiles" Condition="NOT Installed AND JOINCODEFILE" />
       <Custom Action="SetupWithCode" After="SetupWithFile" Condition="NOT Installed AND JOINCODE AND NOT JOINCODEFILE" />
       <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />
-      <Custom Action="RemoveNode" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveNode" Before="ClearHelper" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="ClearHelper" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

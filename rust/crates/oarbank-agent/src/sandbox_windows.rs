@@ -13,10 +13,14 @@
 //!   release grants any more.
 //! - **Network.** None without a capability. `egress-any` adds `internetClient`; AppContainer loopback isolation
 //!   keeps it off loopback. The egress allowlist goes through the agent's proxy on loopback: the elevated helper (a
-//!   LocalSystem service, oarbank-launcher's helper_windows.rs) exempts the container from loopback isolation for
-//!   the job and filters every loopback port but the proxy's. Without the helper the allowlist is unavailable.
+//!   LocalSystem service, oarbank-launcher's helper_windows.rs) exempts the container from loopback isolation and
+//!   filters its loopback connections to the proxy's port only, for as long as the shim that asked runs (the helper
+//!   waits on the shim's process, so a killed job's opening ends too). Without the helper the allowlist is unavailable.
 //! - **IPC.** Named pipes, sections and other objects outside the AppContainer's namespace are denied.
 //! - Execution of written files cannot be refused without application control: `exec_writable_deny` is unavailable.
+//! - **Environment.** Starting a process in an AppContainer points LOCALAPPDATA, TEMP and TMP at
+//!   `<LOCALAPPDATA>\Packages\<container>\AC` (and its `Temp`) under the LOCALAPPDATA it is given. The shim creates
+//!   that folder first, so a job's temporary files and application data stay in its work directory.
 //! - **Handles.** The module inherits its standard handles and, for a job, the control event the agent names in
 //!   OARBANK_CONTROL_EVENT (sys.rs `Nudge`) and its endpoint connectors (OARBANK_SERVICE_<NAME>), for an endpoint
 //!   service's `start` its channel (OARBANK_ENDPOINT_CHANNEL; endpoints.rs), and nothing else the shim inherited: a
@@ -698,17 +702,16 @@ pub fn exec(args: &[String]) -> ! {
         Ok(s) => s,
         Err(e) => die(70, &e),
     };
-    // the allowlist: the helper opens loopback for this container to the proxy's port only, for this job
-    let proxy = match (pol.net.as_str(), pol.proxy_port) {
+    // the allowlist: the helper opens loopback for this container to the proxy's port only, until this shim ends
+    match (pol.net.as_str(), pol.proxy_port) {
         ("egress-allowlist", Some(port)) => {
             if let Err(e) = helper(&json!({"op": "allow", "container": name, "port": port})) {
                 die(70, &e);
             }
-            Some(port)
         }
         ("egress-allowlist", None) => die(70, "an egress allowlist without the proxy port"),
-        _ => None,
-    };
+        _ => {}
+    }
     let ro = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
     // one shim at a time edits ACLs: an edit reads the ACL and writes it back with its entry, so two shims granting the
     // same path (the runtime's Python, a tool) at once could each drop the other's entry
@@ -749,6 +752,15 @@ pub fn exec(args: &[String]) -> ! {
         eprintln!("sandbox launch: {e} (user32, COM and ctypes will not load)");
     }
     drop(acl_lock);
+    // the start points LOCALAPPDATA, TEMP and TMP at the container's folder under the LOCALAPPDATA it is given (the
+    // process's home: a job's work directory, docs/design/module-sandbox.md "A runner's home"), which Windows creates
+    // only under a profile's own; without it programs that ask Windows for a temporary directory find none
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let folder = std::path::Path::new(&local).join("Packages").join(name.to_lowercase()).join("AC");
+        if let Err(e) = std::fs::create_dir_all(folder.join("Temp")) {
+            die(70, &format!("the container's folder {}: {e}", folder.display()));
+        }
+    }
     // capabilities: internetClient for egress-any only
     let mut cap_sid = [0u8; 68];
     let mut caps: Vec<SID_AND_ATTRIBUTES> = vec![];
@@ -807,9 +819,6 @@ pub fn exec(args: &[String]) -> ! {
         let mut code = 1u32;
         GetExitCodeProcess(pi.hProcess, &mut code);
         CloseHandle(pi.hProcess);
-        if let Some(port) = proxy {
-            let _ = helper(&json!({"op": "release", "container": name, "port": port}));
-        }
         std::process::exit(code as i32)
     }
 }
