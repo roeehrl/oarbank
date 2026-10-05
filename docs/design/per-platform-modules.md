@@ -421,7 +421,7 @@ Other coordinator tests:
 - Default `bind`: I propose `capacity` for campaigns and `first-claim` for groups, datasets and pipelines.
 - Default `rebind`: I propose `never`, which raises an alert.
 - Whether an unknown `mix` should mean the strictest setting: I propose yes.
-- Whether Windows counts as a coordinator platform now.
+- Whether Windows counts as a coordinator platform now. (Decided since: it does, D40, windows-coordinator.md.)
 
 ### Critical files for implementation
 - vendor/oarbank-sdk/src/oarbank_sdk/manifest.py

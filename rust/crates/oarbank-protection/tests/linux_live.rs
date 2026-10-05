@@ -168,8 +168,8 @@ impl Drop for Spawned {
 #[ignore = "needs Xvfb, xauth, openbox and xterm"]
 fn the_front_window_comes_from_the_x_server() {
     use std::process::{Command, Stdio};
-    let dir = std::env::temp_dir().join(format!("oarbank-x11-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::Builder::new().prefix("oarbank-x11-").tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
     let auth = dir.join("Xauthority");
     let display = ":77";
     let ok = Command::new("xauth")
@@ -214,7 +214,6 @@ fn the_front_window_comes_from_the_x_server() {
     }
     assert_eq!(r.front, Front::App(term.0.id() as i32), "{r:?}");
     assert_eq!(r.source, "x11 :77");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The session in front decides how the front app is read: nobody at the seat is nothing in front, a Wayland

@@ -127,7 +127,10 @@ by name and scope.
 
 **The service on B:** launchd on macOS (`bootstrap`, `enable`, then `kickstart -k` in `gui/<uid>`; preflight warns that
 a LaunchAgent runs only after a GUI login, so with FileVault and no auto-login B serves nothing after a power loss until
-someone logs in), systemd user units on Linux.
+someone logs in), systemd user units on Linux. On Windows the owner installs B with `install-oarbankd.ps1 -Pair`
+(two services under virtual accounts; a node's agent cannot create services, so it refuses `install_coordinator`
+there), and B restarts on its installed copy through the services' recovery actions ([windows-coordinator.md](windows-coordinator.md)).
+B loads the databases through SQLite's backup API, so no open file is replaced on any OS.
 
 ## Rollback
 

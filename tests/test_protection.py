@@ -130,7 +130,7 @@ def test_release_stage_entries_carry_their_platforms(tmp_path):
     from oarbank.coordinator import releases
     shutil.copytree(Path(__file__).parent / "fixtures" / "modules" / "relay", tmp_path / "relay")
     toml = tmp_path / "relay" / "oarbank-module.toml"
-    toml.write_text(toml.read_text().replace('requires = { pools = { scorer = 1 }, resources',
+    toml.write_text(toml.read_text(encoding="utf-8").replace('requires = { pools = { scorer = 1 }, resources',
                                              'requires = { platforms = ["darwin-arm64"], pools = { scorer = 1 }, resources', 1))
     st = {s["name"]: s for s in releases.module_entry("relay", "1.0.0", "h1:x", tmp_path / "relay", "linux-amd64")["stages"]}
     assert st["score"]["platforms"] == ["darwin-arm64"] and st["render"]["platforms"] == []
@@ -142,7 +142,7 @@ def relay_per_platform(tmp_path) -> Path:
     d = tmp_path / "relay"
     shutil.copytree(Path(__file__).parent / "fixtures" / "modules" / "relay", d, ignore=shutil.ignore_patterns("__pycache__"))
     toml = d / "oarbank-module.toml"
-    toml.write_text(toml.read_text().replace(
+    toml.write_text(toml.read_text(encoding="utf-8").replace(
         'capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\n',
         'capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\nenv = { OMP_NUM_THREADS = "1", MKL_CBWR = "AUTO" }\n'
         '[runner.variants.windows]\nenv = { MKL_CBWR = "COMPATIBLE" }\n'
@@ -238,6 +238,6 @@ def test_release_carries_a_declared_bandwidth_class_only(tmp_path):
     plain = releases.module_entry("relay", "1.0.0", "h1:x", tmp_path / "relay")
     assert "bandwidth_class" not in plain["runner"]
     toml = tmp_path / "relay" / "oarbank-module.toml"
-    toml.write_text(toml.read_text().replace('capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\n',
+    toml.write_text(toml.read_text(encoding="utf-8").replace('capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\n',
                                              'capabilities = ["cancellable", "deterministic_output", "freeze_ok"]\nbandwidth_class = "medium"\n', 1))
     assert releases.module_entry("relay", "1.0.0", "h1:x", tmp_path / "relay")["runner"]["bandwidth_class"] == "medium"

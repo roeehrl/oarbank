@@ -17,3 +17,7 @@ base64.workspace = true
 ring = "0.17.14"
 # shortest round-trip digits with ties to even, as ECMAScript and Python's repr (std's `{:e}` rounds ties up)
 zmij = "1"
+
+[dev-dependencies]
+# tests' scratch directories: a fresh name each, removed when dropped
+tempfile = "3.27.0"

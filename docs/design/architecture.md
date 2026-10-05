@@ -88,8 +88,10 @@ actions on fleet jobs.
 
 ## The coordinator
 
-- **`oarbank/platform`** holds every OS-touching helper: owner-only files (POSIX modes; the per-user data roots on
-  Windows are private to the account), the secret store, interpreter paths, process launch.
+- **`oarbank/platform`** holds every OS-touching helper: owner-only files (POSIX modes; on Windows a protected DACL
+  for SYSTEM, Administrators and the coordinator's accounts), the secret store, interpreter paths, process containers
+  (a process group; a kill-on-close Job Object on Windows), the local admin channel, the service host and the DNS-SD
+  announcement ([windows-coordinator.md](windows-coordinator.md)).
 - **The secret store** keeps small secrets out of the database: the login Keychain on macOS, a DPAPI-wrapped file under
   `<home>/keys/` on Windows, an owner-only file there elsewhere (and in tests, `OARBANK_SECRET_STORE=file`). The audit
   signing key lives there, and so does the key that encrypts module secrets.
@@ -97,12 +99,14 @@ actions on fleet jobs.
   the value beside its params, the `secrets` table holds it AES-256-GCM encrypted, pages and reads show only a keyed
   fingerprint, and only the grant of a job whose stage lists it (resolved per node) or `host.secrets.get` (with
   `secrets:read:self`) carries it. A coordinator move seals each value to the target's transport key.
-- **Module processes** run in the OS's sandbox through the agent's launcher (`bin/oarbank-sandbox` in a coordinator
-  build; `sandboxexec.py`), with the module's own venv (`python` resolves to the bundle's `.venv`). A coordinator on an
-  OS without a sandbox backend refuses to start module processes.
+- **Module processes** run in the OS's sandbox (Seatbelt on macOS; elsewhere through the agent's launcher,
+  `bin/oarbank-sandbox` in a coordinator build: Landlock and seccomp, an AppContainer; `sandboxexec.py`), each in a
+  process container of its own, with the module's own venv (`python` resolves to the bundle's `.venv`). A coordinator
+  on an OS without a sandbox backend refuses to start module processes.
 - **Coordinator builds** are relocatable: a pinned CPython with the locked dependencies and the SDK, the core compiled
   with Nuitka into one native module (no `.py` shipped), per platform, signed by the owner key set. A move installs one
-  on the target (developer mode bundles the running checkout instead). The coordinator runs on macOS and Linux.
+  on the target (developer mode bundles the running checkout instead). The coordinator runs on macOS, Linux and
+  Windows; on Windows it is a system service with x64 CPython on both architectures (D40).
 
 ## Data roots
 
@@ -112,8 +116,9 @@ actions on fleet jobs.
 | Linux | `$XDG_DATA_HOME/oarbank` (`~/.local/share/oarbank`) | `/var/lib/oarbank` |
 | Windows | `%LOCALAPPDATA%\Oarbank` | `%ProgramData%\Oarbank` |
 
-The coordinator lives in `<root>/coordinator` (`OARBANKD_HOME` overrides it), the agent in `<root>/agent`. Unix sockets
-go in `<home>/run`, or a short owner-only directory under `/tmp` when that path would exceed the socket path limit.
+The coordinator lives in `<root>/coordinator` (`OARBANKD_HOME` overrides it), on Windows always in the system scope's
+(`%ProgramData%\Oarbank\coordinator`: it is a service there), the agent in `<root>/agent`. Unix sockets go in
+`<home>/run`, or a short owner-only directory under `/tmp` when that path would exceed the socket path limit.
 
 ## The module sandbox
 
@@ -191,15 +196,18 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
   (viewer, operator, admin) are enforced on every operation. Both listeners answer only allowed Host names (DNS
   rebinding), and Tailscale Funnel traffic is refused.
 - **The local admin channel** is the admin API on `<home>/run/admin.sock`, whose owner-only directory is the
-  credential; the CLI on the coordinator's account uses it without a token. (A Windows named pipe comes when the
-  coordinator runs on Windows.)
-- **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (dns-sd, Avahi); an agent
+  credential, and on Windows on the named pipe `\\.\pipe\oarbank-admin-<home id>`, whose owner-only security
+  descriptor is (an elevated prompt reaches it); the CLI on the coordinator's account uses it without a token.
+- **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (dns-sd, Avahi,
+  `DnsServiceRegister` on Windows); an agent
   finds it with `oarbank-agent discover` or `run --coordinator discover`, verifies the identity proof, and the owner
   still admits the node. `tailscale status` peers appear in the console as candidates.
 - **Ports**: the agent listener 7443 (TLS), the admin API 7401 and the console 7400 on loopback, module frames 7402.
   Agents are outbound-only.
 - **Coordinator moves** ([coordinator-move.md](coordinator-move.md)) work across operating systems: the data is
-  portable, the standby is installed through the service manager, and file modes are applied on the target, not copied.
+  portable (`/` paths, modes recorded rather than read back), the standby is installed through the service manager (on
+  Windows by the owner's installer with the pairing code: an agent's account cannot create services), file modes are
+  applied on the target, not copied, and the target loads the databases through SQLite's backup API.
 
 ## Updates and trust
 
@@ -242,14 +250,16 @@ is a named pipe only the agent's account and the module's AppContainer may open.
   hoc, a postinstall that runs the install plan; `deploy/macos/oarbank-uninstall`), deb, rpm and a tarball through
   nFPM (`scripts/package-linux.sh`, `deploy/linux`), and a WiX MSI (`scripts/package-windows.ps1`,
   `deploy/windows/oarbank-agent.wxs`; `JOINCODEFILE`, `JOINCODE` or `COORDINATOR`). The coordinator is installed from a
-  build by `deploy/oarbankd/install-oarbankd.sh --build`, or by a move.
-- **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the Rust workspace with the agent
-  end-to-end tests and the oarbank-core parity tests on macOS, the Rust workspace on Linux and Windows (x64 and arm64
-  each), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
-  and arm64, and an x64 and an arm64 MSI.
+  build (`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`) by `deploy/oarbankd/install-oarbankd.sh
+  --build` on macOS and Linux and `deploy\oarbankd\install-oarbankd.ps1 -Build` on Windows (two services under
+  virtual accounts), or by a move.
+- **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the chaos tests on macOS and
+  Windows (x64 and arm64), the Rust workspace with the agent end-to-end tests and the oarbank-core parity tests on
+  macOS, the agent end-to-end tests on Windows (x64 and arm64), the Rust workspace on Linux and Windows (x64 and arm64
+  each), the Windows container runtime against a real WSL containers session (x64), and unsigned packages on tags, which the owner signs: the macOS pkg and coordinator build, deb and rpm for x64
+  and arm64, an x64 and an arm64 MSI, and the Windows coordinator builds.
 
 ## Not built yet
 
-- The Windows admin channel (the coordinator runs on macOS and Linux).
 - Protection measurements on hardware other than Apple Silicon.
 - The apt/dnf repository (its hosting and key are the owner's).

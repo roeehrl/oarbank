@@ -23,28 +23,37 @@ class NotACheckout(Exception):
     pass
 
 
-def _tracked(root: Path) -> list[str]:
-    r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True)
-    if r.returncode:
+def _tracked(root: Path) -> list[tuple[str, int]]:
+    """(path, mode) of every tracked file, the mode as git records it (0755 or 0644), whatever this filesystem keeps."""
+    try:
+        r = subprocess.run(["git", "-C", str(root), "ls-files", "-s", "-z"], capture_output=True)
+    except OSError:                               # no git on this machine
+        r = None
+    if r is None or r.returncode:
         raise NotACheckout(f"this coordinator does not run from a git checkout ({root}), so there is no checkout bundle "
                            "for a node to install: move with a signed coordinator build (release signing on), or start "
                            "the standby by hand and prepare the move with its URL")
-    return [p for p in r.stdout.decode().split("\0") if p]
+    out = []
+    for entry in r.stdout.decode().split("\0"):
+        if entry:
+            meta, path = entry.split("\t", 1)
+            out.append((path, 0o755 if meta.startswith("100755") else 0o644))
+    return out
 
 
 def build(repo: Path = REPO) -> bytes:
-    """Reproducible: sorted members, fixed mtimes and owners."""
+    """Reproducible: sorted members, fixed mtimes and owners, git's modes."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=6) as tar:
-        members = [(p, repo / p) for p in _tracked(repo)]
+        members = [(p, repo / p, mode) for p, mode in _tracked(repo)]
         sdk = repo / "vendor" / "oarbank-sdk"
         if (sdk / ".git").exists():
-            members += [(f"vendor/oarbank-sdk/{p}", sdk / p) for p in _tracked(sdk)]
-        for name, path in sorted(members):
+            members += [(f"vendor/oarbank-sdk/{p}", sdk / p, mode) for p, mode in _tracked(sdk)]
+        for name, path, mode in sorted(members):
             if not path.is_file() or path.is_symlink():
                 continue
             info = tar.gettarinfo(str(path), arcname=f"oarbank/{name}")
-            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            info.mtime, info.uid, info.gid, info.uname, info.gname, info.mode = 0, 0, 0, "", "", mode
             with open(path, "rb") as f:
                 tar.addfile(info, f)
     return buf.getvalue()

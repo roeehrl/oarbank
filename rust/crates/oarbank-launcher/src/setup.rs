@@ -128,6 +128,11 @@ fn ensure_account(name: &str, home: &Path, st: &Step) -> Result<()> {
     Ok(())
 }
 
+/// A path the plan names (`/`-separated, relative to the home) in this OS's spelling.
+fn plan_path(home: &Path, rel: &str) -> PathBuf {
+    rel.split('/').filter(|c| !c.is_empty()).fold(home.to_path_buf(), |p, c| p.join(c))
+}
+
 /// `setup [--scope personal|system] [--join-code-file F | --join-code C] [--coordinator URL] [--agent PATH]
 /// [--no-service] [--dry-run]`; `--no-service` lays out the home and prints the agent arguments without loading a
 /// service (image builds, tests).
@@ -159,7 +164,7 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
         ensure_account(a, home.parent().unwrap_or(&home), &st)?;
     }
     for d in p["dirs"].as_array().cloned().unwrap_or_default() {
-        let dir = home.join(d["path"].as_str().unwrap_or(""));
+        let dir = plan_path(&home, d["path"].as_str().unwrap_or(""));
         let mode = u32::from_str_radix(d["mode"].as_str().unwrap_or("0700").trim_start_matches('0'), 8).unwrap_or(0o700);
         st.run(&format!("mkdir -m {mode:o} {}", dir.display()), || {
             std::fs::create_dir_all(&dir)?;
@@ -174,7 +179,7 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
     })?;
     let mut agent_args: Vec<String> = vec![];
     let jc = &p["join_code"];
-    let join_to = home.join(jc["to"].as_str().unwrap_or("state/join-code"));
+    let join_to = plan_path(&home, jc["to"].as_str().unwrap_or("state/join-code"));
     if let Some(code) = code {
         st.run(&format!("write the join code to {} (0600)", join_to.display()), || {
             std::fs::write(&join_to, &code)?;
@@ -246,7 +251,7 @@ pub fn remove(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
     }
     if opts.iter().any(|o| o == "--purge") {
         for rel in p["purge"].as_array().cloned().unwrap_or_default() {
-            let path = home.join(rel.as_str().unwrap_or("-"));
+            let path = plan_path(&home, rel.as_str().unwrap_or("-"));
             if path.exists() || st.dry {
                 st.run(&format!("rm -r {}", path.display()), || Ok(std::fs::remove_dir_all(&path)?))?;
             }

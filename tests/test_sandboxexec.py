@@ -24,7 +24,21 @@ def test_linux_and_windows_wrap_with_the_agent_launcher(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     argv = sandboxexec.wrap(S.Policy(module="m", rw=[str(tmp_path)]), tmp_path / "p.json", ["/usr/bin/python3", "-I", "x.py"])
     assert argv[:4] == [str(launcher), "sandbox-exec", str(tmp_path / "p.json"), "--"] and argv[4:] == ["/usr/bin/python3", "-I", "x.py"]
-    assert json.loads((tmp_path / "p.json").read_text())["module"] == "m"
+    assert json.loads((tmp_path / "p.json").read_text(encoding="utf-8"))["module"] == "m"
+
+
+@pytest.mark.parametrize("interpreter", ["python/bin/python3.12", "python/python.exe"])
+def test_a_coordinator_build_finds_its_own_launcher(tmp_path, monkeypatch, interpreter):
+    """bin/oarbank-sandbox beside python/, whose interpreter is python/bin/python3.x on POSIX and python\\python.exe on
+    Windows (a Windows build once looked for it in the wrong place and refused every module process)."""
+    exe = ".exe" if sys.platform == "win32" else ""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / f"oarbank-sandbox{exe}").write_text("")
+    (tmp_path / interpreter).parent.mkdir(parents=True)
+    (tmp_path / interpreter).write_text("")
+    monkeypatch.delenv("OARBANK_SANDBOX_EXEC", raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / interpreter))
+    assert sandboxexec.launcher() == str((tmp_path / "bin" / f"oarbank-sandbox{exe}").resolve())
 
 
 def test_no_launcher_is_no_backend(monkeypatch, tmp_path):
@@ -39,4 +53,4 @@ def test_no_launcher_is_no_backend(monkeypatch, tmp_path):
 def test_macos_still_uses_seatbelt(tmp_path):
     assert sandboxexec.backend() == "seatbelt"
     argv = sandboxexec.wrap(S.Policy(module="m", rw=[str(tmp_path)]), tmp_path / "p.sb", ["/bin/echo", "hi"])
-    assert "--" in argv and argv[-2:] == ["/bin/echo", "hi"] and (tmp_path / "p.sb").read_text().startswith("(version 1)")
+    assert "--" in argv and argv[-2:] == ["/bin/echo", "hi"] and (tmp_path / "p.sb").read_text(encoding="utf-8").startswith("(version 1)")

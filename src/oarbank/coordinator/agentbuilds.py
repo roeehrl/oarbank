@@ -20,6 +20,7 @@ import shutil
 import struct
 from pathlib import Path
 
+from ..platform import files
 from . import clock
 from . import config as C
 from .db import DB, jl
@@ -112,7 +113,7 @@ def register(db: DB, sha: str, actor: str) -> dict:
     dst = _dir("builds") / sha
     tmp = dst.with_name(f".{sha}.tmp")
     shutil.copyfile(src, tmp)               # a stored copy is read-only: replace it through a rename, never write it
-    os.chmod(tmp, 0o555)
+    files.seal(tmp, executable=True)
     os.replace(tmp, dst)
     src.unlink(missing_ok=True)
     db.x("INSERT INTO agent_builds(sha256, version, path, size, uploaded_at, uploaded_by, platform, format) VALUES(?,?,?,?,?,?,?,?)",

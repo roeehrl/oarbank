@@ -155,7 +155,7 @@ class ConsoleState:
         if self._secret:
             return self._secret
         try:
-            return open(self._secret_path).read().strip() if self._secret_path else None
+            return open(self._secret_path, encoding="utf-8").read().strip() if self._secret_path else None
         except OSError:
             return None
 

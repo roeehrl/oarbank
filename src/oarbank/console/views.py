@@ -379,7 +379,7 @@ def waterfall(r, j: dict, atts: list, now: float | None = None) -> dict:
     span = max(end - start, 1e-6)
     rows, prev_end = [], start
     for a in atts:
-        ph = r.q("SELECT phase, at FROM attempt_phases WHERE attempt_id=? ORDER BY at, phase", (a["attempt_id"],))
+        ph = r.q("SELECT phase, at FROM attempt_phases WHERE attempt_id=? ORDER BY at, rowid", (a["attempt_id"],))
         marks = [(p["phase"], p["at"]) for p in ph]
         if not marks:
             marks = [("granted", a["granted_at"] or prev_end)]
@@ -617,13 +617,14 @@ def agent_builds(r) -> dict:
 
 
 def coordinator(r) -> dict:
-    """The Coordinator page: identity, epoch, role and move phase, the plan and the move, and per node which
-    coordinator key it pinned (from the published public key; the console never reads the private key)."""
+    """The Coordinator page: identity, epoch, role and move phase, where and how it runs (its platform and services, as
+    oarbankd last took them: hostinfo.py), the plan and the move, and per node which coordinator key it pinned (from the
+    published public key; the console never reads the private key)."""
     import base64
     import hashlib
     st = {row["key"]: jl(row["value_json"]) for row in r.q(
         "SELECT key, value_json FROM settings WHERE key IN ('coordinator_cik','coordinator_epoch','coordinator_role',"
-        "'move_phase','fleet_id')")}
+        "'move_phase','fleet_id','coordinator_host')")}
     cik = st.get("coordinator_cik") or ""
     fp = hashlib.sha256(base64.b64decode(cik)).hexdigest() if cik else ""
     plan = (r.q("SELECT plan_id, target_url, target_stable_id, state, created_at FROM coordinator_plans "
@@ -640,7 +641,8 @@ def coordinator(r) -> dict:
     cbuilds = r.q("SELECT sha256, version, platform, seq, signature FROM coordinator_builds ORDER BY uploaded_at DESC LIMIT 20")
     return {"cbuilds": cbuilds, "signing": CC.RELEASE_SIGNING,
             "s": {"role": role, "epoch": st.get("coordinator_epoch") or 1, "phase": st.get("move_phase") or "idle",
-                  "cik_fingerprint": fp, "fleet_id": st.get("fleet_id") or "", "plan": plan, "move": mv},
+                  "cik_fingerprint": fp, "fleet_id": st.get("fleet_id") or "", "plan": plan, "move": mv,
+                  "host": st.get("coordinator_host")},
             "nodes": nodes, "fp": fp}
 
 

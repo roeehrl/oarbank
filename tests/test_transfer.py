@@ -96,10 +96,15 @@ def test_an_interrupted_upload_resumes_from_the_coordinators_offset_and_register
 def test_an_upload_refuses_symlinks_and_paths_that_are_not_portable(env):
     root = folder(env["tmp"])
     (root / "link").symlink_to(root / "big.bin")
-    (root / "a:b.txt").write_text("x")
+    (root / "a b.txt").write_text("x")
+    if os.name == "nt":                               # a junction is a link too
+        import _winapi
+        (root / "d").mkdir()
+        _winapi.CreateJunction(str(root / "d"), str(root / "junction"))
     with pytest.raises(SystemExit) as e:
         T.folder_files(root)
-    assert "link: a symlink" in str(e.value) and "a:b.txt" in str(e.value)
+    assert "link: a link" in str(e.value) and "a b.txt" in str(e.value)
+    assert os.name != "nt" or "junction: a link" in str(e.value)
 
 
 def test_the_default_id_names_the_kind_folder_and_content(env):

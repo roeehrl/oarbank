@@ -17,24 +17,21 @@ import httpx
 URL = os.environ.get("OARBANKD_URL", "http://127.0.0.1:7401")
 
 
-def _local_socket():
-    """The coordinator's local admin socket (its directory is owner-only: reaching it is the credential)."""
+def _local_channel():
+    """A transport to the coordinator's local admin channel when this account can reach it (reaching it is the
+    credential: platform/localchannel.py), else None."""
     if os.environ.get("OARBANKD_URL") or os.environ.get("OARBANK_TOKEN"):
         return None
     from ..coordinator import config as C
-    from ..paths import runtime_socket
-    try:
-        p = runtime_socket(C.HOME, "admin.sock")
-    except OSError:
-        return None
-    return p if p.exists() and os.access(p, os.R_OK | os.W_OK) else None
+    from ..platform import localchannel
+    return localchannel.transport(C.HOME) if localchannel.reachable(C.HOME) else None
 
 
 def http_request(method, url, **kw):
-    """httpx.request, through the local admin socket when this is the coordinator's own account."""
-    sock = _local_socket()
-    if sock and url.startswith(URL):
-        with httpx.Client(transport=httpx.HTTPTransport(uds=str(sock)), base_url="http://oarbank") as c:
+    """httpx.request, through the local admin channel when this is the coordinator's own account."""
+    local = _local_channel()
+    if local and url.startswith(URL):
+        with httpx.Client(transport=local, base_url="http://oarbank") as c:
             return c.request(method, url[len(URL):], **kw)
     return httpx.request(method, url, **kw)
 
@@ -43,13 +40,13 @@ def auth_headers() -> dict:
     """The caller's credential: OARBANK_TOKEN (a personal access token, or the admin token), else the local owner's
     admin token from the coordinator's home (readable only by the account that runs oarbankd)."""
     tok = os.environ.get("OARBANK_TOKEN")
-    if not tok and _local_socket():
+    if not tok and _local_channel():
         return {}
     if not tok:
         from ..coordinator import config as C
         p = C.HOME / "admin.token"
         try:
-            tok = p.read_text().strip()
+            tok = p.read_text(encoding="utf-8").strip()
         except OSError:
             sys.exit(f"no credential: set OARBANK_TOKEN, or run this as the account that runs oarbankd ({p})")
     return {"authorization": f"Bearer {tok}"}
@@ -236,6 +233,16 @@ def cmd_coordinator(a):
     if a.action == "status":
         s = api("GET", "/api/v1/coordinator")
         print(f"role {s['role']}  epoch {s['epoch']}  phase {s['phase']}  fleet {s['fleet_id']}  key {s['cik_fingerprint'][:16]}")
+        h = s["host"]
+        print(f"platform {h['platform']}  {h['manager']}  pid {h['pid']}" + ("" if h["managed"] else " (not run by the service manager)")
+              + f"  sandbox {h['sandbox']['backend'] or 'none'}")
+        for v in h["services"]:
+            print(f"  {v['name']:<30} " + (f"{v['state']}  start {v['start']}  as {v['account']}" + (f"  pid {v['pid']}" if v["pid"] else "")
+                                           if v["installed"] else "not installed"))
+        if "helper" in h["sandbox"]:
+            hp = h["sandbox"]["helper"]
+            print(f"  {hp['name']:<30} " + (f"{hp['state']}  start {hp['start']}" if hp["installed"] else "not installed")
+                  + f"  (module CLI allowlist {hp['allowlist']})")
         if s.get("plan"):
             p = s["plan"]
             print(f"plan {p['plan_id']} -> {p.get('target_url')} ({p['state']})")
@@ -287,10 +294,10 @@ def cmd_owner(a):
         # where the owner keys are, offline: the new coordinator's request names everything the move needs
         if not a.request or not a.out:
             sys.exit("oarbank owner rescue-move --request rescue-request.json --out move.json [--key KEY] [--to-stable-id ID]")
-        stmt = signing.rescue_move_statement(json.loads(Path(a.request).read_text()), a.to_stable_id)
+        stmt = signing.rescue_move_statement(json.loads(Path(a.request).read_text(encoding="utf-8")), a.to_stable_id)
         f = Path(a.key) if a.key else signing.DEFAULT_KEY
         Path(a.out).write_text(json.dumps({"coordinator_move": {"statement": stmt, "signatures": {"owner": signing.sign(stmt, f)}}},
-                                          indent=1) + "\n")
+                                          indent=1) + "\n", encoding="utf-8", newline="\n")
         print(f"wrote {a.out}: on the new coordinator, python -m oarbank.coordinator.rescue sign {a.out}; then publish it at"
               f" a rescue location of the owner key set")
         return
@@ -470,7 +477,7 @@ def cmd_vendor_metadata(a):
     """oarbank vendor-metadata upload <dir>: mirror the vendor's TUF metadata (root, N.root, timestamp, snapshot,
     targets) for agents, which verify agent builds against the vendor root compiled into them."""
     d = Path(a.dir)
-    files = {p.name: p.read_text() for p in sorted(d.glob("*.json"))}
+    files = {p.name: p.read_text(encoding="utf-8") for p in sorted(d.glob("*.json"))}
     if not files:
         sys.exit(f"no .json metadata in {d}")
     res = run_op("vendor.metadata.upload", None, {"files": files}, a.reason, a.yes)
@@ -534,7 +541,7 @@ def cmd_audit(a):
     if a.action == "verify":
         params = {}
         if a.against:          # an off-host copy of the digests (audit/digests.jsonl from another machine)
-            params["digests"] = [json.loads(l) for l in Path(a.against).read_text().splitlines() if l.strip()]
+            params["digests"] = [json.loads(l) for l in Path(a.against).read_text(encoding="utf-8").splitlines() if l.strip()]
         r = run_op("audit.verify", "audit", params, yes=True)["result"]
         print(json.dumps(r, indent=1))
         sys.exit(0 if r["ok"] else 1)
@@ -879,7 +886,8 @@ def cmd_dataset(a):
     elif a.action == "show":
         print(json.dumps(api("GET", f"/api/v1/datasets/{a.what}"), indent=1, default=str))
     elif a.action == "register":
-        print(json.dumps(run_op("datasets.register", None, json.loads(Path(a.what).read_text()), yes=True), indent=1, default=str))
+        params = json.loads(Path(a.what).read_text(encoding="utf-8"))
+        print(json.dumps(run_op("datasets.register", None, params, yes=True), indent=1, default=str))
     else:
         print(json.dumps(api("GET", "/api/v1/datasets" + (f"?kind={a.kind}" if a.kind else "")), indent=1, default=str))
 
@@ -916,7 +924,7 @@ def cmd_folders(a):
 
 def cmd_mod(a):
     """A module's own operation: mod.<module>.<verb> (see `oarbank ops`)."""
-    raw = (Path(a.json).read_text() if Path(a.json).exists() else a.json) if a.json else "{}"
+    raw = (Path(a.json).read_text(encoding="utf-8") if Path(a.json).exists() else a.json) if a.json else "{}"
     params = {**_kv(a.param), **json.loads(raw)}
     print(json.dumps(run_op(f"mod.{a.module.replace('-', '_')}.{a.verb}", a.target, params, a.reason, a.yes, a.confirm, dry_run=a.dry_run),
                      indent=1, default=str))
@@ -925,9 +933,9 @@ def cmd_mod(a):
 def cli_env(tmp: Path, port: int, token: str, module: str) -> dict:
     """The whole environment of a module CLI: nothing inherited but the locale and terminal."""
     from oarbank_sdk import portable
-    return {"PATH": "/usr/bin:/bin", "HOME": str(tmp), "TMPDIR": str(tmp) + "/", "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "OARBANKD_URL": f"http://127.0.0.1:{port}", "OARBANK_TOKEN": token, "OARBANK_MODULE": module,
-            "OARBANK_PLATFORM": portable.host_platform(), "PYTHONUTF8": "1", "TERM": os.environ.get("TERM", "dumb")}
+    return {**portable.os_env(tmp, tmp, os.environ.get("LANG", "C.UTF-8")), "OARBANKD_URL": f"http://127.0.0.1:{port}",
+            "OARBANK_TOKEN": token, "OARBANK_MODULE": module, "OARBANK_PLATFORM": portable.host_platform(),
+            "TERM": os.environ.get("TERM", "dumb")}
 
 
 def cmd_cli(a):
@@ -960,11 +968,15 @@ def cmd_cli(a):
     try:
         if modsandbox.backend() is None:
             sys.exit("no module sandbox backend on this OS: a module CLI does not run unconfined")
+        from ..coordinator import sandboxexec
+        if not sandboxexec.enforced("net.egress-allowlist"):
+            sys.exit("this coordinator's sandbox cannot limit a module CLI to the admin API (on Windows that needs the "
+                     "elevated helper, OarbankHelper, which the agent's package installs)")
         pol = S.Policy(module=info["module_id"], ro=[str(bundle), *S.interpreter_roots(), py], rw=[str(tmp)],
                        net="egress-allowlist", proxy_port=port, kind="cli", exe=py)
-        from ..coordinator import sandboxexec
         argv = sandboxexec.wrap(pol, tmp / "cli.sb", argv)
-        sys.exit(subprocess.run(argv, cwd=str(bundle), env=env).returncode)
+        from ..platform import procs
+        sys.exit(procs.run(argv, detach=False, cwd=str(bundle), env=env).returncode)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

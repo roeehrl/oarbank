@@ -62,9 +62,10 @@ class Fleet:
                 time.sleep(0.1)
         raise RuntimeError("oarbankd did not start")
 
-    def stop(self, sig=signal.SIGTERM):
+    def stop(self, kill=False):
+        """SIGTERM (`kill`: SIGKILL); on Windows both end the process at once (TerminateProcess)."""
         if self.proc and self.proc.poll() is None:
-            self.proc.send_signal(sig)
+            self.proc.kill() if kill else self.proc.terminate()
             self.proc.wait(15)
 
     @property
@@ -94,16 +95,27 @@ class Fleet:
         also kill the module processes of every other suite running on the machine (a Hypothesis run then sees a module
         fault mid-example and reports FlakyStrategyDefinition), and race their exits (ProcessLookupError)."""
         children: dict[int, list[int]] = {}
-        for line in subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, check=True).stdout.splitlines():
-            pid, ppid = map(int, line.split())
+        for pid, ppid, _ in processes():
             children.setdefault(ppid, []).append(pid)
         mine, todo = set(), [self.proc.pid]
         while todo:
             for c in children.get(todo.pop(), []):
                 mine.add(c)
                 todo.append(c)
-        named = subprocess.run(["pgrep", "-f", script], capture_output=True, text=True).stdout.split()
-        return sorted(int(p) for p in named if int(p) in mine)
+        return sorted(pid for pid, _, cmd in processes() if script in cmd and pid in mine)
+
+
+def processes() -> list[tuple[int, int, str]]:
+    """(pid, parent pid, command line) of every process: ps on POSIX, the CIM process list on Windows."""
+    if os.name == "nt":
+        import json
+        from helpers import windows_powershell
+        out = windows_powershell("-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,"
+                                 "CommandLine | ConvertTo-Json -Compress", capture_output=True, text=True, check=True).stdout
+        return [(p["ProcessId"], p["ParentProcessId"], p["CommandLine"] or "") for p in json.loads(out)]
+    rows = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True, text=True, check=True).stdout
+    return [(int(pid), int(ppid), cmd) for pid, ppid, cmd in ((line.split(None, 2) + [""])[:3] for line in rows.splitlines())
+            if pid.isdigit()]
 
 
 def toy_result(n):
@@ -142,7 +154,7 @@ def queue(f: Fleet, n: int, start: int):
 def fleet(tmp_path):
     f = Fleet(tmp_path).start()
     yield f
-    f.stop(signal.SIGKILL)
+    f.stop(kill=True)
 
 
 def test_kill_9_mid_write_leaves_a_consistent_database(fleet):
@@ -152,7 +164,7 @@ def test_kill_9_mid_write_leaves_a_consistent_database(fleet):
     t = threading.Thread(target=agent_loop, args=(fleet, stop, stats), daemon=True)
     t.start()
     time.sleep(2.0)
-    fleet.stop(signal.SIGKILL)                                       # mid-write, no shutdown path
+    fleet.stop(kill=True)                                            # mid-write, no shutdown path
     fleet.start()
     time.sleep(3.0)
     stop.set()
@@ -191,7 +203,7 @@ def test_killing_the_module_process_during_completions_is_a_module_fault_never_c
     pids = fleet.module_pids("toy_module.py")
     assert pids
     for p in pids:                                                   # the coordinator-side module dies
-        os.kill(p, signal.SIGKILL)
+        os.kill(p, getattr(signal, "SIGKILL", signal.SIGTERM))      # Windows: TerminateProcess either way
     codes = []
     for g in grants:
         for _ in range(50):
@@ -213,8 +225,10 @@ def test_ntfy_down_queues_nothing_and_breaks_nothing(fleet):
     db.set_setting("ntfy", {"url": "http://127.0.0.1:9/unreachable"})
     from oarbank.coordinator import core
     core._alert(db, "invariant:S0", "fleet", "chaos: ntfy is down", priority="max")
-    time.sleep(1.5)
     assert db.one("SELECT state FROM alerts WHERE rule='invariant:S0'")["state"] == "open"        # the inbox has it
+    deadline = time.monotonic() + 15        # a refused connection takes Windows about 2 s (it retries the SYN twice)
+    while not db.one("SELECT 1 FROM events WHERE kind='notify_failed'") and time.monotonic() < deadline:
+        time.sleep(0.2)
     assert db.one("SELECT 1 FROM events WHERE kind='notify_failed'")
     r = fleet.call("POST", "/v1/agent/heartbeat", {"attempts": [], "telemetry": {}, "capacity": {}})
     assert r.status_code == 200
@@ -223,10 +237,20 @@ def test_ntfy_down_queues_nothing_and_breaks_nothing(fleet):
 def test_a_hand_edited_audit_row_fails_verification_and_raises_p5(fleet):
     fleet.op("nodes.run_doctor", target=fleet.node_id)
     fleet.stop()
-    c = sqlite3.connect(fleet.db_path)
-    c.execute("UPDATE audit SET reason='edited by hand' WHERE event_id=(SELECT MAX(event_id) FROM audit)")
-    c.commit()
-    c.close()
+    # Windows releases a terminated process's file locks a little later ("the time it takes depends upon available
+    # system resources", LockFileEx): until then SQLite's recovery of the WAL reports a disk I/O error
+    for attempt in range(50):
+        c = sqlite3.connect(fleet.db_path)
+        try:
+            c.execute("UPDATE audit SET reason='edited by hand' WHERE event_id=(SELECT MAX(event_id) FROM audit)")
+            c.commit()
+            c.close()
+            break
+        except sqlite3.OperationalError:
+            c.close()
+            if attempt == 49 or os.name == "posix":
+                raise
+            time.sleep(0.2)
     from oarbank.coordinator import app as coord_app
     db = fleet.db()
     coord_app._audit_hourly(db)
@@ -239,7 +263,7 @@ def test_a_hand_edited_audit_row_fails_verification_and_raises_p5(fleet):
 
 def test_killing_the_console_leaves_the_agent_path_untouched(fleet, tmp_path):
     secret = tmp_path / "console.secret"
-    secret.write_text((fleet.home / "console.secret").read_text())
+    secret.write_text((fleet.home / "console.secret").read_text(encoding="utf-8"))
     port = free_port()
     con = subprocess.Popen([sys.executable, "-m", "oarbank.console", "--port", str(port), "--oarbankd", fleet.admin,
                             "--db", str(fleet.db_path), "--secret-file", str(secret), "--frames-port", str(free_port())],
@@ -256,7 +280,7 @@ def test_killing_the_console_leaves_the_agent_path_untouched(fleet, tmp_path):
         t = threading.Thread(target=agent_loop, args=(fleet, stop, before), daemon=True)
         t.start()
         time.sleep(2)
-        con.send_signal(signal.SIGKILL)                              # the console dies mid-flight
+        con.kill()                                                   # the console dies mid-flight
         con.wait(5)
         mid = dict(before)
         time.sleep(2)

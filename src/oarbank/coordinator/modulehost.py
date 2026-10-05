@@ -147,14 +147,15 @@ class _Proc:
 
     def __init__(self, spec: ModuleSpec, callbacks: dict[str, Callable[[str, dict], Any]], log_path: Path | None):
         self.spec = spec
-        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.environ.get("HOME", "/tmp"),
-               "OARBANK_MODULE": spec.name, **spec.env}
+        env = {"OARBANK_MODULE": spec.name, **spec.env}         # spec.env carries the OS's variables (coordinator_env)
         argv = resolve_argv(spec)
         if isinstance(spec.sandbox, Exception):          # no sandbox backend on this OS: refuse, never run unconfined
             raise OSError(str(spec.sandbox))
         argv = sandboxed_argv(spec, argv)
-        self.proc = subprocess.Popen(argv, cwd=spec.cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, start_new_session=True)
+        from ..platform import procs
+        self.box = procs.Contained(argv, cwd=spec.cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        self.proc = self.box.proc
         self.callbacks = callbacks
         self.consecutive_timeouts = 0
         self.peer = Peer(self.proc.stdout, self.proc.stdin, self._on_request, self._on_notification,
@@ -190,7 +191,7 @@ class _Proc:
             if self.delivered:                     # a safety net: an encoded or split value passes through
                 from .modsecrets import redact
                 line = redact(line, self.delivered)
-            with open(self._log_path, "a") as f:
+            with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + line.rstrip("\n") + "\n")
         except OSError:
             pass
@@ -212,11 +213,9 @@ class _Proc:
         try:
             self.proc.wait(grace)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(self.proc.pid, 9)
-            except OSError:
-                self.proc.kill()
+            self.box.kill()
             self.proc.wait()
+        self.box.close()
 
 
 class ModuleHost:
@@ -253,6 +252,8 @@ class ModuleHost:
         if h.consecutive_failures >= FAULT_AFTER:
             h.state, h.fault_until = "fault", self.clock() + backoff
             log.warning("module %s in fault for %.0f s after %d failures: %s", name, backoff, h.consecutive_failures, detail)
+        else:
+            log.warning("module %s %s (%d in a row): %s", name, kind, h.consecutive_failures, detail)
         h.alerting = True
         self._emit(name, "fault" if h.state == "fault" else "crash", h.last_error)
         return ModuleUnavailable(name, kind, detail, retry_after=backoff)
@@ -295,7 +296,7 @@ class ModuleHost:
                 p.kill(0.5)
                 raise self._fail(name, "handshake", f"{type(e).__name__}: {e}")
             from . import sandboxexec
-            if not sandboxexec.is_confined(p.proc.pid):       # it answered, so it is past exec: it must be confined
+            if not sandboxexec.is_confined(p.box):       # it answered, so it is past exec: it must be confined
                 p.kill(0.5)
                 raise self._fail(name, "sandbox_missing", "the module process is not sandboxed")
             h.state, h.pid = "ready", p.proc.pid

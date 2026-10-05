@@ -4,6 +4,8 @@ import os
 import subprocess
 import time
 
+from oarbank.platform import files
+
 
 def run_agent(agent_bin, home, *args, timeout=60, **kw):
     env = {**os.environ, "OARBANK_LOG": "info"}
@@ -31,10 +33,10 @@ def test_enroll_approve_hello_over_mtls(agent_bin, coordinator, tmp_path):
                     timeout=60)
         facts = json.loads(node["facts_json"]) if isinstance(node.get("facts_json"), str) else node.get("facts") or {}
         assert node["platform"] == "darwin-arm64" or node.get("platform"), node
-        cfg = json.loads((home / "agent.json").read_text())
+        cfg = json.loads((home / "agent.json").read_text(encoding="utf-8"))
         trust = cfg["coordinator_trust"]
         assert trust["cik"] and trust["ca_spki_sha256"] and cfg["node_id"] == node["node_id"]
-        assert (home / "keys" / "node.key").stat().st_mode & 0o077 == 0
+        assert files.owner_only(home / "keys" / "node.key")
         hb0 = node.get("last_heartbeat_at") or 0
         wait(lambda: next((n for n in coordinator.api("GET", "/api/v1/fleet")["nodes"]
                            if (n.get("last_heartbeat_at") or 0) > hb0), None), timeout=40)
@@ -53,7 +55,7 @@ def test_a_join_code_names_the_coordinator_pins_its_ca_and_approves_the_node(age
         node = wait(lambda: next((n for n in coordinator.api("GET", "/api/v1/fleet")["nodes"] if n.get("last_hello_at")), None), 60)
         assert not coordinator.api("GET", "/api/v1/fleet")["enrollments"]            # never waited for the owner
         assert node["hostname"] == "mini-2"                                             # the label names it, after hello too
-        cfg = json.loads((home / "agent.json").read_text())
+        cfg = json.loads((home / "agent.json").read_text(encoding="utf-8"))
         assert cfg["coordinator"] == coordinator.url and "join_secret" not in cfg
     finally:
         p.terminate()

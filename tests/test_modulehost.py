@@ -71,7 +71,7 @@ def test_calls_and_health(tmp_path, mod_file):
         hs = h.health("m")
         assert hs["state"] == "ready" and hs["calls"] == 1 and hs["module_version"] == "0.0.1"
         time.sleep(0.2)
-        assert "stderr noise" in (tmp_path / "logs" / "modules" / "m.log").read_text()
+        assert "stderr noise" in (tmp_path / "logs" / "modules" / "m.log").read_text(encoding="utf-8")
     finally:
         h.close()
 

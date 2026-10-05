@@ -28,7 +28,7 @@ def _tokens(block: str) -> dict:
 
 
 def schemes() -> dict:
-    css = CSS.read_text()
+    css = CSS.read_text(encoding="utf-8")
     light = _tokens(css.split("@media")[0])
     dark_block = re.search(r"@media \(prefers-color-scheme: dark\) \{(.*?)\}\s*\}", css, re.S).group(1)
     return {"light": light, "dark": {**light, **_tokens(dark_block)}}

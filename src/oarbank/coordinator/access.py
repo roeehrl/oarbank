@@ -74,7 +74,7 @@ def ensure_admin_token(home: Path) -> str:
     """The local owner's credential: created once, owner-only; rotated with `oarbankd rotate-admin-token`."""
     p = admin_token_path(home)
     if p.exists():
-        return p.read_text().strip()
+        return p.read_text(encoding="utf-8").strip()
     return rotate_admin_token(home)
 
 
@@ -89,7 +89,7 @@ def check_admin_token(home: Path, presented: str) -> bool:
     p = admin_token_path(home)
     if not presented or not p.exists():
         return False
-    return hmac.compare_digest(p.read_text().strip().encode(), presented.encode())
+    return hmac.compare_digest(p.read_text(encoding="utf-8").strip().encode(), presented.encode())
 
 
 # ------------------------------------------------------------------ passwords and TOTP

@@ -74,10 +74,9 @@ There is no `required` flag and no manifest scope: a stage that lists a secret n
   |---|---|
   | macOS | the login Keychain, a generic password `module-secrets` (the store's default there) |
   | Linux | `<home>/keys/module-secrets.key`, mode 0600 in a 0700 directory owned by the coordinator's account |
-  | Windows | `<home>\keys\module-secrets.key`, the key wrapped with DPAPI (`CryptProtectData`, current user) in a file whose directory is private to the account |
+  | Windows | `<home>\keys\module-secrets.dpapi`, the key wrapped with DPAPI (`CryptProtectData`, for the coordinator service's virtual account) in an owner-only file (windows-coordinator.md) |
 
-  Windows is not a coordinator platform yet; the store's DPAPI backend is built and tested on its own so the
-  coordinator inherits it. Hardware keys (Secure Enclave, TPM through systemd-creds) are an open question below.
+  Hardware keys (Secure Enclave, TPM through systemd-creds) are an open question below.
 - **Fingerprint.** `fp:` and the first 16 hex digits of HMAC-SHA256(fingerprint key, value). The fingerprint key is a
   random fleet-wide key stored like a secret (encrypted, carried by moves), so a fingerprint is stable across moves and
   cannot be brute-forced from the console. The owner compares it with what `oarbank secret set` printed.

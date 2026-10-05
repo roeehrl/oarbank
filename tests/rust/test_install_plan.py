@@ -8,15 +8,16 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import CARGO, REPO, agent_env  # noqa: E402
+import agentbin  # noqa: E402
+from conftest import agent_env, pointer  # noqa: E402
+from helpers import stop_tree  # noqa: E402
+from oarbank.platform import files  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
-LAUNCHER = REPO / "rust" / "target" / "debug" / "oarbank-launcher"
+LAUNCHER = agentbin.LAUNCHER_BIN    # built with the agent by the agent_bin fixture
 
 
 def test_setup_then_the_launcher_joins_with_the_code_file(agent_bin, coordinator, tmp_path):
-    env = {**os.environ, "PATH": f"{os.path.dirname(CARGO)}:{os.environ.get('PATH', '')}"}
-    assert subprocess.run([CARGO, "build", "-q", "-p", "oarbank-launcher"], cwd=REPO / "rust", env=env).returncode == 0
     plan = coordinator.api("POST", "/api/v1/ops/nodes.join_code", json={"params": {"label": "pkg"}, "dry_run": True})["plan"]
     code = coordinator.api("POST", "/api/v1/ops/nodes.join_code", json={"plan_id": plan["plan_id"], "reason": "e2e"})["result"]["code"]
     (tmp_path / "code.txt").write_text(code + "\n")
@@ -25,9 +26,11 @@ def test_setup_then_the_launcher_joins_with_the_code_file(agent_bin, coordinator
                         "--agent", str(agent_bin), "--no-service"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert f"run --join-file {home / 'state' / 'join-code'}" in r.stdout
-    mode = lambda p: stat.S_IMODE(os.stat(p).st_mode)
-    assert mode(home) == 0o700 and mode(home / "versions") == 0o755 and mode(home / "state" / "join-code") == 0o600
-    assert os.path.islink(home / "current")
+    if os.name == "posix":                    # the plan's modes; Windows keeps none (its homes get DACLs: icacls)
+        mode = lambda p: stat.S_IMODE(os.stat(p).st_mode)
+        assert mode(home) == 0o700 and mode(home / "versions") == 0o755 and mode(home / "state" / "join-code") == 0o600
+    assert files.owner_only(home / "state" / "join-code")
+    assert "versions" in pointer(home / "current")
     p = subprocess.Popen([str(LAUNCHER), "--home", str(home), "run", "--join-file", str(home / "state" / "join-code")],
                          env=agent_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out = ""
@@ -35,10 +38,10 @@ def test_setup_then_the_launcher_joins_with_the_code_file(agent_bin, coordinator
         node = wait(lambda: next((n for n in coordinator.api("GET", "/api/v1/fleet")["nodes"] if n.get("last_hello_at")), None), 60)
         assert node["lifecycle"] != "pending"
         assert not (home / "state" / "join-code").exists()
-        cfg = json.loads((home / "agent.json").read_text())
+        cfg = json.loads((home / "agent.json").read_text(encoding="utf-8"))
         assert cfg["coordinator"] == coordinator.url and "join_secret" not in cfg
     finally:
-        p.terminate()
+        stop_tree(p.pid)                      # the launcher and the agent it runs
         out = p.communicate(timeout=30)[0]
         print(out[-4000:])
 

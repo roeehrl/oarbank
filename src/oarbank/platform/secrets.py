@@ -44,7 +44,7 @@ def get_or_create(name: str, home, size: int = 32) -> bytes:
         return raw
     p = Path(home) / "keys" / f"{name}.key"
     if p.exists():
-        return base64.b64decode(p.read_text().strip())
+        return base64.b64decode(p.read_text(encoding="utf-8").strip())
     files.private_dir(p.parent)
     raw = os.urandom(size)
     files.write_private(p, base64.b64encode(raw).decode() + "\n")

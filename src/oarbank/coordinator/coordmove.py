@@ -232,12 +232,12 @@ def manifest(db: DB) -> dict:
             continue
         if p.suffix in (".sqlite3", ".db") or p.name.endswith((".sqlite3-wal", ".sqlite3-shm", ".db-wal", ".db-shm")):
             if p.suffix in (".sqlite3", ".db"):
-                dbs.append(str(rel))
+                dbs.append(rel.as_posix())
             continue
-        files.append({"path": str(rel), "size": p.stat().st_size, "sha256": _sha_cached(p)})
+        files.append({"path": rel.as_posix(), "size": p.stat().st_size, "sha256": _sha_cached(p)})
     # blobs the database references outside the home (datasets registered from files on this machine, e.g. a
     # module's archive and tools): they move too, as external/<digest>, and the target rewrites their paths
-    inside = str(root.resolve()) + "/"
+    inside = os.path.join(str(root.resolve()), "")
     for b in db.q("SELECT digest, path, size FROM blobs WHERE path IS NOT NULL"):
         if b["digest"] in skip:
             continue
@@ -662,7 +662,7 @@ def finalize(db: DB, actor: str) -> dict:
     if m and now() - (m["ended_at"] or 0) < PROBATION_S and not os.environ.get("OARBANKD_MOVE_SKIP_PROBATION"):
         left = PROBATION_S - (now() - (m["ended_at"] or 0))
         raise MoveError(f"probation has {left / 3600:.1f} h left (stragglers may still need the redirect)")
-    (home(db) / "FINALIZED").write_text(json.dumps({"at": now(), "by": actor}) + "\n")
+    (home(db) / "FINALIZED").write_text(json.dumps({"at": now(), "by": actor}) + "\n", encoding="utf-8", newline="\n")
     db.event("coordinator_finalized", actor=actor)
     return {"finalized": True, "home": str(home(db)), "note": "oarbankd stops now and will not start here again"}
 
@@ -676,7 +676,9 @@ def _notify(db: DB, message: str, priority: str = "default"):
 
 
 def status(db: DB) -> dict:
-    """For the console, oarbank and the API: the plan, the move, the phase, which agents followed."""
+    """For the console, oarbank and the API: the plan, the move, the phase, which agents followed, and where and how
+    this coordinator runs (hostinfo.py, taken now)."""
+    from . import hostinfo
     p = plan(db) or db.one("SELECT * FROM coordinator_plans ORDER BY created_at DESC LIMIT 1")
     m = move(db)
     nodes = db.q("SELECT hostname, node_id, json_extract(agent_update_json,'$.state') u, coordinator_move_json, last_heartbeat_at "
@@ -687,4 +689,4 @@ def status(db: DB) -> dict:
             "move": {k: v for k, v in (m or {}).items() if k not in ("statement",)} if m else None,
             "agents": [{"hostname": n["hostname"], "node_id": n["node_id"], "move": jl(n["coordinator_move_json"]),
                         "last_heartbeat_at": n["last_heartbeat_at"]} for n in nodes],
-            "min_timelock_s": MIN_TIMELOCK_S, "default_timelock_s": DEFAULT_TIMELOCK_S}
+            "min_timelock_s": MIN_TIMELOCK_S, "default_timelock_s": DEFAULT_TIMELOCK_S, "host": hostinfo.refresh(db)}

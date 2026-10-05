@@ -12,7 +12,6 @@ are approved. Releases then carry the approved grants to agents, which enforce t
 """
 import hashlib
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -54,9 +53,10 @@ def coordinator_policy(home: Path, name: str, module_id: str, bundle: Path):
         return NoBackend(f"no module sandbox backend on {sys.platform} yet: {module_id} cannot run on this coordinator")
     from oarbank_sdk import sandbox as S
     data, tmp = data_dir(home, name), tmp_dir(home, name)
+    from ..platform import files
     for d in (data, tmp, profile_dir(home)):
-        d.mkdir(parents=True, exist_ok=True)
-        os.chmod(d, 0o700)
+        if not d.is_dir():                        # once: on Windows the sandbox adds the module's own entry after
+            files.private_dir(d)
     from .modulehost import module_python
     py = module_python(bundle)                    # the bundle's .venv interpreter (a symlink chain) or the host's
     return S.Policy(module=module_id, ro=[str(bundle), *S.interpreter_roots(), py], rw=[str(data), str(tmp)],
@@ -66,7 +66,7 @@ def coordinator_policy(home: Path, name: str, module_id: str, bundle: Path):
 def coordinator_env(home: Path, name: str) -> dict:
     from oarbank_sdk import portable
     data, tmp = data_dir(home, name), tmp_dir(home, name)
-    return {"HOME": str(data), "TMPDIR": str(tmp) + "/", "OARBANK_MODULE_DATA": str(data), "OARBANK_MODULE_NAME": name,
+    return {**portable.os_env(data, tmp), "OARBANK_MODULE_DATA": str(data), "OARBANK_MODULE_NAME": name,
             "OARBANK_PLATFORM": portable.host_platform(), "PYTHONDONTWRITEBYTECODE": "1"}
 
 

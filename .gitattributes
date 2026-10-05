@@ -1,0 +1,3 @@
+# Every text file is LF on every platform: bundle digests, the conformance kit's portability check and the fixtures
+# the suite builds modules from need it (Git for Windows checks out CRLF otherwise).
+* text=auto eol=lf

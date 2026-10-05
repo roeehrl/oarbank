@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn work_directories_left_by_an_earlier_run_are_removed_at_start() {
-        let home = scratch("clear");
+        let (_home, home) = scratch("clear");
         let layout = Layout::new(home.clone());
         std::fs::create_dir_all(layout.work().join("17/.grants")).unwrap();
         std::fs::write(layout.work().join("17/.grants/secrets.json"), "{}").unwrap();
@@ -849,7 +849,7 @@ mod tests {
         let text = "calling with sk-live-0123456789-extra and sk-live-0123456789; pin 1234";
         assert_eq!(redact(text, &s), "calling with [secret:long] and [secret:api_key]; pin 1234");
         assert!(secrets_of(&json!({"spec": {}})).is_empty(), "a grant for another stage carries none");
-        let dir = scratch("secrets-file");
+        let (_dir, dir) = scratch("secrets-file");
         assert!(secrets_file(&dir, &[]).unwrap().is_none());
         let f = secrets_file(&dir, &s).unwrap().unwrap();
         let doc: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
@@ -861,11 +861,11 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oarbank-control-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// (what removes the scratch directory when dropped, its path)
+    fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let d = crate::scratch(&format!("control-{name}"));
+        let p = d.path().to_path_buf();
+        (d, p)
     }
 
     fn seq_of(doc: &str) -> Option<i64> {
@@ -914,7 +914,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_nudge_follows_the_replaced_document() {
-        let ws = scratch("unix");
+        let (_ws, ws) = scratch("unix");
         let mut control = ControlFile::create(&ws).unwrap();
         assert_eq!(seq_of(&std::fs::read_to_string(ws.join("control.json")).unwrap()), Some(0));
         let mut cmd = std::process::Command::new("python3");
@@ -934,7 +934,6 @@ mod tests {
         assert_eq!((seen["seq"].as_i64(), seen["pause"].as_bool()), (Some(1), Some(true)));
         procs::signal_group(child.id() as i32, procs::Sig::Kill);
         let _ = child.wait();
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// A waiter woken by the control event reads control.json: it must already be the new document.
@@ -943,7 +942,7 @@ mod tests {
     fn the_nudge_follows_the_replaced_document() {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
-        let ws = scratch("windows");
+        let (_ws, ws) = scratch("windows");
         let mut control = ControlFile::create(&ws).unwrap();
         assert_eq!(seq_of(&std::fs::read_to_string(ws.join("control.json")).unwrap()), Some(0));
         let mut cmd = std::process::Command::new("cmd.exe");
@@ -958,6 +957,5 @@ mod tests {
         control.write(json!({"pause": true})).unwrap();
         let seen: Value = serde_json::from_str(&waiter.join().unwrap().expect("the event was set")).unwrap();
         assert_eq!((seen["seq"].as_i64(), seen["pause"].as_bool()), (Some(1), Some(true)));
-        let _ = std::fs::remove_dir_all(&ws);
     }
 }

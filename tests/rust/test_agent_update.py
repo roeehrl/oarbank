@@ -6,18 +6,9 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import CARGO, REPO, agent_env  # noqa: E402
+from conftest import agent_env, build_version, pointer  # noqa: E402
 from test_agent_session import wait  # noqa: E402
-
-
-def build(version, target, crash=False):
-    env = {**os.environ, "PATH": f"{os.path.dirname(CARGO)}:{os.environ.get('PATH', '')}", "OARBANK_AGENT_VERSION": version}
-    if crash:
-        env["OARBANK_AGENT_TEST_CRASH"] = "1"
-    r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-agent", "-p", "oarbank-launcher", "--target-dir", str(target)],
-                       cwd=REPO / "rust", env=env, capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr[-2000:]
-    return target / "debug" / "oarbank-agent", target / "debug" / "oarbank-launcher"
+from helpers import stop_tree  # noqa: E402
 
 
 def upload_and_canary(c, binary, node_id):
@@ -34,10 +25,9 @@ def node(c):
 
 
 def test_canary_update_confirms_and_a_broken_build_rolls_back(coordinator, tmp_path):
-    t = REPO / "rust" / "target-e2e"
-    v1, launcher = build("1.0.0-alpha.1", t / "v1")
-    v2, _ = build("1.0.0-alpha.2", t / "v2")
-    v3, _ = build("1.0.0-alpha.3", t / "v3", crash=True)
+    v1, launcher = build_version("1.0.0-alpha.1", tmp_path / "v1")
+    v2, _ = build_version("1.0.0-alpha.2", tmp_path / "v2")
+    v3, _ = build_version("1.0.0-alpha.3", tmp_path / "v3", {"OARBANK_AGENT_TEST_CRASH": "1"})
     home = tmp_path / "agent"
     home.mkdir()
     assert subprocess.run([str(launcher), "--home", str(home), "install", str(v1)], capture_output=True).returncode == 0
@@ -53,13 +43,13 @@ def test_canary_update_confirms_and_a_broken_build_rolls_back(coordinator, tmp_p
         wait(lambda: node(coordinator)["agent_build"] == sha2, timeout=120)
         wait(lambda: json.loads(node(coordinator)["agent_update_json"] or "{}").get("state") == "confirmed", timeout=60)
         assert node(coordinator)["agent_version"] == "1.0.0-alpha.2"
-        assert "1.0.0-alpha.2" in os.readlink(home / "current")
+        assert "1.0.0-alpha.2" in pointer(home / "current")
         sha3 = upload_and_canary(coordinator, v3, n["node_id"])
         upd = wait(lambda: (lambda u: u if u.get("state") == "rolled_back" else None)(
             json.loads(node(coordinator)["agent_update_json"] or "{}")), timeout=180)
         assert upd["target"] == sha3 and "failed to start" in upd["error"]
-        assert node(coordinator)["agent_build"] == sha2 and "1.0.0-alpha.2" in os.readlink(home / "current")
+        assert node(coordinator)["agent_build"] == sha2 and "1.0.0-alpha.2" in pointer(home / "current")
     finally:
-        p.terminate()
+        stop_tree(p.pid)                      # the launcher and the agent it runs
         out = p.communicate(timeout=20)[0]
         print(out[-6000:])

@@ -181,7 +181,7 @@ fn expect_line(rx: &mpsc::Receiver<(String, Instant)>, child: &mut Child, want: 
 
 #[test]
 fn a_sandboxed_runner_pauses_resumes_and_stops_on_the_agents_nudges() {
-    let (bundle, ws) = (scratch("bundle"), scratch("ws"));
+    let ((_bundle, bundle), (_ws, ws)) = (scratch("bundle"), scratch("ws"));
     std::fs::copy(SDK_CONTROL, bundle.join("control.py")).expect("the SDK's control.py (vendor/oarbank-sdk)");
     std::fs::write(bundle.join("runner.py"), RUNNER).unwrap();
     write_control(&ws, 0, serde_json::json!({}));
@@ -214,6 +214,4 @@ fn a_sandboxed_runner_pauses_resumes_and_stops_on_the_agents_nudges() {
     eprintln!("reaction latency: {}", took.iter().map(|(e, d)| format!("{e} {:.1} ms", d.as_secs_f64() * 1e3)).collect::<Vec<_>>().join(", "));
     assert_eq!(code, Some(3));
     assert!(took.iter().all(|(_, d)| *d < LATENCY), "{took:?}");
-    let _ = std::fs::remove_dir_all(&bundle);
-    let _ = std::fs::remove_dir_all(&ws);
 }

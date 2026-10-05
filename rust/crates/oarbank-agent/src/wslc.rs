@@ -1062,7 +1062,8 @@ mod imp {
                 eprintln!("set OARBANK_WSLC_SDK to wslcsdk.dll");
                 return;
             };
-            let home = std::env::temp_dir().join(format!("oarbank-wslc-{}", std::process::id()));
+            let tmp = crate::scratch("wslc");
+            let home = tmp.path().to_path_buf();
             std::fs::create_dir_all(home.join("state")).unwrap();
             let rt = WslcRuntime::new(&home, path.clone(), find_wslc(), 2.0, 2);
             let host = Host { home: home.clone(), session: rt.session.clone(), wslc: rt.wslc.clone(), sdk: path.clone(), mem_gb: 2.0, cpus: 2,
@@ -1083,7 +1084,6 @@ mod imp {
                 }
             }
             unsafe { (sdk.release)(session) };
-            let _ = std::fs::remove_dir_all(&home);
         }
     }
 }
@@ -1261,13 +1261,13 @@ mod tests {
         assert!(j["missing"][0]["fix"].as_str().unwrap().contains("hostLoopback: none"));
         assert_eq!(absent_report()["state"], "absent");
         // what the facts and the GPU probe read back
-        let home = std::env::temp_dir().join(format!("oarbank-wslc-state-{}", std::process::id()));
+        let tmp = crate::scratch("wslc-state");
+        let home = tmp.path().to_path_buf();
         assert_eq!(facts(&home), absent_report());
         assert_eq!(container_apis(&home).0, Vec::<String>::new());
         std::fs::create_dir_all(home.join("state")).unwrap();
         std::fs::write(report_file(&home), serde_json::to_vec(&st).unwrap()).unwrap();
         assert_eq!(facts(&home), ready.json());
         assert_eq!(container_apis(&home), (vec!["cuda".to_string(), "directml".to_string()], st["evidence"].as_str().unwrap().to_string()));
-        let _ = std::fs::remove_dir_all(&home);
     }
 }

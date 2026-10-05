@@ -272,7 +272,7 @@ def test_install_refuses_a_bootstrap_stage_the_sdk_refuses(tmp_path, db, monkeyp
     from oarbank_sdk import bundle as B, manifest as mf
     src = tmp_path / "depot"
     shutil.copytree(DEPOT_DIR, src, ignore=shutil.ignore_patterns("__pycache__"))
-    (src / "oarbank-module.toml").write_text(edit((src / "oarbank-module.toml").read_text()))
+    (src / "oarbank-module.toml").write_text(edit((src / "oarbank-module.toml").read_text(encoding="utf-8")))
     with pytest.raises(ValueError, match=why):
         B.build(src, tmp_path / "refused.mfb")                          # the SDK refuses to build it
     with monkeypatch.context() as m:                                    # a bundle made by a tool that skips the rules

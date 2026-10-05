@@ -34,7 +34,7 @@ def db(tmp_path):
 def test_approval_shows_the_prefix_and_the_key_never_digests(db):
     from oarbank_sdk import images
     st = modsandbox.status(db, "vault", "1.0.0")
-    key = (VAULT_DIR / "keys" / "tasks.pub").read_text()
+    key = (VAULT_DIR / "keys" / "tasks.pub").read_text(encoding="utf-8")
     assert st["requests"]["container_sets"] == [{"name": "tasks", "registry": "registry.example.org", "repository": "bench/tasks/",
                                                   "platform": "linux/amd64", "key_sha256": images.key_sha256(key), "index": None}]
     text = modsandbox.describe(st["requests"])
@@ -46,7 +46,7 @@ def test_the_release_carries_the_sets_with_their_keys(db):
     entry = releases.module_entry("vault", "1.0.0", "d", db.abs(modstore.record(db, "vault", "1.0.0")["path"]))
     sets = entry["sandbox"]["container_sets"]
     assert sets == [{"name": "tasks", "registry": "registry.example.org", "repository": "bench/tasks/", "platform": "linux/amd64",
-                     "key": (VAULT_DIR / "keys" / "tasks.pub").read_text()}]
+                     "key": (VAULT_DIR / "keys" / "tasks.pub").read_text(encoding="utf-8")}]
 
 
 def test_jobs_list_digest_pinned_images_inside_a_set(db):
@@ -98,7 +98,7 @@ def test_five_hundred_distinct_signed_images_run_under_one_approval_and_each_fir
 def gpu_variant(tmp_path):
     src = tmp_path / "vault-gpu"
     shutil.copytree(VAULT_DIR, src)
-    m = (src / "oarbank-module.toml").read_text()
+    m = (src / "oarbank-module.toml").read_text(encoding="utf-8")
     m = m.replace('capabilities = ["deterministic_output"]', 'capabilities = ["deterministic_output"]\ngpu = { use = "exclusive", in_container = true }')
     m = m.replace("pools = { containers = 1 } }", "pools = { containers = 1, gpu = 1 } }")
     (src / "oarbank-module.toml").write_text(m)

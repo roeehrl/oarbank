@@ -181,11 +181,11 @@ fn system_dirs() -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oarbank-folders-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::canonicalize(d).unwrap()
+    /// (what removes the scratch directory when dropped, its canonical path)
+    fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let d = crate::scratch(&format!("folders-{name}"));
+        let p = std::fs::canonicalize(d.path()).unwrap();
+        (d, p)
     }
 
     fn stmt(seq: i64, folders: Value) -> Value {
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn a_statement_applies_once_for_this_node_with_a_rising_seq() {
-        let t = scratch("seq");
+        let (_t, t) = scratch("seq");
         std::fs::create_dir_all(t.join("in")).unwrap();
         let d = stmt(2, json!({"inputs": {"access": "read", "path": t.join("in").display().to_string()}}));
         let f = apply(&Folders::default(), &d, "n1", Some("f1"), None, &t.join("data")).unwrap().unwrap();
@@ -203,7 +203,6 @@ mod tests {
         assert!(apply(&f, &d, "n1", Some("f1"), None, &t.join("data")).unwrap().is_none());      // not newer
         assert!(apply(&Folders::default(), &d, "n2", Some("f1"), None, &t).is_err());              // another node
         assert!(apply(&Folders::default(), &d, "n1", Some("f2"), None, &t).is_err());              // another fleet
-        let _ = std::fs::remove_dir_all(t);
     }
 
     #[test]
@@ -211,7 +210,7 @@ mod tests {
         use base64::Engine;
         use ed25519_dalek::Signer;
         let b64 = base64::engine::general_purpose::STANDARD;
-        let t = scratch("sig");
+        let (_t, t) = scratch("sig");
         let owner = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let key = b64.encode(owner.verifying_key().to_bytes());
         let mut d = stmt(1, json!({}));
@@ -220,12 +219,11 @@ mod tests {
         assert!(apply(&Folders::default(), &d, "n1", None, Some(&key), &t).is_err());              // another key signed it
         d["signature"] = json!(b64.encode(owner.sign(d["statement"].as_str().unwrap().as_bytes()).to_bytes()));
         assert_eq!(apply(&Folders::default(), &d, "n1", None, Some(&key), &t).unwrap().unwrap().seq, 1);
-        let _ = std::fs::remove_dir_all(t);
     }
 
     #[test]
     fn roots_homes_data_roots_system_directories_and_overlaps_are_refused() {
-        let t = scratch("paths");
+        let (_t, t) = scratch("paths");
         let data = t.join("oarbank");
         for d in ["in", "in/sub", "out", "oarbank/agent"] {
             std::fs::create_dir_all(t.join(d)).unwrap();
@@ -253,6 +251,5 @@ mod tests {
         let granted = f.granted(&json!([{"id": "outbox", "access": "write"}, {"id": "outbox", "access": "read"},
                                         {"id": "inputs", "access": "read"}]));
         assert_eq!(granted.keys().collect::<Vec<_>>(), ["outbox"]);
-        let _ = std::fs::remove_dir_all(t);
     }
 }
