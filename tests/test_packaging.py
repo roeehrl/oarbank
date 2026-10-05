@@ -410,7 +410,7 @@ def test_the_package_check_finds_links_out_and_build_paths(tmp_path):
         assert check.bad_links(rt) == []
         (rt / "DLLs").symlink_to(target, target_is_directory=True)     # absolute: refused
         (rt / "up").symlink_to(os.path.join("..", target.name))        # relative but outside: refused
-        assert sorted(b.split(":")[0] for b in check.bad_links(rt)) == sorted([str(rt / "DLLs"), str(rt / "up")])
+        assert sorted(b.split(": ")[0] for b in check.bad_links(rt)) == sorted([str(rt / "DLLs"), str(rt / "up")])
         (rt / "DLLs").unlink()
         (rt / "up").unlink()
     (info / "direct_url.json").write_text('{"url": "' + (build / "vendor" / "oarbank-sdk").as_uri() + '"}', encoding="utf-8")
@@ -510,7 +510,7 @@ def test_the_package_check_refuses_native_files_for_another_platform(tmp_path):
     (site / "_core.so").write_bytes(_macho(X86_64))                           # the build machine's wheel, not the package's
     (site / "lib.a").write_bytes(_ar((b"#1/4", b"b.o\0" + _macho(X86_64))))
     bad = check.wrong_platforms(rt, {"": {"darwin-arm64"}})
-    assert sorted(b.split(":")[0] for b in bad) == [str(site / "_core.so"), str(site / "lib.a")]
+    assert sorted(b.split(": ")[0] for b in bad) == [str(site / "_core.so"), str(site / "lib.a")]
     assert "code for darwin-amd64, not darwin-arm64" in bad[0]
     assert len(check.wrong_platforms(rt, {"": {"darwin-arm64", "darwin-amd64"}})) == 3    # universal: python3.12 too
     (site / "_core.so").unlink()
@@ -522,7 +522,7 @@ def test_the_package_check_refuses_native_files_for_another_platform(tmp_path):
     (rt / "bin" / "uv").write_bytes(_pe(0xAA64))
     (site / "core.pyd").write_bytes(_pe(0x8664))
     rules = check.platform_rules(["windows-amd64", f"{rt / 'bin'}=windows-arm64"])
-    assert [b.split(":")[0] for b in check.wrong_platforms(rt, rules)] == [str(rt / "bin" / "python3.12")]
+    assert [b.split(": ")[0] for b in check.wrong_platforms(rt, rules)] == [str(rt / "bin" / "python3.12")]
     with pytest.raises(SystemExit):
         check.platform_rules([f"{rt}=windows-amd64"])                         # nothing names the package's own
 
