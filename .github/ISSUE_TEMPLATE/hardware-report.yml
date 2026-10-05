@@ -1,0 +1,211 @@
+# One machine's results for the hardware compatibility table (docs.codonic.dev/oarbank/operate/compatibility). Every
+# field is one field of a row in vendor/oarbank-sdk/docs/compatibility/reports.json; scripts/compat-row.py turns a
+# report into a draft row, and tests/test_compat_row.py holds this form, the script and the SDK's list of tests to one
+# another. Keep the labels and options in step with the script.
+name: Hardware report
+description: Post one machine's results for the hardware compatibility table, passing or failing.
+title: "Hardware report: <GPU> on <OS>"
+labels: ["hardware report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One report per machine. [#9](https://github.com/roeehrl/oarbank/issues/9) links the issue with the exact commands for your kind of machine; any machine can run [#15](https://github.com/roeehrl/oarbank/issues/15). Each report becomes a row in the [hardware compatibility table](https://docs.codonic.dev/oarbank/operate/compatibility).
+
+        A failed run is as useful as a passing one. Don't fix anything to make it pass: say what broke and where it stopped.
+
+        **Before you post, remove anything that identifies you or your network** from everything you paste: host names, user names, paths with your user name in them, serial numbers, IP and MAC addresses. The table names a reporter only by the GitHub handle this issue is posted under.
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - arm64 (Apple silicon, ARM64, aarch64)
+        - amd64 (x86_64, x64, Intel Mac)
+    validations:
+      required: true
+  - type: input
+    id: os_version
+    attributes:
+      label: OS name and version
+      description: "`sw_vers`, `/etc/os-release`, or `winver`."
+      placeholder: "Ubuntu 24.04 LTS / Windows 11 Pro (build 26100) / macOS 26.1"
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      description: "Linux: `uname -r`. Windows: the kernel line of `wsl --version`, if you ran WSL containers. Otherwise leave it empty."
+  - type: dropdown
+    id: machine
+    attributes:
+      label: Machine
+      options:
+        - Physical machine
+        - Virtual machine
+        - CI runner
+    validations:
+      required: true
+  - type: dropdown
+    id: gpu_vendor
+    attributes:
+      label: GPU vendor
+      description: "Pick No GPU when the only renderer is a software one (lavapipe, llvmpipe, the Microsoft Basic Render Driver)."
+      options:
+        - NVIDIA
+        - AMD
+        - Intel
+        - Apple
+        - Virtual GPU (a hypervisor's display adapter)
+        - No GPU
+    validations:
+      required: true
+  - type: input
+    id: gpu_model
+    attributes:
+      label: GPU model
+      description: "From `nvidia-smi`, `lspci`, `vulkaninfo --summary`, System Information or Device Manager. Empty for No GPU."
+      placeholder: "GeForce RTX 4070"
+  - type: input
+    id: gpu_driver
+    attributes:
+      label: GPU driver version
+      description: "The NVIDIA driver, the ROCm or Mesa version, or the Windows driver version. Empty on macOS and for No GPU."
+      placeholder: "580.82.07"
+  - type: checkboxes
+    id: ran_in
+    attributes:
+      label: Where it ran
+      options:
+        - label: On the host
+        - label: In a Linux container (Podman, Docker or Colima)
+        - label: In WSL containers (Windows)
+  - type: textarea
+    id: tools
+    attributes:
+      label: Tool versions
+      description: "One per line, `name: version`: the container and GPU stack you used. `wsl --version`, `podman --version` or `docker --version`, `nvidia-ctk --version`, `colima version`, `krunkit --version`."
+      placeholder: |
+        WSL: 3.0.1
+        Podman: 5.6.1 (rootless)
+  - type: input
+    id: commit
+    attributes:
+      label: Oarbank commit
+      description: "`git rev-parse --short HEAD` in your clone of roeehrl/oarbank."
+      placeholder: "1dc15f7"
+    validations:
+      required: true
+  - type: textarea
+    id: gpu_apis
+    attributes:
+      label: GPU APIs
+      description: "The whole output of `oarbank-agent gpu-apis` (from `rust/`: `cargo run -p oarbank-agent -- gpu-apis`; an installed Linux node: `sudo -u oarbank oarbank-agent gpu-apis`). It is the `gpu_apis` JSON: `host`, `containers` and `evidence`."
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: test_gpu_apis
+    attributes:
+      label: "Test: test_gpu_apis"
+      description: "`uv run pytest -q tests/rust/test_gpu_apis.py` from the repository root. On a machine with a GPU, a pass is `2 passed`."
+      options:
+        - Not run
+        - Passed
+        - Failed
+        - Skipped itself
+      default: 0
+  - type: dropdown
+    id: doctor_probe_gpu
+    attributes:
+      label: "Test: doctor_probe_gpu"
+      description: "`oarbank-agent containers doctor --probe --gpu` (from `rust/`: `cargo run -p oarbank-agent -- containers doctor --probe --gpu`). Linux: paste `ls /etc/cdi /var/run/cdi` with the output below."
+      options:
+        - Not run
+        - Passed
+        - Failed
+        - Skipped itself
+      default: 0
+  - type: dropdown
+    id: doctor_probe_service
+    attributes:
+      label: "Test: doctor_probe_service"
+      description: "In an administrator shell, the doctor as the installed service runs it: `\"C:\\Program Files\\Oarbank\\oarbank-agent.exe\" --home C:\\ProgramData\\Oarbank\\agent containers doctor --probe`."
+      options:
+        - Not run
+        - Passed
+        - Failed
+        - Skipped itself
+      default: 0
+  - type: dropdown
+    id: verify_windows_containers
+    attributes:
+      label: "Test: verify_windows_containers"
+      description: "In an administrator PowerShell: `scripts\\verify-windows-containers.ps1 -InstallWsl`. A pass ends with `OK: the Windows container runtime works here`."
+      options:
+        - Not run
+        - Passed
+        - Failed
+        - Skipped itself
+      default: 0
+  - type: dropdown
+    id: verify_windows_containers_gpu
+    attributes:
+      label: "Test: verify_windows_containers_gpu"
+      description: "In an administrator PowerShell: `scripts\\verify-windows-containers.ps1 -InstallWsl -Gpu`. It sets `hostLoopback: none` in your own WSLc settings and says so."
+      options:
+        - Not run
+        - Passed
+        - Failed
+        - Skipped itself
+      default: 0
+  - type: dropdown
+    id: live_colima_gpu
+    attributes:
+      label: "Test: live_colima_gpu"
+      description: "On a Mac, after `brew install colima docker` and `brew tap slp/krun && brew trust slp/krun && brew install krunkit`: `OARBANK_LIVE_COLIMA=1 cargo test -p oarbank-agent --bins -- --ignored --nocapture live_colima_gpu_runs_vulkan_compute_on_the_apple_gpu` from `rust/`, then `colima delete oarbank-gpu`."
+      options:
+        - Not run
+        - Passed
+        - Failed
+        - Skipped itself
+      default: 0
+  - type: dropdown
+    id: status
+    attributes:
+      label: Did it work?
+      options:
+        - "Yes: everything I ran worked"
+        - "Partly: something failed, or an API is wrong"
+        - "No: it failed"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: What was wrong or missing
+      description: "An API listed that doesn't work, one you know works that it missed (`vulkaninfo --summary`, `clinfo -l`, `nvidia-smi`, `rocminfo` show what's really there), or where a test stopped."
+  - type: textarea
+    id: output
+    attributes:
+      label: Full output
+      description: "The full output of every command you ran, or `dist\\verify-windows-containers.log`; on a Mac whose container test failed, `~/Library/Application Support/Oarbank/agent/logs/colima-oarbank-gpu.log`."
+      render: text
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed host names, user names, paths, serial numbers and addresses from everything above.
+          required: true

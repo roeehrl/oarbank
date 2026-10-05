@@ -70,8 +70,12 @@ def test_calls_and_health(tmp_path, mod_file):
         assert h.call("m", "params.check", {"params": {"a": 1}})["normalized_params"] == {"a": 1}
         hs = h.health("m")
         assert hs["state"] == "ready" and hs["calls"] == 1 and hs["module_version"] == "0.0.1"
-        time.sleep(0.2)
-        assert "stderr noise" in (tmp_path / "logs" / "modules" / "m.log").read_text(encoding="utf-8")
+        # the host's stderr thread writes the log; wait for its line rather than for a fixed time
+        log = tmp_path / "logs" / "modules" / "m.log"
+        deadline = time.monotonic() + 10
+        while not (log.exists() and "stderr noise" in log.read_text(encoding="utf-8")):
+            assert time.monotonic() < deadline, "the module's stderr never reached its log"
+            time.sleep(0.05)
     finally:
         h.close()
 
