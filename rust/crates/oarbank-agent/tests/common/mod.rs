@@ -4,12 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A fresh directory under the system temp dir.
-pub fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("oarbank-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A fresh directory under the system temp dir: (what removes it when dropped, its path).
+pub fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let d = tempfile::Builder::new().prefix(&format!("oarbank-test-{name}-")).tempdir().unwrap();
+    let p = d.path().to_path_buf();
+    (d, p)
 }
 
 /// The test's Python, found the way runtime.rs finds the node's: OARBANK_TEST_PYTHON (an absolute path), else the node

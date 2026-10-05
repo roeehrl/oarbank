@@ -845,9 +845,8 @@ mod tests {
     #[test]
     fn a_file_granted_through_its_folder_is_not_rewritten() {
         use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ};
-        let d = std::env::temp_dir().join(format!("oarbank-acl-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let tmp = crate::scratch("acl");
+        let d = tmp.path().to_path_buf();
         let exe = d.join("python.exe");
         std::fs::write(&exe, b"x").unwrap();
         let sid = ffi::container_sid(&container_name("dev.test.acl")).unwrap();
@@ -858,13 +857,12 @@ mod tests {
         ffi::grant(&exe.display().to_string(), sid, ro).unwrap();
         assert_eq!(entries(&exe, sid), (0, 1), "the file's ACL was rewritten");
         // a file outside any granted folder takes one explicit entry, once
-        let lone = std::env::temp_dir().join(format!("oarbank-acl-lone-{}.exe", std::process::id()));
+        let elsewhere = crate::scratch("acl-lone");
+        let lone = elsewhere.path().join("lone.exe");
         std::fs::write(&lone, b"x").unwrap();
         ffi::grant(&lone.display().to_string(), sid, ro).unwrap();
         ffi::grant(&lone.display().to_string(), sid, ro).unwrap();
         assert_eq!(entries(&lone, sid).0, 1);
-        let _ = std::fs::remove_file(&lone);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Shims of one module make sure of its profile at once, the first of them creating it. CreateAppContainerProfile
@@ -927,19 +925,20 @@ mod tests {
         (py, home)
     }
 
-    /// A Python runner through the shim, contained as the agent contains it: (the shim, its work directory, its stderr
-    /// file). `script` gets the work directory as argv[1].
-    fn runner(tag: &str, script: &str) -> (std::process::Child, std::path::PathBuf) {
+    /// A Python runner through the shim, contained as the agent contains it: (the shim, what removes its scratch
+    /// directory when dropped, its work directory there, which holds its stderr file). `script` gets the work directory
+    /// as argv[1].
+    fn runner(tag: &str, script: &str) -> (std::process::Child, tempfile::TempDir, std::path::PathBuf) {
         use crate::sandbox::{Came, ConfinedSignal, CONFINE_GUARD};
         let (py, home) = python();
-        let d = std::env::temp_dir().join(format!("oarbank-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let tmp = crate::scratch(tag);
+        let d = tmp.path().join("work");
         std::fs::create_dir_all(&d).unwrap();
         let mut pol = Policy::new(format!("dev.test.{tag}"));
         pol.ro = vec![home];
         pol.rw = vec![d.display().to_string()];
         pol.exe = Some(py.display().to_string());
-        let pf = d.with_extension("policy.json");
+        let pf = tmp.path().join("policy.json");
         std::fs::write(&pf, serde_json::to_vec(&pol).unwrap()).unwrap();
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.arg("sandbox-exec").arg(&pf).arg("--").arg(&py).args(["-I", "-c", script]).arg(&d).current_dir(&d)
@@ -949,7 +948,7 @@ mod tests {
         signal.prepare(&mut cmd);
         let shim = crate::sys::spawn_contained(&mut cmd, false).unwrap();
         assert_eq!(signal.wait(shim.id(), CONFINE_GUARD), Came::Confined);
-        (shim, d)
+        (shim, tmp, d)
     }
 
     /// The runner's `name` file, once written (up to 120 s on a loaded host), or None if the shim ended first.
@@ -967,15 +966,15 @@ mod tests {
         None
     }
 
+    /// The runner's job ends (all of it, before its directory goes): its stderr.
     fn end(mut shim: std::process::Child, d: &std::path::Path) -> String {
         let pid = shim.id() as i32;
+        let members = crate::sys::Members::of(pid);
         crate::sys::signal_group(pid, crate::sys::Sig::Kill);
+        members.wait(std::time::Duration::from_secs(30));
         let _ = shim.wait();
         crate::sys::release(pid);
-        let err = std::fs::read_to_string(d.join("stderr")).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(d);
-        let _ = std::fs::remove_file(d.with_extension("policy.json"));
-        err
+        std::fs::read_to_string(d.join("stderr")).unwrap_or_default()
     }
 
     /// A runner whose first statement starts 20 processes (plain console ones, as a module would): the runner and
@@ -991,7 +990,7 @@ mod tests {
                       open(sys.argv[1] + '/pids.tmp', 'w').write(' '.join([str(os.getpid())] + [str(p.pid) for p in ps if p.poll() is None]))\n\
                       os.replace(sys.argv[1] + '/pids.tmp', sys.argv[1] + '/pids')\n\
                       time.sleep(120)";
-        let (mut shim, d) = runner("born", script);
+        let (mut shim, _tmp, d) = runner("born", script);
         let shim_pid = shim.id() as i32;
         let started: Vec<i32> = read(&mut shim, &d, "pids").unwrap_or_default().split_whitespace().filter_map(|p| p.parse().ok()).collect();
         let members = crate::sys::group_pids(shim_pid);
@@ -1033,7 +1032,7 @@ import os
 os.replace(sys.argv[1] + "/r.tmp", sys.argv[1] + "/r")
 time.sleep(120)
 "#;
-        let (mut shim, d) = runner("consoles", script);
+        let (mut shim, _tmp, d) = runner("consoles", script);
         let shim_pid = shim.id() as i32;
         let got = read(&mut shim, &d, "r");
         let mut escapes = vec![];
@@ -1052,7 +1051,7 @@ time.sleep(120)
     /// Anything in the job outside the AppContainer is an escape: here a plain process the test puts there itself.
     #[test]
     fn a_member_outside_the_appcontainer_is_an_escape() {
-        let (mut shim, d) = runner("intruder", "import sys, time\nopen(sys.argv[1] + '/up', 'w').write('1')\ntime.sleep(120)");
+        let (mut shim, _tmp, d) = runner("intruder", "import sys, time\nopen(sys.argv[1] + '/up', 'w').write('1')\ntime.sleep(120)");
         let shim_pid = shim.id() as i32;
         assert!(read(&mut shim, &d, "up").is_some());
         assert_eq!(escape(shim_pid), None);

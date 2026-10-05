@@ -313,10 +313,8 @@ mod tests {
         HashMap::from([("targets.json".into(), tb), ("snapshot.json".into(), sb), ("timestamp.json".into(), serde_json::to_vec(&ts).unwrap())])
     }
 
-    fn tmp() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("oarbank-tuf-{}-{}", std::process::id(), rand::random::<u64>()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp() -> tempfile::TempDir {
+        crate::scratch("tuf")
     }
 
     #[test]
@@ -335,26 +333,26 @@ mod tests {
         let root1 = sign(root(1, &[&r, &t, &s, &ts]), &[&r]);
         let files = Files(repo(&sha, [&r, &t, &s, &ts]));
         let dir = tmp();
-        let targets = refresh(&files, &serde_json::to_vec(&root1).unwrap(), &dir).await.unwrap();
+        let targets = refresh(&files, &serde_json::to_vec(&root1).unwrap(), dir.path()).await.unwrap();
         assert_eq!(targets["oarbank-agent-1.0.0-darwin-arm64"]["hashes"]["sha256"], sha.as_str());
 
         // a root rotation signed by the old and the new root keys is followed; one signed by the new keys alone is not
         let r2 = key(5);
         let mut f2 = repo(&sha, [&r2, &t, &s, &ts]);
         f2.insert("2.root.json".into(), serde_json::to_vec(&sign(root(2, &[&r2, &t, &s, &ts]), &[&r, &r2])).unwrap());
-        refresh(&Files(f2), &serde_json::to_vec(&root1).unwrap(), &dir).await.unwrap();
+        refresh(&Files(f2), &serde_json::to_vec(&root1).unwrap(), dir.path()).await.unwrap();
         let mut f3 = repo(&sha, [&r2, &t, &s, &ts]);
         f3.insert("2.root.json".into(), serde_json::to_vec(&sign(root(2, &[&r2, &t, &s, &ts]), &[&r2])).unwrap());
-        assert!(refresh(&Files(f3), &serde_json::to_vec(&root1).unwrap(), &tmp()).await.is_err());
+        assert!(refresh(&Files(f3), &serde_json::to_vec(&root1).unwrap(), tmp().path()).await.is_err());
 
         // targets signed by the wrong key, or changed after the snapshot hashed them, are refused
         let mut bad = repo(&sha, [&r, &s, &s, &ts]);
         bad.insert("targets.json".into(), files.0["targets.json"].clone());
-        assert!(refresh(&Files(bad), &serde_json::to_vec(&root1).unwrap(), &tmp()).await.is_err());
+        assert!(refresh(&Files(bad), &serde_json::to_vec(&root1).unwrap(), tmp().path()).await.is_err());
         let mut forged = repo(&sha, [&r, &t, &s, &ts]);
         let mut tj: Value = serde_json::from_slice(&forged["targets.json"]).unwrap();
         tj["signed"]["targets"]["oarbank-agent-1.0.0-darwin-arm64"]["hashes"]["sha256"] = json!("cd".repeat(32));
         forged.insert("targets.json".into(), serde_json::to_vec(&tj).unwrap());
-        assert!(refresh(&Files(forged), &serde_json::to_vec(&root1).unwrap(), &tmp()).await.is_err());
+        assert!(refresh(&Files(forged), &serde_json::to_vec(&root1).unwrap(), tmp().path()).await.is_err());
     }
 }

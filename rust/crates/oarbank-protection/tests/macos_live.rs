@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use common::TempDir;
+use common::scratch;
 use oarbank_protection::platform::macos;
 use oarbank_protection::*;
 
@@ -62,7 +62,7 @@ fn state(pid: i32) -> String {
 /// and refuses the co-tenant, which keeps running.
 #[test]
 fn real_job_is_killed_and_the_co_tenant_is_never_signalled() {
-    let dir = TempDir::new("s16");
+    let dir = scratch("s16");
     let mut job = Spawned::new(&["/bin/sleep", "30"]);
     let cotenant = Spawned::new(&["/bin/sleep", "30"]);
     let j = Arc::new(DecisionJournal::new(

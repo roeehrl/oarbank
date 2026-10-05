@@ -276,7 +276,8 @@ mod tests {
 
     #[test]
     fn only_partials_older_than_a_week_are_swept() {
-        let home = std::env::temp_dir().join(format!("oarbank-staging-{}", std::process::id()));
+        let tmp = crate::scratch("staging");
+        let home = tmp.path().to_path_buf();
         let l = Layout::new(home.clone());
         std::fs::create_dir_all(l.cache_tmp()).unwrap();
         let (old, young) = (l.cache_tmp().join("a.partial"), l.cache_tmp().join("b.partial"));
@@ -286,7 +287,6 @@ mod tests {
         std::fs::File::options().write(true).open(&old).unwrap().set_modified(week_ago).unwrap();
         sweep_partials(&l);
         assert!(!old.exists() && young.exists());
-        let _ = std::fs::remove_dir_all(home);
     }
 
     #[tokio::test]

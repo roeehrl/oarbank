@@ -772,21 +772,12 @@ mod tests {
 
     const IMAGE: &str = "docker.io/org/tool:1.2@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    struct Tmp(PathBuf);
-
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn tmp() -> Tmp {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let d = std::env::temp_dir().join(format!("obk-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("work/inputs")).unwrap();
-        std::fs::create_dir_all(d.join("data/cache")).unwrap();
-        Tmp(d)
+    fn tmp() -> tempfile::TempDir {
+        // a short name: sockets go inside, and macOS limits a socket's path to 104 bytes
+        let d = tempfile::Builder::new().prefix("obk-").tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("work/inputs")).unwrap();
+        std::fs::create_dir_all(d.path().join("data/cache")).unwrap();
+        d
     }
 
     fn grant(base: &Path, egress: bool) -> BrokerGrant {
@@ -800,11 +791,11 @@ mod tests {
     }
 
     /// A fresh endpoint for one test broker: a socket in the test's directory, or a pipe name of its own.
-    fn bind(t: &Tmp, name: &str) -> Bind {
+    fn bind(t: &tempfile::TempDir, name: &str) -> Bind {
         #[cfg(unix)]
-        return t.0.join(name);
+        return t.path().join(name);
         #[cfg(windows)]
-        return format!("oarbank-test-{}-{name}", t.0.file_name().unwrap().to_string_lossy());
+        return format!("oarbank-test-{}-{name}", t.path().file_name().unwrap().to_string_lossy());
     }
 
     /// A host path as the docker arguments spell it (the work and data directories are canonical, so verbatim on
@@ -840,7 +831,7 @@ mod tests {
     #[test]
     fn builds_exactly_the_allowed_docker_arguments() {
         let t = tmp();
-        let s = scope(&t.0, true);
+        let s = scope(t.path(), true);
         let r = req(json!({"args": ["tool", "--in", "/w/x"], "entrypoint": "/bin/tool", "workdir": "/w",
                            "mounts": [{"src": "inputs", "dst": "/w", "ro": true}, {"src": "data:cache", "dst": "/cache"}, {"src": "out", "dst": "/out"}],
                            "env": {"B": "2", "A_1": "x y"}, "network": true, "timeout_s": 100, "cpus": 16, "mem_gb": 2.5}));
@@ -865,7 +856,7 @@ mod tests {
     #[test]
     fn refuses_unapproved_images_and_platforms() {
         let t = tmp();
-        let s = scope(&t.0, false);
+        let s = scope(t.path(), false);
         let r = |i: &str, p: &str| code(plan_spec(&json!({"op": "container.run", "image": i, "platform": p, "args": []}), &s));
         assert_eq!(r(IMAGE, "linux/amd64"), None);
         assert_eq!(r(IMAGE, "linux/arm64").as_deref(), Some("image_not_approved"));
@@ -882,8 +873,8 @@ mod tests {
     #[cfg(unix)]
     fn refuses_bad_mounts_including_symlink_escapes() {
         let t = tmp();
-        let s = scope(&t.0, false);
-        let base = std::fs::canonicalize(&t.0).unwrap();
+        let s = scope(t.path(), false);
+        let base = std::fs::canonicalize(t.path()).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
         std::os::unix::fs::symlink(base.join("outside"), s.work.join("escape")).unwrap();
         std::os::unix::fs::symlink("../..", s.work.join("inputs/up")).unwrap();
@@ -921,8 +912,8 @@ mod tests {
     #[cfg(windows)]
     fn refuses_junction_escapes_on_windows() {
         let t = tmp();
-        let s = scope(&t.0, false);
-        let base = std::fs::canonicalize(&t.0).unwrap();
+        let s = scope(t.path(), false);
+        let base = std::fs::canonicalize(t.path()).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
         let junction = |link: &Path, target: &Path| {
             let out = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(crate::wslc::host_path(target))
@@ -948,7 +939,7 @@ mod tests {
     #[test]
     fn refuses_network_without_grant_and_bad_fields_and_clamps_resources() {
         let t = tmp();
-        let s = scope(&t.0, false);
+        let s = scope(t.path(), false);
         let r = |extra: Value| code(plan_spec(&req(extra), &s));
         assert_eq!(r(json!({"network": true})).as_deref(), Some("network_not_granted"));
         assert_eq!(r(json!({"network": false})), None);
@@ -967,14 +958,14 @@ mod tests {
         assert!(a.contains(&"0.1".to_string()) && a.contains(&"0.25g".to_string()), "{a:?}");
         assert_eq!(p.timeout_s, DEFAULT_TIMEOUT_S);
         assert_eq!(plan_spec(&req(json!({"timeout_s": 0.2})), &s).unwrap().timeout_s, 1.0);
-        let net = scope(&t.0, true);
+        let net = scope(t.path(), true);
         assert!(plan_spec(&req(json!({"network": true})), &net).unwrap().docker_args().windows(2).any(|w| w == ["--network", "bridge"]));
     }
 
     #[test]
     fn never_privileged_host_network_or_another_mount() {
         let t = tmp();
-        let s = scope(&t.0, true);
+        let s = scope(t.path(), true);
         let base = req(json!({"mounts": [{"src": "inputs", "dst": "/w"}], "args": ["--privileged", "-v", "/:/host"]}));
         let mut hostile = base.clone();
         for (k, v) in [("privileged", json!(true)), ("network_mode", json!("host")), ("net", json!("host")), ("pid", json!("host")),
@@ -1109,23 +1100,23 @@ mod tests {
         let t = tmp();
         let rt = Fake::running();
         #[cfg(unix)]
-        let sock = t.0.join("b/42.sock");
+        let sock = t.path().join("b/42.sock");
         #[cfg(windows)]
         let sock = bind(&t, "42");
-        let b = Broker::start(sock.clone(), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(sock.clone(), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         #[cfg(unix)]
         {
             assert_eq!(ep, format!("unix:{}", sock.display()));
             let m = std::fs::symlink_metadata(&sock).unwrap();
             assert!(m.file_type().is_socket() && m.permissions().mode() & 0o777 == 0o600);
-            assert_eq!(std::fs::metadata(t.0.join("b")).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(t.path().join("b")).unwrap().permissions().mode() & 0o777, 0o700);
         }
         #[cfg(windows)]
         {
             assert_eq!(ep, format!("npipe://./pipe/{sock}"));
             // the name is taken: a second broker (or anyone else) cannot create the pipe's first instance
-            assert!(Broker::start(sock.clone(), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.is_err());
+            assert!(Broker::start(sock.clone(), grant(t.path(), false), rt.clone(), verifier(t.path())).await.is_err());
         }
 
         let r = ask(&ep, &req(json!({"args": ["echo"], "mounts": [{"src": "inputs", "dst": "/w", "ro": true}]})).to_string()).await;
@@ -1134,7 +1125,7 @@ mod tests {
         assert_eq!(r["stderr_tail"], "a warning\n");
         assert_eq!(r["stdout_path"], "broker/1.stdout");
         assert!(r["duration_s"].is_number());
-        let work = std::fs::canonicalize(t.0.join("work")).unwrap();
+        let work = std::fs::canonicalize(t.path().join("work")).unwrap();
         assert_eq!(std::fs::read_to_string(work.join("broker").join("1.stdout")).unwrap(), "hello from the container\n");
         let (args, timeout) = rt.with(|s| s.runs[0].clone());
         assert_eq!(timeout, DEFAULT_TIMEOUT_S);
@@ -1198,7 +1189,7 @@ mod tests {
     async fn the_broker_survives_many_clients_closing_at_once() {
         let t = tmp();
         let rt = Fake::running();
-        let b = Broker::start(bind(&t, "many"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "many"), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         let tasks: Vec<_> = (0..32).map(|_| {
             let ep = ep.clone();
@@ -1217,9 +1208,9 @@ mod tests {
     async fn a_platform_the_runtime_cannot_run_is_unavailable() {
         let t = tmp();
         let rt = Fake::running();
-        let mut g = grant(&t.0, false);
+        let mut g = grant(t.path(), false);
         g.approved_images.push((IMAGE.into(), "linux/riscv64".into()));
-        let b = Broker::start(bind(&t, "p.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "p.sock"), g, rt.clone(), verifier(t.path())).await.unwrap();
         let r = ask(&b.endpoint(), &json!({"op": "container.run", "image": IMAGE, "platform": "linux/riscv64"}).to_string()).await;
         assert_eq!(r["error"], "platform_unavailable");
         assert!(rt.with(|s| s.runs.is_empty()));
@@ -1230,7 +1221,7 @@ mod tests {
         let t = tmp();
         let rt = Fake::running();
         rt.with(|s| s.time_out = true);
-        let b = Broker::start(bind(&t, "t.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "t.sock"), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         let r = ask(&b.endpoint(), &req(json!({"timeout_s": 1})).to_string()).await;
         assert_eq!((r["ok"].as_bool(), r["error"].as_str()), (Some(false), Some("timeout")), "{r}");
         assert_eq!(r["stdout_tail"], "hello from the container\n");
@@ -1243,7 +1234,7 @@ mod tests {
         let rt = Fake::running();
         rt.with(|s| s.block = true);
         let sock = bind(&t, "d.sock");
-        let b = Broker::start(sock.clone(), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(sock.clone(), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         let pending = tokio::spawn(async move { ask(&ep, &req(json!({})).to_string()).await });
         eventually("the run to start", || rt.with(|s| !s.runs.is_empty())).await;
@@ -1261,7 +1252,7 @@ mod tests {
     async fn sdk_python_client_round_trip() {
         let t = tmp();
         let rt = Fake::running();
-        let b = Broker::start(bind(&t, "py.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "py.sock"), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         let script = format!(r#"
 import json
 from oarbank_sdk import broker
@@ -1292,7 +1283,7 @@ print(json.dumps(out))
         assert_eq!(v["network"], "network_not_granted");
         let (args, timeout) = rt.with(|s| s.runs[0].clone());
         assert_eq!(timeout, 50.0);
-        let data = std::fs::canonicalize(t.0.join("data")).unwrap();
+        let data = std::fs::canonicalize(t.path().join("data")).unwrap();
         assert!(args.contains(&format!("{}:/c", hp(&data.join("cache")))) && args.contains(&"A=1".to_string()), "{args:?}");
         assert_eq!(args[args.len() - 3..], [IMAGE, "echo", "hi"]);
     }
@@ -1321,11 +1312,11 @@ print(json.dumps(out))
         let outside = { store.lock().unwrap().image("org/elsewhere", b"o") };
         let (unsigned, outside) = (format!("{reg}/org/tasks/unsigned@{unsigned}"), format!("{reg}/org/elsewhere@{outside}"));
         let not_listed = images.pop().unwrap();
-        let mut g = grant(&t.0, false);
+        let mut g = grant(t.path(), false);
         g.sets = vec![set(&reg, &key, None)];
         g.job_images = images.iter().cloned().chain([unsigned.clone(), outside.clone()]).collect();
         let rt = Fake::running();
-        let b = Broker::start(bind(&t, "s.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "s.sock"), g, rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         let run = |image: &str| json!({"op": "container.run", "image": image, "platform": "linux/amd64"}).to_string();
         for i in &images {
@@ -1353,16 +1344,16 @@ print(json.dumps(out))
     async fn gpus_need_the_gpu_pool_and_a_runtime_that_passes_one_through() {
         let t = tmp();
         let rt = Fake::running();
-        let b = Broker::start(bind(&t, "g.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "g.sock"), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["error"], "gpu_not_granted");
         assert_eq!(ask(&ep, &req(json!({"gpus": 1})).to_string()).await["error"], "bad_request");
         assert_eq!(ask(&ep, &req(json!({"gpus": "some"})).to_string()).await["error"], "bad_request");
         assert_eq!(ask(&ep, &req(json!({"gpus": "none"})).to_string()).await["ok"], true);
         drop(b);
-        let mut g = grant(&t.0, false);
+        let mut g = grant(t.path(), false);
         g.gpu = true;
-        let b = Broker::start(bind(&t, "g2.sock"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "g2.sock"), g, rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         assert_eq!(ask(&ep, &req(json!({"gpus": "all"})).to_string()).await["error"], "gpu_unavailable");
         rt.with(|s| s.gpu = Some("nvidia.com/gpu=all".into()));
@@ -1372,7 +1363,7 @@ print(json.dumps(out))
         assert!(args.windows(2).any(|w| w == ["--device", "nvidia.com/gpu=all"]), "{args:?}");
         drop(b);
         // a job that did not reserve the pool is told it cannot give its containers the GPU, on the same runtime
-        let b = Broker::start(bind(&t, "g3.sock"), grant(&t.0, false), rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "g3.sock"), grant(t.path(), false), rt.clone(), verifier(t.path())).await.unwrap();
         assert_eq!(ask(&b.endpoint(), r#"{"op": "status"}"#).await["gpus"], "none");
     }
 
@@ -1448,7 +1439,7 @@ print(json.dumps(out))
         }
         let sdk = PathBuf::from(std::env::var_os("OARBANK_WSLC_SDK").expect("OARBANK_WSLC_SDK names wslcsdk.dll"));
         let t = tmp();
-        let rt = Arc::new(WslcRuntime::start_at(&t.0.join("agent"), sdk, 4.0, 2));
+        let rt = Arc::new(WslcRuntime::start_at(&t.path().join("agent"), sdk, 4.0, 2));
         let ready = { let r = rt.clone(); tokio::task::spawn_blocking(move || r.ensure_started()).await.unwrap() };
         assert!(ready.is_ok(), "the session is not ready: {ready:?}");
         let report = rt.snapshot().json();
@@ -1459,10 +1450,10 @@ print(json.dumps(out))
         eprintln!("GPU APIs in containers: {apis:?} ({evidence})");
         assert!(!apis.is_empty(), "{evidence}");
         let platform = rt.status().unwrap().platforms[0].clone();
-        let mut g = grant(&t.0, false);
+        let mut g = grant(t.path(), false);
         g.approved_images = vec![(PROBE_GPU_IMAGE.into(), platform.clone())];
         g.gpu = true;
-        let b = Broker::start(bind(&t, "gpu"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "gpu"), g, rt.clone(), verifier(t.path())).await.unwrap();
         let script = "test -e /dev/dxg && echo dxg; if command -v nvidia-smi >/dev/null; then nvidia-smi -L; fi";
         let r = ask(&b.endpoint(), &json!({"op": "container.run", "image": PROBE_GPU_IMAGE, "platform": platform, "gpus": "all",
                                            "args": ["sh", "-c", script], "timeout_s": 600}).to_string()).await;
@@ -1482,7 +1473,7 @@ print(json.dumps(out))
         use crate::container_runtime::NativeRuntime;
         use crate::imageset::tests::{set, Key, Store};
         let t = tmp();
-        let layout = crate::paths::Layout::new(t.0.join("agent"));
+        let layout = crate::paths::Layout::new(t.path().join("agent"));
         let Some(rt) = NativeRuntime::detect(&layout, 16.0) else {
             eprintln!("no container engine here: skipped");
             return;
@@ -1511,7 +1502,7 @@ print(json.dumps(out))
         store.sign(&key, &reg, "org/tasks/pushed", &d, true);
         push(&store, port, &["org/tasks/pushed"]).await;
         let got = crate::imageset::Registry::new().unwrap().manifest(&format!("{reg}/org/tasks/pushed"), &d).await;
-        let verified = verifier(&t.0).verify(&set(&reg, &key, None), &format!("{reg}/org/tasks/pushed@{d}"), "linux/amd64").await;
+        let verified = verifier(t.path()).verify(&set(&reg, &key, None), &format!("{reg}/org/tasks/pushed@{d}"), "linux/amd64").await;
         let _ = std::process::Command::new(&cli).env("HOME", &rt.home).args(["rm", "-f", &name]).output();
         assert_eq!(got.unwrap().map(|(_, digest)| digest), Some(d));
         assert_eq!(verified, Ok(()));
@@ -1538,7 +1529,7 @@ print(json.dumps(out))
         }
         let sdk = PathBuf::from(std::env::var_os("OARBANK_WSLC_SDK").expect("OARBANK_WSLC_SDK names wslcsdk.dll"));
         let t = tmp();
-        let rt = Arc::new(WslcRuntime::start_at(&t.0.join("agent"), sdk, 4.0, 2));
+        let rt = Arc::new(WslcRuntime::start_at(&t.path().join("agent"), sdk, 4.0, 2));
         let ready = { let r = rt.clone(); tokio::task::spawn_blocking(move || r.ensure_started()).await.unwrap() };
         assert!(ready.is_ok(), "the session is not ready: {ready:?}\n{}", rt.snapshot().json());
         let platform = rt.status().unwrap().platforms.first().cloned().expect("the session's platform");
@@ -1603,13 +1594,13 @@ print(json.dumps(out))
         let unsigned = store.image("org/tasks/unsigned", b"never pulled: refused before");
         push(&store, port, &["org/tasks/shell", "org/tasks/unsigned"]).await;
         let (signed, unsigned) = (format!("{reg}/org/tasks/shell@{signed}"), format!("{reg}/org/tasks/unsigned@{unsigned}"));
-        let mut g = grant(&t.0, true);
+        let mut g = grant(t.path(), true);
         g.approved_images = vec![(PROBE_IMAGE.into(), platform.clone())];
         g.sets = vec![oarbank_core::images::ContainerSet { name: "tasks".into(), registry: reg.clone(), repository: "org/tasks/".into(),
                                                           platform: platform.clone(), key_pem: key.pem(), index: None }];
         g.job_images = vec![signed.clone(), unsigned.clone()];
         (g.cpus, g.mem_gb) = (1.0, 0.5);
-        let b = Broker::start(bind(&t, "live"), g, rt.clone(), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(bind(&t, "live"), g, rt.clone(), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         let script = "echo signed-ok > /w/written.txt; echo \"mem:$(cat /sys/fs/cgroup/memory.max)\"; echo \"cpu:$(cat /sys/fs/cgroup/cpu.max)\"; \
                       if wget -q -T 5 -O /dev/null http://example.com; then echo net:yes; else echo net:no; fi";
@@ -1619,7 +1610,7 @@ print(json.dumps(out))
         assert_eq!((r["ok"].as_bool(), r["exit_code"].as_i64()), (Some(true), Some(0)), "{r}");
         let out = r["stdout_tail"].as_str().unwrap();
         assert!(out.contains("mem:536870912") && out.contains("cpu:100000 100000") && out.contains("net:no"), "{r}");
-        let work = std::fs::canonicalize(t.0.join("work")).unwrap();
+        let work = std::fs::canonicalize(t.path().join("work")).unwrap();
         assert_eq!(std::fs::read_to_string(work.join("inputs").join("written.txt")).unwrap().trim(), "signed-ok");
         assert_eq!(b.ran_images(), vec![json!({"set": "tasks", "image": signed})]);
         // refusals, before anything is pulled
@@ -1653,16 +1644,16 @@ print(json.dumps(out))
         use crate::container_runtime::{tests::host_rootfs, NativeRuntime};
         use crate::imageset::tests::{serve, Key, Store};
         let t = tmp();
-        let layout = crate::paths::Layout::new(t.0.join("agent"));
+        let layout = crate::paths::Layout::new(t.path().join("agent"));
         let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
             eprintln!("no container engine here: skipped");
             return;
         };
         // a private engine home: its own storage and run state (the reset below removes only those), and the local
         // registry allowed over plain HTTP
-        rt.home = t.0.join("engine-home");
+        rt.home = t.path().join("engine-home");
         crate::container_runtime::tests::private_engine(&rt.home);
-        let tar = t.0.join("rootfs.tar");
+        let tar = t.path().join("rootfs.tar");
         host_rootfs(&tar);
         let key = Key::new();
         let store = Arc::new(Mutex::new(Store { referrers_api: true, ..Default::default() }));
@@ -1685,12 +1676,12 @@ print(json.dumps(out))
             (format!("{reg}/org/tasks/shell@{d}"), format!("{reg}/org/tasks/unsigned@{u}"))
         };
         let (cli, engine_home) = (rt.cli.clone(), rt.home.clone());
-        let mut g = grant(&t.0, false);
+        let mut g = grant(t.path(), false);
         g.approved_images = vec![];
         g.sets = vec![oarbank_core::images::ContainerSet { name: "tasks".into(), registry: reg.clone(), repository: "org/tasks/".into(),
                                                           platform: platform.clone(), key_pem: key.pem(), index: None }];
         g.job_images = vec![signed.clone(), unsigned.clone()];
-        let b = Broker::start(t.0.join("live.sock"), g, Arc::new(rt), verifier(&t.0)).await.unwrap();
+        let b = Broker::start(t.path().join("live.sock"), g, Arc::new(rt), verifier(t.path())).await.unwrap();
         let ep = b.endpoint();
         let r = ask(&ep, &json!({"op": "container.run", "image": signed, "platform": platform, "args": ["sh", "-c", "echo signed-ok"],
                                  "timeout_s": 120}).to_string()).await;

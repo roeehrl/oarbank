@@ -248,9 +248,8 @@ mod tests {
                       time.sleep(120)";
         let python = crate::runtime::which("python3").expect("python3");
         for via_launcher in [false, true] {
-            let dir = std::env::temp_dir().join(format!("oarbank-born-in-cgroup-{}-{via_launcher}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            let tmp = crate::scratch("born-in-cgroup");
+            let dir = tmp.path().to_path_buf();
             let out = dir.join("pids");
             let mut argv: Vec<String> = vec![python.display().to_string(), "-I".into(), "-c".into(), script.into(), out.display().to_string()];
             if via_launcher {
@@ -280,7 +279,6 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
             release(leader);
-            let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(started.len(), 21, "launcher {via_launcher}: {started:?}");
             assert_eq!(started.first(), Some(&leader));
             let outside: Vec<&i32> = started.iter().filter(|p| !members.contains(p)).collect();
@@ -299,8 +297,8 @@ mod tests {
             return;
         }
         assert!(root().is_none() && placement().is_none());
-        let dir = std::env::temp_dir().join(format!("oarbank-no-cgroup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = crate::scratch("no-cgroup");
+        let dir = tmp.path().to_path_buf();
         let kid_file = dir.join("kid");
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", &format!("sleep 120 & echo $! > {}; wait", kid_file.display())]);
@@ -318,7 +316,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_ne!(unsafe { libc::kill(kid, 0) }, 0, "the child ended with its group");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

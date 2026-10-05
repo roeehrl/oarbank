@@ -9,14 +9,14 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../vendor/oarbank-sdk/spec/sandbox/backends/macos-golden")
 }
 
-/// A fresh directory under the system temp dir, resolved (macOS's /var is a symlink to /private/var).
+/// A fresh directory under the system temp dir, resolved (macOS's /var is a symlink to /private/var): (what removes
+/// it when dropped, its path).
 #[cfg(unix)]
-fn scratch(tag: &str) -> PathBuf {
+fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
     let base = std::env::temp_dir().canonicalize().unwrap();
-    let d = base.join(format!("oarbank-core-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    let d = tempfile::Builder::new().prefix(&format!("oarbank-core-{tag}-")).tempdir_in(base).unwrap();
+    let p = d.path().to_path_buf();
+    (d, p)
 }
 
 #[cfg(unix)]
@@ -54,7 +54,7 @@ fn golden_profiles_are_reproduced() {
 #[cfg(unix)]
 #[test]
 fn paths_are_parameters_resolved_with_their_links() {
-    let t = scratch("links");
+    let (_t, t) = scratch("links");
     let real = t.join("real");
     std::fs::create_dir_all(real.join("bin")).unwrap();
     std::os::unix::fs::symlink(&real, t.join("link")).unwrap();
@@ -70,14 +70,13 @@ fn paths_are_parameters_resolved_with_their_links() {
     assert!(get("LINK_1").is_none());
     assert!(!text.contains(t.to_str().unwrap()), "paths never enter the text");
     assert_eq!(text, sandbox::render_text("runner", 1, 1, 1, "none", false, false, None, false, 0, 0).unwrap());
-    std::fs::remove_dir_all(&t).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
 fn links_are_followed_hop_by_hop_and_deduplicated() {
     use std::os::unix::fs::symlink;
-    let t = scratch("hops");
+    let (_t, t) = scratch("hops");
     std::fs::create_dir_all(t.join("c/d")).unwrap();
     symlink("c", t.join("b")).unwrap(); // relative target
     symlink(t.join("b"), t.join("a")).unwrap(); // absolute target, to another link
@@ -103,7 +102,6 @@ fn links_are_followed_hop_by_hop_and_deduplicated() {
     assert_eq!(names, ["MODULE_ID", "RO_0", "RW_0", "LINK_0", "LINK_1", "BROKER_SOCKET"]);
     assert_eq!(params[5].1, s(&t.join("c/broker.sock")));
     assert_eq!(text, sandbox::render_text("runner", 1, 1, 2, "egress-allowlist", true, false, Some(47001), false, 0, 0).unwrap());
-    std::fs::remove_dir_all(&t).unwrap();
 }
 
 #[test]

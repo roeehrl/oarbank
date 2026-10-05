@@ -485,7 +485,7 @@ mod tests {
     /// Every known API is probed and has evidence; a Mac with Apple silicon always has Metal, and nothing else does.
     #[test]
     fn detection_names_every_api_with_its_evidence() {
-        let r = detect(&std::env::temp_dir().join(format!("oarbank-gpuapi-{}", std::process::id())));
+        let r = detect(crate::scratch("gpuapi").path());
         let host = host(&r);
         let mut sorted = host.clone();
         sorted.sort();
