@@ -57,7 +57,7 @@ def test_the_agent_installs_the_standby_and_follows_the_move(agent_bin, tmp_path
                 print(json.dumps(a.api("GET", "/api/v1/coordinator"), indent=1)[-6000:])
             except Exception as e:
                 print(f"the old coordinator's status: {e}")
-            for log in sorted(b_home.glob("logs/**/*.log")) + sorted(install.glob("*/*.log")):
+            for log in sorted(b_home.rglob("*.log")) + sorted(install.glob("*/*.log")):    # the move's check: move/verify
                 if log.is_file():
                     print(f"--- {log}\n" + log.read_text(encoding="utf-8", errors="replace")[-3000:])
     assert "standby coordinator installed" in out
