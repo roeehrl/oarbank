@@ -258,6 +258,10 @@ Built as designed, with these additions found on the way:
   `IsWow64Process2`.
 - **A managed Python's real prefix**: uv names its interpreters through junctions, and copying a junction left a "copy"
   whose installs landed in the shared interpreter; the build copies `realpath(sys.base_prefix)` and refuses a link.
+- **The admin pipe's client** opens it with `CreateFileW`: Python's `open()` goes through the C runtime, which reports
+  a busy pipe (one instance being served, the next not made yet) as EINVAL, so a client could not wait for it and the
+  CLI took a running coordinator for gone (seen on CI). Its server makes the next instance before it closes one whose
+  client left, so the name always has one.
 - **Releases and moves** were made OS-independent (decision 13); the move's database install uses the backup API
   (decision 14). A module environment rebuilt in place is deleted with `files.remove_tree`, which retries for up to a
   minute an executable Windows will not delete (nor its directory rename) while Defender scans it after it was written

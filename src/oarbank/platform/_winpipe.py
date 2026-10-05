@@ -1,7 +1,6 @@
 """The local admin channel on Windows (localchannel.py): a named pipe served by uvicorn on asyncio's proactor, and an
 httpx transport that reaches it. Imported only on Windows."""
 import asyncio
-import os
 import time
 from asyncio import windows_utils
 
@@ -87,26 +86,34 @@ class PipeServer(uvicorn.Server):
 
 
 def open_pipe(name: str):
-    """A client end of the pipe, waiting while every instance is taken (other clients are being served)."""
+    """A client end of the pipe, waiting while every instance is taken (one is being served and the next not made yet).
+    CreateFileW rather than open(): the C runtime's open() reports a busy pipe as EINVAL, so a caller could not tell it
+    from a refusal."""
+    import msvcrt
+    GENERIC_READ, GENERIC_WRITE, OPEN_EXISTING = 0x80000000, 0x40000000, 3
     for _ in range(50):
-        try:
-            return open(name, "r+b", buffering=0)
-        except OSError as e:
-            if getattr(e, "winerror", None) != ERROR_PIPE_BUSY:
-                raise
-            WaitNamedPipeW(name, 2000)
+        h = W.CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None)
+        if h != W.INVALID_HANDLE_VALUE and h:
+            return open(msvcrt.open_osfhandle(h, 0), "r+b", buffering=0)
+        err = W.ctypes.get_last_error()
+        if err != ERROR_PIPE_BUSY:
+            raise W.ctypes.WinError(err, f"opening {name}")
+        WaitNamedPipeW(name, 2000)
     raise TimeoutError(f"{name}: every instance stays busy")
 
 
 def reachable(name: str) -> bool:
     """The pipe exists and admits this account (a connection, closed again at once, tells)."""
-    if name.rsplit("\\", 1)[1] not in os.listdir("\\\\.\\pipe\\"):
-        return False
+    return unreachable(name) is None
+
+
+def unreachable(name: str) -> str | None:
+    """Why the pipe cannot be used from this account, or None when it can."""
     try:
         open_pipe(name).close()
-    except OSError:
-        return False
-    return True
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+    return None
 
 
 class _Stream(httpcore.NetworkStream):

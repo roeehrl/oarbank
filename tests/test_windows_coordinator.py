@@ -138,13 +138,14 @@ def test_descriptors_are_compared_by_sid_not_by_how_sddl_spells_it(tmp_path):
 
 @windows
 def test_the_admin_pipe_stays_reachable_while_clients_come_and_go(tmp_path):
-    """A reachability check connects and leaves at once; the next instance exists before the departed client's is
-    closed, so the pipe's name never vanishes and the next check (the CLI deciding how to reach oarbankd) finds it."""
+    """Checks in a row (the CLI deciding how to reach oarbankd) each find the pipe: one that comes while the last
+    client's instance is taken and the next not made yet waits for it. open() could not, as the C runtime reports a
+    busy pipe as EINVAL; on CI the CLI then took a running coordinator for gone."""
     import asyncio
     import threading
     import httpx
     from fastapi import FastAPI
-    from oarbank.platform import localchannel
+    from oarbank.platform import _winpipe, localchannel
     app = FastAPI()
     app.get("/ping")(lambda: {"ok": True})
     srv = localchannel.server(app, tmp_path, log_level="warning")
@@ -152,7 +153,8 @@ def test_the_admin_pipe_stays_reachable_while_clients_come_and_go(tmp_path):
     t.start()
     try:
         assert wait_for(lambda: localchannel.reachable(tmp_path), 20)
-        assert all(localchannel.reachable(tmp_path) for _ in range(300))
+        why = [_winpipe.unreachable(localchannel.address(tmp_path)) for _ in range(300)]
+        assert not any(why), sorted({w for w in why if w})
         with httpx.Client(transport=localchannel.transport(tmp_path), base_url="http://oarbank") as c:
             assert c.get("/ping").json() == {"ok": True}
     finally:
