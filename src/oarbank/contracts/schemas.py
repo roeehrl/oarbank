@@ -26,8 +26,8 @@ def export() -> list[str]:
     changed = []
     for name, text in render_all().items():
         p = ROOT / name
-        if not p.exists() or p.read_text() != text:
-            p.write_text(text)
+        if not p.exists() or p.read_text(encoding="utf-8") != text:
+            p.write_text(text, encoding="utf-8", newline="\n")
             changed.append(name)
     return changed
 

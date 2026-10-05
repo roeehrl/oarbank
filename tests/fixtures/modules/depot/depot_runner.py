@@ -18,11 +18,11 @@ def write(path: Path, obj):
 
 
 def run(spec_path: Path, ws: Path, out: Path) -> int:
-    env = json.loads(spec_path.read_text())
+    env = json.loads(spec_path.read_text(encoding="utf-8"))
     res = {"envelope": 1, "schema": "depot/result@1", "module_version": env.get("module_version", "1.0.0"), "protocol": 1}
     if env.get("stage") == "fetch":
-        granted = {"data": os.environ.get("OARBANK_MODULE_DATA"), "tools": Path(os.environ["OARBANK_TOOLS_FILE"]).read_text(),
-                   "settings": Path(os.environ["OARBANK_SETTINGS_FILE"]).read_text()}
+        granted = {"data": os.environ.get("OARBANK_MODULE_DATA"), "tools": Path(os.environ["OARBANK_TOOLS_FILE"]).read_text(encoding="utf-8"),
+                   "settings": Path(os.environ["OARBANK_SETTINGS_FILE"]).read_text(encoding="utf-8")}
         if granted != {"data": None, "tools": "{}", "settings": "{}"}:      # the bootstrap grants, and nothing more
             write(ws / "failure.json", {"reason": "depot/not_bootstrap_grants", "detail": json.dumps(granted), "fault": "job"})
             return 1

@@ -8,7 +8,9 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 - Nodes: macOS 15 or later on Apple silicon (Intel Macs run the universal agent when it is built with the x86_64
   target), Linux with systemd on x86-64 or arm64 ([Linux nodes](#linux-nodes)), or Windows 10 1809 or later on x64
   or arm64 ([Windows nodes](#windows-nodes)).
-- For the coordinator: a Mac or a Linux machine that stays on, reachable by the nodes on one address (port 7443/tcp).
+- For the coordinator: a Mac, a Linux machine or a Windows machine (Windows 10 1809, Windows 11 or Windows Server
+  2019 or later; [Windows coordinator](#windows-coordinator)) that stays on, reachable by the nodes on one address
+  (port 7443/tcp).
 - Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
   agent's own Colima, and so on). On a Mac with Apple silicon, krunkit gives GPU containers Vulkan on the Mac's GPU,
   in a second agent-owned Colima VM: `brew tap slp/krun && brew trust slp/krun && brew install krunkit` (Homebrew asks
@@ -18,7 +20,8 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 
 | File | Built by | What |
 |---|---|---|
-| `oarbank-coordinator-<v>-darwin-arm64.tar.gz` | `scripts/build-coordinator.sh` | the coordinator: a relocatable Python with the compiled core, `bin/oarbankd`, `bin/oarbank`, `bin/oarbank-console` |
+| `oarbank-coordinator-<v>-darwin-arm64.tar.gz` | `scripts/build-coordinator.sh` | the coordinator: a relocatable Python with the compiled core, `bin/oarbankd`, `bin/oarbank`, `bin/oarbank-console` (and `-linux-<arch>` on Linux) |
+| `oarbank-coordinator-<v>-windows-<arch>.tar.gz` | `scripts\build-coordinator.ps1` | the same for Windows: x64 Python with the compiled core, the agent's module launcher, uv, and `bin\*.cmd` |
 | `oarbank-agent-<v>-macos.pkg` | `scripts/package-macos.sh` | the node: `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}` and the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host) |
 | `oarbank-agent-<v>-darwin-<arch>` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
 
@@ -162,3 +165,39 @@ virtualization in a VM). `CONTAINERS=1` on the `msiexec` command line installs b
 Virtual Machine Platform was new); `oarbank-agent containers install` does the same later. `oarbank-agent containers
 doctor` prints the runtime's state and each missing piece with its fix, and `--probe` runs a container through it.
 The node offers the `containers` pool only while its session is ready.
+
+## Windows coordinator
+
+Windows 10 1809 or later, Windows 11 or Windows Server 2019 or later, x64 or arm64. The coordinator runs as two
+Windows services; its Python is x64 on both architectures (on arm64 under Windows' own emulation), because one of its
+libraries publishes no Windows on Arm builds.
+
+```powershell
+scripts\build-coordinator.ps1                 # on Windows with Rust, uv and the MSVC build tools: dist\oarbank-coordinator-<v>-windows-<arch>.tar.gz
+# in an elevated PowerShell on the coordinator:
+deploy\oarbankd\install-oarbankd.ps1 -Build oarbank-coordinator-<v>-windows-<arch>.tar.gz -AgentBind <address>
+```
+The installer unpacks the build under `C:\Program Files\Oarbank\Coordinator\<v>-<sha>` with `current` a junction to
+it, and installs the services `dev.codonic.oarbank.oarbankd` and `dev.codonic.oarbank.console`, each run by its own
+virtual account, started automatically about two minutes after boot and restarted by the service manager after a crash.
+The coordinator's state is in `C:\ProgramData\Oarbank\coordinator`, which only SYSTEM, administrators and the two
+services can open; its logs are in its `logs` folder. An inbound firewall rule lets nodes reach the agent port (7443)
+of the oarbankd service; the console and the admin API answer on loopback only. `-DryRun` prints every step.
+
+Then, in an elevated prompt on the coordinator (it talks to oarbankd over a named pipe only administrators and the
+services can open, so it needs no token):
+```powershell
+& "C:\Program Files\Oarbank\Coordinator\current\bin\oarbank.cmd" account create <you> --role admin --password
+& "C:\Program Files\Oarbank\Coordinator\current\bin\oarbank.cmd" join-code --label <node>
+```
+A module's own CLI (`oarbank cli <module>`) is limited to the admin API through the elevated helper the agent's MSI
+installs; install the agent on the coordinator too to use one. Module processes run in AppContainers, as on a Windows
+node.
+
+**Updating:** run the installer again with the new build: the services stop, `current` moves and they start; earlier
+builds stay beside it. **Moving the coordinator to a Windows machine:** prepare the move with that machine's URL
+(`oarbank coordinator prepare --to https://<host>:7443`) and run the installer there with the printed pairing code:
+`install-oarbankd.ps1 -Build … -AgentBind <host> -Pair <code> -From <old url> -FromCa <pin>` (an agent on a Windows node
+cannot install services, so a move never installs one there by itself). **Removing:** `install-oarbankd.ps1
+-Uninstall` removes the services, the firewall rule and the programs; the state stays in
+`C:\ProgramData\Oarbank\coordinator` until you delete it.

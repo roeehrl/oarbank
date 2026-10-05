@@ -67,7 +67,7 @@ def adopt(old: Path, url: str, home: Path | None = None) -> dict:
     old_cik = db.get_setting("coordinator_cik")
     fid = identity.fleet_id(db)
     tlsca.ensure_ca(home, fid)
-    tlsca.trust_adopted_ca(home, (old / "tls" / "ca.pem").read_text())
+    tlsca.trust_adopted_ca(home, (old / "tls" / "ca.pem").read_text(encoding="utf-8"))
     with db.tx():
         identity.set_role(db, "standby")
         for k in ("move_phase", "move_commit_decided", "move_rules_plan", "move_blockers", "move_postflight_pending"):
@@ -89,7 +89,7 @@ def sign(path: Path, home: Path | None = None) -> dict:
     req = db.get_setting("rescue_request")
     if not req:
         raise RescueError("nothing to sign: adopt a fleet first (python -m oarbank.coordinator.rescue adopt)")
-    d = json.loads(Path(path).read_text())
+    d = json.loads(Path(path).read_text(encoding="utf-8"))
     mv = d["coordinator_move"]
     stmt = json.loads(mv["statement"])
     k = identity.key(home)
@@ -100,7 +100,7 @@ def sign(path: Path, home: Path | None = None) -> dict:
     if not owner.verify_any(db, mv["statement"], mv["signatures"].get("owner")):
         raise RescueError("the move is not signed by a key of the fleet's owner key set")
     mv["signatures"]["to"] = k.sign(mv["statement"])
-    Path(path).write_text(json.dumps(d, indent=1) + "\n")
+    Path(path).write_text(json.dumps(d, indent=1) + "\n", encoding="utf-8", newline="\n")
     last = db.one("SELECT MAX(last_event_id) m FROM audit_digests")["m"]
     with db.tx():
         db.set_setting("coordinator_epoch", int(stmt["epoch"]))

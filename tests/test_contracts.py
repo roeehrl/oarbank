@@ -77,14 +77,14 @@ def test_console_forms_match_the_registry():
     """Every operation a console template renders is registered with the console route, and vice versa."""
     rendered = set()
     for t in (SRC / "console" / "templates").glob("*.html"):
-        rendered |= set(re.findall(r'op_form\("([a-z_.]+)"', t.read_text()))
+        rendered |= set(re.findall(r'op_form\("([a-z_.]+)"', t.read_text(encoding="utf-8")))
     registered = {op.id for op in ops.OPS if op.gui and not op.id.startswith("mod.")}   # module ops render in module pages
     assert rendered == registered
 
 
 def test_console_templates_have_no_inline_script_or_handlers():
     for t in (SRC / "console" / "templates").glob("*.html"):
-        text = t.read_text()
+        text = t.read_text(encoding="utf-8")
         assert not re.search(r"<script(?![^>]*\bsrc=)", text), t.name
         assert not re.search(r"\son[a-z]+\s*=", text), t.name
         assert "javascript:" not in text, t.name
@@ -94,7 +94,7 @@ def test_console_templates_have_no_inline_script_or_handlers():
 
 
 def test_cli_mutates_only_through_registered_operations():
-    src = (SRC / "cli" / "main.py").read_text()
+    src = (SRC / "cli" / "main.py").read_text(encoding="utf-8")
     assert not re.findall(r'api\("(POST|PUT|PATCH|DELETE)"', src)            # every write is an operation (run_op)
     named = re.findall(r'run_op\("([a-z_.]+)"', src) + re.findall(r'"(nodes\.[a-z_]+)"', src)
     assert named and all(o in ops.REGISTRY for o in named), [o for o in named if o not in ops.REGISTRY]
@@ -181,7 +181,7 @@ def _quoted(texts, s):
 def test_every_code_has_a_producer():
     """No code is registered that nothing emits: each is named as a literal (or written as one of its end reasons) by
     the core or the agent. The agent formats some codes from a prefix (`format!("RUNG_{}", rung)`)."""
-    texts = [p.read_text() for p in PRODUCERS]
+    texts = [p.read_text(encoding="utf-8") for p in PRODUCERS]
     prefixes = {m for t in texts for m in re.findall(r'"([A-Z][A-Z0-9]*_)\{\}"', t)}
     orphans = [c.code for c in rc.CODES
                if not _quoted(texts, c.code) and not any(_quoted(texts, w) for w in c.wire)
@@ -192,7 +192,7 @@ def test_every_code_has_a_producer():
 def test_console_and_explain_name_only_registered_codes():
     named = {}
     for p in CONSUMERS:
-        t = p.read_text()
+        t = p.read_text(encoding="utf-8")
         for m in (*CODE_LITERAL.finditer(t), *CODE_POSITION.finditer(t), *(ANY_CODE.finditer(t) if p in CODE_ONLY else ())):
             named.setdefault(m.group(1), p.name)
     unknown = {c: f for c, f in named.items() if c not in rc.REGISTRY}
@@ -204,7 +204,7 @@ def test_agent_protection_reasons_are_registered():
     calls = [re.compile(rf'journal(?:_record)?\(\s*(?:"[a-z_]+"|[a-z_&.]+),\s*(?:&format!\()?"({CODE}(?:_\{{\}})?)"'),
              re.compile(rf'ProtectionEvent::new\(\s*"[a-z_]+",\s*.+?,\s*"({CODE})"', re.S)]
     reasons = {(p.name, m.group(1)) for p in ROOT.glob("rust/crates/oarbank-protection/src/**/*.rs") for c in calls
-               for m in c.finditer(p.read_text())}
+               for m in c.finditer(p.read_text(encoding="utf-8"))}
     assert len(reasons) >= 10, reasons
     unknown = [(f, s) for f, s in sorted(reasons)
                if not (any(c.startswith(s[:-2]) for c in rc.REGISTRY) if s.endswith("_{}") else s in rc.REGISTRY)]
@@ -218,12 +218,12 @@ def test_core_end_reasons_are_registered():
             r'release\(db, node, attempt_id, "([a-z_]+)"\)', r'_cancel_goldens\([^()]*,\s*"([a-z_]+)"\)']
     found = set()
     for f in ("core.py", "ops.py"):
-        t = (SRC / "coordinator" / f).read_text()
+        t = (SRC / "coordinator" / f).read_text(encoding="utf-8")
         for pat in pats:
             found |= set(re.findall(pat, t))
         for mapping in re.findall(r"reason, accepted = \{([^}]*)\}", t):      # {state: end reason}[state]
             found |= set(re.findall(r':\s*"([a-z_]+)"', mapping))
-    artifacts = (SRC / "coordinator" / "core.py").read_text().split("def _register_artifacts", 1)[1].split("\ndef ", 1)[0]
+    artifacts = (SRC / "coordinator" / "core.py").read_text(encoding="utf-8").split("def _register_artifacts", 1)[1].split("\ndef ", 1)[0]
     found |= set(re.findall(r'return "([a-z_]+)"', artifacts))                 # its rejection reasons
     assert {"node_quarantined", "node_retired", "job_cancelled", "stale_generation", "bad_artifact", "golden_failed"} <= found
     missing = sorted(r for r in found if r not in rc.WIRE)
@@ -307,14 +307,14 @@ def test_no_action_can_target_a_protected_process():
 
 def test_contract_schemas_are_fresh():
     rendered = schemas.render_all()
-    on_disk = {p.name: p.read_text() for p in schemas.ROOT.glob("*.schema.json")}
+    on_disk = {p.name: p.read_text(encoding="utf-8") for p in schemas.ROOT.glob("*.schema.json")}
     assert on_disk == rendered, "run `python -m oarbank.contracts.schemas`"
 
 
 def test_generated_registry_docs_are_fresh():
     from oarbank.contracts import docs
     for name, fn in docs.RENDERED.items():
-        assert (docs.DOCS / name).read_text() == fn(), "run `python -m oarbank.contracts.docs`"
+        assert (docs.DOCS / name).read_text(encoding="utf-8") == fn(), "run `python -m oarbank.contracts.docs`"
 
 
 def test_every_operation_has_a_handler_and_a_console_form():

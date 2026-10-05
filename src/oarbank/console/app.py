@@ -157,11 +157,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
 
     @app.get("/static-ui/ui.css")
     async def ui_css():
-        return Response(CSS_PATH.read_text(), media_type="text/css")
+        return Response(CSS_PATH.read_text(encoding="utf-8"), media_type="text/css")
 
     @app.get("/static-ui/ui.js")
     async def ui_js():
-        return Response((RENDER_HERE / "static" / "ui.js").read_text(), media_type="text/javascript")
+        return Response((RENDER_HERE / "static" / "ui.js").read_text(encoding="utf-8"), media_type="text/javascript")
     T = templates()
     limiter = anyio.CapacityLimiter(3)
     clients = {"n": 0}

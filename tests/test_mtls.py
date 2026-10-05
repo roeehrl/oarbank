@@ -129,4 +129,5 @@ def test_certificates_are_p256_with_strict_extensions(db, tmp_path):
                 x509.AuthorityKeyIdentifier, x509.SubjectAlternativeName):
         cert.extensions.get_extension_for_class(ext)
     assert tlsca.node_of(cert.public_bytes(serialization.Encoding.DER)) == "n_1"
-    assert (db.root / "tls" / "ca.key").stat().st_mode & 0o077 == 0
+    from oarbank.platform import files
+    assert files.owner_only(db.root / "tls" / "ca.key")

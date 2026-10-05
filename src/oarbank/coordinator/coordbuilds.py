@@ -17,6 +17,7 @@ import shutil
 import tarfile
 from pathlib import Path
 
+from ..platform import files
 from . import clock
 from . import config as C
 from .db import DB
@@ -87,7 +88,7 @@ def register(db: DB, sha: str, actor: str) -> dict:
         return {**record(db, sha), "already": True}
     dst = _dir("builds") / f"{sha}.tar.gz"
     shutil.copyfile(src, dst.with_suffix(".tmp"))
-    os.chmod(dst.with_suffix(".tmp"), 0o444)
+    files.seal(dst.with_suffix(".tmp"))
     os.replace(dst.with_suffix(".tmp"), dst)
     src.unlink(missing_ok=True)
     db.x("INSERT INTO coordinator_builds(sha256, version, platform, path, size, uploaded_at, uploaded_by) VALUES(?,?,?,?,?,?,?)",

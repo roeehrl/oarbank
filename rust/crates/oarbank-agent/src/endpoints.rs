@@ -800,6 +800,8 @@ pub mod tests {
         release: Release,
         python: PathBuf,
         roots: Vec<String>,
+        /// removes `root` when the fixture goes
+        _tmp: tempfile::TempDir,
     }
 
     fn copy_dir(from: &Path, to: &Path) {
@@ -820,10 +822,8 @@ pub mod tests {
         fn new(tag: &str) -> Fx {
             // the service manager's own account of what it did (an op that failed, a sandbox escape) shows with a failure
             let _ = tracing_subscriber::fmt().with_test_writer().with_env_filter("oarbank_agent=info").try_init();
-            let root = std::env::temp_dir().join(format!("oarbank-ep-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).unwrap();
-            let root = dunce(std::fs::canonicalize(&root).unwrap());
+            let tmp = crate::scratch(&format!("ep-{tag}"));
+            let root = dunce(std::fs::canonicalize(tmp.path()).unwrap());
             let dir = root.join("releases").join("r_test");
             let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../vendor/oarbank-sdk/examples/modelserver");
             copy_dir(&example, &dir.join("modules").join("modelserver"));
@@ -834,7 +834,7 @@ pub mod tests {
                 "probes": [], "sandbox": {"contract": 1, "net": {"mode": "none"}, "tools": [], "devices": {"gpu": "none"},
                                           "exec_writable": false}});
             let (python, roots) = python();
-            Fx { root, release: Release { id: "r_test".into(), dir, modules: vec![entry] }, python, roots }
+            Fx { root, release: Release { id: "r_test".into(), dir, modules: vec![entry] }, python, roots, _tmp: tmp }
         }
 
         fn manager(&self) -> ServiceManager {
@@ -944,12 +944,6 @@ pub mod tests {
         s.strip_prefix(r"\\?\").map(PathBuf::from).unwrap_or(p)
     }
 
-    impl Drop for Fx {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
     struct Job {
         child: std::process::Child,
         ws: PathBuf,
@@ -972,10 +966,15 @@ pub mod tests {
             panic!("no answers: {}", std::fs::read_to_string(self.ws.join("stderr")).unwrap_or_default());
         }
 
-        /// The attempt ends: its container is killed, then its connectors go.
+        /// The attempt ends: its container is killed (all of it, before the fixture's directory goes), then its
+        /// connectors go.
         fn end(mut self) {
             let pid = self.child.id() as i32;
+            #[cfg(windows)]
+            let members = crate::sys::Members::of(pid);
             crate::sys::signal_group(pid, crate::sys::Sig::Kill);
+            #[cfg(windows)]
+            members.wait(Duration::from_secs(30));
             let _ = self.child.wait();
             crate::sys::release(pid);
             self.connectors.clear();
@@ -1067,8 +1066,10 @@ pub mod tests {
         assert!(gone(pid), "its processes are ended");
         assert_eq!(m.held(), BTreeMap::from([("modelserver/model".to_string(), "preempt_memory".to_string())]));
         assert!(!tick_until(&mut m, 1, 2.0, |m| !m.running().is_empty()), "not started again while held, even with users");
-        let refused = fx.job(&m, 202, &["y"]).out();
-        assert!(refused["error"].as_str().unwrap().contains("service_unavailable"), "{refused}");
+        let mut refused = fx.job(&m, 202, &["y"]);
+        let out = refused.out();
+        assert!(out["error"].as_str().unwrap().contains("service_unavailable"), "{out}");
+        refused.end();
         j.end();
         m.set_held(&BTreeMap::new());
         assert!(tick_until(&mut m, 1, 90.0, ready), "free again: started on demand");
@@ -1082,9 +1083,14 @@ pub mod tests {
         let mut m = fx.manager();
         assert!(tick_until(&mut m, 1, 90.0, ready), "{}", fx.why(&m));
         let pid = daemon(&fx);
+        // all of the service's processes, which end with it (not only its daemon)
+        #[cfg(windows)]
+        let members = crate::sys::Members::of(m.fleet_view()[0].pgid.unwrap());
         let empty = Release { id: "r_none".into(), dir: fx.release.dir.clone(), modules: vec![] };
         m.configure(&empty, &json!({}), None);
         assert!(gone(pid), "the module's service is stopped with the module");
+        #[cfg(windows)]
+        assert!(members.wait(Duration::from_secs(30)), "the service's processes end with it");
         assert!(m.running().is_empty() && !fx.data("model.ready").exists());
     }
 

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import secrets
+import sys
 import threading
 import time
 
@@ -27,7 +28,26 @@ def main():
     ap.add_argument("--url", help="this coordinator's agent URL as agents reach it (default http://<agent-bind>:<agent-port>)")
     ap.add_argument("--archive-home", action="store_true",
                     help="with --standby: move an existing home aside first (a reverse move back to this machine)")
+    ap.add_argument("--service", action="store_true",
+                    help="run as a Windows service (the service control manager starts it so: platform/service.py)")
     a = ap.parse_args()
+    if a.service:
+        if sys.platform != "win32":
+            ap.error("--service is for the Windows service control manager; launchd and systemd run oarbankd as it is")
+        from ..platform import service
+        return service.run(lambda: run(a), stop_servers)
+    return run(a)
+
+
+_SERVERS: list = []           # the uvicorn servers of this process, for a stop from the service manager
+
+
+def stop_servers():
+    for s in _SERVERS:
+        s.should_exit = True
+
+
+def run(a):
     os.umask(0o077)                           # every file oarbankd creates is owner-only
     my_url = (a.url or f"https://{a.agent_bind}:{a.agent_port}").rstrip("/")
 
@@ -38,7 +58,8 @@ def main():
         dest = C.HOME.with_name(C.HOME.name + "-archive-" + time.strftime("%Y%m%d-%H%M%S"))
         C.HOME.rename(dest)
         print(f"oarbankd: archived the old home to {dest}")
-    from ..platform import files
+    from ..platform import files, service
+    service.log_to(C.HOME / "logs" / "oarbankd.log")
     files.private_dir(C.HOME)
     tightened = files.tighten_home(C.HOME)
     from . import access, identity, movepull
@@ -48,6 +69,8 @@ def main():
         raise SystemExit(f"oarbankd: {C.HOME} holds a coordinator; a standby starts empty (add --archive-home)")
     db = DB(C.DB_PATH)
     identity.ensure(db)
+    from . import hostinfo
+    hostinfo.refresh(db)
     completed_move = movepull.finish_install(db, C.HOME)
     puller = None
     if not completed_move and (a.standby or mstate.get("phase") in ("paired", "seeding", "seeded", "ready", "promoting")):
@@ -101,18 +124,14 @@ def main():
         bus.bind(asyncio.get_running_loop())
         agent = uvicorn.Server(uvicorn.Config(agent_app(db, puller), host=a.agent_bind, port=a.agent_port, http=PeerCertH11,
                                               log_level="warning", access_log=False, **ssl_opts))
-        servers = [agent.serve()]
         admin = uvicorn.Server(uvicorn.Config(admin_app(db, bus, console_secret=secret), host=a.admin_bind,
                                               port=a.admin_port, log_level="warning", access_log=False))
-        from ..paths import runtime_socket
-        files.private_dir(C.HOME / "run")
-        sock = runtime_socket(C.HOME, "admin.sock")
-        sock.unlink(missing_ok=True)
-        local = uvicorn.Server(uvicorn.Config(admin_app(db, bus, console_secret=secret, local_socket=True), uds=str(sock),
-                                              log_level="warning", access_log=False))
-        servers.append(local.serve())
+        from ..platform import localchannel
+        local = localchannel.server(admin_app(db, bus, console_secret=secret, local_channel=True), C.HOME,
+                                    log_level="warning", access_log=False)
+        _SERVERS[:] = [agent, admin, local]
         db.event("coordinator_started", reason=f"agent https://{a.agent_bind}:{a.agent_port} admin {a.admin_bind}:{a.admin_port}")
-        await asyncio.gather(*servers, admin.serve())
+        await asyncio.gather(*(s.serve() for s in _SERVERS))
 
     try:
         asyncio.run(serve())

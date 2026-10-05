@@ -40,7 +40,7 @@ the owner's own work first, every job in the operating system's sandbox.</p>
 
 ## What it does
 
-- **Runs one queue on all your computers.** A coordinator on a Mac or a Linux machine hands jobs to nodes on macOS
+- **Runs one queue on all your computers.** A coordinator on a Mac, a Linux machine or a Windows PC hands jobs to nodes on macOS
   (Apple silicon), Linux (x86_64 and arm64, systemd) and Windows 10 and 11 (x64 and ARM64). A job goes to a node with
   the CPU, memory and tools it needs; a node that sleeps or leaves gives its work back.
 - **Keeps each computer's own work first.** Every node has a memory guard and per-node caps on cores, memory, jobs and
@@ -105,12 +105,13 @@ the reference module above, sums integers and checks each answer.
 Oarbank is **not released yet**: there are no published packages. Follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) for what you need and how it will install, or build the
 packages yourself (`scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1`,
-`scripts/build-coordinator.sh`) and follow [docs/install.md](docs/install.md).
+`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`) and follow [docs/install.md](docs/install.md).
 
 In short, once you have the packages:
 
 ```bash
-# on the coordinator (macOS on Apple silicon, or Linux with systemd)
+# on the coordinator (macOS on Apple silicon, or Linux with systemd; on Windows, in an elevated PowerShell:
+#   deploy\oarbankd\install-oarbankd.ps1 -Build oarbank-coordinator-<v>-windows-<arch>.tar.gz -AgentBind <address>)
 deploy/oarbankd/install-oarbankd.sh --build oarbank-coordinator-<v>-<os>-<arch>.tar.gz --agent-bind <address>
 oarbank account create <you> --role admin --password    # console sign-in: a password and a TOTP secret
 oarbank join-code --label <node>                         # one per computer
@@ -170,8 +171,8 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 **Can I install it today?** Not yet. The first public release brings the installers; until then you can build the
 packages from this repository. [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements.
 
-**What do I need?** Two or more computers that can reach one another: a Mac or a Linux machine for the coordinator
-(it can be a node too), and Macs, Linux machines or Windows PCs as nodes.
+**What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the
+coordinator (it can be a node too), and Macs, Linux machines or Windows PCs as nodes.
 
 **Will it slow my computer down?** It is built not to: the memory guard stops taking jobs when free memory runs low and
 evicts the fleet's jobs if it keeps falling, and caps limit cores, memory, jobs and hours. It also yields to the person

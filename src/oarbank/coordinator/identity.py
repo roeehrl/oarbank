@@ -20,6 +20,7 @@ import secrets
 import time
 from pathlib import Path
 
+from ..platform import files
 from . import config as C
 from .db import DB
 
@@ -51,13 +52,11 @@ class Key:
         if raw is None:
             assert path is not None
             if path.exists():
-                raw = base64.b64decode(path.read_text().strip())
+                raw = base64.b64decode(path.read_text(encoding="utf-8").strip())
             else:
                 raw = os.urandom(32)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w") as f:
-                    f.write(b64(raw) + "\n")
+                files.write_private(path, b64(raw) + "\n", exclusive=True)
         self._k = Ed25519PrivateKey.from_private_bytes(raw)
         from cryptography.hazmat.primitives import serialization
         self.public_b64 = b64(self._k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
@@ -117,8 +116,8 @@ def set_role(db: DB, r: str):
     if r == "handed_off":
         # the marker first: from here on a restarted oarbankd comes back redirect-only whatever the database says
         p = marker_path(db)
-        p.write_text(json.dumps({"at": time.time(), "epoch": epoch(db)}) + "\n")
-        os.chmod(p, 0o444)
+        p.write_text(json.dumps({"at": time.time(), "epoch": epoch(db)}) + "\n", encoding="utf-8", newline="\n")
+        files.seal(p)
     db.set_setting("coordinator_role", r)
 
 

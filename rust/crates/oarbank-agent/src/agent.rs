@@ -1115,21 +1115,20 @@ pub mod tests {
     /// whose `requires.capabilities` only on nodes that report them.
     #[test]
     fn the_doctor_report_names_the_nodes_capabilities() {
-        let home = std::env::temp_dir().join(format!("oarbank-agent-caps-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let tmp = crate::scratch("agent-caps");
+        let home = tmp.path().to_path_buf();
         let agent = Agent::open(Layout::new(home.clone()), Some("https://127.0.0.1:9")).unwrap();
         let mut rep = json!({"modules": {}});
         agent.fold_requires(&mut rep);
         assert_eq!(rep["capabilities"], json!([]));
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The doctor report carries the GPU probe; a module whose runner needs an API this host lacks is `undetected`
     /// (never offered or certified here), one that needs it in containers or names none is left to its own doctor.
     #[test]
     fn the_doctor_report_names_the_gpu_apis_and_a_module_needing_another_is_undetected() {
-        let home = std::env::temp_dir().join(format!("oarbank-agent-gpuapis-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let tmp = crate::scratch("agent-gpuapis");
+        let home = tmp.path().to_path_buf();
         let mut agent = Agent::open(Layout::new(home.clone()), Some("https://127.0.0.1:9")).unwrap();
         let mut rep = json!({"modules": {}});
         agent.fold_gpu_apis(&mut rep);
@@ -1151,14 +1150,13 @@ pub mod tests {
         for m in ["metal", "boxed", "cpu"] {
             assert_eq!(rep["modules"][m], ok, "{m}");
         }
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// the pending move (and survives a restart in agent.json).
     #[tokio::test]
     async fn a_rescue_move_at_a_pinned_rescue_location_becomes_the_pending_move() {
-        let home = std::env::temp_dir().join(format!("oarbank-agent-rescue-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let tmp = crate::scratch("agent-rescue");
+        let home = tmp.path().to_path_buf();
         let (a, b, owner) = (key(1), key(2), key(3));
         let base = serve(vec![("/fleet_a.json", 200, "", rescue_file(&a.1, &b, &owner.0, 2, "https://b:7443").to_string())]).await;
         let mut agent = Agent::open(Layout::new(home.clone()), Some("https://127.0.0.1:9")).unwrap();
@@ -1178,6 +1176,5 @@ pub mod tests {
         assert_eq!(agent.move_state["state"], "pending");
         let saved = Config::load(&agent.layout.config()).unwrap().unwrap();
         assert!(saved.coordinator_trust.pending_move.is_some() && saved.coordinator_trust.owner_rescue.len() == 1);
-        let _ = std::fs::remove_dir_all(home);
     }
 }

@@ -49,7 +49,7 @@ else:
 def scored_toy(tmp):
     src = tmp / "toy"
     shutil.copytree(TOY, src)
-    m = (src / "oarbank-module.toml").read_text()
+    m = (src / "oarbank-module.toml").read_text(encoding="utf-8")
     m = m.replace('runner_protocol = [1]', 'runner_protocol = [1]\nservice_protocol = [1]')
     m = m.replace('requires.resources = { cpu = 1, mem_gb = 0.1 }',
                   'requires.resources = { cpu = 1, mem_gb = 0.1 }\nrequires.pools = { scorer = 1 }')
@@ -63,7 +63,7 @@ provides = { pools = ["scorer"] }
 '''
     (src / "oarbank-module.toml").write_text(m)
     (src / "scorer_service.py").write_text(SERVICE)
-    mod = (src / "toy_module.py").read_text()
+    mod = (src / "toy_module.py").read_text(encoding="utf-8")
     (src / "toy_module.py").write_text(mod.replace('"resources": {"cpu": 1, "mem_gb": 0.1}}',
                                                    '"resources": {"cpu": 1, "mem_gb": 0.1, "pools": {"scorer": 1}}}'))
     return src
@@ -92,7 +92,7 @@ def test_on_demand_service_starts_for_pool_jobs(agent_bin, coordinator, tmp_path
         jobs = wait(lambda: (lambda j: j if j["n"] == 2 and j["d"] == 2 else None)(
             coordinator.api("GET", f"/api/v1/campaigns/{cid}")["jobs"]), timeout=180)
         assert jobs["f"] == 0
-        calls = (home / "modules-data" / "toy" / "scorer.calls").read_text().split()
+        calls = (home / "modules-data" / "toy" / "scorer.calls").read_text(encoding="utf-8").split()
         assert "start" in calls and "ready" in calls
         tel = wait(lambda: (lambda t: t if t.get("services_running") else None)(
             json.loads(node(coordinator)["telemetry_json"] or "{}")), timeout=60)

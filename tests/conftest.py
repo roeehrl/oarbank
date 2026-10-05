@@ -52,3 +52,16 @@ def pytest_configure(config):
         raise pytest.UsageError(f"no module sandbox backend on {sys.platform}: OARBANK_SANDBOX_EXEC={exe} is missing or "
                                 f"`{exe} sandbox-status` reports no backend (build it with `cargo build -p oarbank-agent` "
                                 "in rust/; Linux needs Landlock and seccomp)")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _module_processes_end_with_their_test_module():
+    """Module hosts a test file made stop when the file is done, rather than when their database is collected: their
+    processes would otherwise pile up over the session (on Windows each holds its files open)."""
+    from oarbank.coordinator import modcalls
+    before = len(modcalls._all_hosts)
+    yield
+    for ref in modcalls._all_hosts[before:]:
+        h = ref()
+        if h is not None:
+            h.close()

@@ -31,7 +31,7 @@ def file_audit_keys(monkeypatch, tmp_path):
             if private_key_b64 is None:
                 k = tmp_path / f"audit-{id(self) % 7}.key"
                 identity.Key(k)
-                private_key_b64 = k.read_text().strip()
+                private_key_b64 = k.read_text(encoding="utf-8").strip()
             real.__init__(self, private_key_b64)
     monkeypatch.setattr(audit, "Signer", FileSigner)
     monkeypatch.setattr(coordmove, "MIN_TIMELOCK_S", 1)
@@ -422,7 +422,7 @@ def coordinator_here_only(tmp_path) -> Path:
     from helpers import RELAY_DIR
     d = tmp_path / "relay-here"
     shutil.copytree(RELAY_DIR, d, ignore=shutil.ignore_patterns("__pycache__", "dist"))
-    m = (d / "oarbank-module.toml").read_text().replace(
+    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace(
         'core = ">=2.3,<3"', f'core = ">=2.3,<3"\ncoordinator_platforms = ["{portable.host_platform()}"]')
     (d / "oarbank-module.toml").write_text(m)
     return d

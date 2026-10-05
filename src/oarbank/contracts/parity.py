@@ -11,11 +11,11 @@ EXPLAIN_KINDS = ("job", "node")                               # oarbankd.explain
 
 
 def _templates() -> str:
-    return "\n".join(p.read_text() for p in (SRC / "console" / "templates").glob("*.html"))
+    return "\n".join(p.read_text(encoding="utf-8") for p in (SRC / "console" / "templates").glob("*.html"))
 
 
 def _cli_source() -> str:
-    return (SRC / "cli" / "main.py").read_text()
+    return (SRC / "cli" / "main.py").read_text(encoding="utf-8")
 
 
 def op_rows() -> list[dict]:
@@ -35,8 +35,8 @@ def op_rows() -> list[dict]:
 
 def explain_rows() -> list[dict]:
     t, cli_src = _templates(), _cli_source()
-    console = (SRC / "console" / "app.py").read_text()
-    app = (SRC / "coordinator" / "app.py").read_text()
+    console = (SRC / "console" / "app.py").read_text(encoding="utf-8")
+    app = (SRC / "coordinator" / "app.py").read_text(encoding="utf-8")
     return [{"kind": k, "api_ok": "/api/v1/explain/{kind}/{ident}" in app, "cli_ok": "def cmd_explain" in cli_src,
              "gui_ok": "/explain/{kind}/{ident}" in console and f"/explain/{k}/" in t} for k in EXPLAIN_KINDS]
 

@@ -293,7 +293,8 @@ mod tests {
             eprintln!("no Landlock here: skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("oarbank-ll-{}", std::process::id()));
+        let tmp = crate::scratch("ll");
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("rw")).unwrap();
         std::fs::write(dir.join("secret"), "x").unwrap();
         let mut p = Policy::new("m");
@@ -309,6 +310,5 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(!text.contains("READ") && text.contains("WROTE") && !text.contains("UDP"), "{text}");
         assert!(text.contains("NoNewPrivs:\t1") && text.contains("Seccomp:\t2"), "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

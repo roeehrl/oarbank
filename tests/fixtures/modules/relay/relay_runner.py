@@ -14,7 +14,7 @@ def write(path: Path, obj):
 
 
 def run(spec_path: Path, ws: Path, out: Path) -> int:
-    env = json.loads(spec_path.read_text())
+    env = json.loads(spec_path.read_text(encoding="utf-8"))
     pl = env["payload"]
     h = hashlib.sha256(json.dumps([pl.get("params"), pl.get("dataset")], sort_keys=True).encode()).hexdigest()
     res = {"envelope": 1, "schema": "relay/result@1", "module_version": env.get("module_version", "1.0.0"), "protocol": 1,

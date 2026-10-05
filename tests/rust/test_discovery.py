@@ -3,6 +3,7 @@
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 
@@ -13,7 +14,8 @@ from conftest import Coordinator  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="the system responder (dns-sd)")
+@pytest.mark.skipif(sys.platform.startswith("linux") and not shutil.which("avahi-publish-service"),
+                    reason="Linux announces and browses through Avahi, which is not installed")
 def test_agent_finds_the_announcing_coordinator(agent_bin, tmp_path):
     ty = f"_oarbt{secrets.token_hex(3)}._tcp"
     home = tmp_path / "c"

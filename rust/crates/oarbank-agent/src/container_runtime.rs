@@ -1006,7 +1006,7 @@ pub mod tests {
     #[cfg(unix)]
     fn the_engine_keeps_its_state_where_the_agent_may_write() {
         use std::os::unix::fs::PermissionsExt;
-        let (mine, agent, roots) = (temp("eh-mine"), temp("eh-agent"), temp("eh-root"));
+        let ((_m, mine), (_a, agent), (_r, roots)) = (temp("eh-mine"), temp("eh-agent"), temp("eh-root"));
         std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(0o555)).unwrap();
         assert_eq!(engine_home(Some(mine.clone()), &agent), mine);
         assert_eq!(engine_home(None, &agent), agent);
@@ -1070,7 +1070,7 @@ pub mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_private_engine_keeps_its_state_to_itself() {
-        let home = temp("private-engine");
+        let (_home, home) = temp("private-engine");
         let layout = crate::paths::Layout::new(home.join("agent"));
         let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
             eprintln!("no container engine here: skipped");
@@ -1097,7 +1097,6 @@ pub mod tests {
         assert!(!rt.home.exists(), "the private engine's files are gone");
         rt.home = account_home;
         assert!(rt.status().is_ok_and(|s| s.running), "the account's engine still answers");
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A root filesystem of this host's `sh` and `cat` with the libraries they load (`ldd`), as a tar to import: an
@@ -1127,7 +1126,7 @@ pub mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn the_native_runtime_runs_a_real_container() {
-        let home = temp("native");
+        let (_home, home) = temp("native");
         let layout = crate::paths::Layout::new(home.clone());
         let Some(rt) = NativeRuntime::detect(&layout, 16.0) else {
             eprintln!("no container engine here: skipped");
@@ -1156,14 +1155,13 @@ pub mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "hello");
         assert_eq!(std::fs::read_to_string(work.join("hi.txt")).unwrap().trim(), "hello");
         assert!(rt.pool_tokens() > 0);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
-    fn temp(tag: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let d = std::env::temp_dir().join(format!("oarbank-crt-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::canonicalize(&d).unwrap()
+    /// A scratch directory: (what removes it when dropped, its canonical path).
+    fn temp(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let d = crate::scratch(&format!("crt-{tag}"));
+        let p = std::fs::canonicalize(d.path()).unwrap();
+        (d, p)
     }
 
     #[cfg(target_os = "macos")]
@@ -1186,7 +1184,7 @@ pub mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn start_mounts_only_the_agent_directories_and_docker_never_uses_the_user_context() {
-        let base = temp("start");
+        let (_base, base) = temp("start");
         let mut c = colima_at(&base, Profile::Cpu);
         (c.vm_cpus, c.vm_mem_gb) = (6, 10.0);
         std::fs::create_dir_all(&c.work).unwrap();
@@ -1204,7 +1202,6 @@ pub mod tests {
         assert!(get("DOCKER_CONTEXT").is_none());
         assert!(c.colima_env().iter().any(|(k, v)| k == "DOCKER_CONFIG" && *v == format!("{agent}/run/docker")));
         assert_eq!(c.gpu_device(), None);
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// The GPU profile is a VM of its own on krunkit (no Rosetta, arm64 images only), with the same two mounts and its own
@@ -1212,7 +1209,7 @@ pub mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn the_gpu_profile_is_a_krunkit_vm_of_its_own() {
-        let base = temp("gpu");
+        let (_base, base) = temp("gpu");
         let mut g = colima_at(&base, Profile::Gpu);
         (g.vm_cpus, g.vm_mem_gb) = (6, 10.0);
         let agent = base.join("agent").to_string_lossy().to_string();
@@ -1232,7 +1229,6 @@ pub mod tests {
         assert!(std::sync::Arc::ptr_eq(&none.for_job(true), &cpu) && none.all().len() == 1);
         let same = Containers { cpu: cpu.clone(), gpu: Some(cpu.clone()) };
         assert_eq!(same.all().len(), 1, "on Linux the GPU runtime is the CPU runtime: reaped once");
-        let _ = std::fs::remove_dir_all(base);
     }
 
     fn spec(image: &str) -> RunSpec {
@@ -1279,7 +1275,7 @@ pub mod tests {
     #[test]
     fn cdi_specs_name_the_gpu_device_kind() {
         let kind = |dirs: &[&Path]| cdi_spec(dirs).map(|s| s.kind);
-        let d = temp("cdi");
+        let (_d, d) = temp("cdi");
         assert_eq!(kind(&[d.as_path()]), None);
         std::fs::write(d.join("readme.txt"), "kind: x/y\n- name: all\n").unwrap();
         assert_eq!(kind(&[d.as_path()]), None, "only .json, .yaml and .yml files are specs");
@@ -1287,7 +1283,7 @@ pub mod tests {
             devices:\n- containerEdits:\n    deviceNodes:\n    - path: /dev/nvidia0\n  name: \"0\"\n- containerEdits:\n\
                 deviceNodes:\n    - path: /dev/nvidia0\n  name: all\nkind: nvidia.com/gpu\n").unwrap();
         assert_eq!(kind(&[d.as_path()]).as_deref(), Some("nvidia.com/gpu"));
-        let j = temp("cdi-json");
+        let (_j, j) = temp("cdi-json");
         std::fs::write(j.join("amd.json"), r#"{"cdiVersion": "0.6.0", "kind": "amd.com/gpu", "devices": [{"name": "0"}]}"#).unwrap();
         assert_eq!(kind(&[j.as_path()]), None, "no `all` device");
         std::fs::write(j.join("amd.json"), r#"{"kind": "amd.com/gpu", "devices": [{"name": "0"}, {"name": "all"}]}"#).unwrap();
@@ -1298,7 +1294,7 @@ pub mod tests {
     /// host, and `--mode=wsl` over GPU-PV), and AMD's (`amd-ctk cdi generate`).
     #[test]
     fn cdi_specs_name_the_apis_a_container_gets() {
-        let d = temp("cdi-apis");
+        let (_d, d) = temp("cdi-apis");
         std::fs::write(d.join("nvidia.yaml"), "---\ncdiVersion: 0.5.0\ncontainerEdits:\n  deviceNodes:\n  - path: /dev/nvidiactl\n\
             \x20 - path: /dev/nvidia-uvm\n  mounts:\n  - containerPath: /usr/lib/x86_64-linux-gnu/libcuda.so.570.86.15\n\
             \x20   hostPath: /usr/lib/x86_64-linux-gnu/libcuda.so.570.86.15\n    options: [ro, nosuid, nodev, bind]\n\
@@ -1307,13 +1303,13 @@ pub mod tests {
             \x20 - containerPath: /etc/vulkan/icd.d/nvidia_icd.json\n    hostPath: /etc/vulkan/icd.d/nvidia_icd.json\n\
             devices:\n- containerEdits:\n    deviceNodes:\n    - path: /dev/nvidia0\n  name: all\nkind: nvidia.com/gpu\n").unwrap();
         assert_eq!(cdi_spec(&[d.as_path()]).unwrap().apis, ["cuda", "opencl", "vulkan"]);
-        let w = temp("cdi-wsl");
+        let (_w, w) = temp("cdi-wsl");
         std::fs::write(w.join("nvidia.json"), r#"{"cdiVersion": "0.5.0", "kind": "nvidia.com/gpu",
             "devices": [{"name": "all", "containerEdits": {"deviceNodes": [{"path": "/dev/dxg"}]}}],
             "containerEdits": {"mounts": [{"hostPath": "/usr/lib/wsl/lib/libcuda.so.1.1", "containerPath": "/usr/lib/wsl/lib/libcuda.so.1.1"},
                                           {"hostPath": "/usr/lib/wsl/lib/libd3d12.so", "containerPath": "/usr/lib/wsl/lib/libd3d12.so"}]}}"#).unwrap();
         assert_eq!(cdi_spec(&[w.as_path()]).unwrap().apis, ["cuda"]);
-        let a = temp("cdi-amd");
+        let (_a, a) = temp("cdi-amd");
         std::fs::write(a.join("amd.json"), r#"{"cdiVersion": "0.6.0", "kind": "amd.com/gpu", "devices": [
             {"name": "0", "containerEdits": {"deviceNodes": [{"path": "/dev/dri/card1"}, {"path": "/dev/dri/renderD128"}]}},
             {"name": "all", "containerEdits": {"deviceNodes": [{"path": "/dev/kfd"}, {"path": "/dev/dri/card1"},
@@ -1360,13 +1356,12 @@ pub mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn a_missing_runtime_is_an_error_not_a_stopped_vm() {
-        let base = temp("missing");
+        let (_base, base) = temp("missing");
         let mut c = colima_at(&base, Profile::Cpu);
         c.colima = "/nonexistent/colima".into();
         assert!(c.status().unwrap_err().contains("missing"));
         assert!(c.ensure_started().is_err());
         assert!(c.remove_attempt(1).is_empty());
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A Mac with krunkit: starts (never stops) the agent's own `oarbank-gpu` profile, builds the Vulkan compute probe

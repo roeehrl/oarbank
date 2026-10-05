@@ -12,6 +12,7 @@ EXE = ".exe" if sys.platform == "win32" else ""
 CARGO = next((c for c in (shutil.which("cargo"), "/opt/homebrew/opt/rustup/bin/cargo", str(Path.home() / ".cargo" / "bin" / f"cargo{EXE}"))
               if c and Path(c).is_file()), None)
 AGENT_BIN = REPO / "rust" / "target" / "debug" / f"oarbank-agent{EXE}"
+LAUNCHER_BIN = REPO / "rust" / "target" / "debug" / f"oarbank-launcher{EXE}"
 
 
 class BuildError(RuntimeError):
@@ -23,12 +24,14 @@ def cargo_env() -> dict:
 
 
 def build() -> Path:
-    """`cargo build -p oarbank-agent` (incremental) and the binary's path."""
+    """`cargo build -p oarbank-agent -p oarbank-launcher` (incremental) and the agent's path. Always both, as CI builds
+    them: another package set can unify dependency features differently and relink, and Windows refuses to replace a
+    binary a running service or the virus scanner holds."""
     if not CARGO:
         raise BuildError("no Rust toolchain (cargo) found: install rustup, or build the agent elsewhere with "
                          "`cargo build -p oarbank-agent` in rust/ and point OARBANK_SANDBOX_EXEC at the binary")
-    r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-agent"], cwd=REPO / "rust", env=cargo_env(),
+    r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-agent", "-p", "oarbank-launcher"], cwd=REPO / "rust", env=cargo_env(),
                        capture_output=True, text=True)
     if r.returncode != 0:
-        raise BuildError(f"`cargo build -p oarbank-agent` failed in rust/:\n{r.stderr[-3000:]}")
+        raise BuildError(f"`cargo build -p oarbank-agent -p oarbank-launcher` failed in rust/:\n{r.stderr[-3000:]}")
     return AGENT_BIN

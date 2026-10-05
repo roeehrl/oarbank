@@ -5,7 +5,7 @@ import subprocess
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import REPO, agent_env, install_module
+from conftest import REPO, agent_env, install_module, pointer
 from test_agent_session import wait
 
 TOY = REPO / "vendor" / "oarbank-sdk" / "examples" / "toy"
@@ -23,7 +23,7 @@ def test_release_install_and_doctor(agent_bin, coordinator, tmp_path):
                                   if n.get("doctor_json") and n.get("release_id")), None), timeout=90)
         doc = json.loads(node["doctor_json"]) if isinstance(node["doctor_json"], str) else node["doctor_json"]
         assert doc["modules"]["toy"]["health"] == "healthy", doc
-        assert (home / "releases" / "current").is_symlink()
+        assert node["release_id"] in pointer(home / "releases" / "current")
         rel = home / "releases" / node["release_id"]
         assert (rel / "modules" / "toy" / "toy_runner.py").exists()
         mods = json.loads(node["modules_json"]) if isinstance(node["modules_json"], str) else node["modules_json"]

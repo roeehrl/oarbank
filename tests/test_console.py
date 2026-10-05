@@ -214,7 +214,7 @@ def test_the_modules_page_shows_each_installed_bundles_files_and_the_files_a_mod
     from oarbank.coordinator import modstore
     db = env["db"]
     for r in modstore.installed(db):
-        meta = __import__("json").loads((Path(r["path"]) / "bundle.json").read_text())
+        meta = __import__("json").loads((Path(r["path"]) / "bundle.json").read_text(encoding="utf-8"))
         assert r["bundle_files"] == len(meta["files"]) > 0
         assert r["bundle_bytes"] == sum((Path(r["path"]) / f["path"]).stat().st_size for f in meta["files"]) > 0
     page = env["c"].get("/modules").text
@@ -243,7 +243,7 @@ def test_waterfall_shows_each_phase(env):
     core.heartbeat(db, fresh(db, node), {"attempts": [{"attempt_id": g["attempt_id"], "phase": "calling", "cpu_s": 5}],
                                          "ready_datasets": READY})
     core.complete(db, fresh(db, node), g["attempt_id"], relay_result())
-    phases = [r["phase"] for r in db.q("SELECT phase FROM attempt_phases WHERE attempt_id=? ORDER BY at", (g["attempt_id"],))]
+    phases = [r["phase"] for r in db.q("SELECT phase FROM attempt_phases WHERE attempt_id=? ORDER BY at, rowid", (g["attempt_id"],))]
     assert phases[0] == "granted" and "calling" in phases and phases[-2:] == ["completion_received", "verdict"]
     html = env["c"].get(f"/jobs/{g['job_id']}").text
     for label in ("queued", "staging", "calling", "evaluating"):

@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
@@ -197,7 +198,7 @@ def test_a_job_reads_its_read_folder_and_writes_only_into_its_outbox(agent_bin, 
         payload = json.loads(res["result_json"])["payload"]
         want = hashlib.sha256(b"ferry me\n2").hexdigest()
         assert payload["digest"] == want                              # read from the read-only folder
-        assert (outbox / "ferried-2.txt").read_text() == want + "\n"  # written into the outbox
+        assert (outbox / "ferried-2.txt").read_text(encoding="utf-8") == want + "\n"  # written into the outbox
         assert payload["probes"] == {"read_outbox": "refused", "list_outbox": "refused", "write_inbox": "refused",
                                      "list_inbox": "allowed"}, payload["probes"]
         assert not (inbox / "planted.txt").exists()
@@ -211,10 +212,21 @@ def test_a_job_reads_its_read_folder_and_writes_only_into_its_outbox(agent_bin, 
 
 # ---------------------------------------------------------------------------- checkpoint, release, resume elsewhere
 
+def windows_session() -> int:
+    import ctypes
+    sid = ctypes.c_ulong()
+    ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid))
+    return sid.value
+
+
 def test_a_render_paused_past_the_limit_moves_to_another_node_and_finishes_from_its_checkpoint(agent_bin, coordinator, tmp_path):
     """The acceptance test of #15: protection pauses the render on node A (a rule for a process the test starts), the
     pause outlasts A's max_pause_s, so A asks the runner for a checkpoint, uploads it and releases the job; node B takes
     the job with the checkpoint and finishes it with the digest an uninterrupted render has."""
+    if os.name == "nt" and windows_session() == 0:
+        pytest.skip("on Windows the agent counts every process in session 0 (services: where ssh and CI runners start "
+                    "the suite) as no person's, so a rule for a process the test starts there never matches; it runs in "
+                    "a person's session (docs/design/windows-coordinator.md)")
     frames, seed = 40, 5
     install_module(coordinator, REEL, tmp_path)
     log, procs = [], []

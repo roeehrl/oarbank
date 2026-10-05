@@ -495,7 +495,8 @@ mod e2e {
     fn a_rule_naming_a_running_process_pauses_and_lowers_fleet_jobs() {
         #[cfg(target_os = "linux")]
         let _ = crate::cgroup::root(); // cgroups first, as the agent's main does
-        let home = std::env::temp_dir().join(format!("oarbank-prot-e2e-{}", std::process::id()));
+        let tmp = crate::scratch("prot-e2e");
+        let home = tmp.path().to_path_buf();
         let l = Layout::new(home.clone());
         l.ensure().unwrap();
         let mut p = Protection::new(&l, false);
@@ -542,7 +543,6 @@ mod e2e {
         assert!(running > 0.3, "a resumed job used only {running} s of CPU");
         assert!(!lowered(pb));
         drop((a, b));
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// macOS, a system install's view of a person's work: the agent's protection serving session helpers runs as
@@ -561,7 +561,10 @@ mod e2e {
         if role == "service" {
             return session_service_side();
         }
-        let dir = PathBuf::from(format!("/private/tmp/oarbank-session-e2e-{}", std::process::id()));
+        // short (the socket's path) and reachable by the service's account
+        let tmp = tempfile::Builder::new().prefix("oarbank-session-e2e-").tempdir_in("/private/tmp").unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = tmp.path().to_path_buf();
         let svc = dir.join("svc");
         std::fs::create_dir_all(&svc).unwrap();
         // the service's account makes its home and socket here; it runs a copy of this test (homes are private)
@@ -580,7 +583,6 @@ mod e2e {
             .arg(format!("OARBANK_E2E_MARKER={marker}")).arg(&exe).args(["--exact", NAME, "--ignored", "--nocapture"])
             .output().unwrap();
         let _ = Command::new("/usr/bin/sudo").args(["-n", "-u", "nobody", "/bin/rm", "-rf"]).arg(svc.join("agent")).status();
-        let _ = std::fs::remove_dir_all(&dir);
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success(), "the service side failed:\n{text}");
         eprintln!("{text}");

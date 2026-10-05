@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "hypothesis>=6.168.3"]
+dev = ["pytest>=8", "hypothesis>=6.168.3", "pytest-xdist>=3.8"]      # xdist: CI splits the suite over a runner's cores
 
 [project.scripts]
 oarbankd = "oarbank.coordinator.__main__:main"
