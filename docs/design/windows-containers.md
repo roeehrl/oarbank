@@ -20,7 +20,7 @@ under the agent's home, its own VM size, its own settings.
 - **Facts gain, on Windows, `containers.runtime`, `containers.state`, `containers.session`, `containers.platforms`
   and `containers.missing`** (below). The APIs a Windows GPU container gets go into D38's doctor report
   (`gpu_apis.containers`, [gpu-placement.md](gpu-placement.md)), like every other platform's. Facts are format 2 and open: a coordinator that does not know
-  a key ignores it. `CORE_VERSION` stays 2.5.0, the SDK stays 1.5.0 (both unreleased).
+  a key ignores it. Released in core 2.5.0 and SDK 1.5.0.
 
 ## Decision: an agent-owned WSL containers session
 
@@ -227,7 +227,7 @@ Each is one command; the output to attach when it fails is named.
 
 ## Implementation status
 
-Built as designed in **core 2.5.0** and **oarbank-sdk 1.5.0** (both unreleased). Where the build adds to or narrows the
+Built as designed in **core 2.5.0** and **oarbank-sdk 1.5.0** (released together). Where the build adds to or narrows the
 design:
 
 - **Agent.** `wslc.rs` (the session host over the SDK's C API, loaded with `LoadLibraryExW` from the agent's directory

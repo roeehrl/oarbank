@@ -1,6 +1,6 @@
 # Module GUIs: UI contract 1.2 and a safe bridge (SDK 1.5, core 2.5)
 
-Status: built as designed (PLAN D41; see Implementation status), in the unreleased oarbank-sdk 1.5.0 and core 2.5.0.
+Status: built as designed (PLAN D41; see Implementation status), released in oarbank-sdk 1.5.0 and core 2.5.0.
 Versions stay 1.5.0 and 2.5.0; the UI contract's minor goes from 1.1 to 1.2.
 
 A module's GUI is the SDK's UI contract (spec/ui-contract.md): pages and panels made of host components bound to host

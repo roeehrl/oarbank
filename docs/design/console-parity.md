@@ -59,7 +59,7 @@ agents report only how containers get the GPU.
 
 ## Versioning
 
-No version change: core 2.5.0 is unreleased. The explain document (schema `explain-1`) gains `remedies[].target`; the
+Released in core 2.5.0. The explain document (schema `explain-1`) gains `remedies[].target`; the
 admin API gains three read routes; the registry's CLI strings now name existing commands (`oarbank pause|halt|resume
 --all`, `oarbank pipeline single|split --module`, `oarbank job retry|cancel`, `oarbank protection preview`).
 
