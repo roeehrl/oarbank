@@ -160,16 +160,6 @@ def test_the_admin_pipe_stays_reachable_while_clients_come_and_go(tmp_path):
         t.join(20)
 
 
-def wait_for(pred, timeout):
-    import time
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if pred():
-            return True
-        time.sleep(0.1)
-    return False
-
-
 def _elevated() -> bool:
     return sys.platform == "win32" and bool(ctypes.windll.shell32.IsUserAnAdmin())
 
