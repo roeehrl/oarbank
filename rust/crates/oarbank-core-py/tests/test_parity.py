@@ -396,7 +396,8 @@ def test_image_signatures():
 
 
 def test_version():
-    assert oc.version().startswith("1.")
+    import oarbank
+    assert oc.version() == oarbank.__version__, "the Rust core and the coordinator are one release"
 
 
 if __name__ == "__main__":

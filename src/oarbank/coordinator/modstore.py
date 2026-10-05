@@ -29,10 +29,10 @@ from oarbank_sdk import manifest as mf
 from oarbank_sdk import platform as pf
 from oarbank_sdk import portable
 
+from .. import __version__ as CORE_VERSION
 from . import config as C
 from .db import DB, jl
 
-CORE_VERSION = "2.5.0"
 MODULE_PROTOCOLS = {1}
 RUNNER_PROTOCOLS = {1}
 FEATURES = ("placement",)                  # requires.features this core implements (must-understand)

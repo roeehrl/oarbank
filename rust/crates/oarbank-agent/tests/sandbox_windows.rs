@@ -233,13 +233,16 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// A pipe with the broker's security descriptor for `module` (oarbank-core's `broker_pipe_sddl`), answering each
-/// connection's first line with `pong`; the thread ends after `clients` connections.
+/// connection's first line with `pong`; the thread ends after `clients` connections. An answer is read before its
+/// instance is disconnected: DisconnectNamedPipe discards what the client has not read yet, and the client's next read
+/// fails (ERROR_PIPE_NOT_CONNECTED, which Python's `read` reports as EINVAL).
 fn broker_pipe(name: &str, module: &str, clients: usize) -> std::thread::JoinHandle<()> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
-    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows_sys::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                                  PIPE_ACCESS_DUPLEX};
     use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     let (owner, container) = unsafe {
@@ -277,6 +280,7 @@ fn broker_pipe(name: &str, module: &str, clients: usize) -> std::thread::JoinHan
             ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut got, std::ptr::null_mut());
             let mut put = 0u32;
             WriteFile(h, b"pong\n".as_ptr(), 5, &mut put, std::ptr::null_mut());
+            FlushFileBuffers(h);
             windows_sys::Win32::System::Pipes::DisconnectNamedPipe(h);
             CloseHandle(h);
         }
@@ -285,14 +289,15 @@ fn broker_pipe(name: &str, module: &str, clients: usize) -> std::thread::JoinHan
 
 /// The broker's pipe on Windows (broker.rs, spec/sandbox/backends/windows.md): the runner of the module it was made for
 /// opens it from inside its AppContainer (low integrity) and talks, as the SDK's `broker` client does (`open` of the
-/// pipe's name); a runner of another module, in another AppContainer, is refused.
+/// pipe's name); a runner of another module, in another AppContainer, is refused. The client reads its answer a moment
+/// after it writes, as a loaded host makes it, by when the server has written the answer and gone on.
 #[test]
 fn only_its_modules_appcontainer_opens_a_broker_pipe() {
     let name = format!("oarbank-test-broker-{}", std::process::id());
     let server = broker_pipe(&name, "dev.test.brokerpipe", 1);
     let (py, roots) = python();
-    let client = format!("import sys\ntry:\n    f = open(r'\\\\.\\pipe\\{name}', 'r+b', buffering=0)\nexcept OSError as e:\n    \
-                          print('refused', e.errno); sys.exit(0)\nf.write(b'ping\\n')\nprint(f.read(64).decode().strip())\n");
+    let client = format!("import sys, time\ntry:\n    f = open(r'\\\\.\\pipe\\{name}', 'r+b', buffering=0)\nexcept OSError as e:\n    \
+                          print('refused', e.errno); sys.exit(0)\nf.write(b'ping\\n')\ntime.sleep(0.5)\nprint(f.read(64).decode().strip())\n");
     let run = |module: &str, tag: &str| {
         let (_d, d) = scratch(tag);
         let policy = serde_json::json!({"module": module, "ro": roots, "rw": [d.display().to_string()], "net": "none",
