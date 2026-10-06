@@ -231,7 +231,7 @@ jobs:
       - run: scripts/build-coordinator.sh "${VERSION#v}"
       - uses: actions/upload-artifact@v4
         with:
-          name: oarbank-${{ github.ref_name }}-macos-unsigned
+          name: oarbank-${{ env.VERSION || github.sha }}-macos-unsigned
           path: dist/
 
   package-linux:
@@ -258,7 +258,7 @@ jobs:
       - run: scripts/build-coordinator.sh "${VERSION#v}"
       - uses: actions/upload-artifact@v4
         with:
-          name: oarbank-${{ github.ref_name }}-${{ matrix.os }}-unsigned
+          name: oarbank-${{ env.VERSION || github.sha }}-${{ matrix.os }}-unsigned
           path: dist/
 
   package-windows:
@@ -296,6 +296,6 @@ jobs:
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
-          name: oarbank-${{ github.ref_name }}-windows-${{ matrix.arch }}-unsigned
+          name: oarbank-${{ env.VERSION || github.sha }}-windows-${{ matrix.arch }}-unsigned
           path: dist/
 
