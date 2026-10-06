@@ -170,12 +170,16 @@ class Coordinator:
 
     def _locks_released(self, within=10.0):
         """Windows terminates a process outright and releases its file locks a little later ("the time it takes depends
-        upon available system resources", LockFileEx); until then reading the database reports a disk I/O error."""
+        upon available system resources", LockFileEx); until then opening the database reports a disk I/O error. The
+        probe does what opening it as the coordinator's DB does, setting the journal mode and taking the write lock: a
+        plain read can pass while a lock the terminated oarbankd or console held still refuses those."""
         end = time.monotonic() + within
         while True:
-            c = sqlite3.connect(self.db_path, timeout=30)
+            c = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
             try:
-                c.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+                c.execute("PRAGMA journal_mode=WAL")
+                c.execute("BEGIN IMMEDIATE")
+                c.execute("ROLLBACK")
                 return
             except sqlite3.OperationalError:
                 if time.monotonic() > end:
