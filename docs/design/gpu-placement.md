@@ -1,7 +1,6 @@
 # GPU placement by API, and GPU in containers on macOS
 
-Status: built (PLAN D38) in **oarbank-sdk 1.5.0** and **core 2.5.0** (both still unreleased, so nothing here bumps a
-version); see Implementation status.
+Status: built (PLAN D38) in **oarbank-sdk 1.5.0** and **core 2.5.0** (released together); see Implementation status.
 
 ## The problem
 

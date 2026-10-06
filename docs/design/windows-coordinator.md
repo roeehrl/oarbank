@@ -2,7 +2,7 @@
 
 **Status (2026-10-04):** design for the third 2.5.0 gap: oarbankd, its console and the admin CLI run on Windows, as a
 Windows service, so the core suite and the coordinator-backed end-to-end tests (`tests/rust`) run on Windows locally
-and in CI. Decision **D40** in [PLAN.md](PLAN.md). Versions stay core 2.5.0 / SDK 1.5.0 (unreleased); no manifest key,
+and in CI. Decision **D40** in [PLAN.md](PLAN.md). Released in core 2.5.0 / SDK 1.5.0; no manifest key,
 protocol field or schema changes. The SDK gains one helper (`portable.os_env`) and a corrected platform probe.
 
 ## The problem

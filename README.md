@@ -34,9 +34,9 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Status: not released yet.** The installers (macOS pkg, deb and rpm, Windows MSI) and the coordinator build come
-> with the first public release. Until then, [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank/get-started)
-> describes how Oarbank works and how it installs, and you can build the packages from this repository.
+> **Release 2.5.0** is out: the installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI) and
+> the coordinator builds are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.5.0). [Get started](https://docs.codonic.dev/oarbank/get-started)
+> walks through the setup.
 
 ## What it does
 
@@ -44,8 +44,8 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   (Apple silicon and Intel), Linux (x86_64 and arm64, systemd) and Windows 10 and 11 (x64 and ARM64). A job goes to a node with
   the CPU, memory and tools it needs; a node that sleeps or leaves gives its work back.
 - **Keeps each computer's own work first.** Every node has a memory guard and per-node caps on cores, memory, jobs and
-  hours, all off until you set them. On macOS, nodes also take fewer jobs while someone is at the Mac, follow rules for
-  the apps and processes you name, and back off when hot or on battery.
+  hours, all off until you set them. Nodes also take fewer jobs while someone is at the computer, follow rules for the
+  apps and processes you name, and back off on battery, and on macOS and Linux when hot.
 - **Sandboxes every job.** Seatbelt on macOS, Landlock and seccomp on Linux, AppContainers on Windows. A job reads its
   own inputs, writes its own folder, and reaches only the network hosts, host tools, GPU and containers you approved for
   that module version.
@@ -102,17 +102,18 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Oarbank is **not released yet**: there are no published packages. Follow
-[Get started](https://docs.codonic.dev/oarbank/get-started) for what you need and how it will install, or build the
-packages yourself (`scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1`,
-`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`) and follow [docs/install.md](docs/install.md).
+Download the packages for your computers from the [2.5.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.5.0), check the
+[Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
+[Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
+packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1`,
+`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`.
 
-In short, once you have the packages:
+In short:
 
 ```bash
 # on the coordinator (macOS on Apple silicon, or Linux with systemd; on Windows, in an elevated PowerShell:
-#   deploy\oarbankd\install-oarbankd.ps1 -Build oarbank-coordinator-<v>-windows-<arch>.tar.gz -AgentBind <address>)
-deploy/oarbankd/install-oarbankd.sh --build oarbank-coordinator-<v>-<os>-<arch>.tar.gz --agent-bind <address>
+#   .\install-oarbankd.ps1 -Build oarbank-coordinator-<v>-windows-<arch>.tar.gz -AgentBind <address>)
+bash install-oarbankd.sh --build oarbank-coordinator-<v>-<os>-<arch>.tar.gz --agent-bind <address>
 oarbank account create <you> --role admin --password    # console sign-in: a password and a TOTP secret
 oarbank join-code --label <node>                         # one per computer
 ```
@@ -168,8 +169,8 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Not yet. The first public release brings the installers; until then you can build the
-packages from this repository. [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements.
+**Can I install it today?** Yes: the [2.5.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.5.0) has the installers for macOS, Linux and Windows.
+[Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the
 coordinator (it can be a node too), and Macs, Linux machines or Windows PCs as nodes.
