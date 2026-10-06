@@ -155,7 +155,8 @@ storage.
 
 - `scripts/package-windows.ps1` fetches `Microsoft.WSL.Containers` 3.0.1 from nuget.org, checks its SHA-256 against
   the script's pin, and puts the architecture's `wslcsdk.dll` (MIT) beside the agent; `check-pe-imports.py` keeps the
-  agent free of a link-time dependency on it (it is loaded at run time).
+  agent free of a link-time dependency on it (it is loaded at run time), and `check-package.py` checks it is for the
+  MSI's architecture.
 - The MSI installs the DLL. `CONTAINERS=1` runs `oarbank-agent containers install` (the Virtual Machine Platform and
   WSL, unattended; a reboot may follow). Without it nothing is installed and doctor names what is missing.
 - Uninstalling (`oarbank-launcher remove`, which the MSI runs) ends the agent's session and deletes its storage through

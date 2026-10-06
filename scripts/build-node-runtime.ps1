@@ -1,4 +1,6 @@
-# Build the node runtime for Windows (see build-node-runtime.sh): OUT\python.exe with the module SDK, and OUT\uv.exe.
+# Build the node runtime for Windows (see build-node-runtime.sh): OUT\python.exe with the module SDK, and OUT\uv.exe,
+# every native file for -Arch: the interpreter's build for it, the wheels it asks for, uv's release for it
+# (scripts\fetch-uv.py).
 #   scripts\build-node-runtime.ps1 -Out dist\runtime [-Arch x64|arm64]     # the machine's architecture by default
 param([Parameter(Mandatory)][string]$Out, [string]$Python = "3.12", [string]$Arch = "")
 $ErrorActionPreference = "Stop"
@@ -7,7 +9,10 @@ $Arch = & "$PSScriptRoot\windows-arch.ps1" -Arch $Arch
 # named in full: on Windows on Arm uv picks an x86_64 CPython by default, which would run emulated
 $Request = "cpython-$Python-windows-$(if ($Arch -eq 'arm64') { 'aarch64' } else { 'x86_64' })-none"
 & "$PSScriptRoot\bundle-python.ps1" -Dest $Out -Request $Request
-uv pip install -q --python "$Out\python.exe" --break-system-packages "$Repo\vendor\oarbank-sdk"
+# the runtime's own uv installs into it: uv writes console-script launchers (Scripts\*.exe) for its own architecture
+& "$Out\python.exe" -I -B "$Repo\scripts\fetch-uv.py" "windows-$(if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' })" "$Out\uv.exe"
+if ($LASTEXITCODE) { throw "fetching uv failed" }
+& "$Out\uv.exe" pip install -q --python "$Out\python.exe" --break-system-packages "$Repo\vendor\oarbank-sdk"
 if ($LASTEXITCODE) { throw "installing the SDK failed" }
 # a plain install, as from an index: uv records the checkout it installed from (direct_url.json), a path on this build
 # machine that the runtime has no use for
@@ -15,7 +20,6 @@ $Info = (Get-Item "$Out\Lib\site-packages\oarbank_sdk-*.dist-info").FullName
 Remove-Item "$Info\direct_url.json"
 [IO.File]::WriteAllLines("$Info\RECORD", [string[]](Get-Content "$Info\RECORD" | Where-Object { $_ -notmatch '/direct_url\.json,' }),
                          (New-Object Text.UTF8Encoding $false))
-Copy-Item (Get-Command uv).Source "$Out\uv.exe"
 # uv's launchers (Scripts\oarbank-sdk.exe, ...) name this build path as their interpreter: point them at ..\python.exe,
 # then check every launcher the runtime ships (-B wherever the build runs it: bytecode written now would name this
 # build's directory)

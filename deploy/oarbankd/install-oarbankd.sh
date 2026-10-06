@@ -52,14 +52,6 @@ esac
 HOME_DIR="$DATA/coordinator"
 SIGNING="${OARBANK_RELEASE_SIGNING:-1}"
 
-# uv (oarbankd installs module dependencies with it; --checkout syncs the virtualenv): on PATH, else where its
-# installer ($XDG_BIN_HOME or ~/.local/bin) or Homebrew (macOS, Linux) puts it
-UV="$(command -v uv || true)"
-for c in "${XDG_BIN_HOME:-$HOME/.local/bin}/uv" /opt/homebrew/bin/uv /usr/local/bin/uv /home/linuxbrew/.linuxbrew/bin/uv; do
-    [[ -z "$UV" && -x "$c" ]] && UV="$c"
-done
-SVC_PATH="$SYS_PATH"                                    # the services' PATH: oarbankd finds the same uv
-[[ -z "$UV" || ":$SYS_PATH:" == *":$(dirname "$UV"):"* ]] || SVC_PATH="$(dirname "$UV"):$SYS_PATH"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 
 if [[ -n "$BUILD" ]]; then
@@ -83,8 +75,18 @@ if [[ -n "$BUILD" ]]; then
     OARBANKD=("$DATA/coordinator-app/current/bin/oarbankd")
     CONSOLE=("$DATA/coordinator-app/current/bin/oarbank-console")
     CLI="$DATA/coordinator-app/current/bin/oarbank"
+    # the services' PATH: oarbankd installs module dependencies with the build's own uv
+    SVC_PATH="$DATA/coordinator-app/current/bin:$SYS_PATH"
 else
+    # uv syncs the virtualenv and oarbankd installs module dependencies with it: on PATH, else where its installer
+    # ($XDG_BIN_HOME or ~/.local/bin) or Homebrew (macOS, Linux) puts it
+    UV="$(command -v uv || true)"
+    for c in "${XDG_BIN_HOME:-$HOME/.local/bin}/uv" /opt/homebrew/bin/uv /usr/local/bin/uv /home/linuxbrew/.linuxbrew/bin/uv; do
+        [[ -z "$UV" && -x "$c" ]] && UV="$c"
+    done
     [[ -n "$UV" ]] || die "uv is not installed (https://docs.astral.sh/uv/getting-started/installation/)"
+    SVC_PATH="$SYS_PATH"                                # the services' PATH: oarbankd finds the same uv
+    [[ ":$SYS_PATH:" == *":$(dirname "$UV"):"* ]] || SVC_PATH="$(dirname "$UV"):$SYS_PATH"
     (cd "$REPO" && run git submodule update --init -q && run "$UV" sync -q --inexact)
     OARBANKD=("$REPO/.venv/bin/oarbankd")
     CONSOLE=("$REPO/.venv/bin/python" "-m" "oarbank.console")

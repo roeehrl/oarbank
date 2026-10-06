@@ -6,7 +6,7 @@
 #
 # Layout: oarbank-coordinator.json, python\ (a relocatable CPython with the coordinator's dependencies and the SDK;
 # modules run on this interpreter), bin\oarbank-sandbox.exe (the agent's module launcher: AppContainers), bin\uv.exe
-# (module environments), and per program a launcher (bin\oarbankd.py, …) and a .cmd for people. The services run
+# (module environments; scripts\fetch-uv.py), and per program a launcher (bin\oarbankd.py, …) and a .cmd for people. The services run
 # python\python.exe with the launcher (the manifest's exec): a service needs a program, not a script. The core is compiled with
 # Nuitka into one native extension module (D7: its source is not shipped); its templates, static files and schemas sit
 # beside it. Needs Rust, uv and the MSVC build tools for x64 (Nuitka compiles for the interpreter); on arm64 also clang
@@ -47,8 +47,11 @@ try {
   Check "uv export"
   Pop-Location
   Set-Content -Encoding utf8 "$Work\requirements.txt" $req
-  uv pip install -q --python $Py --break-system-packages -r "$Work\requirements.txt"; Check "installing the dependencies"
-  uv pip install -q --python $Py --break-system-packages --no-deps "$Repo\vendor\oarbank-sdk"; Check "installing the SDK"
+  # by the uv the build ships (module environments): uv writes console-script launchers (python\Scripts\*.exe) for its
+  # own architecture, the platform's
+  & $Py -I -B "$Repo\scripts\fetch-uv.py" $Platform "$Root\bin\uv.exe"; Check "fetching uv"
+  & "$Root\bin\uv.exe" pip install -q --python $Py --break-system-packages -r "$Work\requirements.txt"; Check "installing the dependencies"
+  & "$Root\bin\uv.exe" pip install -q --python $Py --break-system-packages --no-deps "$Repo\vendor\oarbank-sdk"; Check "installing the SDK"
   # a plain install, as from an index: uv records the checkout it installed from (direct_url.json)
   $Info = (Get-Item "$Root\python\Lib\site-packages\oarbank_sdk-*.dist-info").FullName
   Remove-Item "$Info\direct_url.json"
@@ -72,7 +75,7 @@ try {
   & $Py -I -B -c "import oarbank, oarbank.coordinator.app, oarbank.console.app; assert hasattr(oarbank, '__compiled__'), oarbank.__file__"
   Check "the compiled core does not import"
 
-  # 3b. the agent's launcher confines module processes (AppContainers); uv makes module environments
+  # 3b. the agent's launcher confines module processes (AppContainers)
   if ($Arch -eq "arm64") { $env:PATH = "$(& "$PSScriptRoot\windows-clang.ps1");$env:PATH" }   # ring needs clang here
   # for the platform's architecture, whatever the toolchain's own host is
   $Target = if ($Arch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
@@ -85,7 +88,6 @@ try {
   Pop-Location
   if ($built) { throw "cargo build failed" }
   Copy-Item "$Repo\rust\target\$Target\release\oarbank-agent.exe" "$Root\bin\oarbank-sandbox.exe"
-  Copy-Item (Get-Command uv).Source "$Root\bin\uv.exe"
 
   # 4. entry points, relative to the build so it runs from wherever it is unpacked: a two-line launcher per program
   #    (the compiled core cannot run as `python -m`: its loader has no code objects), and a .cmd for people
@@ -106,12 +108,15 @@ try {
 
   # 5. signatures, then the archive
   Get-ChildItem $Root -Recurse -Include *.exe, *.dll, *.pyd | ForEach-Object { Sign $_.FullName }
-  # it runs from wherever it is unpacked (a copy, so the run writes no bytecode into the build), and it ships no link and
-  # no path of this build machine
+  # it runs from wherever it is unpacked (a copy, so the run writes no bytecode into the build), and it ships no link, no
+  # path of this build machine and no native file for another architecture: the interpreter and everything it loads are
+  # x64, the module launcher, uv and uv's console-script launchers the platform's
   Copy-Item -Recurse $Root "$Work\moved"
   & "$Work\moved\bin\oarbankd.cmd" --help | Out-Null; Check "oarbankd --help"
   uv run --no-project --python 3.12 python "$Repo\scripts\check-package.py" --build-path $Work --build-path (uv python dir).Trim() `
-    --run "$Root=python\python.exe" --imports oarbank,oarbank_sdk $Root (Get-Item "$Site\oarbank.*.pyd").FullName "$Root\bin\oarbank-sandbox.exe"
+    --platform windows-amd64 --platform "$Root\bin=$Platform" --platform "$Root\python\Scripts=$Platform" `
+    --run "$Root=python\python.exe" --imports oarbank,oarbank_sdk `
+    $Root (Get-Item "$Site\oarbank.*.pyd").FullName "$Root\bin\oarbank-sandbox.exe"
   Check "the coordinator build is not fit to ship"
   $Tgz = "$Out\oarbank-coordinator-$Version-$Platform.tar.gz"
   & $Py -I -B "$Repo\scripts\pack-tar.py" $Tgz $Root oarbank-coordinator.json bin python; Check "the archive"
