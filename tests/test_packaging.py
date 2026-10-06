@@ -1,4 +1,5 @@
 """The node packages' declarative parts, checked without building them."""
+import json
 import os
 import re
 import subprocess
@@ -427,7 +428,13 @@ def test_the_package_check_finds_links_out_and_build_paths(tmp_path):
     (info / "direct_url.json").unlink()
     account = tmp_path / "Users" / "runneradmin"
     (rt / "wheel.so").write_bytes(b"\x7fELF" + str(account / ".cargo" / "registry").encode())
-    (rt / "lib" / "site-packages" / "x.pth").write_text(str(account / "lib"), encoding="utf-8")
+    (account / "Library" / "Application Support" / "uv").mkdir(parents=True)
+    (rt / "lib" / "site-packages" / "x.pth").write_text(str(account / "Library" / "Application Support" / "uv") + " (uv)",
+                                                         encoding="utf-8")
+    # a wheel built on a CI account named like this build's records that machine's paths: none exists here
+    sbom = rt / "lib" / "site-packages" / "w-1.0.dist-info" / "sboms" / "w.cyclonedx.json"
+    sbom.parent.mkdir(parents=True)
+    sbom.write_text(json.dumps({"bom-ref": str(account / "work" / "w" / "w") + "#1.0"}), encoding="utf-8")
     assert {f for f, _ in check.references(rt, [str(build)], [str(account)])} == {rt / "lib" / "site-packages" / "x.pth"}
     assert check.references(rt / "wheel.so", [], [str(account)]) == [(rt / "wheel.so", str(account))]
 
