@@ -6,6 +6,12 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # the package jobs on a branch before it is tagged (gh workflow run ci.yml --ref <branch>): they build what a tag
+  # would, with the repository's own version
+  workflow_dispatch:
+
+env:
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}   # empty: the scripts read the repository's
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -204,7 +210,7 @@ jobs:
     # oarbank-agent-<v>-macos-arm64.pkg and -macos-x86_64.pkg, each native throughout (docs/design/architecture.md,
     # "Packaging and CI"): the x86_64 one is built here too, its interpreter and agent run under Rosetta 2 for the
     # build's checks; and the coordinator build for darwin-arm64
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [coordinator, agent]
     runs-on: macos-26
     timeout-minutes: 90
@@ -221,8 +227,8 @@ jobs:
       - name: Rosetta 2, which runs the x86_64 package's code for its checks
         run: sudo softwareupdate --install-rosetta --agree-to-license
       - run: uv sync --extra dev --frozen
-      - run: for arch in arm64 x86_64; do scripts/package-macos.sh "${GITHUB_REF_NAME#v}" "$arch"; done
-      - run: scripts/build-coordinator.sh "${GITHUB_REF_NAME#v}"
+      - run: for arch in arm64 x86_64; do scripts/package-macos.sh "${VERSION#v}" "$arch"; done
+      - run: scripts/build-coordinator.sh "${VERSION#v}"
       - uses: actions/upload-artifact@v4
         with:
           name: oarbank-${{ github.ref_name }}-macos-unsigned
@@ -230,7 +236,7 @@ jobs:
 
   package-linux:
     # deb, rpm, the tarball and the coordinator build for the runner's architecture (amd64, arm64)
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [rust-other-os, coordinator]
     strategy:
       matrix:
@@ -248,8 +254,8 @@ jobs:
       - run: |
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update -q && sudo apt-get install -y -q nfpm
-      - run: scripts/package-linux.sh "${GITHUB_REF_NAME#v}"
-      - run: scripts/build-coordinator.sh "${GITHUB_REF_NAME#v}"
+      - run: scripts/package-linux.sh "${VERSION#v}"
+      - run: scripts/build-coordinator.sh "${VERSION#v}"
       - uses: actions/upload-artifact@v4
         with:
           name: oarbank-${{ github.ref_name }}-${{ matrix.os }}-unsigned
@@ -258,7 +264,7 @@ jobs:
   package-windows:
     # oarbank-agent-<v>-windows-x64.msi and -arm64.msi, and the coordinator build for windows-amd64 and windows-arm64:
     # the agent's package for the architecture named, the coordinator build for the runner's
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [rust-other-os, coordinator]
     strategy:
       matrix:
@@ -284,9 +290,9 @@ jobs:
       - run: |
           dotnet tool install --global wix --version 5.*
           wix extension add --global WixToolset.Util.wixext/5.0.2
-      - run: scripts/package-windows.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))" -Arch ${{ matrix.arch }}
+      - run: scripts/package-windows.ps1 -Version "$($env:VERSION.TrimStart('v'))" -Arch ${{ matrix.arch }}
         shell: pwsh
-      - run: scripts/build-coordinator.ps1 -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
+      - run: scripts/build-coordinator.ps1 -Version "$($env:VERSION.TrimStart('v'))"
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:

@@ -8,10 +8,11 @@ scripts/package-windows.ps1) and the coordinator build (scripts/build-coordinato
 - No path of the build: no file names the checkout, the build's work directories or the interpreter's install
   directory, in any encoding a program stores it in: package metadata (uv's direct_url.json names the directory it
   installed from), path files, scripts, bytecode and binaries. Nor may any file but a native binary inside a tree name
-  the build account's home or CARGO_HOME, and a binary given as its own argument (the build's own: the agent, the
-  launcher) not even those (rustc embeds the source paths of the crates a binary is built from). The native binaries
-  inside the trees come built from elsewhere (wheels, uv, python-build-standalone), often on CI machines whose account
-  is the build's own (GitHub's runneradmin), so their copies of those paths are not this build's.
+  a path under the build account's home or CARGO_HOME that exists on this machine, and a binary given as its own
+  argument (the build's own: the agent, the launcher) not mention those at all (rustc embeds the source paths of the
+  crates a binary is built from). What the trees hold comes built from elsewhere (wheels, uv, python-build-standalone),
+  often on CI machines whose account is the build's own (GitHub's runner and runneradmin): their binaries and their
+  metadata (a wheel's SBOM names the directory it was built in) carry paths of those machines, not of this build.
 - Every native file is for the package's platforms: each Mach-O (thin or universal), ELF and PE file, and each object
   of a static or import library, carries code for every platform --platform declares for where it sits
   (spec/platforms.md tokens; DIR=PLATFORMS for the files under DIR, the longest DIR that holds a file deciding). Code
@@ -111,18 +112,37 @@ NATIVE = (b"MZ", b"\x7fELF", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xf
 
 
 def references(root: Path, own: list[str], account: list[str]) -> list[tuple[Path, str]]:
-    """(file, path) for each path a file under `root` must not hold: `own` in any file; `account` in any but a native
-    binary inside a tree (a file given itself is checked for both)."""
+    """(file, path) for each path a file under `root` must not hold: `own` in any file; under `account`, in any file but
+    a native binary inside a tree, a path that exists here; and a file given itself, `account` at all."""
     mine, theirs = needles(own), needles(account)
     out = []
     for f in files(root):
         if not f.is_file() or f.is_symlink():
             continue
         data = f.read_bytes()
-        found = mine if f != root and data.startswith(NATIVE) else {**mine, **theirs}
+        given, native = f == root, data.startswith(NATIVE)
         data = data.lower() if WINDOWS else data
-        out += [(f, p) for n, p in found.items() if n in data]
+        out += [(f, p) for n, p in mine.items() if n in data]
+        if given:
+            out += [(f, p) for n, p in theirs.items() if n in data]
+        elif not native:
+            out += [(f, p) for n, p in theirs.items() if any(Path(c).exists() for c in named(data, n))]
     return sorted(set(out))
+
+
+PATH_END = re.compile(r"[\"'<>|*?\0\r\n\t,;)\]}#]")
+
+
+def named(data: bytes, needle: bytes) -> list[str]:
+    """The paths `data` names that start with `needle`: each up to the first character no path here holds, and each
+    shorter cut at a space (a path may hold one: Application Support; prose may follow one)."""
+    enc = "utf-16-le" if b"\0" in needle else "utf-8"
+    out, i = [], data.find(needle)
+    while i >= 0:
+        text = PATH_END.split(data[i:i + 8192].decode(enc, "ignore"), 1)[0].replace("\\\\", "\\")
+        out += [text[:j] for j in range(len(text), 0, -1) if j == len(text) or text[j] == " "]
+        i = data.find(needle, i + 1)
+    return out
 
 
 MACHO_CPU = {0x0100000C: "arm64", 0x01000007: "amd64"}          # CPU_TYPE_ARM64, CPU_TYPE_X86_64
