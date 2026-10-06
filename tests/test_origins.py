@@ -5,6 +5,7 @@ origins only when a node asks for it (every origin failed there), once, streamin
 when the digest matches, and never from a non-public address."""
 import asyncio
 import datetime
+import gc
 import hashlib
 import http.server
 import ipaddress
@@ -132,9 +133,11 @@ def _cert(tmp: Path):
 
 @pytest.fixture
 def origin(tmp_path, monkeypatch):
-    """A local https origin for HOST: /m.bin (ranges), /moved (a redirect to /m.bin), /bad (other bytes)."""
+    """A local https origin for HOST: /m.bin (ranges), /moved (a redirect to /m.bin), /bad (other bytes), /stall.bin
+    (/m.bin, but asked from the start it sends half and then goes silent until the test ends)."""
     cert, key = _cert(tmp_path)
     hits = []
+    release = threading.Event()
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -148,14 +151,22 @@ def origin(tmp_path, monkeypatch):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            body = MODEL if self.path == "/m.bin" else os.urandom(len(MODEL))
+            body = MODEL if self.path in ("/m.bin", "/stall.bin") else os.urandom(len(MODEL))
             start = int(self.headers["Range"][6:-1]) if self.headers.get("Range") else 0
+            if self.path == "/stall.bin" and not start:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:len(body) // 2])
+                release.wait()
+                return
             self.send_response(206 if start else 200)
             self.send_header("Content-Length", str(len(body) - start))
             self.end_headers()
             self.wfile.write(body[start:])
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -167,6 +178,7 @@ def origin(tmp_path, monkeypatch):
     monkeypatch.setattr(blobstore, "_resolve", resolve)
     monkeypatch.setattr(blobstore, "ssl_context", lambda: ssl.create_default_context(cafile=str(cert)))
     yield f"https://{HOST}:{srv.server_address[1]}", hits
+    release.set()
     srv.shutdown()
 
 
@@ -208,6 +220,26 @@ def test_concurrent_nodes_share_one_fetch_and_a_resuming_node_gets_the_rest(db, 
     a, b = asyncio.run(both())
     assert a.content == MODEL and (b.status_code, b.content) == (206, MODEL[500:])
     assert hits == ["/m.bin"]
+    assert not list(blobstore.upload_dir(db).glob("*.origin.partial"))   # gone once its last reader closed it (Windows)
+
+
+def test_the_fetch_outlives_a_garbage_collection_and_resumes_an_origin_that_goes_silent(db, origin, monkeypatch):
+    """The event loop holds tasks weakly: the fetch is held by its _Fetch, or a collection mid-download ends it and every
+    node following it waits forever. An origin that stops sending is resumed from the bytes already written."""
+    base, hits = origin
+    monkeypatch.setattr(blobstore, "READ_TIMEOUT_S", 0.5)
+    import_asset(db, f"{base}/stall.bin")
+
+    async def fetch_all():
+        chunks = await blobstore.origin_stream(db, MODEL_SHA)
+        task = blobstore._fetches[MODEL_SHA].task
+        gc.collect()
+        assert task in asyncio.all_tasks()
+        return b"".join([c async for c in chunks])
+    assert asyncio.run(fetch_all()) == MODEL
+    assert hits == ["/stall.bin", "/stall.bin"]                   # the second asked for the rest (Range)
+    assert blobstore.path(db, MODEL_SHA).read_bytes() == MODEL
+    assert db.one("SELECT 1 FROM events WHERE kind='origin_fetch_retry'")
 
 
 def test_an_origin_serving_other_bytes_is_never_adopted(db, origin):

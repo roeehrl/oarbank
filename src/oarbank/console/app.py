@@ -175,6 +175,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         return A.session_for(state.reader, request.cookies.get(SESSION_COOKIE))
 
     touching: set = set()
+    touches: set[asyncio.Task] = set()                 # held here: the event loop keeps only a weak reference to a task
 
     async def touch(sid: str):
         """A session in use stays signed in: oarbankd restarts its idle timeout, at most once a minute (the console
@@ -199,7 +200,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         sid = request.cookies.get(SESSION_COOKIE)
         if sid and sid not in touching and (s := session(request)) and time.time() - s["last_seen"] > TOUCH_EVERY_S:
             touching.add(sid)
-            asyncio.get_running_loop().create_task(touch(sid))
+            t = asyncio.get_running_loop().create_task(touch(sid))
+            touches.add(t)
+            t.add_done_callback(touches.discard)
         if request.method not in ("GET", "HEAD", "OPTIONS") and not path.startswith(("/do/", "/apply/", "/api/")) \
                 and not path.startswith(SESSION_PATHS) and not path.startswith("/login") and not path.startswith("/account/passkey"):
             sess = session(request)

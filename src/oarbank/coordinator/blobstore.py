@@ -286,6 +286,7 @@ async def _resolve(host: str, port: int) -> str:
 
 
 MAX_REDIRECTS = 5
+READ_TIMEOUT_S = 60                                   # an origin silent this long has stalled: resume elsewhere
 
 
 async def _get(url: str, start: int, policy: list[str] | None = None):
@@ -316,14 +317,14 @@ async def _get_once(url: str, start: int, policy: list[str] | None):
         req += f"Range: bytes={start}-\r\n"
     writer.write((req + "\r\n").encode())
     await writer.drain()
-    status_line = (await asyncio.wait_for(reader.readline(), 60)).decode("latin-1").strip()
+    status_line = (await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)).decode("latin-1").strip()
     parts = status_line.split(" ", 2)
     if len(parts) < 2 or not parts[1].isdigit():
         writer.close()
         raise OriginError(f"{url}: not an HTTP answer")
     headers = {}
     while True:
-        line = (await asyncio.wait_for(reader.readline(), 60)).decode("latin-1")
+        line = (await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)).decode("latin-1")
         if line in ("\r\n", "\n", ""):
             break
         k, _, v = line.partition(":")
@@ -335,20 +336,20 @@ async def _body(reader, headers):
     """The response body's chunks (Content-Length, chunked, or until the connection closes)."""
     if headers.get("transfer-encoding", "").lower() == "chunked":
         while True:
-            n = int((await reader.readline()).split(b";")[0].strip() or b"0", 16)
+            n = int((await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)).split(b";")[0].strip() or b"0", 16)
             if n == 0:
                 return
             left = n
             while left:
-                b = await reader.read(min(left, 1 << 20))
+                b = await asyncio.wait_for(reader.read(min(left, 1 << 20)), READ_TIMEOUT_S)
                 if not b:
                     raise OriginError("the origin closed the connection mid-chunk")
                 left -= len(b)
                 yield b
-            await reader.readline()
+            await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
     left = int(headers["content-length"]) if "content-length" in headers else None
     while left is None or left > 0:
-        b = await reader.read(1 << 20 if left is None else min(left, 1 << 20))
+        b = await asyncio.wait_for(reader.read(1 << 20 if left is None else min(left, 1 << 20)), READ_TIMEOUT_S)
         if not b:
             if left:
                 raise OriginError("the origin closed the connection early")
@@ -360,10 +361,14 @@ async def _body(reader, headers):
 
 class _Fetch:
     """One origin fetch of a blob, shared by every node that asked for it: a background task writes the partial, and
-    readers follow it as it grows (woken per chunk, never polling)."""
+    readers follow it as it grows (woken per chunk, never polling). The partial goes once the fetch has ended and no
+    reader has it open: Windows cannot delete an open file."""
 
     def __init__(self, part: Path, size: int):
         self.part, self.size = part, size
+        self.task: asyncio.Task | None = None         # held here: the event loop keeps only a weak reference to a task
+        self.readers = 0
+        self.ended = False
         self.written = 0
         self.grew = asyncio.Condition()
         self.done = False
@@ -380,25 +385,34 @@ class _Fetch:
             self.done, self.ok, self.error = True, ok, error
             self.grew.notify_all()
 
+    def drop_partial(self):
+        if self.ended and not self.readers:
+            self.part.unlink(missing_ok=True)
+
     async def follow(self, start: int):
         """The blob's bytes from `start`, as the fetch writes them."""
-        with open(self.part, "rb") as f:
-            f.seek(start)
-            pos = start
-            while True:
-                async with self.grew:
-                    await self.grew.wait_for(lambda: self.written > pos or self.done)
-                    if self.done and not self.ok:
-                        raise OriginError(self.error or "the origin fetch failed")
-                    upto = self.written
-                while pos < upto:
-                    b = f.read(min(1 << 20, upto - pos))
-                    if not b:
-                        break
-                    pos += len(b)
-                    yield b
-                if self.done and pos >= self.size:
-                    return
+        self.readers += 1
+        try:
+            with open(self.part, "rb") as f:
+                f.seek(start)
+                pos = start
+                while True:
+                    async with self.grew:
+                        await self.grew.wait_for(lambda: self.written > pos or self.done)
+                        if self.done and not self.ok:
+                            raise OriginError(self.error or "the origin fetch failed")
+                        upto = self.written
+                    while pos < upto:
+                        b = f.read(min(1 << 20, upto - pos))
+                        if not b:
+                            break
+                        pos += len(b)
+                        yield b
+                    if self.done and pos >= self.size:
+                        return
+        finally:
+            self.readers -= 1
+            self.drop_partial()
 
 
 _fetches: dict[str, _Fetch] = {}
@@ -419,7 +433,7 @@ async def origin_stream(db: DB, digest: str, start: int = 0):
         upload_dir(db).mkdir(parents=True, exist_ok=True)
         fetch = _fetches[digest] = _Fetch(upload_dir(db) / f"{digest}.origin.partial", size)
         fetch.part.write_bytes(b"")
-        asyncio.get_running_loop().create_task(_run_fetch(db, digest, urls, fetch))
+        fetch.task = asyncio.get_running_loop().create_task(_run_fetch(db, digest, urls, fetch))
     return fetch.follow(start)
 
 
@@ -476,7 +490,8 @@ async def _run_fetch(db: DB, digest: str, urls: list[str], fetch: _Fetch):
         await fetch.finish(False, str(e))
     finally:
         _fetches.pop(digest, None)
-        fetch.part.unlink(missing_ok=True)
+        fetch.ended = True
+        fetch.drop_partial()
 
 
 async def _file_chunks(p: Path | None, start: int):
