@@ -68,5 +68,6 @@ Copy-Item "$Bin\oarbank-agent.exe" "$Out\oarbank-agent-$Version-windows-$Arch.ex
 # collect the hashes before writing: the sums file matches the same pattern
 $Sums = Get-ChildItem "$Out\oarbank-agent-$Version-windows-$Arch*" | Where-Object Extension -ne ".wixpdb" | Get-FileHash -Algorithm SHA256 |
   ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
-Set-Content "$Out\SHA256SUMS-agent-$Version-windows-$Arch" $Sums
+# LF, as sha256sum -c reads it on any OS (Set-Content ends lines with CRLF, which it takes as part of the name)
+[IO.File]::WriteAllText("$Out\SHA256SUMS-agent-$Version-windows-$Arch", (($Sums -join "`n") + "`n"))
 Get-ChildItem $Out
