@@ -121,7 +121,7 @@ try {
   $Tgz = "$Out\oarbank-coordinator-$Version-$Platform.tar.gz"
   & $Py -I -B "$Repo\scripts\pack-tar.py" $Tgz $Root oarbank-coordinator.json bin python; Check "the archive"
   $h = (Get-FileHash -Algorithm SHA256 $Tgz).Hash.ToLower()
-  Set-Content -Encoding ascii "$Out\SHA256SUMS-coordinator-$Version-$Platform" "$h  $(Split-Path -Leaf $Tgz)"
+  [IO.File]::WriteAllText("$Out\SHA256SUMS-coordinator-$Version-$Platform", "$h  $(Split-Path -Leaf $Tgz)`n")   # LF, as sha256sum -c reads it
   $Tgz
 } finally {
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue

@@ -57,6 +57,22 @@ def test_the_helper_service_starts_after_the_filtering_engine_and_is_configured_
     assert step.get("After") == "InstallServices" and step.get("Condition") == 'NOT REMOVE="ALL"'
 
 
+def test_windows_checksum_files_end_lines_with_lf():
+    # sha256sum -c and shasum -c on Linux and macOS take a CRLF line's \r as part of the file name, and Set-Content
+    # ends lines with CRLF on Windows: the sums files are written whole, with LF
+    for name in ("package-windows.ps1", "build-coordinator.ps1"):
+        lines = [l for l in (WXS.parents[2] / "scripts" / name).read_text(encoding="utf-8").splitlines() if "SHA256SUMS-" in l]
+        assert lines and all("WriteAllText" in l and "`n" in l for l in lines), (name, lines)
+
+
+def test_windows_checksum_files_end_lines_with_lf():
+    # sha256sum -c and shasum -c on Linux and macOS take a CRLF line's \r as part of the file name, and Set-Content
+    # ends lines with CRLF on Windows: the sums files are written whole, with LF
+    for name in ("package-windows.ps1", "build-coordinator.ps1"):
+        lines = [l for l in (WXS.parents[2] / "scripts" / name).read_text(encoding="utf-8").splitlines() if "SHA256SUMS-" in l]
+        assert lines and all("WriteAllText" in l and "`n" in l for l in lines), (name, lines)
+
+
 def test_windows_build_scripts_stop_when_a_native_command_fails():
     # PowerShell's $ErrorActionPreference does not see a native command's exit code: a failed cargo build once went on
     # to package the binaries an earlier build had left in target\release
