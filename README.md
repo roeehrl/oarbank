@@ -41,7 +41,7 @@ the owner's own work first, every job in the operating system's sandbox.</p>
 ## What it does
 
 - **Runs one queue on all your computers.** A coordinator on a Mac, a Linux machine or a Windows PC hands jobs to nodes on macOS
-  (Apple silicon and Intel), Linux (x86_64 and arm64, systemd) and Windows 10 and 11 (x64 and ARM64). A job goes to a node with
+  (Apple silicon and Intel), Linux (x86_64 and arm64, systemd, glibc 2.39+) and Windows 10 and 11 (x64 and ARM64). A job goes to a node with
   the CPU, memory and tools it needs; a node that sleeps or leaves gives its work back.
 - **Keeps each computer's own work first.** Every node has a memory guard and per-node caps on cores, memory, jobs and
   hours, all off until you set them. Nodes also take fewer jobs while someone is at the computer, follow rules for the

@@ -5,10 +5,10 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 
 ## What you need
 
-- Nodes: macOS 15 or later on Apple silicon or Intel (one package each), Linux with systemd on x86-64 or arm64 ([Linux nodes](#linux-nodes)), or Windows 10 1809 or later on x64
+- Nodes: macOS 15 or later on Apple silicon or Intel (one package each), Linux with systemd and glibc 2.39 or newer on x86-64 or arm64 ([Linux nodes](#linux-nodes)), or Windows 10 1809 or later on x64
   or arm64 ([Windows nodes](#windows-nodes)).
 - For the coordinator: macOS 15 or later on Apple silicon (Intel can run a source checkout), Linux with systemd
-  on x86-64 or arm64, or a Windows machine (x64: Windows 10 1809 / Windows Server 2019 or later; arm64: Windows 11;
+  and glibc 2.39 or newer on x86-64 or arm64, or a Windows machine (x64: Windows 10 1809 / Windows Server 2019 or later; arm64: Windows 11;
   [Windows coordinator](#windows-coordinator)) that stays on, reachable by the nodes on one address
   (port 7443/tcp).
 - Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
@@ -161,7 +161,7 @@ whole networks (`sudo defaults write com.apple.network.local-network AllowedEthe
 ## Linux nodes
 
 Built for x86-64 and arm64; the sandbox needs Linux 6.2 or later (6.12 for every capability: see the SDK's
-spec/sandbox/backends/linux.md), and `systemd`.
+spec/sandbox/backends/linux.md), and `systemd`. The published 2.6.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
 
 ```bash
 scripts/package-linux.sh                     # on a Linux machine with nFPM: dist/*.deb, *.rpm and a tarball
@@ -184,8 +184,7 @@ oarbank-agent gpu-apis`) prints the GPU APIs the node provides and why any is mi
 same list, and work is placed by it ([gpu-placement.md](design/gpu-placement.md)).
 
 For a Linux coordinator, install the native package and run its wizard as described above. The coordinator's
-module sandbox has the same kernel requirements. The bundled interpreter also needs a compatible glibc;
-use a distribution supported by the release build and verify its runtime before production deployment.
+module sandbox has the same kernel requirements. The published coordinator payload, including its sandbox launcher, requires glibc 2.39 or newer and is built and checked on Ubuntu 24.04.
 
 ## Windows nodes
 
