@@ -109,7 +109,7 @@ packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scri
 `build-coordinator` followed by `package-coordinator` for the coordinator (see [docs/install.md](docs/install.md)).
 
 Install the coordinator package (`.pkg`, `.deb`/`.rpm`, or `.msi`) for your platform. Open **Oarbank Coordinator**
-from Applications or your application menu. Its browser wizard asks for the address your nodes will reach,
+from Applications or your application menu (**Oarbank coordinator setup** in Windows Start). Its browser wizard asks for the address your nodes will reach,
 your administrator name and password, and an authenticator code. It creates and pins your primary and backup
 owner signing keys. Installing the package alone does not configure or start a fleet.
 

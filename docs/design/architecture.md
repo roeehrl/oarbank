@@ -279,7 +279,9 @@ is a named pipe only the agent's account and the module's AppContainer may open.
   `scripts/build-coordinator.sh` / `.ps1` are wrapped in software-only native `.pkg`, `.deb`/`.rpm`, and `.msi`
   installers by `scripts/package-coordinator-*`. Their application launcher opens the local browser setup wizard;
   submitting configures per-user LaunchAgents/systemd services or Windows services under virtual accounts, then
-  initializes the admin account, TOTP and primary/backup owner signing keys. Bundled helpers accept an installed
+  initializes the admin account, TOTP and primary/backup owner signing keys. Windows calls its Start shortcut
+  **Oarbank coordinator setup** and requires Windows 11 on ARM64 for bundled x64 Python; see
+  [installation requirements](../install.md#windows-coordinator). Bundled helpers accept an installed
   payload through `--installed` / `-Installed`. Advanced archives use `--build` / `-Build` and remain the signed move
   format.
 - **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the chaos tests on macOS and

@@ -38,8 +38,9 @@ worse, pass while doing something else:
 
 ## Decisions
 
-1. **Windows is a coordinator platform**: `windows-amd64` and `windows-arm64`, Windows 10 1809 / Server 2019 or later
-   (the agent's sandbox floor, D30). A module's `requires.coordinator_platforms` decides per module as before.
+1. **Windows is a coordinator platform**: `windows-amd64` requires Windows 10 1809 / Server 2019 or later;
+   `windows-arm64` requires Windows 11 for the bundled x64 interpreter's emulation. The native ARM64 agent keeps
+   its Windows 10 sandbox floor (D30). A module's `requires.coordinator_platforms` decides per module as before.
 
 2. **One x64 interpreter on both architectures.** The coordinator's `cryptography` dependency publishes no Windows on
    Arm wheels, so the coordinator build and the test environments use x64 CPython, which Windows on Arm runs under its

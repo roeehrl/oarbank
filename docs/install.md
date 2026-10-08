@@ -8,7 +8,7 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 - Nodes: macOS 15 or later on Apple silicon or Intel (one package each), Linux with systemd on x86-64 or arm64 ([Linux nodes](#linux-nodes)), or Windows 10 1809 or later on x64
   or arm64 ([Windows nodes](#windows-nodes)).
 - For the coordinator: macOS 15 or later on Apple silicon (Intel can run a source checkout), Linux with systemd
-  on x86-64 or arm64, or a Windows machine (Windows 10 1809, Windows 11 or Windows Server 2019 or later;
+  on x86-64 or arm64, or a Windows machine (x64: Windows 10 1809 / Windows Server 2019 or later; arm64: Windows 11;
   [Windows coordinator](#windows-coordinator)) that stays on, reachable by the nodes on one address
   (port 7443/tcp).
 - Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
@@ -39,7 +39,7 @@ Download the native coordinator installer for your computer from the
 [2.6.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.6.0) and verify it against its `SHA256SUMS` file.
 On macOS, double-click the `.pkg` and follow Installer, then open **Oarbank Coordinator** in Applications.
 On Linux, install the `.deb` or `.rpm` with your package manager, then launch **Oarbank Coordinator** from the
-application menu or run `oarbank-setup`. On Windows, run the `.msi`, then open **Oarbank Coordinator** from Start
+application menu or run `oarbank-setup`. On Windows, run the `.msi`, then open **Oarbank coordinator setup** from Start
 and accept the administrator prompt. Package installation needs administrator privileges; on macOS/Linux,
 launch setup as the ordinary user who will own the coordinator.
 
@@ -222,11 +222,12 @@ The node offers the `containers` pool only while its session is ready.
 
 ## Windows coordinator
 
-Windows 10 1809 or later, Windows 11 or Windows Server 2019 or later, x64 or arm64. The coordinator runs as two
-Windows services; its Python is x64 on both architectures (on arm64 under Windows' own emulation), because one of its
-libraries publishes no Windows on Arm builds.
+On x64: Windows 10 1809 or later, Windows 11, or Windows Server 2019 or later. On arm64: Windows 11. The coordinator
+runs as two Windows services; its bundled Python is x64 on both architectures, because one dependency has no
+Windows on Arm wheels. [Windows 11 provides x64 emulation; Windows 10 on Arm does not](https://learn.microsoft.com/en-us/windows/arm/apps-on-arm-x86-emulation).
+This coordinator requirement does not change the native ARM64 agent's Windows 10 floor.
 
-Install `oarbank-coordinator-<v>-windows-<arch>.msi`, then open **Oarbank Coordinator** from Start. The launcher
+Install `oarbank-coordinator-<v>-windows-<arch>.msi`, then open **Oarbank coordinator setup** from Start. The launcher
 asks for elevation and opens the same browser setup wizard. Its native package installs at
 `C:\Program Files\Oarbank\Coordinator\package`; service setup points `current` at that installed payload.
 The services `dev.codonic.oarbank.oarbankd` and `dev.codonic.oarbank.console` each run under their own virtual
@@ -244,7 +245,7 @@ A module's own CLI (`oarbank cli <module>`) is limited to the admin API through 
 installs; install the agent on the coordinator too to use one. Module processes run in AppContainers, as on a Windows
 node.
 
-**Updating:** install the new native package, then reopen Oarbank Coordinator to refresh and restart its services.
+**Updating:** install the new native package, then reopen **Oarbank coordinator setup** to refresh and restart its services.
 For an archive installation, run the helper with the new build; earlier archive builds remain beside it. **Moving the coordinator to a Windows machine:** prepare the move with that machine's URL
 (`oarbank coordinator prepare --to https://<host>:7443`) and run the installer there with the printed pairing code:
 `install-oarbankd.ps1 -Build … -AgentBind <host> -Pair <code> -From <old url> -FromCa <pin>` (an agent on a Windows node
