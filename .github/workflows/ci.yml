@@ -248,7 +248,7 @@ jobs:
       - if: inputs.installer_check_platform != 'windows-msi'
         run: uv run pytest -q -n auto --durations=10 tests/test_coordinator_setup.py tests/test_coordinator_native_macos.py tests/test_coordinator_native_windows.py tests/test_coordinator_linux_packages.py tests/test_packaging.py tests/test_campaigns.py::test_core_names_no_module_concepts
       - if: inputs.installer_check_platform == 'windows-msi'
-        run: uv run pytest -q tests/test_coordinator_native_windows.py -k "msi or start_menu or packager_defaults"
+        run: uv run pytest --noconftest -q tests/test_coordinator_native_windows.py -k "msi or start_menu or packager_defaults"
 
   package:
     # oarbank-agent-<v>-macos-arm64.pkg and -macos-x86_64.pkg, each native throughout (docs/design/architecture.md,

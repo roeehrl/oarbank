@@ -44,9 +44,13 @@ public sealed class Fixture : ServiceBase {
     protected override void OnStop() { }
     public static void Main(string[] args) { ServiceBase.Run(new Fixture(args[0])); }
 }
-'@ | Set-Content "$fixture/Fixture.cs"
+'@ | Set-Content (Join-Path $fixture 'Fixture.cs')
     $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    & $csc /nologo /target:exe /reference:System.ServiceProcess.dll "/out:$fixture/Fixture.exe" "$fixture/Fixture.cs"
+    $sourcePath = Join-Path $fixture 'Fixture.cs'
+    $exePath = Join-Path $fixture 'Fixture.exe'
+    Write-Host "Compiling service fixture: $sourcePath -> $exePath"
+    if (-not (Test-Path $sourcePath)) { throw 'fixture source missing before compilation' }
+    & $csc /nologo /target:exe /reference:System.ServiceProcess.dll "/out:$exePath" $sourcePath
     if ($LASTEXITCODE) { throw 'service fixture compilation failed' }
     foreach ($name in $services) {
         New-Service -Name $name -BinaryPathName "`"$fixture\Fixture.exe`" $name" -StartupType Manual | Out-Null
