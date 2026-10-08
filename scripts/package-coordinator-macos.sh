@@ -45,7 +45,23 @@ done
 if [[ "$ID" == "-" ]]; then codesign --force --sign - "$APP"
 else codesign --force --options runtime --timestamp --sign "$ID" "$APP"; fi
 codesign --verify --deep --strict "$APP"
-pkgbuild --quiet --root "$WORK/root" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg"
+pkgbuild --quiet --root "$WORK/root" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
+# macOS can retain provenance attributes despite xattr -cr. pkgbuild then embeds
+# AppleDouble siblings; omit those without changing signed app resources, link
+# targets, file modes or Installer's recommended root ownership.
+if pkgutil --payload-files "$WORK/coordinator.pkg" | grep '/\._' >/dev/null; then
+    pkgutil --expand "$WORK/coordinator.pkg" "$WORK/expanded"
+    (cd "$WORK/root" && find . | COPYFILE_DISABLE=1 cpio -o --format odc -R 0:0 --quiet | gzip -9 -c) > "$WORK/expanded/Payload"
+    lsbom "$WORK/expanded/Bom" | "$PY" -I -B -c 'import sys; sys.stdout.write("".join(line for line in sys.stdin if not any(p.startswith("._") for p in line.split("\t", 1)[0].split("/"))))' > "$WORK/bom.txt"
+    mkbom -i "$WORK/bom.txt" "$WORK/expanded/Bom"
+    count=$(cd "$WORK/root" && find . | wc -l | tr -d ' ')
+    sed -i '' "s/numberOfFiles=\"[0-9]*\"/numberOfFiles=\"$count\"/" "$WORK/expanded/PackageInfo"
+    rm "$WORK/coordinator.pkg"
+    pkgutil --flatten "$WORK/expanded" "$WORK/coordinator.pkg"
+fi
+! pkgutil --payload-files "$WORK/coordinator.pkg" | grep '/\._' >/dev/null || { echo "AppleDouble metadata remains in coordinator package" >&2; exit 1; }
+pkgutil --expand "$WORK/coordinator.pkg" "$WORK/bom-check"
+diff <(lsbom -s "$WORK/bom-check/Bom" | sort) <(cd "$WORK/root" && find . | sort) >/dev/null || { echo "coordinator package bill does not match its payload" >&2; exit 1; }
 # Explicit host architecture: the package cannot claim Intel support with an ARM runtime.
 if [[ "$ARCH" == arm64 ]]; then apple_silicon=true; else apple_silicon=false; fi
 cat > "$WORK/distribution.xml" <<XML
