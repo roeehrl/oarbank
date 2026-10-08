@@ -11,6 +11,14 @@
                   DowngradeErrorMessage="A newer Oarbank coordinator is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPCOMMENTS" Value="Configure the coordinator with Oarbank coordinator setup in the Start menu. Fleet data is retained on uninstall." />
+    <Property Id="COORDINATOR_SERVICE_EXISTS" Secure="yes">
+      <RegistrySearch Id="FindCoordinatorService" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\dev.codonic.oarbank.oarbankd"
+                      Name="ImagePath" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="CONSOLE_SERVICE_EXISTS" Secure="yes">
+      <RegistrySearch Id="FindConsoleService" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\dev.codonic.oarbank.console"
+                      Name="ImagePath" Type="raw" Bitness="always64" />
+    </Property>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="OARBANKFOLDER" Name="Oarbank">
@@ -26,10 +34,18 @@
                         Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
                         Arguments="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[PACKAGEFOLDER]oarbank-setup.ps1&quot;"
                         WorkingDirectory="PACKAGEFOLDER" Advertise="no" />
-              <!-- The wizard creates these services. Stop existing ones before replacing files; restart them after
-                   an upgrade/repair. ServiceControl also supports services not installed by this MSI. Do not delete
-                   them here: an upgrade preserves their configuration, a true uninstall uses the script below. -->
+            </Component>
+            <!-- Initial installation has no services: the wizard creates them later. Only control services found
+                 by AppSearch. Transitive components reevaluate the condition during a subsequent repair/upgrade.
+                 An upgrade retains service configuration; a true uninstall uses the script below. -->
+            <Component Id="ExistingCoordinatorService" Bitness="always64" Condition="COORDINATOR_SERVICE_EXISTS" Transitive="yes">
+              <RegistryValue Root="HKLM" Key="Software\Codonic\Oarbank\Coordinator" Name="ControlCoordinator"
+                             Type="integer" Value="1" KeyPath="yes" />
               <ServiceControl Id="CoordinatorControl" Name="dev.codonic.oarbank.oarbankd" Stop="both" Start="install" Wait="yes" />
+            </Component>
+            <Component Id="ExistingConsoleService" Bitness="always64" Condition="CONSOLE_SERVICE_EXISTS" Transitive="yes">
+              <RegistryValue Root="HKLM" Key="Software\Codonic\Oarbank\Coordinator" Name="ControlConsole"
+                             Type="integer" Value="1" KeyPath="yes" />
               <ServiceControl Id="ConsoleControl" Name="dev.codonic.oarbank.console" Stop="both" Start="install" Wait="yes" />
             </Component>
           </Directory>
@@ -39,6 +55,8 @@
     <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Main">
       <ComponentRef Id="CoordinatorRegistration" />
+      <ComponentRef Id="ExistingCoordinatorService" />
+      <ComponentRef Id="ExistingConsoleService" />
       <Files Directory="PACKAGEFOLDER" Include="$(var.PackageDir)\**" />
     </Feature>
 

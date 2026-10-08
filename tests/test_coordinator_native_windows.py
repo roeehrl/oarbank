@@ -67,6 +67,24 @@ def test_msi_upgrade_preserves_service_configuration_and_uninstall_has_rollback(
     )
 
 
+def test_initial_msi_install_does_not_attempt_to_start_services_that_the_wizard_has_not_created():
+    pkg = _package()
+    registration = pkg.find(".//w:Component[@Id='CoordinatorRegistration']", NS)
+    assert registration.find("w:ServiceControl", NS) is None
+    controls = pkg.findall(".//w:Component/w:ServiceControl/..", NS)
+    assert len(controls) == 2
+    for component in controls:
+        service = component.find("w:ServiceControl", NS)
+        prop = pkg.find(f"w:Property[@Id='{component.get('Condition')}']", NS)
+        assert prop is not None and prop.get("Secure") == "yes"
+        search = prop.find("w:RegistrySearch", NS)
+        assert search.get("Root") == "HKLM" and search.get("Bitness") == "always64"
+        assert search.get("Key") == "SYSTEM\\CurrentControlSet\\Services\\" + service.get("Name")
+        assert search.get("Name") == "ImagePath" and search.get("Type") == "raw"
+        assert component.get("Transitive") == "yes"
+        assert pkg.find(f"w:Feature/w:ComponentRef[@Id='{component.get('Id')}']", NS) is not None
+
+
 def test_start_menu_uses_hidden_elevation_broker_and_bundled_gui_interpreter():
     shortcut = _package().find(".//w:Shortcut", NS)
     assert shortcut.get("Directory") == "ProgramMenuFolder" and shortcut.get("Advertise") == "no"
