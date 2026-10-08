@@ -3,6 +3,12 @@
 # and an uninstall that leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
 name: msi
 on:
+  workflow_dispatch:
+    inputs:
+      coordinator_fixture_only:
+        description: 'Diagnose native coordinator MSI lifecycle with a tiny non-executable payload'
+        type: boolean
+        default: false
   push:
     branches: ["**"]
     tags: ["v*"]
@@ -20,11 +26,12 @@ on:
     paths: *paths
 
 concurrency:
-  group: msi-${{ github.ref }}
+  group: msi-${{ github.ref }}${{ inputs.coordinator_fixture_only && '-coordinator-fixture' || '' }}
   cancel-in-progress: true
 
 jobs:
   msi:
+    if: '!inputs.coordinator_fixture_only'
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -56,3 +63,35 @@ jobs:
         with:
           name: msi-logs
           path: dist/msi-logs/
+
+  coordinator-fixture:
+    if: inputs.coordinator_fixture_only
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          dotnet tool install --global wix --version 5.*
+          wix extension add --global WixToolset.Util.wixext/5.0.2
+      - name: stage an inert package fixture (programs are never executed)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'coordinator-fixture'
+          New-Item -ItemType Directory -Force "$root/python", "$root/bin", 'dist' | Out-Null
+          foreach ($file in @('python/python.exe', 'python/pythonw.exe', 'bin/oarbankd.py', 'bin/oarbank-console.py', 'bin/oarbank-setup.py', 'bin/oarbank-setup.cmd', 'bin/oarbank.cmd', 'bin/oarbank-sandbox.exe', 'bin/uv.exe')) {
+            Set-Content -LiteralPath "$root/$file" -Value 'Fixture only; never execute.'
+          }
+          foreach ($version in @('2.6.900', '2.6.901')) {
+            @{format=1; version=$version; platform='windows-amd64'; exec=@('python/python.exe','-I','bin/oarbankd.py'); console=@('python/python.exe','-I','bin/oarbank-console.py')} | ConvertTo-Json | Set-Content "$root/oarbank-coordinator.json"
+            tar -czf dist/coordinator-fixture.tar.gz -C $root .
+            if ($LASTEXITCODE) { throw 'fixture archive failed' }
+            scripts/package-coordinator-windows.ps1 -Build dist/coordinator-fixture.tar.gz
+          }
+      - name: install, repair after service creation, upgrade and remove
+        shell: pwsh
+        run: scripts/ci-coordinator-windows-fixture.ps1 -First dist/oarbank-coordinator-2.6.900-windows-x64.msi -Second dist/oarbank-coordinator-2.6.901-windows-x64.msi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coordinator-fixture-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/coordinator-fixture-*.log

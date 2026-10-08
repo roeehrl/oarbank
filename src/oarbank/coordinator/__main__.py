@@ -49,7 +49,8 @@ def stop_servers():
 
 def run(a):
     os.umask(0o077)                           # every file oarbankd creates is owner-only
-    my_url = (a.url or f"https://{a.agent_bind}:{a.agent_port}").rstrip("/")
+    url_host = f"[{a.agent_bind}]" if ":" in a.agent_bind else a.agent_bind
+    my_url = (a.url or f"https://{url_host}:{a.agent_port}").rstrip("/")
 
     if (C.HOME / "FINALIZED").exists():
         print(f"oarbankd: {C.HOME} was finalized after a coordinator move; not starting (remove FINALIZED to override)")

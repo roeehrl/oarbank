@@ -1,6 +1,6 @@
 [project]
 name = "oarbank"
-version = "2.5.0"
+version = "2.6.0"
 description = "Batch orchestrator for a fleet of machines on a tailnet: the coordinator (oarbankd), its console and the admin CLI (oarbank)"
 requires-python = ">=3.12"
 dependencies = [
@@ -20,6 +20,7 @@ dev = ["pytest>=8", "hypothesis>=6.168.3", "pytest-xdist>=3.8"]      # xdist: CI
 [project.scripts]
 oarbankd = "oarbank.coordinator.__main__:main"
 oarbank = "oarbank.cli.main:main"
+oarbank-setup = "oarbank.setup:main"
 
 [build-system]
 requires = ["hatchling"]

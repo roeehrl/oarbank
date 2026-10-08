@@ -19,6 +19,10 @@ The release key is the owner set's primary key. Keep the backup offline (another
 
 ## Setting it up
 
+The native coordinator installer's first-run wizard creates and pins the primary and backup keys before it
+finishes. Keep that backup offline. If you used the wizard, proceed to signing your module releases and agent builds
+below; do not create a second key set. For manual/archive setup or keys held on another trusted machine:
+
 1. Make the keys on a machine you trust, not necessarily the coordinator:
    `oarbank release keygen` writes the primary to `keys/release-ed25519.key` (0600) in the config directory
    (`~/.config/oarbank` on Linux, `~/Library/Application Support/Oarbank` on macOS; `OARBANK_RELEASE_KEY` names

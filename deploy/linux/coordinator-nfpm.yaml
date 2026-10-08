@@ -1,0 +1,32 @@
+# Paths are rendered as JSON strings by coordinator-stage.py (also valid YAML).
+name: oarbank-coordinator
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: Codonic <support@codonic.dev>
+description: |
+  Oarbank coordinator and browser setup wizard.
+  Launch Oarbank Coordinator to configure services for your own user account.
+vendor: Codonic
+homepage: https://codonic.dev
+license: Proprietary
+depends:
+  - systemd
+contents:
+  - src: ${ROOT}
+    dst: /opt/oarbank/coordinator
+    type: tree
+  - src: /opt/oarbank/coordinator/bin/oarbank-setup
+    dst: /usr/bin/oarbank-setup
+    type: symlink
+  - src: ${DESKTOP}
+    dst: /usr/share/applications/oarbank-coordinator.desktop
+    file_info: {mode: 0644}
+  - src: ${REMOVE}
+    dst: /usr/lib/oarbank/coordinator-remove.py
+    file_info: {mode: 0644}
+# No install/upgrade hook starts or enables services. Only final removal cleans up.
+scripts:
+  preremove: ${PREREMOVE}

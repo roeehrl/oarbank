@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The coordinator MSI owns only the build tree and its setup shortcut. The portable wizard creates/configures
+  services with install-oarbankd.ps1 -Installed PACKAGEFOLDER. Fleet data stays in ProgramData\Oarbank\coordinator.
+  Build with scripts/package-coordinator-windows.ps1 -Build <coordinator archive> (WiX 5 + Util extension).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Oarbank coordinator" Manufacturer="Codonic" Version="$(var.Version)"
+           UpgradeCode="{E53883E9-1395-4A42-B87A-4E1314FA21D2}" Scope="perMachine" Compressed="yes">
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer Oarbank coordinator is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPCOMMENTS" Value="Configure the coordinator with Oarbank coordinator setup in the Start menu. Fleet data is retained on uninstall." />
+    <Property Id="COORDINATOR_SERVICE_EXISTS" Secure="yes">
+      <RegistrySearch Id="FindCoordinatorService" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\dev.codonic.oarbank.oarbankd"
+                      Name="ImagePath" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="CONSOLE_SERVICE_EXISTS" Secure="yes">
+      <RegistrySearch Id="FindConsoleService" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\dev.codonic.oarbank.console"
+                      Name="ImagePath" Type="raw" Bitness="always64" />
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="OARBANKFOLDER" Name="Oarbank">
+        <Directory Id="COORDINATORFOLDER" Name="Coordinator">
+          <Directory Id="PACKAGEFOLDER" Name="package">
+            <Component Id="CoordinatorRegistration" Bitness="always64">
+              <RegistryValue Root="HKLM" Key="Software\Codonic\Oarbank\Coordinator" Name="PackageDirectory"
+                             Type="string" Value="[PACKAGEFOLDER]" KeyPath="yes" />
+              <!-- The hidden broker launches the bundled pythonw.exe -I bin/oarbank-setup.py with RunAs and shows
+                   startup failures. It does not change compatibility settings on the interpreter. -->
+              <Shortcut Id="CoordinatorSetup" Directory="ProgramMenuFolder" Name="Oarbank coordinator setup"
+                        Description="Set up or reconfigure the Oarbank coordinator (administrator permission required)"
+                        Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
+                        Arguments="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[PACKAGEFOLDER]oarbank-setup.ps1&quot;"
+                        WorkingDirectory="PACKAGEFOLDER" Advertise="no" />
+            </Component>
+            <!-- Initial installation has no services: the wizard creates them later. Only control services found
+                 by AppSearch. Transitive components reevaluate the condition during a subsequent repair/upgrade.
+                 An upgrade retains service configuration; a true uninstall uses the script below. -->
+            <Component Id="ExistingCoordinatorService" Bitness="always64" Condition="COORDINATOR_SERVICE_EXISTS" Transitive="yes">
+              <RegistryValue Root="HKLM" Key="Software\Codonic\Oarbank\Coordinator" Name="ControlCoordinator"
+                             Type="integer" Value="1" KeyPath="yes" />
+              <ServiceControl Id="CoordinatorControl" Name="dev.codonic.oarbank.oarbankd" Stop="both" Start="install" Wait="yes" />
+            </Component>
+            <Component Id="ExistingConsoleService" Bitness="always64" Condition="CONSOLE_SERVICE_EXISTS" Transitive="yes">
+              <RegistryValue Root="HKLM" Key="Software\Codonic\Oarbank\Coordinator" Name="ControlConsole"
+                             Type="integer" Value="1" KeyPath="yes" />
+              <ServiceControl Id="ConsoleControl" Name="dev.codonic.oarbank.console" Stop="both" Start="install" Wait="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <Feature Id="Main">
+      <ComponentRef Id="CoordinatorRegistration" />
+      <ComponentRef Id="ExistingCoordinatorService" />
+      <ComponentRef Id="ExistingConsoleService" />
+      <Files Directory="PACKAGEFOLDER" Include="$(var.PackageDir)\**" />
+    </Feature>
+
+    <SetProperty Id="RemoveCoordinator" Before="RemoveCoordinator" Sequence="execute"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[PACKAGEFOLDER]install-oarbankd.ps1&quot; -Uninstall -KeepPrograms -SaveConfiguration &quot;[COORDINATORFOLDER]uninstall-[ProductCode].xml&quot;" />
+    <SetProperty Id="RestoreCoordinator" Before="RestoreCoordinator" Sequence="execute"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[PACKAGEFOLDER]install-oarbankd.ps1&quot; -RestoreConfiguration &quot;[COORDINATORFOLDER]uninstall-[ProductCode].xml&quot;" />
+    <SetProperty Id="DiscardCoordinatorSnapshot" Before="DiscardCoordinatorSnapshot" Sequence="execute"
+                 Value="&quot;[System64Folder]cmd.exe&quot; /c del /q &quot;[COORDINATORFOLDER]uninstall-[ProductCode].xml&quot;" />
+    <CustomAction Id="RestoreCoordinator" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec"
+                  Execute="rollback" Impersonate="no" Return="check" />
+    <CustomAction Id="DiscardCoordinatorSnapshot" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec"
+                  Execute="commit" Impersonate="no" Return="ignore" />
+    <CustomAction Id="RemoveCoordinator" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <!-- StopServices precedes RemoveFiles; KeepPrograms leaves payload deletion to MSI and retains ProgramData. -->
+      <Custom Action="RemoveCoordinator" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RestoreCoordinator" Before="RemoveCoordinator" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="DiscardCoordinatorSnapshot" After="RemoveCoordinator" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

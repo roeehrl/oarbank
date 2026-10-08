@@ -38,8 +38,9 @@ worse, pass while doing something else:
 
 ## Decisions
 
-1. **Windows is a coordinator platform**: `windows-amd64` and `windows-arm64`, Windows 10 1809 / Server 2019 or later
-   (the agent's sandbox floor, D30). A module's `requires.coordinator_platforms` decides per module as before.
+1. **Windows is a coordinator platform**: `windows-amd64` requires Windows 10 1809 / Server 2019 or later;
+   `windows-arm64` requires Windows 11 for the bundled x64 interpreter's emulation. The native ARM64 agent keeps
+   its Windows 10 sandbox floor (D30). A module's `requires.coordinator_platforms` decides per module as before.
 
 2. **One x64 interpreter on both architectures.** The coordinator's `cryptography` dependency publishes no Windows on
    Arm wheels, so the coordinator build and the test environments use x64 CPython, which Windows on Arm runs under its
@@ -118,7 +119,7 @@ worse, pass while doing something else:
    programs live in `%ProgramFiles%\Oarbank\Coordinator\<version>-<sha12>`, writable only by administrators (a
    service cannot rewrite its own code), with `current` a directory junction to the running one.
 
-10. **The coordinator build is the package on every OS.** `scripts/build-coordinator.ps1` builds
+10. **The coordinator archive is the shared payload; native packages wrap it.** `scripts/build-coordinator.ps1` builds
     `oarbank-coordinator-<v>-windows-<arch>.tar.gz` with the same layout and manifest as the POSIX builds (x64 CPython,
     the locked dependencies, the SDK, the core compiled with Nuitka into one `.pyd`, `bin\oarbank-sandbox.exe`,
     `bin\uv.exe` for module environments, and per program a launcher and a `.cmd` for people; the manifest's `exec`
@@ -128,8 +129,11 @@ worse, pass while doing something else:
     and an inbound firewall rule for the agent port scoped to the oarbankd service; running it again with a newer
     build is the upgrade (the services stop, `current` moves, they start; modules' environments made on the previous
     build's interpreter are rebuilt at start, `modlife.runtimes_ok`). `-Uninstall` removes the services, the rule and
-    the programs and keeps the home. Not an MSI: the coordinator is one machine the owner sets up, moves install the
-    same archive, and one archive with one installer per OS family keeps a single format.
+    the programs and keeps the home. Since 2.6, `package-coordinator-windows.ps1` wraps that payload in a WiX MSI,
+    with an elevated Start menu launcher for the browser setup wizard. The MSI installs software only; the wizard
+    calls the helper's `-Installed` mode and handles account, TOTP and owner signing keys. The MSI's uninstall uses
+    `-Uninstall -KeepPrograms` before Windows Installer removes its payload. POSIX native wrappers use the same
+    archive/helper contract. Archives remain available for signed moves and explicit manual setup.
 
 11. **The local admin channel on Windows is a named pipe** (`platform/localchannel.py`, `_winpipe.py`):
     `\\.\pipe\oarbank-admin-<sha256(home)[:12]>`, created with the owner-only descriptor (SYSTEM, Administrators,

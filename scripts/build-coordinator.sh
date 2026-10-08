@@ -72,16 +72,26 @@ fi
 
 # 4. entry points, relative to the build so it runs from wherever it is unpacked
 launcher() {
+    local extra=''
+    [[ "$1" != oarbank-setup ]] || extra='--root "$here"'
     cat > "$ROOT/bin/$1" <<SH
 #!/bin/sh
-here="\$(cd "\$(dirname "\$0")/.." && pwd -P)"
-exec "\$here/python/bin/python$PYVER" -I -c 'import sys; from $2 import main; sys.argv[0] = "$1"; sys.exit(main())' "\$@"
+script="\$0"
+while [ -L "\$script" ]; do
+    dir="\$(cd "\$(dirname "\$script")" && pwd -P)"
+    script="\$(readlink "\$script")"
+    case "\$script" in /*) ;; *) script="\$dir/\$script" ;; esac
+done
+here="\$(cd "\$(dirname "\$script")/.." && pwd -P)"
+exec "\$here/python/bin/python$PYVER" -I -B -c 'import sys; from $2 import main; sys.argv[0] = "$1"; sys.exit(main())' $extra "\$@"
 SH
     chmod 755 "$ROOT/bin/$1"
 }
 launcher oarbankd oarbank.coordinator.__main__
 launcher oarbank oarbank.cli.main
 launcher oarbank-console oarbank.console.__main__
+launcher oarbank-setup oarbank.setup
+install -m 755 "$REPO/deploy/oarbankd/install-oarbankd.sh" "$ROOT/install-oarbankd.sh"
 # pip wrote the build path into its console scripts' shebangs (python/bin/oarbank-sdk, uvicorn, ...): point them at the
 # python beside them, and stop if any script still names an interpreter by absolute path
 "$PY" -I -B "$REPO/scripts/relocate_shebangs.py" "$ROOT/python/bin" "$ROOT"
@@ -95,21 +105,29 @@ JSON
 # 5. signatures (macOS), then the archive
 if [[ "$(uname -s)" == Darwin ]]; then
     ID="${OARBANK_CODESIGN_IDENTITY:--}"
+    sign_with_timestamp() {
+        local attempt
+        for attempt in 1 2 3; do
+            codesign --force --options runtime --timestamp --sign "$ID" "$1" && return 0
+            [[ $attempt == 3 ]] || sleep 3
+        done
+        return 1
+    }
     find "$ROOT" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
         file -b "$f" | grep Mach-O >/dev/null || continue
         if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-        else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
+        else sign_with_timestamp "$f"; fi
     done
 fi
 # it runs from wherever it is unpacked (a copy, so the run writes no bytecode into the build), and it ships no link out
 # of itself, no path of this build machine and no native file for another platform
-cp -R "$ROOT" "$WORK/moved" && "$WORK/moved/bin/oarbankd" --help >/dev/null && "$WORK/moved/bin/uv" --version
+cp -R "$ROOT" "$WORK/moved" && "$WORK/moved/bin/oarbankd" --help >/dev/null && "$WORK/moved/bin/oarbank-setup" --help >/dev/null && "$WORK/moved/bin/uv" --version
 own=("$SITE"/oarbank.*.so)                                      # the binaries this build made, checked in full
 [[ -e "$ROOT/bin/oarbank-sandbox" ]] && own+=("$ROOT/bin/oarbank-sandbox")
 uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --build-path "$WORK" --build-path "$(uv python dir)" \
     --platform "$PLATFORM" --run "$ROOT=python/bin/python$PYVER" --imports oarbank,oarbank_sdk "$ROOT" "${own[@]}"
 TGZ="$OUT/oarbank-coordinator-$VERSION-$PLATFORM.tar.gz"
-"$PY" -I -B "$REPO/scripts/pack-tar.py" "$TGZ" "$ROOT" oarbank-coordinator.json bin python
+"$PY" -I -B "$REPO/scripts/pack-tar.py" "$TGZ" "$ROOT" oarbank-coordinator.json bin python install-oarbankd.sh
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 (cd "$OUT" && sha256 "$(basename "$TGZ")" > "SHA256SUMS-coordinator-$VERSION-$PLATFORM")
 echo "$TGZ"
