@@ -105,10 +105,18 @@ JSON
 # 5. signatures (macOS), then the archive
 if [[ "$(uname -s)" == Darwin ]]; then
     ID="${OARBANK_CODESIGN_IDENTITY:--}"
+    sign_with_timestamp() {
+        local attempt
+        for attempt in 1 2 3; do
+            codesign --force --options runtime --timestamp --sign "$ID" "$1" && return 0
+            [[ $attempt == 3 ]] || sleep 3
+        done
+        return 1
+    }
     find "$ROOT" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
         file -b "$f" | grep Mach-O >/dev/null || continue
         if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-        else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
+        else sign_with_timestamp "$f"; fi
     done
 fi
 # it runs from wherever it is unpacked (a copy, so the run writes no bytecode into the build), and it ships no link out

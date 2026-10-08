@@ -154,6 +154,76 @@ def test_forged_posts_have_no_effect(wizard, headers, status):
     assert not access.accounts(wizard.backend.db)
 
 
+@pytest.mark.parametrize("forged,status", [("Host", 421), ("Origin", 403), ("X-Oarbank-Setup", 403), ("Sec-Fetch-Site", 403)])
+def test_early_rejection_waits_for_bounded_body_then_delivers_http_error(wizard, monkeypatch, forged, status):
+    rejected = threading.Event()
+    original = setup.Handler._guard
+    def guard(handler, write=False):
+        try:
+            return original(handler, write)
+        except setup.SetupError:
+            rejected.set()
+            raise
+    monkeypatch.setattr(setup.Handler, "_guard", guard)
+    # Invalid JSON containing a credential-like string must only be discarded,
+    # never parsed, reflected, logged or acted on after authentication fails.
+    body = (PASSWORD.encode() + b"\x00not-json") * 300
+    assert len(body) <= 16384
+    with serving(wizard) as server, socket.create_connection(server.server_address, timeout=3) as connection:
+        headers = {"Host": server.host, "Origin": server.origin, "X-Oarbank-Setup": wizard.capability,
+                   "Content-Type": "application/json", "Content-Length": str(len(body))}
+        headers[forged] = "same-site" if forged == "Sec-Fetch-Site" else "forged"
+        request = "POST /start HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
+        connection.sendall(request.encode())
+        assert rejected.wait(timeout=1)
+        connection.settimeout(.05)
+        # The old handler sent/closed here, before the body reached its socket.
+        with pytest.raises(socket.timeout):
+            connection.recv(1)
+        connection.settimeout(3)
+        connection.sendall(body)
+        response = http.client.HTTPResponse(connection)
+        response.begin()
+        assert response.status == status
+        payload = response.read()
+        assert PASSWORD.encode() not in payload
+        assert response.getheader("Connection") == "close"
+        assert connection.recv(1) == b""
+    assert not wizard.backend.installs and not wizard.pending_path.exists()
+    assert not access.accounts(wizard.backend.db)
+
+
+def test_incomplete_rejected_body_has_absolute_timeout_and_server_recovers(wizard, monkeypatch):
+    monkeypatch.setattr(setup.Handler, "REJECT_BODY_TIMEOUT", .15)
+    with serving(wizard) as server, socket.create_connection(server.server_address, timeout=2) as connection:
+        start = time.monotonic()
+        connection.sendall((f"POST /start HTTP/1.1\r\nHost: {server.host}\r\nOrigin: {server.origin}\r\n"
+                            "X-Oarbank-Setup: forged\r\nContent-Length: 16384\r\n\r\nx").encode())
+        response = http.client.HTTPResponse(connection)
+        response.begin()
+        assert response.status == 403 and response.read()
+        assert .1 <= time.monotonic() - start < 1
+        assert post(server, "/state", {}).status_code == 200
+    assert not wizard.backend.installs
+
+
+@pytest.mark.parametrize("framing", ["Content-Length: 16385", "Content-Length: -1", "Content-Length: +5",
+                                      "Content-Length: 5\r\nContent-Length: 5", "Transfer-Encoding: chunked",
+                                      "Content-Length: 5\r\nTransfer-Encoding:"])
+def test_ambiguous_or_oversized_rejected_framing_is_not_drained(wizard, framing):
+    with serving(wizard) as server, socket.create_connection(server.server_address, timeout=2) as connection:
+        start = time.monotonic()
+        # No body is sent: waiting for it would be an unbounded framing mistake.
+        connection.sendall((f"POST /start HTTP/1.1\r\nHost: {server.host}\r\nOrigin: {server.origin}\r\n"
+                            f"X-Oarbank-Setup: forged\r\n{framing}\r\n\r\n").encode())
+        response = http.client.HTTPResponse(connection)
+        response.begin()
+        assert response.status == 403 and response.read()
+        assert time.monotonic() - start < .75
+        assert connection.recv(1) == b""
+    assert not wizard.backend.installs
+
+
 def test_duplicate_host_origin_token_and_missing_origin(wizard):
     with serving(wizard) as server:
         data = json.dumps(FORM).encode()
@@ -429,12 +499,49 @@ def test_discovery_fixed_commands_filters_addresses(wizard, monkeypatch):
     monkeypatch.setattr(C, "TAILSCALE", "/trusted/tailscale")
     def run(command, **kwargs):
         calls.append(command)
-        return SimpleNamespace(returncode=0, stdout="inet 192.168.1.4 netmask 0xffffff00\ninet6 fd00::4\ninet6 fe80::4%en0\ninet 127.0.0.1" if command[0] == "/sbin/ifconfig" else "100.64.1.4\n")
+        return SimpleNamespace(returncode=0, stdout=(
+            "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+            "\tinet 192.168.1.4 netmask 0xffffff00 broadcast 192.168.1.255\n"
+            "\tinet 10.0.0.4 netmask 255.255.255.0 broadcast 10.0.0.255\n"
+            "\tinet6 fd00::4 prefixlen 64\n\tinet6 fe80::4%en0 prefixlen 64 scopeid 0x6\n"
+            "\tstatus: active 192.0.2.42\n\tinet 127.0.0.1 netmask 0xff000000\n"
+        ) if command[0] == "/sbin/ifconfig" else "100.64.1.4\n")
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(setup, "check_local_address", lambda _: None)
     choices = setup.local_addresses()
-    assert {c["address"] for c in choices} == {"192.168.1.4", "fd00::4", "100.64.1.4"}
+    assert {c["address"] for c in choices} == {"192.168.1.4", "10.0.0.4", "fd00::4", "100.64.1.4"}
     assert calls == [["/sbin/ifconfig"], ["/trusted/tailscale", "ip", "-4"]]
+
+
+def test_macos_broadcast_rejected_even_when_socket_bind_would_succeed(wizard, monkeypatch):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    commands, bound = [], []
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="\tinet 192.168.1.4 netmask 0xffffff00 broadcast 192.168.1.255\n")
+    monkeypatch.setattr(subprocess, "run", run)
+    class BindableSocket:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def bind(self, address):
+            bound.append(address)
+    monkeypatch.setattr(socket, "socket", lambda *_: BindableSocket())
+    with pytest.raises(setup.SetupError, match="broadcast address"):
+        setup.check_local_address("192.168.1.255")
+    assert not bound
+    setup.check_local_address("192.168.1.4")
+    assert bound == [("192.168.1.4", 0)]
+    assert commands == [["/sbin/ifconfig"], ["/sbin/ifconfig"]]
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_non_macos_address_check_still_only_probes_bind(wizard, monkeypatch, platform):
+    monkeypatch.setattr(setup.sys, "platform", platform)
+    # The fixture forbids subprocess.run: these platforms must keep their
+    # existing behavior and never query macOS interface metadata.
+    setup.check_local_address("127.0.0.1")
 
 
 def test_close_has_no_marker_and_requires_capability(wizard):

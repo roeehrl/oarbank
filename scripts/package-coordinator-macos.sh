@@ -37,13 +37,21 @@ xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit "$REPO/deploy/
 # Remove inherited extended attributes before sealing the application.
 xattr -cr "$WORK/root"
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
+sign_with_timestamp() {
+    local attempt
+    for attempt in 1 2 3; do
+        codesign --force --options runtime --timestamp --sign "$ID" "$1" && return 0
+        [[ $attempt == 3 ]] || sleep 3
+    done
+    return 1
+}
 find "$APP" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
     file -b "$f" | grep Mach-O >/dev/null || continue
     if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-    else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
+    else sign_with_timestamp "$f"; fi
 done
 if [[ "$ID" == "-" ]]; then codesign --force --sign - "$APP"
-else codesign --force --options runtime --timestamp --sign "$ID" "$APP"; fi
+else sign_with_timestamp "$APP"; fi
 codesign --verify --deep --strict "$APP"
 pkgbuild --quiet --root "$WORK/root" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
 # macOS can retain provenance attributes despite xattr -cr. pkgbuild then embeds

@@ -47,6 +47,17 @@ def agent_address(value):
 
 
 def check_local_address(address):
+    if sys.platform == "darwin" and ':' not in address and not ipaddress.ip_address(address).is_loopback:
+        # macOS accepts binding some IPv4 broadcast addresses. A successful
+        # bind alone therefore does not prove this is an assigned interface IP.
+        try:
+            result = subprocess.run(["/sbin/ifconfig"], stdin=subprocess.DEVNULL, capture_output=True,
+                                    text=True, timeout=3, check=False)
+            broadcasts = re.findall(r"^\s*inet\s+\S+[^\n]*\bbroadcast\s+(\S+)", result.stdout, re.MULTILINE)
+            if result.returncode == 0 and address in broadcasts:
+                raise SetupError("Choose the assigned interface address, not its broadcast address.")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     try:
         with socket.socket(socket.AF_INET6 if ':' in address else socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind((address, 0))
@@ -72,7 +83,10 @@ def local_addresses():
                                     check=False)
             if result.returncode:
                 continue
-            for word in re.findall(r"[0-9a-fA-F:.]+(?:%[\w.-]+)?", result.stdout):
+            words = (re.findall(r"^\s*inet6?\s+(\S+)", result.stdout, re.MULTILINE)
+                     if sys.platform == "darwin" and command == ["/sbin/ifconfig"]
+                     else re.findall(r"[0-9a-fA-F:.]+(?:%[\w.-]+)?", result.stdout))
+            for word in words:
                 try:
                     address = agent_address(word)
                     if ipaddress.ip_address(address).is_loopback:
@@ -376,8 +390,48 @@ class SetupServer(HTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    REJECT_BODY_TIMEOUT = 1.0
+
     def log_message(self, *_):
         pass
+
+    def _body_length(self):
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get_all("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
+            raise SetupError("A single valid Content-Length is required.")
+        length = int(lengths[0])
+        if not 0 <= length <= 16384:
+            raise SetupError("Invalid or oversized JSON request.")
+        return length
+
+    def _discard_unread_body(self):
+        """Bounded byte discard, never JSON parsing, before an early rejection.
+
+        Closing with unread TCP data can reset the connection on Windows and
+        erase the HTTP error. Ambiguous/oversized framing is never drained;
+        incomplete bodies get at most one second in total, even when trickled.
+        """
+        self.close_connection = True
+        try:
+            remaining = self._body_length()
+        except (SetupError, ValueError):
+            return
+        deadline = time.monotonic() + self.REJECT_BODY_TIMEOUT
+        previous_timeout = self.connection.gettimeout()
+        try:
+            while remaining:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                self.connection.settimeout(timeout)
+                chunk = self.rfile.read1(min(remaining, 4096))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            self.connection.settimeout(previous_timeout)
 
     def _reply(self, status, data, content_type="application/json", nonce=None):
         payload = json.dumps(data).encode() if content_type == "application/json" else data.encode()
@@ -429,18 +483,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         password = ""
         active = False
+        body_read_started = False
         try:
             self._guard(write=True)
             if self.path not in ("/state", "/start", "/finish", "/ping", "/close"):
                 raise SetupError("Not found.", 404)
-            if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
-                raise SetupError("A single Content-Length is required.")
+            length = self._body_length()
             if self.headers.get("Content-Type") != "application/json":
                 raise SetupError("Send application/json.", 415)
             try:
-                length = int(self.headers["Content-Length"])
-                if not 0 < length <= 16384:
+                if not length:
                     raise ValueError()
+                body_read_started = True
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError()
@@ -469,6 +523,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.finished = True
             self._reply(200, result)
         except (SetupError, SystemExit) as e:
+            if not body_read_started:
+                self._discard_unread_body()
             # CLI errors preserve the operation/status/detail, without reflecting
             # a submitted password or a once-only enrollment secret.
             detail = str(e)

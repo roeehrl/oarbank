@@ -9,16 +9,22 @@ on:
   # the package jobs on a branch before it is tagged (gh workflow run ci.yml --ref <branch>): they build what a tag
   # would, with the repository's own version
   workflow_dispatch:
+    inputs:
+      coordinator_installers_only:
+        description: 'Validate coordinator setup and all native packages; reuse already-passed core/agent checks'
+        type: boolean
+        default: false
 
 env:
   VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}   # empty: the scripts read the repository's
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}${{ inputs.coordinator_installers_only && '-installers' || '' }}
   cancel-in-progress: true
 
 jobs:
   coordinator:
+    if: '!inputs.coordinator_installers_only'
     # the coordinator suite and the chaos tests on every OS the coordinator runs on (docs/design/windows-coordinator.md);
     # on Windows module processes run in the agent's AppContainers, so the agent (and the elevated helper the MSI
     # installs, for enforced allowlists) are built first; xdist splits the suite over the runner's cores
@@ -66,6 +72,7 @@ jobs:
       - run: uv run pytest -q -p no:cacheprovider --ignore=tests/rust -m chaos
 
   agent:
+    if: '!inputs.coordinator_installers_only'
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -96,6 +103,7 @@ jobs:
           uv run --no-sync pytest -q -p no:cacheprovider rust/crates/oarbank-core-py/tests/test_parity.py
 
   windows-e2e:
+    if: '!inputs.coordinator_installers_only'
     # the agent's end-to-end tests against a real oarbankd on Windows, as the macOS agent job runs them
     strategy:
       fail-fast: false
@@ -132,6 +140,7 @@ jobs:
       - run: uv run pytest -q -p no:cacheprovider tests/rust
 
   rust-other-os:
+    if: '!inputs.coordinator_installers_only'
     # the agent, launcher and portable crates on Linux and Windows, x64 and arm64: unit tests on the real OS (the
     # core's tests replay the SDK's vectors and schemas, so the submodule is checked out)
     strategy:
@@ -184,6 +193,7 @@ jobs:
         working-directory: rust
 
   windows-containers:
+    if: '!inputs.coordinator_installers_only'
     # the Windows container runtime against a real WSL containers session (docs/design/windows-containers.md): GitHub's
     # x64 Windows runners have nested virtualization and WSL 2 (the arm64 ones have neither); WSL 3.0.1 comes from its
     # release, pinned, and the agent's live tests create their own session
@@ -206,12 +216,41 @@ jobs:
           name: verify-windows-containers
           path: dist/verify-windows-containers.log
 
+  coordinator-installers:
+    # An explicit manual recovery lane for installer-only fixes. Default PR/tag
+    # CI keeps the complete core, chaos, agent and container coverage above.
+    if: inputs.coordinator_installers_only
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - if: runner.os == 'Windows'
+        run: |
+          Add-Content $env:GITHUB_ENV 'UV_PYTHON=cpython-3.12-windows-x86_64-none'
+          Add-Content $env:GITHUB_ENV 'UV_LINK_MODE=copy'
+        shell: pwsh
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.22'
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - run: uv run pytest -q tests/test_coordinator_setup.py tests/test_coordinator_native_macos.py tests/test_coordinator_native_windows.py tests/test_coordinator_linux_packages.py tests/test_packaging.py tests/test_campaigns.py::test_core_names_no_module_concepts
+
   package:
     # oarbank-agent-<v>-macos-arm64.pkg and -macos-x86_64.pkg, each native throughout (docs/design/architecture.md,
     # "Packaging and CI"): the x86_64 one is built here too, its interpreter and agent run under Rosetta 2 for the
     # build's checks; and the coordinator build for darwin-arm64
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [coordinator, agent]
+    if: >-
+      always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
+      ((inputs.coordinator_installers_only && needs.coordinator-installers.result == 'success') ||
+      (!inputs.coordinator_installers_only && needs.coordinator.result == 'success' && needs.agent.result == 'success'))
+    needs: [coordinator, agent, coordinator-installers]
     runs-on: macos-26
     timeout-minutes: 90
     steps:
@@ -237,8 +276,11 @@ jobs:
 
   package-linux:
     # deb, rpm, the tarball and the coordinator build for the runner's architecture (amd64, arm64)
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [rust-other-os, coordinator]
+    if: >-
+      always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
+      ((inputs.coordinator_installers_only && needs.coordinator-installers.result == 'success') ||
+      (!inputs.coordinator_installers_only && needs.rust-other-os.result == 'success' && needs.coordinator.result == 'success'))
+    needs: [rust-other-os, coordinator, coordinator-installers]
     strategy:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
@@ -267,8 +309,11 @@ jobs:
   package-windows:
     # oarbank-agent-<v>-windows-x64.msi and -arm64.msi, and the coordinator build for windows-amd64 and windows-arm64:
     # the agent's package for the architecture named, the coordinator build for the runner's
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [rust-other-os, coordinator]
+    if: >-
+      always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
+      ((inputs.coordinator_installers_only && needs.coordinator-installers.result == 'success') ||
+      (!inputs.coordinator_installers_only && needs.rust-other-os.result == 'success' && needs.coordinator.result == 'success'))
+    needs: [rust-other-os, coordinator, coordinator-installers]
     strategy:
       matrix:
         include:
