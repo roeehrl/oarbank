@@ -17,7 +17,7 @@ on:
       installer_check_platform:
         description: 'Focused installer recovery only: retain passed checks on other platforms'
         type: choice
-        options: [all, windows-11-arm]
+        options: [all, windows-11-arm, windows-msi]
         default: all
 
 env:
@@ -228,7 +228,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ inputs.coordinator_installers_only && inputs.installer_check_platform == 'windows-11-arm' && fromJSON('["windows-11-arm"]') || fromJSON('["macos-26","ubuntu-24.04","ubuntu-24.04-arm","windows-2025","windows-11-arm"]') }}
+        os: ${{ inputs.installer_check_platform == 'windows-msi' && fromJSON('["windows-2025","windows-11-arm"]') || inputs.installer_check_platform == 'windows-11-arm' && fromJSON('["windows-11-arm"]') || fromJSON('["macos-26","ubuntu-24.04","ubuntu-24.04-arm","windows-2025","windows-11-arm"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -245,7 +245,10 @@ jobs:
           version: '0.12.22'
           enable-cache: true
       - run: uv sync --extra dev --frozen
-      - run: uv run pytest -q -n auto --durations=10 tests/test_coordinator_setup.py tests/test_coordinator_native_macos.py tests/test_coordinator_native_windows.py tests/test_coordinator_linux_packages.py tests/test_packaging.py tests/test_campaigns.py::test_core_names_no_module_concepts
+      - if: inputs.installer_check_platform != 'windows-msi'
+        run: uv run pytest -q -n auto --durations=10 tests/test_coordinator_setup.py tests/test_coordinator_native_macos.py tests/test_coordinator_native_windows.py tests/test_coordinator_linux_packages.py tests/test_packaging.py tests/test_campaigns.py::test_core_names_no_module_concepts
+      - if: inputs.installer_check_platform == 'windows-msi'
+        run: uv run pytest -q tests/test_coordinator_native_windows.py -k "msi or start_menu or packager_defaults"
 
   package:
     # oarbank-agent-<v>-macos-arm64.pkg and -macos-x86_64.pkg, each native throughout (docs/design/architecture.md,
@@ -253,7 +256,7 @@ jobs:
     # build's checks; and the coordinator build for darwin-arm64
     if: >-
       always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
-      ((inputs.coordinator_installers_only && needs.coordinator-installers.result == 'success') ||
+      ((inputs.coordinator_installers_only && inputs.installer_check_platform != 'windows-msi' && needs.coordinator-installers.result == 'success') ||
       (!inputs.coordinator_installers_only && needs.coordinator.result == 'success' && needs.agent.result == 'success'))
     needs: [coordinator, agent, coordinator-installers]
     runs-on: macos-26
@@ -283,10 +286,11 @@ jobs:
     # deb, rpm, the tarball and the coordinator build for the runner's architecture (amd64, arm64)
     if: >-
       always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
-      ((inputs.coordinator_installers_only && needs.coordinator-installers.result == 'success') ||
+      ((inputs.coordinator_installers_only && inputs.installer_check_platform != 'windows-msi' && needs.coordinator-installers.result == 'success') ||
       (!inputs.coordinator_installers_only && needs.rust-other-os.result == 'success' && needs.coordinator.result == 'success'))
     needs: [rust-other-os, coordinator, coordinator-installers]
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
@@ -320,6 +324,7 @@ jobs:
       (!inputs.coordinator_installers_only && needs.rust-other-os.result == 'success' && needs.coordinator.result == 'success'))
     needs: [rust-other-os, coordinator, coordinator-installers]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - {os: windows-2025, arch: x64, target: x86_64-pc-windows-msvc}
