@@ -12,7 +12,10 @@ $sentinel = Join-Path $state 'ci-retained-data.txt'
 Set-Content -LiteralPath $sentinel -Value 'retain across package removal'
 function Installer([string]$action, [string]$log) {
     $process = Start-Process msiexec.exe -ArgumentList "$action `"$Msi`" /qn /norestart /l*v `"$log`"" -Wait -PassThru
-    if ($process.ExitCode -notin @(0, 3010)) { throw "Windows Installer $action failed: $($process.ExitCode); see $log" }
+    if ($process.ExitCode -notin @(0, 3010)) {
+        Get-Content -LiteralPath $log | Select-String -Pattern 'Error [0-9]+|Return value 3|MainEngineThread is returning' -Context 3,3 | Select-Object -Last 35 | ForEach-Object { Write-Host $_ }
+        throw "Windows Installer $action failed: $($process.ExitCode); see $log"
+    }
 }
 Installer '/i' (Join-Path $env:RUNNER_TEMP 'coordinator-install.log')
 try {

@@ -352,6 +352,13 @@ jobs:
       - run: scripts/ci-coordinator-windows-msi.ps1 -Msi "dist/oarbank-coordinator-$((Select-String -Path pyproject.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value)-windows-${{ matrix.arch }}.msi"
         shell: pwsh
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coordinator-msi-logs-${{ github.sha }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/coordinator-*.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: oarbank-${{ env.VERSION || github.sha }}-windows-${{ matrix.arch }}-unsigned
           path: dist/
