@@ -81,24 +81,15 @@ jobs:
           foreach ($file in @('python/python.exe', 'python/pythonw.exe', 'bin/oarbankd.py', 'bin/oarbank-console.py', 'bin/oarbank-setup.py', 'bin/oarbank-setup.cmd', 'bin/oarbank.cmd', 'bin/oarbank-sandbox.exe', 'bin/uv.exe')) {
             Set-Content -LiteralPath "$root/$file" -Value 'Fixture only; never execute.'
           }
-          @{format=1; version='2.6.900'; platform='windows-amd64'; exec=@('python/python.exe','-I','bin/oarbankd.py'); console=@('python/python.exe','-I','bin/oarbank-console.py')} | ConvertTo-Json | Set-Content "$root/oarbank-coordinator.json"
-          tar -czf dist/coordinator-fixture.tar.gz -C $root .
-          if ($LASTEXITCODE) { throw 'fixture archive failed' }
-          scripts/package-coordinator-windows.ps1 -Build dist/coordinator-fixture.tar.gz
-      - name: install and remove the inert package, retaining diagnostic logs
+          foreach ($version in @('2.6.900', '2.6.901')) {
+            @{format=1; version=$version; platform='windows-amd64'; exec=@('python/python.exe','-I','bin/oarbankd.py'); console=@('python/python.exe','-I','bin/oarbank-console.py')} | ConvertTo-Json | Set-Content "$root/oarbank-coordinator.json"
+            tar -czf dist/coordinator-fixture.tar.gz -C $root .
+            if ($LASTEXITCODE) { throw 'fixture archive failed' }
+            scripts/package-coordinator-windows.ps1 -Build dist/coordinator-fixture.tar.gz
+          }
+      - name: install, repair after service creation, upgrade and remove
         shell: pwsh
-        run: |
-          $msi = (Resolve-Path dist/oarbank-coordinator-2.6.900-windows-x64.msi).Path
-          foreach ($name in @('dev.codonic.oarbank.oarbankd', 'dev.codonic.oarbank.console')) {
-            if (Get-Service $name -ErrorAction SilentlyContinue) { throw "unexpected existing service $name" }
-          }
-          $result = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$env:RUNNER_TEMP/coordinator-fixture-install.log`"" -Wait -PassThru
-          if ($result.ExitCode -notin @(0,3010)) {
-            Get-Content "$env:RUNNER_TEMP/coordinator-fixture-install.log" | Select-String -Pattern 'Error [0-9]+|Return value 3' -Context 3,3 | Select-Object -Last 35 | ForEach-Object { Write-Host $_ }
-            throw "fixture install failed: $($result.ExitCode)"
-          }
-          $result = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /norestart /l*v `"$env:RUNNER_TEMP/coordinator-fixture-uninstall.log`"" -Wait -PassThru
-          if ($result.ExitCode -notin @(0,3010)) { throw "fixture uninstall failed: $($result.ExitCode)" }
+        run: scripts/ci-coordinator-windows-fixture.ps1 -First dist/oarbank-coordinator-2.6.900-windows-x64.msi -Second dist/oarbank-coordinator-2.6.901-windows-x64.msi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
