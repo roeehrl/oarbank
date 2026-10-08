@@ -275,10 +275,13 @@ is a named pipe only the agent's account and the module's AppContainer may open.
   Developer ID with hardened runtime or ad hoc, a postinstall that runs the install plan;
   `deploy/macos/oarbank-uninstall`), deb, rpm and a tarball through
   nFPM (`scripts/package-linux.sh`, `deploy/linux`), and a WiX MSI (`scripts/package-windows.ps1`,
-  `deploy/windows/oarbank-agent.wxs`; `JOINCODEFILE`, `JOINCODE` or `COORDINATOR`). The coordinator is installed from a
-  build (`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`) by `deploy/oarbankd/install-oarbankd.sh
-  --build` on macOS and Linux and `deploy\oarbankd\install-oarbankd.ps1 -Build` on Windows (two services under
-  virtual accounts), or by a move.
+  `deploy/windows/oarbank-agent.wxs`; `JOINCODEFILE`, `JOINCODE` or `COORDINATOR`). Coordinator builds from
+  `scripts/build-coordinator.sh` / `.ps1` are wrapped in software-only native `.pkg`, `.deb`/`.rpm`, and `.msi`
+  installers by `scripts/package-coordinator-*`. Their application launcher opens the local browser setup wizard;
+  submitting configures per-user LaunchAgents/systemd services or Windows services under virtual accounts, then
+  initializes the admin account, TOTP and primary/backup owner signing keys. Bundled helpers accept an installed
+  payload through `--installed` / `-Installed`. Advanced archives use `--build` / `-Build` and remain the signed move
+  format.
 - **CI** (`.github/workflows/ci.yml`) holds no signing keys: the coordinator suite and the chaos tests on macOS and
   Windows (x64 and arm64), the Rust workspace with the agent end-to-end tests and the oarbank-core parity tests on
   macOS, the agent end-to-end tests on Windows (x64 and arm64), the Rust workspace on Linux and Windows (x64 and arm64

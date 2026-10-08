@@ -229,6 +229,7 @@ jobs:
       - run: uv sync --extra dev --frozen
       - run: for arch in arm64 x86_64; do scripts/package-macos.sh "${VERSION#v}" "$arch"; done
       - run: scripts/build-coordinator.sh "${VERSION#v}"
+      - run: scripts/package-coordinator-macos.sh
       - uses: actions/upload-artifact@v4
         with:
           name: oarbank-${{ env.VERSION || github.sha }}-macos-unsigned
@@ -256,6 +257,8 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q nfpm
       - run: scripts/package-linux.sh "${VERSION#v}"
       - run: scripts/build-coordinator.sh "${VERSION#v}"
+      - run: scripts/package-coordinator-linux.sh
+      - run: scripts/ci-coordinator-linux-packages.sh
       - uses: actions/upload-artifact@v4
         with:
           name: oarbank-${{ env.VERSION || github.sha }}-${{ matrix.os }}-unsigned
@@ -294,8 +297,11 @@ jobs:
         shell: pwsh
       - run: scripts/build-coordinator.ps1 -Version "$($env:VERSION.TrimStart('v'))"
         shell: pwsh
+      - run: scripts/package-coordinator-windows.ps1
+        shell: pwsh
+      - run: scripts/ci-coordinator-windows-msi.ps1 -Msi "dist/oarbank-coordinator-$((Select-String -Path pyproject.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value)-windows-${{ matrix.arch }}.msi"
+        shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: oarbank-${{ env.VERSION || github.sha }}-windows-${{ matrix.arch }}-unsigned
           path: dist/
-

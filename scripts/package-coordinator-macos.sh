@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Wrap a compiled coordinator build in a native Installer package. No host installation.
+# scripts/package-coordinator-macos.sh [archive]
+set -euo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/pyproject.toml" | head -1)"
+ARCH="$(uname -m)"
+case "$ARCH" in arm64) PLATFORM=darwin-arm64 ;; x86_64) PLATFORM=darwin-amd64 ;; *) echo "unsupported Mac architecture" >&2; exit 2 ;; esac
+ARCHIVE="${1:-$REPO/dist/oarbank-coordinator-$VERSION-$PLATFORM.tar.gz}"
+OUT="$REPO/dist"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/oarbank-coordinator-pkg.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+APP="$WORK/root/Applications/Oarbank Coordinator.app"
+ROOT="$APP/Contents/Resources/coordinator"
+mkdir -p "$ROOT" "$APP/Contents/MacOS" "$OUT"
+tar -xzf "$ARCHIVE" -C "$ROOT"
+# The package's identity and architecture come from its build, never a filename.
+PY="$ROOT/python/bin/python3.12"
+"$PY" -I -B -c 'import json, sys; from pathlib import Path; m=json.loads((Path(sys.argv[1])/"oarbank-coordinator.json").read_text()); assert m["format"] == 1 and m["version"] == sys.argv[2] and m["platform"] == sys.argv[3]; import oarbank.setup' "$ROOT" "$VERSION" "$PLATFORM"
+[[ -x "$ROOT/install-oarbankd.sh" && -x "$ROOT/bin/oarbank-setup" ]] || { echo "build has no guided setup" >&2; exit 1; }
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.codonic.oarbank.coordinator</string>
+<key>CFBundleName</key><string>Oarbank Coordinator</string>
+<key>CFBundleDisplayName</key><string>Oarbank Coordinator</string>
+<key>CFBundleExecutable</key><string>Oarbank Coordinator</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
+<key>CFBundleVersion</key><string>$VERSION</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
+<key>NSLocalNetworkUsageDescription</key><string>Oarbank connects your computers to this coordinator to run the jobs you choose.</string>
+</dict></plist>
+PLIST
+xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit "$REPO/deploy/macos/coordinator/Launcher.swift" -o "$APP/Contents/MacOS/Oarbank Coordinator"
+# Remove inherited extended attributes before sealing the application.
+xattr -cr "$WORK/root"
+ID="${OARBANK_CODESIGN_IDENTITY:--}"
+find "$APP" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
+    file -b "$f" | grep Mach-O >/dev/null || continue
+    if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
+    else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
+done
+if [[ "$ID" == "-" ]]; then codesign --force --sign - "$APP"
+else codesign --force --options runtime --timestamp --sign "$ID" "$APP"; fi
+codesign --verify --deep --strict "$APP"
+pkgbuild --quiet --root "$WORK/root" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg"
+# Explicit host architecture: the package cannot claim Intel support with an ARM runtime.
+if [[ "$ARCH" == arm64 ]]; then apple_silicon=true; else apple_silicon=false; fi
+cat > "$WORK/distribution.xml" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+<title>Oarbank Coordinator</title>
+<options customize="never" require-scripts="false" hostArchitectures="$ARCH"/>
+<installation-check script="architecture()"/>
+<script><![CDATA[
+function architecture() {
+    if ((system.sysctl("hw.optional.arm64") == 1) == $apple_silicon) return true;
+    my.result.type = "Fatal";
+    my.result.title = "This package is for $ARCH Macs";
+    my.result.message = "Download the coordinator package for this Mac's architecture.";
+    return false;
+}
+]]></script>
+<domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+<choices-outline><line choice="coordinator"/></choices-outline>
+<choice id="coordinator" visible="false"><pkg-ref id="dev.codonic.oarbank.coordinator"/></choice>
+<pkg-ref id="dev.codonic.oarbank.coordinator" version="$VERSION" onConclusion="none">coordinator.pkg</pkg-ref>
+</installer-gui-script>
+XML
+PKG="$OUT/oarbank-coordinator-$VERSION-macos-$ARCH.pkg"
+SIGN=()
+[[ -z "${OARBANK_INSTALLER_IDENTITY:-}" ]] || SIGN=(--sign "$OARBANK_INSTALLER_IDENTITY" --timestamp)
+productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" "${SIGN[@]}" "$PKG"
+if [[ -n "${OARBANK_NOTARY_PROFILE:-}" ]]; then
+    [[ -n "${OARBANK_INSTALLER_IDENTITY:-}" && "$ID" != "-" ]] || { echo "notarization needs Developer ID signatures" >&2; exit 1; }
+    xcrun notarytool submit "$PKG" --keychain-profile "$OARBANK_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$PKG"
+fi
+(cd "$OUT" && shasum -a 256 "oarbank-coordinator-$VERSION-$PLATFORM.tar.gz" "$(basename "$PKG")" > "SHA256SUMS-coordinator-$VERSION-$PLATFORM")
+echo "$PKG"

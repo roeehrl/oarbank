@@ -92,10 +92,12 @@ try {
   # 4. entry points, relative to the build so it runs from wherever it is unpacked: a two-line launcher per program
   #    (the compiled core cannot run as `python -m`: its loader has no code objects), and a .cmd for people
   foreach ($e in @(@("oarbankd", "oarbank.coordinator.__main__"), @("oarbank", "oarbank.cli.main"),
-                   @("oarbank-console", "oarbank.console.__main__"))) {
-    Set-Content -Encoding ascii "$Root\bin\$($e[0]).py" "import sys`nfrom $($e[1]) import main`nsys.argv[0] = `"$($e[0])`"`nsys.exit(main())"
+                   @("oarbank-console", "oarbank.console.__main__"), @("oarbank-setup", "oarbank.setup"))) {
+    $SetupRoot = if ($e[0] -eq "oarbank-setup") { "from pathlib import Path`nsys.argv[1:1] = ['--root', str(Path(__file__).resolve().parent.parent)]`n" } else { "" }
+    Set-Content -Encoding ascii "$Root\bin\$($e[0]).py" "import sys`nfrom $($e[1]) import main`nsys.argv[0] = `"$($e[0])`"`n${SetupRoot}sys.exit(main())"
     Set-Content -Encoding ascii "$Root\bin\$($e[0]).cmd" "@`"%~dp0..\python\python.exe`" -I `"%~dp0$($e[0]).py`" %*"
   }
+  Copy-Item "$Repo\deploy\oarbankd\install-oarbankd.ps1" "$Root\install-oarbankd.ps1"
   # uv's launchers (python\Scripts\*.exe) name the build path as their interpreter: point them at ..\python.exe, then
   # check every launcher the build ships
   & $Py -I -B "$Repo\scripts\relocate_shebangs.py" "$Root\python\Scripts" $Root; Check "relocating the launchers"
@@ -119,7 +121,7 @@ try {
     $Root (Get-Item "$Site\oarbank.*.pyd").FullName "$Root\bin\oarbank-sandbox.exe"
   Check "the coordinator build is not fit to ship"
   $Tgz = "$Out\oarbank-coordinator-$Version-$Platform.tar.gz"
-  & $Py -I -B "$Repo\scripts\pack-tar.py" $Tgz $Root oarbank-coordinator.json bin python; Check "the archive"
+  & $Py -I -B "$Repo\scripts\pack-tar.py" $Tgz $Root oarbank-coordinator.json bin python install-oarbankd.ps1; Check "the archive"
   $h = (Get-FileHash -Algorithm SHA256 $Tgz).Hash.ToLower()
   [IO.File]::WriteAllText("$Out\SHA256SUMS-coordinator-$Version-$Platform", "$h  $(Split-Path -Leaf $Tgz)`n")   # LF, as sha256sum -c reads it
   $Tgz

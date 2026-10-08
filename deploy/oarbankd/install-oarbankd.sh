@@ -6,13 +6,14 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 usage() {
     cat <<USAGE
-usage: $(basename "$0") (--build <archive> | --checkout) --agent-bind <address> [--dry-run]
+usage: $(basename "$0") (--build <archive> | --installed <directory> | --checkout) --agent-bind <address> [--dry-run]
 
 Install the Oarbank coordinator (oarbankd and the console) for the current user: LaunchAgents on macOS, systemd
 user units on Linux. Running it again updates an installation in place.
 
   --build <archive>        a coordinator build (oarbank-coordinator-<v>-<os>-<arch>.tar.gz from
                            scripts/build-coordinator.sh), unpacked beside earlier ones with \`current\` pointing at it
+  --installed <directory>  use the build already installed by a native package (no archive needed)
   --checkout               run this repository's virtualenv instead (developer mode)
   --agent-bind <address>   the address agents reach: a LAN or tailnet address (127.0.0.1 only for a one-machine trial)
   --dry-run                print the commands and service files instead of running and writing them
@@ -22,20 +23,23 @@ Environment: OARBANK_RELEASE_SIGNING=0 installs developer mode (release signing 
 USAGE
 }
 fail() { echo "install-oarbankd.sh: $*" >&2; echo "try --help" >&2; exit 2; }
-BUILD="" CHECKOUT=0 BIND="" DRY=0
+BUILD="" INSTALLED="" CHECKOUT=0 BIND="" DRY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --build|--agent-bind) [[ $# -ge 2 && "$2" != -* ]] || fail "$1 needs a value"
-            if [[ "$1" == --build ]]; then BUILD="$2"; else BIND="$2"; fi; shift 2 ;;
+        --build|--installed|--agent-bind) [[ $# -ge 2 && "$2" != -* ]] || fail "$1 needs a value"
+            case "$1" in --build) BUILD="$2" ;; --installed) INSTALLED="$2" ;; *) BIND="$2" ;; esac; shift 2 ;;
         --checkout) CHECKOUT=1; shift ;;
         --dry-run) DRY=1; shift ;;
         *) fail "unknown argument: $1" ;;
     esac
 done
 [[ -n "$BIND" ]] || fail "give --agent-bind <address agents reach>"
-[[ -n "$BUILD" || $CHECKOUT == 1 ]] || fail "give --build <archive> or --checkout"
-[[ -z "$BUILD" || $CHECKOUT == 0 ]] || fail "give --build or --checkout, not both"
+modes=$CHECKOUT
+[[ -z "$BUILD" ]] || modes=$((modes + 1))
+[[ -z "$INSTALLED" ]] || modes=$((modes + 1))
+[[ $modes == 1 ]] || fail "give exactly one of --build, --installed or --checkout"
+[[ "$BIND" != -* && "$BIND" != *[[:space:]]* ]] || fail "invalid agent address"
 run() { if [[ $DRY == 1 ]]; then echo "$*"; else "$@"; fi; }
 
 die() { echo "install-oarbankd.sh: $*" >&2; exit 1; }
@@ -77,6 +81,19 @@ if [[ -n "$BUILD" ]]; then
     CLI="$DATA/coordinator-app/current/bin/oarbank"
     # the services' PATH: oarbankd installs module dependencies with the build's own uv
     SVC_PATH="$DATA/coordinator-app/current/bin:$SYS_PATH"
+elif [[ -n "$INSTALLED" ]]; then
+    [[ -f "$INSTALLED/oarbank-coordinator.json" && -x "$INSTALLED/bin/oarbankd" && -x "$INSTALLED/bin/oarbank-console" ]] \
+        || die "$INSTALLED is not an installed coordinator build"
+    APP="$(cd "$INSTALLED" && pwd -P)"
+    manifest="$(cat "$APP/oarbank-coordinator.json")"
+    [[ "$manifest" =~ \"format\":\ *1[,\ }] ]] || die "unknown installed build format"
+    case "$OS-$(uname -m)" in Darwin-arm64) want=darwin-arm64 ;; Darwin-x86_64) want=darwin-amd64 ;;
+        Linux-aarch64) want=linux-arm64 ;; Linux-x86_64) want=linux-amd64 ;; *) want=unknown ;; esac
+    [[ "$manifest" =~ \"platform\":\ *\"$want\" ]] || die "the installed build is not for $want"
+    OARBANKD=("$APP/bin/oarbankd")
+    CONSOLE=("$APP/bin/oarbank-console")
+    CLI="$APP/bin/oarbank"
+    SVC_PATH="$APP/bin:$SYS_PATH"
 else
     # uv syncs the virtualenv and oarbankd installs module dependencies with it: on PATH, else where its installer
     # ($XDG_BIN_HOME or ~/.local/bin) or Homebrew (macOS, Linux) puts it
@@ -142,6 +159,11 @@ UNIT
 
 run mkdir -p "$HOME_DIR/logs" "$LA"
 if [[ "$OS" != Darwin ]]; then
+    if [[ "$INSTALLED" == /opt/oarbank/coordinator && $DRY != 1 ]]; then
+        # Let native package removal find customized XDG unit directories even
+        # after this user's manager has stopped. No service starts before this.
+        "$APP/python/bin/python3.12" -I -B -c 'import json, os, pwd, sys; from pathlib import Path; from oarbank.platform import files; p=Path(pwd.getpwuid(os.getuid()).pw_dir)/".local/share/oarbank/coordinator-package.json"; files.private_dir(p.parent); files.write_private(p, json.dumps({"format":1,"root":sys.argv[1],"unit_dir":str(Path(sys.argv[2]).absolute())}))' "$APP" "$LA"
+    fi
     for job in oarbankd console; do
         name="dev.codonic.oarbank.$job.service"
         if [[ $job == oarbankd ]]; then body="$(unit oarbankd on-failure "${OARBANKD[@]}" --agent-bind "$BIND")"

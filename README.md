@@ -34,8 +34,8 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Release 2.5.0** is out: the installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI) and
-> the coordinator builds are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.5.0). [Get started](https://docs.codonic.dev/oarbank/get-started)
+> **Release 2.6.0** is out: the installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI) and
+> native coordinator installers and advanced coordinator archives are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.6.0). [Get started](https://docs.codonic.dev/oarbank/get-started)
 > walks through the setup.
 
 ## What it does
@@ -102,21 +102,19 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Download the packages for your computers from the [2.5.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.5.0), check the
+Download the packages for your computers from the [2.6.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.6.0), check the
 [Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
-packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1`,
-`scripts/build-coordinator.sh`, `scripts/build-coordinator.ps1`.
+packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1` for agents;
+`build-coordinator` followed by `package-coordinator` for the coordinator (see [docs/install.md](docs/install.md)).
 
-In short:
+Install the coordinator package (`.pkg`, `.deb`/`.rpm`, or `.msi`) for your platform. Open **Oarbank Coordinator**
+from Applications or your application menu. Its browser wizard asks for the address your nodes will reach,
+your administrator name and password, and an authenticator code. It creates and pins your primary and backup
+owner signing keys. Installing the package alone does not configure or start a fleet.
 
-```bash
-# on the coordinator (macOS on Apple silicon, or Linux with systemd; on Windows, in an elevated PowerShell:
-#   .\install-oarbankd.ps1 -Build oarbank-coordinator-<v>-windows-<arch>.tar.gz -AgentBind <address>)
-bash install-oarbankd.sh --build oarbank-coordinator-<v>-<os>-<arch>.tar.gz --agent-bind <address>
-oarbank account create <you> --role admin --password    # console sign-in: a password and a TOTP secret
-oarbank join-code --label <node>                         # one per computer
-```
+After setup, open the console and create one join code per computer. The coordinator needs its own agent too
+if you want it to execute jobs.
 
 Then install the agent on each computer with its join code (the macOS pkg, the deb or rpm, or the Windows MSI). The
 node joins, installs its release, runs each module's doctor and golden jobs, and takes work.
@@ -169,7 +167,7 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Yes: the [2.5.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.5.0) has the installers for macOS, Linux and Windows.
+**Can I install it today?** Yes: the [2.6.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.6.0) has the installers for macOS, Linux and Windows.
 [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the
