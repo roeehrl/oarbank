@@ -387,14 +387,17 @@ def test_the_architecture_is_the_machine_s_under_emulation_and_whatever_the_envi
     def arch(shell, *args, env=None):
         r = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *args],
                            capture_output=True, text=True, env=env, timeout=120)
-        return r.returncode, r.stdout.strip()
+        return r
     assert len(shells) == 2, shells
     for shell in shells:
         for claimed in (None, "AMD64", "ARM64", "x86"):
             env = {**os.environ, **({"PROCESSOR_ARCHITECTURE": claimed} if claimed else {})}
-            assert arch(shell, env=env) == (0, machine), (shell, claimed)
-        assert arch(shell, "-Arch", "x64") == (0, "x64") and arch(shell, "-Arch", "arm64") == (0, "arm64")
-        assert arch(shell, "-Arch", "ia64")[0] != 0
+            result = arch(shell, env=env)
+            assert (result.returncode, result.stdout.strip()) == (0, machine), (shell, claimed, result.stderr)
+        for requested in ("x64", "arm64"):
+            result = arch(shell, "-Arch", requested)
+            assert (result.returncode, result.stdout.strip()) == (0, requested), (shell, requested, result.stderr)
+        assert arch(shell, "-Arch", "ia64").returncode != 0
 
 
 def _script(name):
