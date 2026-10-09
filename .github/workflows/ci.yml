@@ -246,7 +246,7 @@ jobs:
           enable-cache: true
       - run: uv sync --extra dev --frozen
       - if: inputs.installer_check_platform != 'windows-msi'
-        run: uv run pytest -q -n auto --durations=10 tests/test_coordinator_setup.py tests/test_coordinator_setup_ui.py tests/test_coordinator_desktop.py tests/test_coordinator_autostart.py tests/test_coordinator_native_macos.py tests/test_coordinator_native_windows.py tests/test_coordinator_linux_packages.py tests/test_packaging.py tests/test_campaigns.py::test_core_names_no_module_concepts
+        run: uv run pytest -q -n auto --durations=10 tests/test_coordinator_setup.py tests/test_coordinator_setup_ui.py tests/test_coordinator_desktop.py tests/test_console.py::test_health_exposes_only_setup_flags_without_enrollment_secrets tests/test_coordinator_autostart.py tests/test_coordinator_native_macos.py tests/test_coordinator_native_windows.py tests/test_coordinator_linux_packages.py tests/test_packaging.py tests/test_campaigns.py::test_core_names_no_module_concepts
       - if: inputs.installer_check_platform == 'windows-msi'
         run: uv run pytest --noconftest -q tests/test_coordinator_native_windows.py -k "msi or start_menu or packager_defaults"
 
