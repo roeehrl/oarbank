@@ -6,6 +6,7 @@ import ServiceManagement
 final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private let stateItem = NSMenuItem(title: "Checking coordinator…", action: nil, keyEquivalent: "")
+    private var applicationStateItem: NSMenuItem?
     private var preferences: NSWindow?
     private var startup: NSButton?
     private var startupNote: NSTextField?
@@ -35,6 +36,7 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         quit.target = self; menu.addItem(quit); statusItem.menu = menu
         // Standard keyboard commands also work when Preferences has focus.
         let main = NSMenu(); let appItem = NSMenuItem(); main.addItem(appItem); appItem.submenu = menu.copy() as? NSMenu
+        applicationStateItem = appItem.submenu?.items[1]
         NSApp.mainMenu = main
         refreshStatus()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in self.refreshStatus() }
@@ -64,7 +66,7 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 if process.terminationStatus != 0 || state == nil { text = "Status unavailable" }
                 else if state?["configured"] as? Bool != true { text = state?["pending"] as? Bool == true ? "Finish authenticator setup" : "Setup needed" }
                 else { text = state?["online"] as? Bool == true ? "Coordinator online" : "Coordinator offline" }
-                self.stateItem.title = text; self.statusItem.button?.toolTip = "Oarbank Coordinator — \(text)"
+                self.stateItem.title = text; self.applicationStateItem?.title = text; self.statusItem.button?.toolTip = "Oarbank Coordinator — \(text)"
             }
         }
         do { try task.run() } catch { statusTask = nil; stateItem.title = "Status unavailable" }

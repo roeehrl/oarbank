@@ -1,5 +1,6 @@
 """Native Linux preference lifecycle; never touches the user's actual startup."""
 import importlib.util
+import os
 from pathlib import Path
 import pytest
 
@@ -13,7 +14,9 @@ def test_startup_is_opt_in_per_user_and_round_trips(tmp_path, monkeypatch):
     assert not autostart.enabled() and not list(tmp_path.iterdir())
     autostart.set_enabled(True)
     entry=autostart.entry_path()
-    assert autostart.enabled() and entry.stat().st_mode & 0o777 == 0o644
+    assert autostart.enabled()
+    if os.name != "nt":
+        assert entry.stat().st_mode & 0o777 == 0o644
     assert '--background' in entry.read_text()
     autostart.set_enabled(False)
     assert not autostart.enabled() and not entry.exists()

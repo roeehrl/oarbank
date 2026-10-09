@@ -39,8 +39,9 @@ Download the native coordinator installer for your computer from the
 [2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0) and verify it against its `SHA256SUMS` file.
 On macOS, double-click the `.pkg` and follow Installer, then open **Oarbank Coordinator** in Applications.
 On Linux, install the `.deb` or `.rpm` with your package manager, then launch **Oarbank Coordinator** from the
-application menu or run `oarbank-setup`. On Windows, run the `.msi`, then open **Oarbank coordinator setup** from Start
-and accept the administrator prompt. Package installation needs administrator privileges; on macOS/Linux,
+application menu or run `oarbank-coordinator`. On Windows, run the `.msi`, then open **Oarbank Coordinator** from Start.
+Click the menu bar/tray icon and choose **Open web app**; a desktop without tray support shows the same controls in a window.
+Windows requests elevation only when opening unfinished setup. Package installation needs administrator privileges; on macOS/Linux,
 launch setup as the ordinary user who will own the coordinator.
 
 The package installs software only. The first-run browser wizard lets you select a LAN or Tailscale IP address
@@ -57,8 +58,11 @@ while that user is logged in. State is in `~/Library/Application Support/Oarbank
 Enable lingering with `sudo loginctl enable-linger <user>` if the Linux coordinator should run from boot without
 that user's login. Windows uses system services and protected `C:\ProgramData\Oarbank\coordinator` state.
 
-If you close the wizard before verification, open it again and resume with the same address, account name and
-password. Existing accounts and keys are preserved. Reopening a completed setup opens the console. After an upgrade or relocation, or when services are stopped,
+In **Preferences**, enable **Start automatically at sign-in** if you want the companion to launch quietly for your account.
+**Quit** closes the companion and leaves coordinator services running.
+
+If you close the wizard before verification, choose **Open web app** again. The saved address and account are shown;
+enter the original password to continue. Existing accounts and keys are preserved. Reopening a completed setup opens the console. After an upgrade or relocation, or when services are stopped,
 it refreshes the service definitions before opening the console. An older manually configured coordinator opens its existing console; stop/start or migrate
 its services explicitly rather than treating it as a new fleet.
 
