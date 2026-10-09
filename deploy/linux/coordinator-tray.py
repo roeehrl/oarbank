@@ -231,6 +231,9 @@ class Coordinator(Gtk.Application):
                 box.pack_start(Gtk.Label(label=text, xalign=0, wrap=True), False, False, 0)
             self.preferences = window
         self.preferences.show_all(); self.preferences.present()
+        self.automatic.handler_block_by_func(self.toggle_startup)
+        self.automatic.set_active(autostart.enabled())
+        self.automatic.handler_unblock_by_func(self.toggle_startup)
 
     def toggle_startup(self, button):
         try: autostart.set_enabled(button.get_active())

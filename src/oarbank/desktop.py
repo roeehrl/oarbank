@@ -38,7 +38,7 @@ def status(home=None):
             with httpx.Client(trust_env=False, follow_redirects=False) as client:
                 response = client.get(console.rsplit('/', 1)[0] + '/healthz', timeout=2)
                 payload = response.json() if response.status_code == 200 else {}
-                online = payload.get('ok') is True
+                online = payload.get('ok') is True and payload.get('coordinator_ok', True) is True
                 remote = payload.get('coordinator_setup')
                 if local is None and isinstance(remote, dict) and all(type(remote.get(k)) is bool for k in ('configured', 'pending')):
                     pending = remote['pending']

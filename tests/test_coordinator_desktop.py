@@ -19,7 +19,8 @@ def test_status_is_read_only_and_pending_setup_takes_precedence(tmp_path, monkey
     assert state['console'].startswith('http://127.0.0.1:')
 
 
-def test_health_uses_loopback_without_proxies_or_redirects(tmp_path, monkeypatch):
+@pytest.mark.parametrize('coordinator_ok', [True, False])
+def test_health_uses_loopback_without_proxies_or_redirects(tmp_path, monkeypatch, coordinator_ok):
     (tmp_path / 'setup.complete.json').write_text('completed')
     class Client:
         def __init__(self, **kw): assert kw == {'trust_env': False, 'follow_redirects': False}
@@ -27,10 +28,10 @@ def test_health_uses_loopback_without_proxies_or_redirects(tmp_path, monkeypatch
         def __exit__(self, *args): pass
         def get(self, url, **kw):
             assert url == 'http://127.0.0.1:7400/healthz' and kw['timeout'] == 2
-            return desktop.httpx.Response(200,json={'ok':True})
+            return desktop.httpx.Response(200,json={'ok':True, 'coordinator_ok':coordinator_ok})
     monkeypatch.setattr(desktop.C,'CONSOLE_PORT',7400)
     monkeypatch.setattr(desktop.httpx,'Client',Client)
-    assert desktop.status(tmp_path)['online']
+    assert desktop.status(tmp_path)['online'] is coordinator_ok
 
 
 def test_open_existing_web_app_does_not_run_setup(tmp_path, monkeypatch):
