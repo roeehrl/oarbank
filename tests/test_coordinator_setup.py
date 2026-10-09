@@ -286,7 +286,13 @@ def test_bad_password_name_or_extra_fields_do_not_install(wizard, changes):
 def test_http_payload_limits_and_routes(wizard):
     with serving(wizard) as server:
         assert post(server, body=[]).status_code == 400
-        assert post(server, body={**FORM, "password": "a" * 17000}).status_code == 400
+        try:
+            assert post(server, body={**FORM, "password": "a" * 17000}).status_code == 400
+        except httpx.ReadError:
+            # Oversized framing is deliberately not drained. Windows can reset
+            # that connection before the HTTP rejection reaches the client.
+            # Subsequent requests below prove the server remains available.
+            pass
         assert post(server, headers={"Content-Type": "text/plain"}).status_code == 415
         assert post(server, path="/run").status_code == 404
         assert post(server, path="/start?root=evil").status_code == 404
