@@ -92,6 +92,7 @@ try {
 }
 '@
   [IO.File]::WriteAllText("$Root\oarbank-setup.ps1", $setupBroker)
+  Copy-Item -LiteralPath "$Repo\deploy\icons\oarbank.ico" -Destination "$Root\oarbank.ico"
   $MsiVersion = ($Version -split '[-+]')[0]
   $parts = $MsiVersion.Split('.')
   if ([long]$parts[0] -gt 255 -or [long]$parts[1] -gt 255 -or [long]$parts[2] -gt 65535) {

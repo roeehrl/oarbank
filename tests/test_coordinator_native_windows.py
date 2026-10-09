@@ -87,6 +87,14 @@ def test_initial_msi_install_does_not_attempt_to_start_services_that_the_wizard_
 
 def test_start_menu_uses_hidden_elevation_broker_and_bundled_gui_interpreter():
     shortcut = _package().find(".//w:Shortcut", NS)
+    pkg = _package()
+    icon = pkg.find("w:Icon[@Id='OarbankIcon']", NS)
+    assert shortcut.get("Icon") == icon.get("Id") and shortcut.get("IconIndex") == "0"
+    assert icon.get("SourceFile") == "$(var.PackageDir)\\oarbank.ico"
+    assert pkg.find("w:Property[@Id='ARPPRODUCTICON']", NS).get("Value") == icon.get("Id")
+    from PIL import Image
+    with Image.open(REPO / "deploy/icons/oarbank.ico") as image:
+        assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= image.ico.sizes()
     assert shortcut.get("Directory") == "ProgramMenuFolder" and shortcut.get("Advertise") == "no"
     assert shortcut.get("Target") == "[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe"
     assert '-WindowStyle Hidden' in shortcut.get("Arguments")

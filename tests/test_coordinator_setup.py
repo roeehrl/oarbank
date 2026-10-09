@@ -3,6 +3,13 @@
 Every coordinator file, credential and signing key lives under tmp_path. The
 integration backend runs the real CLI operations against the real admin app.
 """
+import base64
+import io
+from urllib.parse import parse_qs, urlparse
+
+import zxingcpp
+from PIL import Image
+
 import contextlib
 import http.client
 import json
@@ -131,6 +138,7 @@ def test_no_install_on_get_and_secret_headers(wizard, capsys):
         assert response.headers["Cache-Control"].startswith("no-store")
         assert response.headers["X-Frame-Options"] == "DENY"
         assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert "img-src data:;" in response.headers["Content-Security-Policy"]
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
         assert "'nonce-" in response.headers["Content-Security-Policy"]
         assert not capsys.readouterr().err
@@ -292,7 +300,25 @@ def test_real_cli_setup_totp_completion_and_private_recovery(wizard, capsys):
         response = post(server)
         assert response.status_code == 200, response.text
         seed = response.json()["totp_secret"]
-        assert seed and response.json()["otpauth"].startswith("otpauth://")
+        uri = response.json()["otpauth"]
+        qr = response.json()["totp_qr"]
+        assert qr.startswith("data:image/png;base64,")
+        picture = Image.open(io.BytesIO(base64.b64decode(qr.split(",", 1)[1]))).convert("RGB")
+        decoded = zxingcpp.read_barcode(picture)
+        assert decoded is not None and decoded.format == zxingcpp.BarcodeFormat.QRCode
+        assert decoded.text == uri
+        account = urlparse(decoded.text)
+        params = parse_qs(account.query)
+        assert account.scheme == "otpauth" and account.netloc == "totp" and account.path == "/Oarbank:admin"
+        assert params == {"secret": [seed], "issuer": ["Oarbank"], "algorithm": ["SHA1"], "digits": ["6"], "period": ["30"]}
+        # A phone scans an opaque, high-contrast code with a four-module quiet zone.
+        assert picture.getpixel((24, 24)) == (0, 0, 0)
+        assert picture.crop((0, 0, picture.width, 24)).getextrema() == ((255, 255),) * 3
+        assert "totp_qr" not in wizard.pending_path.read_text()
+        for private_response in (post(server, "/state", {}), post(server, headers={"X-Oarbank-Setup": "wrong"}),
+                                 httpx.get(server.origin + "/qr", trust_env=False)):
+            assert seed not in private_response.text and qr not in private_response.text
+
         assert files_private(wizard.pending_path)
         assert files_private(wizard.primary) and files_private(wizard.backup)
         assert PASSWORD not in wizard.pending_path.read_text()
@@ -330,9 +356,17 @@ def test_partial_retry_preserves_admin_seed_and_keys(wizard, monkeypatch):
     old = {p: p.read_bytes() for p in (wizard.primary, wizard.backup)}
     new = restarted(wizard, monkeypatch)
     with serving(new) as server:
+        state = post(server, "/state", {}).json()
+        assert state["pending"] == {"name": FORM["name"], "address": FORM["address"]}
+        assert "totp_secret" not in json.dumps(state) and "totp_qr" not in json.dumps(state)
+        # A new page/refresh cannot reset the journal or terminate the local server.
+        assert httpx.get(server.origin, trust_env=False).status_code == 200
+        assert post(server, "/state", {}).json()["pending"] == state["pending"]
+        assert not server.finished
         assert post(server, "/finish", {"code": code(new)}).status_code == 409
         response = post(server)
         assert response.status_code == 200 and response.json()["totp_secret"] == first["totp_secret"]
+        assert response.json()["totp_qr"] == first["totp_qr"]
         assert post(server, "/finish", {"code": code(new)}).status_code == 200
     assert len(wizard.backend.installs) == 1
     assert len(access.accounts(wizard.backend.db)) == 1

@@ -18,6 +18,7 @@ tar -xzf "$ARCHIVE" -C "$ROOT"
 PY="$ROOT/python/bin/python3.12"
 "$PY" -I -B -c 'import json, sys; from pathlib import Path; m=json.loads((Path(sys.argv[1])/"oarbank-coordinator.json").read_text()); assert m["format"] == 1 and m["version"] == sys.argv[2] and m["platform"] == sys.argv[3]; import oarbank.setup' "$ROOT" "$VERSION" "$PLATFORM"
 [[ -x "$ROOT/install-oarbankd.sh" && -x "$ROOT/bin/oarbank-setup" ]] || { echo "build has no guided setup" >&2; exit 1; }
+cp "$REPO/deploy/icons/oarbank.icns" "$APP/Contents/Resources/oarbank.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -26,6 +27,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleName</key><string>Oarbank Coordinator</string>
 <key>CFBundleDisplayName</key><string>Oarbank Coordinator</string>
 <key>CFBundleExecutable</key><string>Oarbank Coordinator</string>
+<key>CFBundleIconFile</key><string>oarbank.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>CFBundleVersion</key><string>$VERSION</string>

@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
+import segno
+
 from . import paths
 from .coordinator import access
 from .platform import files
@@ -307,6 +309,8 @@ class Wizard:
             self.backend.signing(self.primary, self.backup)
         self.password = password  # memory only, cleared after TOTP confirmation
         return {"account": name, "totp_secret": enrollment["totp_secret"], "otpauth": enrollment["otpauth"],
+                "totp_qr": segno.make_qr(enrollment["otpauth"], error="m").png_data_uri(
+                    scale=6, border=4, dark="black", light="white"),
                 "primary_key": str(self.primary), "backup_key": str(self.backup)}
 
     def finish(self, body):
@@ -447,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         scripts = f"'nonce-{nonce}'" if nonce else "'none'"
         self.send_header("Content-Security-Policy", f"default-src 'none'; script-src {scripts}; style-src {scripts}; "
-                         "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+                         "img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)

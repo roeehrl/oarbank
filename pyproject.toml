@@ -1,6 +1,6 @@
 [project]
 name = "oarbank"
-version = "2.6.0"
+version = "2.6.1"
 description = "Batch orchestrator for a fleet of machines on a tailnet: the coordinator (oarbankd), its console and the admin CLI (oarbank)"
 requires-python = ">=3.12"
 dependencies = [
@@ -12,10 +12,11 @@ dependencies = [
     "oarbank-sdk",
     "cryptography>=43",      # the agent CA (D29), audit digests (D13), release and owner signing (D31)
     "webauthn>=2.2",
+    "segno>=1.6.6",          # local authenticator QR generation; no external service
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "hypothesis>=6.168.3", "pytest-xdist>=3.8"]      # xdist: CI splits the suite over a runner's cores
+dev = ["pytest>=8", "hypothesis>=6.168.3", "pytest-xdist>=3.8", "pillow>=11", "zxing-cpp>=2.3"]      # xdist: CI splits the suite over a runner's cores
 
 [project.scripts]
 oarbankd = "oarbank.coordinator.__main__:main"

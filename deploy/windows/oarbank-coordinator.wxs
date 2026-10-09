@@ -10,6 +10,8 @@
     <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer Oarbank coordinator is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="OarbankIcon" SourceFile="$(var.PackageDir)\oarbank.ico" />
+    <Property Id="ARPPRODUCTICON" Value="OarbankIcon" />
     <Property Id="ARPCOMMENTS" Value="Configure the coordinator with Oarbank coordinator setup in the Start menu. Fleet data is retained on uninstall." />
     <Property Id="COORDINATOR_SERVICE_EXISTS" Secure="yes">
       <RegistrySearch Id="FindCoordinatorService" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\dev.codonic.oarbank.oarbankd"
@@ -33,7 +35,7 @@
                         Description="Set up or reconfigure the Oarbank coordinator (administrator permission required)"
                         Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
                         Arguments="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[PACKAGEFOLDER]oarbank-setup.ps1&quot;"
-                        WorkingDirectory="PACKAGEFOLDER" Advertise="no" />
+                        WorkingDirectory="PACKAGEFOLDER" Advertise="no" Icon="OarbankIcon" IconIndex="0" />
             </Component>
             <!-- Initial installation has no services: the wizard creates them later. Only control services found
                  by AppSearch. Transitive components reevaluate the condition during a subsequent repair/upgrade.

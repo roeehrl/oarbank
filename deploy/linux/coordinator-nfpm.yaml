@@ -24,6 +24,9 @@ contents:
   - src: ${DESKTOP}
     dst: /usr/share/applications/oarbank-coordinator.desktop
     file_info: {mode: 0644}
+  - src: ${ICON}
+    dst: /usr/share/icons/hicolor/scalable/apps/oarbank-coordinator.svg
+    file_info: {mode: 0644}
   - src: ${REMOVE}
     dst: /usr/lib/oarbank/coordinator-remove.py
     file_info: {mode: 0644}

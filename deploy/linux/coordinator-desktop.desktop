@@ -4,6 +4,7 @@ Name=Oarbank Coordinator
 Comment=Set up your Oarbank coordinator
 Exec=/opt/oarbank/coordinator/bin/oarbank-setup
 TryExec=/opt/oarbank/coordinator/bin/oarbank-setup
+Icon=oarbank-coordinator
 Terminal=false
 Categories=System;Settings;
 StartupNotify=true
