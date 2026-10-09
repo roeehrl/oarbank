@@ -8,7 +8,10 @@ it does not stop the separately managed coordinator and console services.
 
 The companion runs as the signed-in user. Status probes only the loopback console
 health endpoint, ignores environment proxies, does not follow redirects, and exposes
-no account credentials, owner keys or enrollment secrets. Opening a configured
+no account credentials, owner keys or enrollment secrets. The console reports only
+configured/pending booleans when Windows service ACLs prevent the companion from
+inspecting setup file metadata. The explicit Open action refreshes this status before
+deciding whether elevation is needed. Opening a configured
 coordinator goes to its normal login page. Unfinished setup uses the existing wizard;
 on Windows only that explicit action requests elevation. A private loopback wizard
 record allows subsequent launches to reopen a live, authenticated setup session.

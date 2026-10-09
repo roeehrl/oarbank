@@ -847,7 +847,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, **{k: v for k, v in state.meta().items() if k != "oarbankd"}, "renders": state.renders}
+        from ..desktop import setup_state
+        return {"ok": True, **{k: v for k, v in state.meta().items() if k != "oarbankd"}, "renders": state.renders,
+                "coordinator_setup": setup_state(Path(state.db_path).parent)}
 
     # ------------------------------------------------------------------ SSE (resync-first)
     @app.get("/sse")

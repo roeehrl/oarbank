@@ -21,7 +21,7 @@ sealed class CoordinatorTray : Form {
     readonly ToolStripMenuItem status = new ToolStripMenuItem("Checking coordinator…");
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     readonly EventWaitHandle reopen;
-    bool checking, configured, updatingStartup;
+    bool checking, opening, configured, updatingStartup;
     volatile bool quitting;
     Form preferences;
     CheckBox automatic;
@@ -74,8 +74,13 @@ sealed class CoordinatorTray : Form {
             }));
         });
     }
-    void OpenWeb() {
+    async void OpenWeb() {
+        if(opening) return;
+        opening=true;
         try {
+            // Do not decide elevation from a stale or not-yet-loaded menu row.
+            var latest=await Task.Run(() => ReadStatus());
+            configured=(bool)latest["configured"];
             if(configured) {
                 Process.Start(new ProcessStartInfo(Python,Arguments(false)) { UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=root });
             } else {
@@ -83,6 +88,7 @@ sealed class CoordinatorTray : Form {
                 Process.Start(new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File " + Q(Path.Combine(root,"oarbank-setup.ps1"))) { UseShellExecute=true,WindowStyle=ProcessWindowStyle.Hidden,WorkingDirectory=root });
             }
         } catch(Exception error) { Error("Could not open the coordinator",error.Message); }
+        finally { opening=false; }
     }
     bool StartupEnabled() {
         using(var key=Registry.CurrentUser.OpenSubKey(RunKey)) {

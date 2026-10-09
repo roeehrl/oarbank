@@ -43,6 +43,23 @@ def test_open_existing_web_app_does_not_run_setup(tmp_path, monkeypatch):
     assert opened == ['http://127.0.0.1:7400/login']
 
 
+@pytest.mark.parametrize('pending', [False, True])
+def test_protected_service_state_uses_only_loopback_setup_flags(monkeypatch, pending):
+    def denied(*args):
+        raise PermissionError('Service data is private')
+    monkeypatch.setattr(desktop, 'setup_state', denied)
+    class Client:
+        def __init__(self, **kw): assert kw == {'trust_env': False, 'follow_redirects': False}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, url, **kw):
+            return desktop.httpx.Response(200, json={'ok': True, 'coordinator_setup': {'configured': not pending, 'pending': pending}})
+    monkeypatch.setattr(desktop.httpx, 'Client', Client)
+    state = desktop.status()
+    assert state['configured'] is (not pending) and state['pending'] is pending
+    assert state['online'] is (not pending)
+
+
 def test_running_wizard_reopens_only_private_authenticated_loopback(wizard):
     # Reuse real HTTP guards: bogus capabilities must not become browser links.
     from test_coordinator_setup import serving
