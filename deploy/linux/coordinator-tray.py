@@ -24,7 +24,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gio, GLib, Gtk
 
-spec = importlib.util.spec_from_file_location('autostart', Path(__file__).with_name('coordinator-autostart.py'))
+spec = importlib.util.spec_from_file_location('autostart', Path(__file__).resolve().with_name('coordinator-autostart.py'))
 autostart = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(autostart)
 ROOT = Path('/opt/oarbank/coordinator')
@@ -145,7 +145,7 @@ class Coordinator(Gtk.Application):
     def props(self, ident, names=()):
         labels = {1: 'Oarbank Coordinator', 2: self.state, 4: 'Open web app', 5: 'Preferences…', 7: 'Quit Oarbank Coordinator'}
         if ident in (3, 6): result = {'type': GLib.Variant('s', 'separator')}
-        else: result = {'label': GLib.Variant('s', labels.get(ident, '')), 'enabled': GLib.Variant('b', ident in (4, 5, 7)), 'visible': GLib.Variant('b', True)}
+        else: result = {'label': GLib.Variant('s', labels.get(ident, '')), 'enabled': GLib.Variant('b', ident in (0, 4, 5, 7)), 'visible': GLib.Variant('b', True)}
         if ident == 0: result['children-display'] = GLib.Variant('s', 'submenu')
         return {key: value for key, value in result.items() if not names or key in names}
 
@@ -245,6 +245,7 @@ class Coordinator(Gtk.Application):
             autostart.set_enabled(False); assert not autostart.enabled()
             self.show_preferences(); assert not self.automatic.get_active()
             layout = GLib.Variant('(u(ia{sv}av))', (self.revision, self.layout(0, -1, []))).unpack()
+            assert layout[1][1]['enabled'] is True
             assert len(layout[1][2]) == 7
             assert layout[1][2][3][1]['label'] == 'Open web app'
             assert self.property(None, None, None, SNI, 'Menu').unpack() == MENU_PATH
