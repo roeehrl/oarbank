@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Oarbank Coordinator
-Comment=Set up your Oarbank coordinator
-Exec=/opt/oarbank/coordinator/bin/oarbank-setup
-TryExec=/opt/oarbank/coordinator/bin/oarbank-setup
+Comment=Open the coordinator web app and preferences
+Exec=/usr/bin/oarbank-coordinator
+TryExec=/usr/bin/oarbank-coordinator
+Icon=oarbank-coordinator
 Terminal=false
 Categories=System;Settings;
 StartupNotify=true

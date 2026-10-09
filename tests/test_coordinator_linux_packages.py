@@ -103,8 +103,11 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("dst: /usr/bin/oarbank-setup\n    type: symlink", config)
         desktop = (DEPLOY / "coordinator-desktop.desktop").read_text()
         self.assertIn("Name=Oarbank Coordinator\n", desktop)
-        self.assertIn("Exec=/opt/oarbank/coordinator/bin/oarbank-setup\n", desktop)
+        self.assertIn("Exec=/usr/bin/oarbank-coordinator\n", desktop)
         self.assertIn("Terminal=false\n", desktop)
+        self.assertIn("Icon=oarbank-coordinator\n", desktop)
+        self.assertIn("dst: /usr/share/icons/hicolor/scalable/apps/oarbank-coordinator.svg", config)
+        self.assertIn(json.dumps(str(REPO / "docs/assets/logo.svg")), config)
 
     def test_arm64_is_selected_from_manifest(self):
         make_archive(self.archive, platform="linux-arm64")

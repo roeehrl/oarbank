@@ -39,7 +39,11 @@ def test_native_build_activation_is_dry_run_and_preserves_payload(tmp_path):
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='Apple toolchain')
 def test_application_launcher_compiles(tmp_path):
-    result = subprocess.run(['xcrun', 'swiftc', '-O', '-framework', 'AppKit',
+    result = subprocess.run(['xcrun', 'swiftc', '-O', '-target', f'{platform.machine()}-apple-macos15.0',
+        '-framework', 'AppKit', '-framework', 'ServiceManagement',
         str(REPO / 'deploy/macos/coordinator/Launcher.swift'), '-o', str(tmp_path / 'launcher')], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / 'launcher').is_file()
+    build = subprocess.run(['xcrun', 'vtool', '-show-build', str(tmp_path / 'launcher')],
+                           capture_output=True, text=True, check=True)
+    assert 'minos 15.0' in build.stdout

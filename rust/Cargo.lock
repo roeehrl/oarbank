@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-agent"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-core"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-core-py"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "oarbank-core",
  "pyo3",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-launcher"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-protection"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "fancy-regex",
  "libc",

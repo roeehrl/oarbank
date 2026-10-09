@@ -92,6 +92,17 @@ try {
 }
 '@
   [IO.File]::WriteAllText("$Root\oarbank-setup.ps1", $setupBroker)
+  Copy-Item -LiteralPath "$Repo\deploy\icons\oarbank.ico" -Destination "$Root\oarbank.ico"
+  $Tray = "$Root\Oarbank Coordinator.exe"
+  if (-not $DryRun) {
+    $Compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    if (-not (Test-Path -LiteralPath $Compiler)) { $Compiler = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
+    & $Compiler /nologo /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll "/win32icon:$Root\oarbank.ico" "/win32manifest:$Repo\deploy\windows\coordinator-tray.manifest" "/out:$Tray" "$Repo\deploy\windows\CoordinatorTray.cs"
+    Check "compiling the native coordinator tray"
+    if ($env:OARBANK_SIGNTOOL_ARGS) {
+      & signtool sign $env:OARBANK_SIGNTOOL_ARGS.Split(' ') $Tray; Check "signing the coordinator tray"
+    }
+  }
   $MsiVersion = ($Version -split '[-+]')[0]
   $parts = $MsiVersion.Split('.')
   if ([long]$parts[0] -gt 255 -or [long]$parts[1] -gt 255 -or [long]$parts[2] -gt 65535) {

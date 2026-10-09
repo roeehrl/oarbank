@@ -79,6 +79,17 @@ def test_pages_render_with_strict_csp(env):
     assert c.get(f"/jobs/{jid}").status_code == 200
 
 
+def test_health_exposes_only_setup_flags_without_enrollment_secrets(env):
+    from pathlib import Path
+    home = Path(env['state'].db_path).parent
+    env['c'].cookies.clear()
+    assert env['c'].get('/healthz').json()['coordinator_setup'] == {'configured': True, 'pending': False}
+    (home / 'setup.pending.json').write_text('{"totp_secret":"private-enrollment"}')
+    response = env['c'].get('/healthz')
+    assert response.json()['coordinator_setup'] == {'configured': False, 'pending': True}
+    assert 'private-enrollment' not in response.text
+
+
 def test_t0_operation_is_forwarded_with_identity_and_audited(env):
     c, db, n = env["c"], env["db"], env["node"]
     r = form(c, "nodes.pause", target=n["node_id"])

@@ -22,7 +22,7 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 |---|---|---|
 | `oarbank-coordinator-<v>-macos-arm64.pkg` | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-macos.sh` | Software-only installer: `/Applications/Oarbank Coordinator.app`, bundled Python/core, CLI, uv and browser setup wizard |
 | `oarbank-coordinator-<v>-linux-amd64.deb`, `.rpm` (also `linux-arm64`) | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-linux.sh` | Software-only installer: `/opt/oarbank/coordinator`, application menu entry and `oarbank-setup` |
-| `oarbank-coordinator-<v>-windows-x64.msi` (also `windows-arm64`) | `scripts\build-coordinator.ps1`, then `scripts\package-coordinator-windows.ps1` | Software-only installer: `C:\Program Files\Oarbank\Coordinator\package`, Start menu setup launcher |
+| `oarbank-coordinator-<v>-windows-x64.msi` (also `windows-arm64`) | `scripts\build-coordinator.ps1`, then `scripts\package-coordinator-windows.ps1` | Software-only installer: `C:\Program Files\Oarbank\Coordinator\package`, Start menu tray application |
 | `oarbank-coordinator-<v>-<os>-<arch>.tar.gz` | `scripts/build-coordinator.sh` or `scripts\build-coordinator.ps1` | Advanced relocatable build for signed coordinator moves and manual setup; includes its service installer and guided setup |
 | `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-macos-x86_64.pkg` | `scripts/package-macos.sh [<v>] [arm64\|x86_64]` | the node, for Macs with Apple silicon or Intel Macs (each refuses the other): `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}` and the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host) |
 | `oarbank-agent-<v>-darwin-arm64`, `oarbank-agent-<v>-darwin-amd64` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
@@ -36,17 +36,18 @@ x86_64 package builds on Apple silicon with the `x86_64-apple-darwin` Rust targe
 ## 1. The coordinator
 
 Download the native coordinator installer for your computer from the
-[2.6.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.6.0) and verify it against its `SHA256SUMS` file.
+[2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0) and verify it against its `SHA256SUMS` file.
 On macOS, double-click the `.pkg` and follow Installer, then open **Oarbank Coordinator** in Applications.
 On Linux, install the `.deb` or `.rpm` with your package manager, then launch **Oarbank Coordinator** from the
-application menu or run `oarbank-setup`. On Windows, run the `.msi`, then open **Oarbank coordinator setup** from Start
-and accept the administrator prompt. Package installation needs administrator privileges; on macOS/Linux,
+application menu or run `oarbank-coordinator`. On Windows, run the `.msi`, then open **Oarbank Coordinator** from Start.
+Click the menu bar/tray icon and choose **Open web app**; a desktop without tray support shows the same controls in a window.
+Windows requests elevation when setting up or recovering stopped services; opening a configured, running web app needs none. Package installation needs administrator privileges; on macOS/Linux,
 launch setup as the ordinary user who will own the coordinator.
 
 The package installs software only. The first-run browser wizard lets you select a LAN or Tailscale IP address
 assigned to this computer, enter an administrator name and password (at least 12 characters), and confirm the
 password. Choose an address reachable by your nodes, not loopback for a multi-computer fleet. Submitting starts
-the services and creates your account. Add the displayed secret to an authenticator app and verify its current
+the services and creates your account. Scan the displayed QR code with an authenticator app and verify its current
 six-digit code. The wizard creates and pins two owner signing keys; copy the backup key to secure offline storage.
 It then opens the console. No cloud account or separately installed Python or uv is required.
 
@@ -57,10 +58,15 @@ while that user is logged in. State is in `~/Library/Application Support/Oarbank
 Enable lingering with `sudo loginctl enable-linger <user>` if the Linux coordinator should run from boot without
 that user's login. Windows uses system services and protected `C:\ProgramData\Oarbank\coordinator` state.
 
-If you close the wizard before verification, open it again and resume with the same address, account name and
-password. Existing accounts and keys are preserved. Reopening a completed setup opens the console. After an upgrade or relocation, or when services are stopped,
-it refreshes the service definitions before opening the console. An older manually configured coordinator opens its existing console; stop/start or migrate
-its services explicitly rather than treating it as a new fleet.
+In **Preferences**, enable **Start automatically at sign-in** if you want the companion to launch quietly for your account.
+**Quit** closes the companion and leaves coordinator services running.
+
+If you close the wizard before verification, choose **Open web app** again. The saved address and account are shown;
+enter the original password to continue. Existing accounts and keys are preserved. Reopening completed setup opens the console login.
+If services need restarting after an upgrade or relocation, explicitly run the bundled `bin/oarbank-setup` helper
+(`/usr/bin/oarbank-setup` on Linux; on macOS it is inside the app’s `Contents/Resources/coordinator` directory).
+The helper refreshes an existing wizard-managed installation without creating a new fleet. An older manually configured
+coordinator keeps its existing console; stop/start or migrate its services explicitly.
 
 **Local Network privacy (macOS 15 and later).** The coordinator announces itself on the local network for
 `oarbank-agent discover`. LaunchAgents are not exempt from Local Network privacy, so a macOS that applies it to them
@@ -161,7 +167,7 @@ whole networks (`sudo defaults write com.apple.network.local-network AllowedEthe
 ## Linux nodes
 
 Built for x86-64 and arm64; the sandbox needs Linux 6.2 or later (6.12 for every capability: see the SDK's
-spec/sandbox/backends/linux.md), and `systemd`. The published 2.6.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
+spec/sandbox/backends/linux.md), and `systemd`. The published 2.7.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
 
 ```bash
 scripts/package-linux.sh                     # on a Linux machine with nFPM: dist/*.deb, *.rpm and a tarball
@@ -226,8 +232,9 @@ runs as two Windows services; its bundled Python is x64 on both architectures, b
 Windows on Arm wheels. [Windows 11 provides x64 emulation; Windows 10 on Arm does not](https://learn.microsoft.com/en-us/windows/arm/apps-on-arm-x86-emulation).
 This coordinator requirement does not change the native ARM64 agent's Windows 10 floor.
 
-Install `oarbank-coordinator-<v>-windows-<arch>.msi`, then open **Oarbank coordinator setup** from Start. The launcher
-asks for elevation and opens the same browser setup wizard. Its native package installs at
+Install `oarbank-coordinator-<v>-windows-<arch>.msi`, then open **Oarbank Coordinator** from Start.
+Click its tray icon and choose **Open web app**. The tray and Preferences run without elevation;
+unfinished setup requests elevation before opening the browser wizard. Its native package installs at
 `C:\Program Files\Oarbank\Coordinator\package`; service setup points `current` at that installed payload.
 The services `dev.codonic.oarbank.oarbankd` and `dev.codonic.oarbank.console` each run under their own virtual
 account, start automatically about two minutes after boot, and are restarted after a crash.
@@ -244,7 +251,8 @@ A module's own CLI (`oarbank cli <module>`) is limited to the admin API through 
 installs; install the agent on the coordinator too to use one. Module processes run in AppContainers, as on a Windows
 node.
 
-**Updating:** install the new native package, then reopen **Oarbank coordinator setup** to refresh and restart its services.
+**Updating:** install the new native package; the MSI restarts existing coordinator services with the updated payload.
+For explicit service recovery, run `C:\Program Files\Oarbank\Coordinator\package\oarbank-setup.ps1`; it requests elevation.
 For an archive installation, run the helper with the new build; earlier archive builds remain beside it. **Moving the coordinator to a Windows machine:** prepare the move with that machine's URL
 (`oarbank coordinator prepare --to https://<host>:7443`) and run the installer there with the printed pairing code:
 `install-oarbankd.ps1 -Build … -AgentBind <host> -Pair <code> -From <old url> -FromCa <pin>` (an agent on a Windows node
