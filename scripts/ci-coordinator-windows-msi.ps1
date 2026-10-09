@@ -23,8 +23,10 @@ try {
     & "$root\python\python.exe" -I -B "$root\bin\oarbank-setup.py" --help
     if ($LASTEXITCODE) { throw 'installed setup launcher cannot run' }
     if (-not (Test-Path "$root\oarbank-setup.ps1")) { throw 'Start menu elevation broker missing' }
-    $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Oarbank coordinator setup.lnk'
+    $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Oarbank Coordinator.lnk'
     if (-not (Test-Path $shortcut)) { throw 'Start menu shortcut missing' }
+    $tray = Start-Process -FilePath "$root\Oarbank Coordinator.exe" -ArgumentList '--self-test' -Wait -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\coordinator-tray.log" -RedirectStandardError "$env:RUNNER_TEMP\coordinator-tray-error.log"
+    if ($tray.ExitCode) { Get-Content "$env:RUNNER_TEMP\coordinator-tray-error.log"; throw 'native tray self-test failed' }
 } finally {
     Installer '/x' (Join-Path $env:RUNNER_TEMP 'coordinator-uninstall.log')
 }

@@ -77,7 +77,7 @@ def stage(repo: Path, archive: Path, version: str, work: Path) -> None:
     helper.chmod(0o755)
     deploy = repo / "deploy/linux"
     values = {"ARCH": doc["platform"].removeprefix("linux-"), "VERSION": version,
-              "ROOT": str(root), "ICON": str(repo / "docs/assets/logo.svg"), "DESKTOP": str(deploy / "coordinator-desktop.desktop"),
+              "ROOT": str(root), "TRAY": str(deploy / "coordinator-tray.py"), "AUTOSTART": str(deploy / "coordinator-autostart.py"), "ICON": str(repo / "docs/assets/logo.svg"), "DESKTOP": str(deploy / "coordinator-desktop.desktop"),
               "REMOVE": str(deploy / "coordinator-remove.py"), "PREREMOVE": str(deploy / "coordinator-preremove.sh")}
     template = (deploy / "coordinator-nfpm.yaml").read_text()
     config = re.sub(r"\$\{(\w+)\}", lambda match: json.dumps(values[match[1]]), template)

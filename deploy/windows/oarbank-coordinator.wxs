@@ -4,11 +4,12 @@
   services with install-oarbankd.ps1 -Installed PACKAGEFOLDER. Fleet data stays in ProgramData\Oarbank\coordinator.
   Build with scripts/package-coordinator-windows.ps1 -Build <coordinator archive> (WiX 5 + Util extension).
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Oarbank coordinator" Manufacturer="Codonic" Version="$(var.Version)"
            UpgradeCode="{E53883E9-1395-4A42-B87A-4E1314FA21D2}" Scope="perMachine" Compressed="yes">
     <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer Oarbank coordinator is already installed." />
+    <util:CloseApplication Id="CloseCoordinatorTray" Target="Oarbank Coordinator.exe" CloseMessage="yes" ElevatedCloseMessage="yes" RebootPrompt="no" Timeout="5" />
     <MediaTemplate EmbedCab="yes" />
     <Icon Id="OarbankIcon" SourceFile="$(var.PackageDir)\oarbank.ico" />
     <Property Id="ARPPRODUCTICON" Value="OarbankIcon" />
@@ -31,10 +32,9 @@
                              Type="string" Value="[PACKAGEFOLDER]" KeyPath="yes" />
               <!-- The hidden broker launches the bundled pythonw.exe -I bin/oarbank-setup.py with RunAs and shows
                    startup failures. It does not change compatibility settings on the interpreter. -->
-              <Shortcut Id="CoordinatorSetup" Directory="ProgramMenuFolder" Name="Oarbank coordinator setup"
-                        Description="Set up or reconfigure the Oarbank coordinator (administrator permission required)"
-                        Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
-                        Arguments="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[PACKAGEFOLDER]oarbank-setup.ps1&quot;"
+              <Shortcut Id="CoordinatorSetup" Directory="ProgramMenuFolder" Name="Oarbank Coordinator"
+                        Description="Open the Oarbank coordinator tray, web app and preferences"
+                        Target="[PACKAGEFOLDER]Oarbank Coordinator.exe"
                         WorkingDirectory="PACKAGEFOLDER" Advertise="no" Icon="OarbankIcon" IconIndex="0" />
             </Component>
             <!-- Initial installation has no services: the wizard creates them later. Only control services found

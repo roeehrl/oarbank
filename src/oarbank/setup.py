@@ -573,6 +573,31 @@ def setup_lock(home):
         yield
 
 
+def running_setup(home):
+    """Reopen only an owner-private, authenticated loopback wizard, never a stale URL."""
+    import httpx
+    path = Path(home) / "setup.active.json"
+    if not path.is_file() or path.is_symlink() or not files.owner_only(path):
+        return None
+    try:
+        active = json.loads(path.read_text())
+        origin, token = active["origin"], active["capability"]
+        if not isinstance(origin, str) or not re.fullmatch(r"http://127\.0\.0\.1:[0-9]{1,5}", origin):
+            return None
+        if not 1 <= int(origin.rsplit(":", 1)[1]) <= 65535:
+            return None
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+            return None
+        import httpx
+        with httpx.Client(trust_env=False, follow_redirects=False) as client:
+            response = client.post(origin + "/ping", json={}, headers={"Origin": origin, "X-Oarbank-Setup": token}, timeout=2)
+        if response.status_code == 200 and response.json() == {"ok": True}:
+            return origin + "/#" + token
+    except (OSError, ValueError, KeyError, TypeError, httpx.HTTPError):
+        pass
+    return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Set up the coordinator in a private loopback browser wizard.")
     parser.add_argument("--root", required=True, type=Path)
@@ -582,6 +607,13 @@ def main(argv=None):
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
     try:
+        home = Path(os.environ.get("OARBANKD_HOME") or paths.coordinator_home())
+        url = running_setup(home)
+        if url:
+            print(f"Open this private setup link on this computer: {url}", flush=True)
+            if not args.no_browser:
+                webbrowser.open(url)
+            return 0
         wizard = Wizard(args.root)
         with setup_lock(wizard.home):
             if wizard.existing():
@@ -592,14 +624,19 @@ def main(argv=None):
                 return 0
             with SetupServer(wizard, args.port) as server:
                 url = server.origin + "/#" + wizard.capability
+                active_path = wizard.home / "setup.active.json"
+                files.write_private(active_path, json.dumps({"origin": server.origin, "capability": wizard.capability}))
                 # The capability is a URL fragment: not in HTTP requests, referers
                 # or access logs. Printing this local launch link permits no-browser use.
                 print(f"Open this private setup link on this computer: {url}", flush=True)
                 if not args.no_browser:
                     webbrowser.open(url)
                 server.timeout = .5
-                while not server.finished and time.monotonic() - server.last_activity < server.idle_timeout:
-                    server.handle_request()
+                try:
+                    while not server.finished and time.monotonic() - server.last_activity < server.idle_timeout:
+                        server.handle_request()
+                finally:
+                    active_path.unlink(missing_ok=True)
         return 0
     except KeyboardInterrupt:
         return 130

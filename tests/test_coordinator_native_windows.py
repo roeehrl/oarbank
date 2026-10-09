@@ -96,9 +96,13 @@ def test_start_menu_uses_hidden_elevation_broker_and_bundled_gui_interpreter():
     with Image.open(REPO / "deploy/icons/oarbank.ico") as image:
         assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= image.ico.sizes()
     assert shortcut.get("Directory") == "ProgramMenuFolder" and shortcut.get("Advertise") == "no"
-    assert shortcut.get("Target") == "[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe"
-    assert '-WindowStyle Hidden' in shortcut.get("Arguments")
-    assert '-File "[PACKAGEFOLDER]oarbank-setup.ps1"' in shortcut.get("Arguments")
+    assert shortcut.get("Target") == "[PACKAGEFOLDER]Oarbank Coordinator.exe"
+    assert shortcut.get("Arguments") is None
+    manifest = ET.parse(REPO / "deploy/windows/coordinator-tray.manifest").getroot()
+    execution = next(e for e in manifest.iter() if e.tag.endswith('requestedExecutionLevel'))
+    assert execution.get('level') == 'asInvoker'
+    closer = next(e for e in pkg.iter() if e.tag.endswith('CloseApplication'))
+    assert closer.get('Target') == 'Oarbank Coordinator.exe' and closer.get('CloseMessage') == 'yes'
     broker = _broker()
     assert "Join-Path $PSScriptRoot 'python\\pythonw.exe'" in broker
     assert "Join-Path $PSScriptRoot 'bin\\oarbank-setup.py'" in broker

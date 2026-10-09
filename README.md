@@ -34,8 +34,8 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Release 2.6.1** is out: the installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI) and
-> native coordinator installers and advanced coordinator archives are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.6.1). [Get started](https://docs.codonic.dev/oarbank/get-started)
+> **Release 2.7.0** is out: the installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI) and
+> native coordinator installers and advanced coordinator archives are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0). [Get started](https://docs.codonic.dev/oarbank/get-started)
 > walks through the setup.
 
 ## What it does
@@ -102,14 +102,14 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Download the packages for your computers from the [2.6.1 release](https://github.com/roeehrl/oarbank/releases/tag/v2.6.1), check the
+Download the packages for your computers from the [2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0), check the
 [Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
 packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1` for agents;
 `build-coordinator` followed by `package-coordinator` for the coordinator (see [docs/install.md](docs/install.md)).
 
 Install the coordinator package (`.pkg`, `.deb`/`.rpm`, or `.msi`) for your platform. Open **Oarbank Coordinator**
-from Applications or your application menu (**Oarbank coordinator setup** in Windows Start). Its browser wizard asks for the address your nodes will reach,
+from Applications or your application menu (**Oarbank Coordinator** in Windows Start). Click its menu bar or tray icon and choose **Open web app**. Its browser wizard asks for the address your nodes will reach,
 your administrator name and password. Scan the displayed QR code with your authenticator, then enter its current six-digit code. If you reopen pending setup, your address and account are saved; enter the original password to continue. It creates and pins your primary and backup
 owner signing keys. Installing the package alone does not configure or start a fleet.
 
@@ -167,7 +167,7 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Yes: the [2.6.1 release](https://github.com/roeehrl/oarbank/releases/tag/v2.6.1) has the installers for macOS, Linux and Windows.
+**Can I install it today?** Yes: the [2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0) has the installers for macOS, Linux and Windows.
 [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the
