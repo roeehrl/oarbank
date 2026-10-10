@@ -409,3 +409,32 @@ def test_module_health_shows_each_pinned_dataset_registered_waiting_or_in_confli
                  (json.dumps(man.datasets.pinned[0].dataset_files()),))
             assert "registered since" in text(c.get("/modules/depot/health").text)
 
+
+
+def test_settings_as_code_campaigns_and_reports_from_the_command_line(fleet, capsys, tmp_path):
+    """`oarbank settings export` / `import --dry-run` (exit 0: no changes), a changed file imported, a campaign's
+    override with --campaign, `settings shadowed` and `settings drift`."""
+    db, nid, sid = fleet["db"], fleet["nid"], fleet["sid"]
+    code, _ = oarbank(capsys, "settings", "set", "job_mem_gb", "2", "--yes")
+    assert code == 0
+    f = tmp_path / "fleet.yml"
+    code, out = oarbank(capsys, "settings", "export", "--out", f)
+    assert code == 0 and "job_mem_gb: 2" in f.read_text()
+    code, out = oarbank(capsys, "settings", "import", f, "--dry-run")
+    assert code == 0 and "No changes: the file matches this fleet" in out
+    f.write_text(f.read_text().replace("job_mem_gb: 2", "job_mem_gb: 3"))
+    code, out = oarbank(capsys, "settings", "import", f, "--dry-run")
+    assert code == 2 and "Memory per job slot at Fleet: 2 GB → 3 GB" in out
+    code, out = oarbank(capsys, "settings", "import", f, "--yes", "--reason", "from file")
+    assert code == 0 and "Imported 1 change" in out
+    code, out = oarbank(capsys, "settings", "set", "replica_rate", "0.5", "--campaign", sid, "--yes")
+    assert code == 0 and "its jobs get it" in out
+    code, out = oarbank(capsys, "settings", "get", "--campaign", sid)
+    assert code == 0 and "replica_rate" in out and "(set by the campaign)" in out
+    code, out = oarbank(capsys, "settings", "set", "replica_rate", "0.01", "--campaign", sid, "--yes")
+    assert code != 0 and "may only tighten" in out
+    code, out = oarbank(capsys, "settings", "set", "job_mem_gb", "3", "--node", nid, "--yes")
+    code, out = oarbank(capsys, "settings", "shadowed")
+    assert code == 0 and "the same as it inherits" in out and f"oarbank settings reset job_mem_gb --node" in out
+    code, out = oarbank(capsys, "settings", "drift")
+    assert code == 0 and ("do not run their latest settings" in out or "Every node runs" in out)

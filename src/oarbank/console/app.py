@@ -598,6 +598,51 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no setting {key!r}", "actor": actor}, 404)
         return render(request, "settings_overrides.html", {"o": d, "actor": actor})
 
+    @app.get("/settings/shadowed", response_class=HTMLResponse)
+    async def settings_shadowed(request: Request):
+        actor = who(request)
+        d = await drill(views.shadowed_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy", "actor": actor}, 503)
+        return render(request, "settings_shadowed.html", {"r": d, "actor": actor})
+
+    @app.get("/settings/export")
+    async def settings_export(request: Request, scope: str = "fleet", module: str = ""):
+        """The Export download: a scope's settings as YAML (settings/export.py; secrets as fingerprints only)."""
+        actor = who(request)
+        from ..coordinator.settings import SettingError
+        from ..coordinator.settings import export as X
+
+        def run(r):
+            try:
+                return X.export_yaml(r, scope or "fleet", module)
+            except SettingError as e:
+                return e
+        text = await drill(run)
+        if text is None or isinstance(text, Exception):
+            return render(request, "error.html", {"message": f"cannot export {scope}: {getattr(text, 'detail', 'the database is busy')}",
+                                                  "actor": actor}, 404 if text is not None else 503)
+        name = "oarbank-settings-" + (scope or "fleet").replace(":", "-") + (f"-{module}" if module else "") + ".yml"
+        return Response(text, media_type="application/yaml", headers={"content-disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/settings/import", response_class=HTMLResponse)
+    async def settings_import(request: Request):
+        """Export and import: download a scope's settings, or upload or paste a file; the preview lists every difference
+        and the nodes whose values change before anything is saved."""
+        actor = who(request)
+        d = await drill(views.import_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy", "actor": actor}, 503)
+        return render(request, "settings_import.html", {**d, "actor": actor})
+
+    @app.get("/settings/drift", response_class=HTMLResponse)
+    async def settings_drift(request: Request):
+        actor = who(request)
+        d = await drill(views.drift_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy", "actor": actor}, 503)
+        return render(request, "settings_drift.html", {"d": d, "actor": actor})
+
     @app.get("/nodes/{nid}/protection", response_class=HTMLResponse)
     async def node_protection(nid: str, request: Request):
         actor = who(request)
@@ -1138,6 +1183,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                 if getattr(f, "read", None) and f.filename:
                     files[Path(f.filename).name] = (await f.read()).decode("utf-8", "replace")
             form = {**{k: form.get(k) for k in form.keys() if k != "metadata"}, "params": json.dumps({"files": files})}
+        if op == "settings.import" and getattr(form.get("file"), "read", None):
+            data = await form["file"].read()
+            if data:                                      # an uploaded file wins over the text box
+                form = {**{k: form.get(k) for k in form.keys() if k != "file"},
+                        "text": data.decode("utf-8", "replace")}
         if op == "modules.install" and getattr(form.get("bundle"), "read", None):
             data = await form["bundle"].read()
             up = await http.post("/api/v1/modules/bundles", content=data, headers=state.coordinator_headers(actor))

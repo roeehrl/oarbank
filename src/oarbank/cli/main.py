@@ -883,6 +883,78 @@ def cmd_settings(a):
             print(f"{s['key']:<22} {s['label']:<42} scopes {','.join(s['scopes']):<17} {s['merge']:<7} {s['danger']}  default {dflt}"
                   + (f"  (written by {s['writer']})" if s["writer"] else ""))
         return
+    if a.action == "shadowed":
+        d = api("GET", "/api/v1/settings/shadowed")
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        if not d["rows"]:
+            print("no shadowed values: every value set changes something")
+            return
+        for x in d["rows"]:
+            where = "fleet" if x["scope"] == "fleet" else f"{x['scope']} {x['name']}"
+            key = (f"[{x['module']}] " if x["module"] and not x["key"].startswith("module.") else "") + x["key"]
+            flag = {"group": f"--group {x['scope_id']}", "node": f"--node {x['name']}"}.get(x["scope"], "")
+            print(f"  {where:<22} {key:<28} {x['value_text']:<14} {x['why']}\n"
+                  f"      reset: oarbank settings reset {x['key']} {flag}{' --module ' + x['module'] if x['module'] else ''}".rstrip())
+        if a.yes and d["reset_all"]:
+            res = run_op("settings.apply", "shadowed", {"changes": d["reset_all"], "comment": "reset shadowed values"},
+                         a.reason, a.yes, a.confirm, dry_run=a.dry_run, preview=True)
+            print(((res or {}).get("result") or {}).get("message") or "")
+        else:
+            print(f"{d['total']} value(s): {d['counts']['locked']} under a lock, {d['counts']['same']} the same as inherited, "
+                  f"{d['counts']['no_effect']} with no effect (oarbank settings shadowed --yes resets them all)")
+        return
+    if a.action == "export":
+        from urllib.parse import urlencode
+        r = http_request("GET", URL + "/api/v1/settings/export?" + urlencode({"scope": a.scope or "fleet",
+                                                                              **({"module": a.module} if a.module else {})}),
+                         headers=auth_headers(), timeout=600)
+        if r.status_code >= 400:
+            sys.exit(f"export: {r.status_code} {r.text}")
+        if a.out:
+            Path(a.out).write_text(r.text, encoding="utf-8")
+            print(f"wrote {a.out}")
+        else:
+            sys.stdout.write(r.text)
+        return
+    if a.action == "import":
+        if not a.key:
+            sys.exit("oarbank settings import <file> [--dry-run]  (a file oarbank settings export wrote; - reads stdin)")
+        text = sys.stdin.read() if a.key == "-" else Path(a.key).read_text(encoding="utf-8")
+        params = {"text": text, **({"comment": a.comment} if a.comment else {})}
+        if a.dry_run:                                     # exit 0 when the file matches this fleet, 2 when it differs
+            op = "settings.import"                        # the operation's preview, through its own route
+            r = http_request("POST", f"{URL}/api/v1/ops/{op}", json={"target": "import", "params": params,
+                             "dry_run": True}, headers={"x-oarbank-source": "cli", **auth_headers()}, timeout=600)
+            body = r.json() if r.text else {}
+            if r.status_code >= 400:
+                sys.exit("settings.import refused:\n" + "\n".join(f"  {e.get('key') or ''}: {e.get('message')}"
+                                                                    for e in body.get("errors") or []) if body.get("errors")
+                         else f"settings.import: {r.status_code} {body}")
+            from ..contracts import impact
+            imp = body["plan"]["impact"]
+            print(f"settings.import ({body['plan'].get('tier')}):")
+            for line in impact.lines(imp):
+                print(line)
+            sys.exit(0 if imp.get("empty") else 2)
+        res = run_op("settings.import", "import", params, a.reason, a.yes, a.confirm, preview=True)
+        r = (res or {}).get("result") or {}
+        print(r.get("message") or json.dumps(r, indent=1, default=str))
+        return
+    if a.action == "drift":
+        d = api("GET", "/api/v1/settings/drift")
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        print(d["summary"])
+        for x in d["nodes"]:
+            lag = f" for {int(x['lag_s'])} s" if x.get("lag_s") else ""
+            print(f"  {x['hostname']:<20} sent rev {x['settings_rev']:<5} applied {x['applied_rev'] if x['applied_rev'] is not None else '-':<5} "
+                  f"{x['text']}{lag}")
+            for g in x["managed"]:
+                print(f"      managed on this machine: {g['key']} {g['value_text']} ({'applies' if g['binds'] else 'looser: not applied'})")
+        return
     if a.action in ("set-secret", "clear-secret"):
         if not a.key:
             sys.exit(f"oarbank settings {a.action} <name>  (ntfy_token)")
@@ -1351,6 +1423,23 @@ def cmd_tools(a):
         return
     if a.action == "detect":
         res = run_op("tools.detect", a.what, {}, a.reason, True)
+        if a.wait:                                        # after installing a tool: until the node reports again
+            deadline = time.time() + a.wait
+            while time.time() < deadline:
+                n = next(iter(api("GET", f"/api/v1/tools?node={a.what}").get("nodes") or []), None)
+                st = (n or {}).get("redetect") or {}
+                if st.get("state") == "done":
+                    print(f"{n['hostname']} detected again:")
+                    for tid, insts in sorted(n["tools"].items()):
+                        for i in insts:
+                            print(f"  {tid:<10} {i.get('status'):<10} {_inst(i)}  [{i.get('source')}]")
+                    for mod, rows in sorted(n["modules"].items()):
+                        for r in rows:
+                            print(f"  {mod}: {r['need']} -> {r['status']}: "
+                                  + (_inst(r["installation"]) if r["status"] == "ok" else r["detail"]))
+                    return
+                time.sleep(2)
+            sys.exit(f"{a.what} has not reported a new detection within {a.wait:g} s ({st.get('text') or 'no answer'})")
     elif a.action == "define":
         search = {}
         for kv in a.search or []:
@@ -1448,9 +1537,10 @@ def parser() -> argparse.ArgumentParser:
     st = sub.add_parser("settings", help="owner settings: get (effective values and where they come from), set, reset, "
                                          "overrides (who overrides a fleet default), explain (the whole chain), promote (a "
                                          "group's value to the fleet: canary, then promote), schema, set-secret / "
-                                         "clear-secret (the ntfy token)")
+                                         "clear-secret (the ntfy token), shadowed (values that change nothing), drift "
+                                         "(nodes not running their latest settings), export (YAML), import <file>")
     st.add_argument("action", choices=["get", "set", "reset", "overrides", "explain", "promote", "schema", "set-secret",
-                                       "clear-secret"])
+                                       "clear-secret", "shadowed", "drift", "export", "import"])
     st.add_argument("key", nargs="?", help="a setting's key (oarbank settings schema lists them), or a core secret's name")
     st.add_argument("value", nargs="?", help="set: JSON (true, 2, 1.5, null, [\"a\"]) or text; a list setting also takes a,b")
     st.add_argument("--node", help="a node (id or name): its own value; get/explain: the value in effect on it")
@@ -1459,6 +1549,8 @@ def parser() -> argparse.ArgumentParser:
     st.add_argument("--nodes", help="set/reset: each of these nodes' own value (comma-separated names): one change set")
     st.add_argument("--label", help="set/reset: each node carrying this label: its own value, one change set")
     st.add_argument("--to", help="promote: fleet (the default) or a wider group")
+    st.add_argument("--scope", help="export: fleet (the default), group:<group> or node:<node>")
+    st.add_argument("--out", "-o", help="export: write the YAML to this file (default: stdout)")
     st.add_argument("--campaign", help="a campaign: set/reset its override of a key it may override (while it runs; safety "
                                        "keys only tighten); get/explain: the value its jobs get")
     st.add_argument("--module", help="a module: one of its own settings (vm_mem_gb, or module.<module>.vm_mem_gb), or a core key "
@@ -1555,6 +1647,8 @@ def parser() -> argparse.ArgumentParser:
                     help="define: an extra search pattern for fleet, darwin, linux or windows (repeatable)")
     tl.add_argument("--version-args", help="define, executable: the version command's arguments (default --version)")
     tl.add_argument("--version-regex", help="define, executable: the regex whose first group is the version")
+    tl.add_argument("--wait", type=float, nargs="?", const=120.0, default=None,
+                    help="detect: wait (default 120 s) until the node reports what it found, and print it")
     tl.add_argument("--json", action="store_true")
     tl.add_argument("--reason")
     tl.add_argument("--yes", "-y", action="store_true")

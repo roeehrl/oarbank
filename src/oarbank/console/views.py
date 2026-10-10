@@ -620,6 +620,27 @@ def overrides_page(r, key: str, module: str = "") -> dict | None:
         return None
 
 
+def shadowed_page(r) -> dict:
+    """Values that change nothing (settings/reports.shadowed)."""
+    from ..coordinator.settings import reports
+    return reports.shadowed(r)
+
+
+def import_page(r) -> dict:
+    """Export and import: the scopes an export can cover (the fleet, each group, each node) and the modules."""
+    from ..coordinator.settings import resolve as V
+    snap = V.snapshot(r)
+    return {"groups": [{"id": g["id"], "name": g["name"]} for g in sorted(snap.groups, key=lambda g: -g["rank"])],
+            "nodes": r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname"),
+            "modules": snap.modules}
+
+
+def drift_page(r) -> dict:
+    """Nodes that do not run their latest settings, and what managed policy tightens (settings/reports.drift)."""
+    from ..coordinator.settings import reports
+    return reports.drift(r)
+
+
 def module_settings_page(r, name: str) -> dict | None:
     """A module's Settings tab (settings/views.module_page)."""
     return settings_views.module_page(r, name)

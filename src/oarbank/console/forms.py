@@ -245,6 +245,8 @@ MAPPERS = {
     "settings.secrets.set": lambda f, ctx: {},
     "settings.secrets.clear": lambda f, ctx: {},
     "tools.define": lambda f, ctx: tool_definition(f),
+    # a settings export: the file's text (an upload, read by the console, or the text box), as it is
+    "settings.import": lambda f, ctx: {"text": f.get("text") or "", **({"comment": f.get("comment")} if f.get("comment") else {})},
     # a folder's path per node, one "<node>=<path>" per line; a node with an empty path is removed
     "settings.folders.update": lambda f, ctx: {"access": f.get("access") or "read", "nodes": {
         k.strip(): v.strip() or None for k, _, v in (x.partition("=") for x in (f.get("nodes") or "").splitlines()) if k.strip()}},

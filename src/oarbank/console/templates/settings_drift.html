@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Applied drift · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/settings">← Settings</a></p>
+<h1>Applied drift</h1>
+<div class="card small">
+  <p>The coordinator sends each node its complete settings with a revision; the node's agent reports the revision it
+  applied, the keys it refused, and what the machine's managed policy (MDM) tightens there.</p>
+  <p role="status"><b>{{ d.summary }}</b></p>
+</div>
+<div class="table-wrap"><table class="small"><caption class="sr-only">Each node's applied settings</caption>
+<tr><th scope="col">node</th><th scope="col">sent</th><th scope="col">applied</th><th scope="col">state</th><th scope="col">managed on this machine</th></tr>
+{% for x in d.nodes %}<tr>
+  <td><a href="/nodes/{{ x.node_id }}/settings">{{ x.hostname }}</a>{% if not x.online %} <span class="mut">(offline)</span>{% endif %}</td>
+  <td class="mono">rev {{ x.settings_rev }}</td>
+  <td class="mono">{{ ('rev ' ~ x.applied_rev) if x.applied_rev is not none else '–' }}</td>
+  <td><span class="chip {{ x.tone }}">{{ x.text }}</span>{% if x.lag_s %} <span class="mut">for {{ x.lag_s | secs }}</span>{% endif %}</td>
+  <td>{% for g in x.managed %}<span class="chip{{ ' warn' if g.binds }}" title="{{ 'applies: stricter than the coordinator' if g.binds else 'looser than the coordinator: not applied' }}">{{ g.label }}: {{ g.value_text }}</span> {% else %}<span class="mut">nothing</span>{% endfor %}{% if x.managed_by %} <span class="mut">by {{ x.managed_by }}</span>{% endif %}
+    {% for f in x.managed_refused %}<div class="small field-error">policy key {{ f.key }} refused: {{ f.reason }}</div>{% endfor %}</td></tr>
+{% endfor %}</table></div>
+{% endblock %}

@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-93 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+94 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -137,6 +137,7 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
 | `settings.apply` — Set or reset owner settings at the fleet, a group or a node, as one change set (policy, caps, notifications, access, verification); the preview names every node whose effective value changes | T0 (from each key's danger tier and scope: a node change keeps the key's tier (caps T0, policy T1), a fleet or group change is one tier up, a lock is T3) | optional | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.apply)<br>`POST /do/{op}` (op=settings.apply) | oarbank settings set <key> <value> [--node <node>] [--group <group>]<br>oarbank settings reset <key> [--node <node>] [--group <group>] |
+| `settings.import` — Import a settings export (YAML): groups, labels, tool definitions and values, only where they differ, as one change; absent keys inherit, !reset deletes | T2 (T3 when the file adds or changes a lock) | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.import)<br>`POST /do/{op}` (op=settings.import) | oarbank settings import <file> [--dry-run] |
 | `settings.secrets.set` — Set a core secret (the ntfy token): write-only, shown only as a fingerprint | T1 | prompted | – | admin | declarative | settings.secrets.clear | `POST /api/v1/ops/{op}` (op=settings.secrets.set)<br>`POST /do/{op}` (op=settings.secrets.set) | oarbank settings set-secret <name> |
 | `settings.secrets.clear` — Remove a core secret's value (the ntfy token) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=settings.secrets.clear)<br>`POST /do/{op}` (op=settings.secrets.clear) | oarbank settings clear-secret <name> |
 | `settings.promote` — Promote a group's value of a setting (a canary) to the fleet or a wider group: set there and deleted from the group, as one change set | T1 (from the key's danger tier at the target scope (a fleet change is one tier up); a lock is T3) | prompted | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.promote)<br>`POST /do/{op}` (op=settings.promote) | oarbank settings promote <key> --group <group> [--to <group>] |

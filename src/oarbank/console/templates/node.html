@@ -99,6 +99,7 @@
   <div class="row"><span class="small mut">The node finds its tools itself, verifies each (a JDK by its <span class="mono">release</span> file) and
     reports it; a module gets the one installation that satisfies what it asks for.</span><span class="sp"></span>
     {{ m.op_form("tools.detect", n.node_id, "Re-detect") }}</div>
+  {% if T.redetect %}<p class="small" role="status"><span class="chip {{ 'ok' if T.redetect.state == 'done' else 'warn' }}">{{ T.redetect.text }}</span> <span class="mut">asked {{ T.redetect.requested_at | ago }}</span></p>{% endif %}
   <table class="small"><caption class="sr-only">Installations this node found</caption>
   <tr><th>tool</th><th>path</th><th>version</th><th>arch</th><th>vendor</th><th>found by</th><th>status</th></tr>
   {% for tid, insts in T.tools.items() %}{% for i in insts %}<tr><td class="mono nowrap">{{ tid }}</td><td class="mono" title="{{ i.given or i.path }}">{{ i.path }}</td>
@@ -115,7 +116,7 @@
     <td class="mono">{% if r.installation %}{{ r.installation.version }} at {{ r.installation.path }}{% else %}–{% endif %}</td>
     <td class="nowrap">{% if r.override %}path set ({{ 'this node' if r.override.scope == 'node' else r.override.scope }}{% if r.override.module %}, {{ r.override.module }}{% endif %}){% elif r.source == 'detected' %}detected{% else %}–{% endif %}</td>
     <td>{% if r.status == 'ok' %}<span class="chip ok">ok</span>{% else %}<span class="chip bad">{{ r.code }}</span> {{ r.detail }}{% endif %}</td>
-    <td class="actions">{% for f in r.fixes %}{% if f.op %}{{ m.op_form(f.op, f.target, f.label) }}{% elif f.command %}<div><span class="mut">{{ f.label }}:</span> <code class="small">{{ f.command }}</code></div>{% endif %}{% endfor %}</td></tr>{% endfor %}
+    <td class="actions">{% for f in r.fixes %}{% if f.op %}{{ m.op_form(f.op, f.target, f.label) }}{% elif f.command %}<div><span class="mut">{{ f.label }}:</span> <code class="small">{{ f.command }}</code>{% if f.then %} <span class="mut small">({{ f.then }})</span>{% endif %}</div>{% endif %}{% endfor %}</td></tr>{% endfor %}
   {% else %}<tr><td colspan="6" class="mut">no enabled module asks for a host tool</td></tr>{% endfor %}
   </table>
   <h3 class="small">Paths set on this node</h3>

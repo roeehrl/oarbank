@@ -431,21 +431,59 @@ def unmet(r, manifest, node: dict, module: str = "") -> tuple[str, str] | None:
 
 # ------------------------------------------------------------------------------------------------ remediation
 
-def install_command(kind: str | None, req: dict, os_: str | None) -> str | None:
-    """A copyable command that installs a version the request accepts (the lowest JDK LTS, the newest Python), or None."""
+# Linux package managers by the distribution's os-release ID (the agent's facts: platform.distro)
+DNF = ("fedora", "rhel", "centos", "rocky", "almalinux", "ol", "amzn")
+ZYPPER = ("opensuse", "opensuse-leap", "opensuse-tumbleweed", "sles")
+PACMAN = ("arch", "manjaro", "endeavouros")
+
+
+def _linux_manager(distro: str | None) -> str:
+    d = (distro or "").lower()
+    return "dnf" if d in DNF else "zypper" if d in ZYPPER else "pacman" if d in PACMAN else "apt"
+
+
+def install_command(kind: str | None, req: dict, os_: str | None, distro: str | None = None) -> str | None:
+    """A copyable command that installs a version the request accepts (the lowest JDK LTS, the newest Python) with the
+    node's own package manager (Homebrew, the Linux distribution's, winget), or None. Oarbank never runs it: the
+    machine's admin does, then asks the node to re-detect (docs/design/host-tools.md, "Installing a tool")."""
     if kind == "jdk":
         major = next((v for v in JDK_LTS if tv.satisfies(str(v), req.get("version"))), None)
         if major is None:
             return None
-        return {"darwin": f"brew install openjdk@{major}", "linux": f"sudo apt install openjdk-{major}-jdk-headless",
+        linux = {"apt": f"sudo apt install openjdk-{major}-jdk-headless",
+                 "dnf": f"sudo dnf install java-{major}-openjdk-headless",
+                 "zypper": f"sudo zypper install java-{major}-openjdk-headless",
+                 "pacman": f"sudo pacman -S jdk{major}-openjdk"}[_linux_manager(distro)]
+        return {"darwin": f"brew install openjdk@{major}", "linux": linux,
                 "windows": f"winget install EclipseAdoptium.Temurin.{major}.JDK"}.get(os_ or "")
     if kind == "python":
         ver = next((v for v in PYTHONS if tv.satisfies(v, req.get("version"))), None)
         if ver is None:
             return None
-        return {"darwin": f"brew install python@{ver}", "linux": f"sudo apt install python{ver}",
+        linux = {"apt": f"sudo apt install python{ver}", "dnf": f"sudo dnf install python{ver}",
+                 "zypper": f"sudo zypper install python{ver.replace('.', '')}",
+                 "pacman": "sudo pacman -S python"}[_linux_manager(distro)]
+        return {"darwin": f"brew install python@{ver}", "linux": linux,
                 "windows": f"winget install Python.Python.{ver}"}.get(os_ or "")
     return None
+
+
+def redetect_state(node: dict, now: float | None = None) -> dict | None:
+    """The Re-detect flow after installing a tool: None before anyone asked; "waiting" until the node reports a detection
+    made after the request (at its next heartbeat when online), then "done" with when it reported."""
+    asked = node.get("detect_requested_at")
+    if not asked:
+        return None
+    now = now or time.time()
+    at = report(node).get("detected_at")
+    at = at - float(node.get("clock_offset_s") or 0) if isinstance(at, (int, float)) else None   # the node's clock, ours
+    if at and at >= asked:
+        return {"state": "done", "requested_at": asked, "detected_at": at,
+                "text": "Detected again after the request: the list above is what it found"}
+    online = bool(node.get("last_heartbeat_at") and now - node["last_heartbeat_at"] < 30.0)
+    return {"state": "waiting", "requested_at": asked, "detected_at": at,
+            "text": "Re-detect asked: waiting for the node's next heartbeat" if online
+                    else "Re-detect asked: the node is offline; it detects again when it reconnects"}
 
 
 def fixes(r, node: dict, module: str, req: dict, res: dict, defs: dict | None = None) -> list[dict]:
@@ -457,9 +495,11 @@ def fixes(r, node: dict, module: str, req: dict, res: dict, defs: dict | None = 
     out = []
     if res.get("unknown") or not d:
         return [{"label": f"Define {req['id']} in Settings → Tools", "href": f"/settings?tool={req['id']}#tools"}]
-    cmd = install_command(d["kind"], req, os_)
+    facts = jl(node.get("facts_json"), {}) or {}
+    cmd = install_command(d["kind"], req, os_, (facts.get("platform") or {}).get("distro"))
     if res["status"] in ("not_found", "version_unmet") and cmd:
-        out.append({"label": f"Install on {node.get('hostname') or node.get('node_id')}", "command": cmd})
+        out.append({"label": f"Install on {node.get('hostname') or node.get('node_id')}", "command": cmd,
+                    "then": "then Re-detect: the node reports what it found at its next heartbeat"})
     out.append({"label": "Re-detect", "op": "tools.detect", "target": node.get("node_id"),
                 "command": f"oarbank tools detect {node.get('hostname') or node.get('node_id')}"})
     out.append({"label": "Set path on this node", "href": f"/nodes/{node.get('node_id')}#tools",
@@ -506,6 +546,7 @@ def node_view(r, node: dict, defs: dict | None = None) -> dict:
             mods[name] = rows
     overrides = node_values(r, node.get("node_id"))
     return {"reported": bool(rep), "detected_at": rep.get("detected_at"), "native_arch": native_arch(node),
+            "redetect": redetect_state(node),
             "tools": {tid: installations(node, tid) for tid in defs}, "extra": sorted(set(rep.get("tools") or {}) - set(defs)),
             "modules": mods, "overrides": overrides, "definitions": defs}
 
