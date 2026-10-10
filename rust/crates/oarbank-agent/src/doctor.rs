@@ -32,8 +32,9 @@ pub fn grant_files(dir: &Path, entry: &Value, settings: &Value, granted: &Value)
     }
     let tf = dir.join("tools.json");
     let sf = dir.join("settings.json");
-    std::fs::write(&tf, serde_json::to_vec(&Value::Object(tools))?)?;
-    std::fs::write(&sf, serde_json::to_vec(settings)?)?;
+    // each module's own files: a change to another module's settings or tools leaves these untouched
+    crate::fsutil::write_if_changed(&tf, &serde_json::to_vec(&Value::Object(tools))?)?;
+    crate::fsutil::write_if_changed(&sf, &serde_json::to_vec(settings)?)?;
     Ok((tf, sf, paths))
 }
 
@@ -190,6 +191,28 @@ pub fn now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A module's settings file holds exactly that module's settings and is rewritten only when they change: setting
+    /// one module's node key never touches another module's file (docs/design/settings.md, "Module settings").
+    #[test]
+    fn a_modules_settings_file_changes_only_with_its_own_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = json!({"name": "a", "sandbox": {"tools": []}});
+        let policy = |a: Value, b: Value| json!({"module_settings": {"a": a, "b": b}});
+        let write = |p: &Value, m: &str| grant_files(&tmp.path().join(m), &entry, &p["module_settings"][m], &json!({})).unwrap().1;
+        let p1 = policy(json!({"vm_mem_gb": 8}), json!({"tile_size": 32}));
+        let (fa, fb) = (write(&p1, "a"), write(&p1, "b"));
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for f in [&fa, &fb] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(old).unwrap();
+        }
+        let p2 = policy(json!({"vm_mem_gb": 12}), json!({"tile_size": 32}));     // a's key changes, b's do not
+        let (fa, fb) = (write(&p2, "a"), write(&p2, "b"));
+        assert_eq!(std::fs::read_to_string(&fa).unwrap(), r#"{"vm_mem_gb":12}"#);
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), r#"{"tile_size":32}"#);
+        assert_eq!(std::fs::metadata(&fb).unwrap().modified().unwrap(), old, "b's settings file was rewritten");
+        assert_ne!(std::fs::metadata(&fa).unwrap().modified().unwrap(), old);
+    }
 
     /// The quoted names in one tuple assignment of the SDK's manifest.py, e.g. `RESERVED_ENV = ("PATH", ...)`.
     fn sdk_names(assignment: &str) -> Vec<String> {
