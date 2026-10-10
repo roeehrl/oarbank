@@ -1,23 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The Windows agent package (docs/design/architecture.md, "Packaging and CI"): the agent and its launcher in Program Files\Oarbank, and the
-  node set up as a service run by its virtual account (oarbank-launcher setup scope system). For unattended and MDM
-  installs the join code comes from a property or a file:
+  The Windows agent package (docs/design/architecture.md, "Packaging and CI"; docs/design/node-enrollment.md): the agent
+  and its launcher in Program Files\Oarbank, the node set up as a service run by its virtual account (oarbank-launcher
+  setup scope system), oarbank-node.exe on the system PATH, the Oarbank Node tray app, the join window and the oarbank://
+  link handler. The package installs; it never needs a join code. Without one the agent's service starts and waits
+  (status "unjoined") until oarbank-node join or the join window stages a code, or managed policy names one
+  (HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent, the release's ADMX template). A code may also come with the install:
     msiexec /i oarbank-agent.msi /qn JOINCODEFILE=C:\path\join-code.txt      (preferred: never on a command line)
-    msiexec /i oarbank-agent.msi /qn JOINCODE=OB1-...
+    msiexec /i oarbank-agent.msi /qn JOINCODE=OB2-...                        (kept out of the installer's log)
     msiexec /i oarbank-agent.msi /qn COORDINATOR=https://coordinator:7443     (the owner then approves the node)
-  Without one, it installs the programs only. CONTAINERS=1 also installs what the agent's container runtime needs (the
-  Virtual Machine Platform and WSL, docs/design/windows-containers.md; Windows may need a restart). Uninstalling removes
-  the service and the agent's WSL containers session with its storage; the node's home in ProgramData stays.
-  Built by scripts/package-windows.ps1 with WiX 5 (wix build -d Version=... -d BinDir=...).
+  NAME= names the node when the code has no label. CONTAINERS=1 also installs what the agent's container runtime needs
+  (the Virtual Machine Platform and WSL, docs/design/windows-containers.md; Windows may need a restart). NOLAUNCH=1
+  leaves the last page's "Open Oarbank Node" unticked. A silent install (/qn) shows no page and starts nothing.
+  Attended, the join page takes the code in a password field; the last page opens Oarbank Node at the join window.
+  Uninstalling removes the service and the agent's WSL containers session with its storage; the node's home in
+  ProgramData stays.
+  Built by scripts/package-windows.ps1 with WiX 5 and its Util and UI extensions (wix build -ext WixToolset.Util.wixext
+  -ext WixToolset.UI.wixext -d Version=... -d BinDir=... -d RuntimeDir=... -d JoinDir=...).
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Oarbank agent" Manufacturer="Codonic" Version="$(var.Version)" UpgradeCode="{5D57D0BD-3099-53F1-B96A-619388A7265D}" Scope="perMachine"
            Compressed="yes">
     <!-- every build of a version carries the same MSI version (numeric only: 1.0.0-alpha.1 is 1.0.0), so a newer
          build of it must replace the installed one rather than install beside it -->
     <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Oarbank agent is already installed." />
+    <!-- the tray app runs from Program Files: it is asked to quit before its files are replaced or removed -->
+    <util:CloseApplication Id="CloseNodeTray" Target="Oarbank Node.exe" CloseMessage="yes" ElevatedCloseMessage="yes" RebootPrompt="no" Timeout="5" />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="OarbankIcon" SourceFile="$(var.BinDir)\oarbank.ico" />
+    <Property Id="ARPPRODUCTICON" Value="OarbankIcon" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Oarbank">
@@ -42,28 +53,84 @@
           </ServiceInstall>
           <ServiceControl Id="HelperControl" Name="OarbankHelper" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
         </Component>
+        <!-- oarbank-node: the node's command line (join, check, status, leave, doctor; docs/design/node-enrollment.md),
+             the launcher under a second name (a copy). Program Files\Oarbank goes on the system PATH so `oarbank-node`
+             works in any new prompt; an uninstall takes it out again -->
+        <Component Id="NodeCli">
+          <File Id="NodeCli" Source="$(var.BinDir)\oarbank-node.exe" KeyPath="yes" />
+          <Environment Id="NodeCliPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes" Permanent="no" />
+        </Component>
+        <!-- Oarbank Node, the tray app (deploy/windows/NodeTray.cs): the node's status, Join this PC, the join window -->
+        <Component Id="NodeTray">
+          <File Id="NodeTray" Name="Oarbank Node.exe" Source="$(var.BinDir)\Oarbank Node.exe" KeyPath="yes">
+            <Shortcut Id="NodeTrayShortcut" Directory="ProgramMenuFolder" Name="Oarbank Node"
+                      Description="Join this PC to an Oarbank fleet and see its status" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+          </File>
+          <File Id="NodeIcon" Name="oarbank.ico" Source="$(var.BinDir)\oarbank.ico" />
+        </Component>
+        <!-- oarbank://join?code=... (the console's "Open in Oarbank Node"): the tray app hands the link to the join
+             window, which shows the coordinator and asks before it joins (a link only arrives; it is never trusted).
+             The whole key goes on uninstall, its subkeys with it -->
+        <Component Id="NodeProtocol">
+          <RegistryKey Root="HKCR" Key="oarbank" ForceDeleteOnUninstall="yes">
+            <RegistryValue Type="string" Value="URL:Oarbank" KeyPath="yes" />
+            <RegistryValue Name="URL Protocol" Type="string" Value="" />
+            <RegistryKey Key="DefaultIcon">
+              <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]Oarbank Node.exe&quot;,0" />
+            </RegistryKey>
+            <RegistryKey Key="shell\open\command">
+              <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]Oarbank Node.exe&quot; --link &quot;%1&quot;" />
+            </RegistryKey>
+          </RegistryKey>
+        </Component>
         <!-- the node runtime beside the launcher: CPython 3.12 with the module SDK, and uv -->
         <Directory Id="RUNTIMEFOLDER" Name="runtime" />
+        <!-- the join window (deploy/node/join-window.py and .html), run by the runtime's pythonw.exe -->
+        <Directory Id="JOINFOLDER" Name="join" />
       </Directory>
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Main">
       <ComponentRef Id="Binaries" />
       <ComponentRef Id="WslcSdk" />
       <ComponentRef Id="Launcher" />
+      <ComponentRef Id="NodeCli" />
+      <ComponentRef Id="NodeTray" />
+      <ComponentRef Id="NodeProtocol" />
       <Files Directory="RUNTIMEFOLDER" Include="$(var.RuntimeDir)\**" />
+      <Files Directory="JOINFOLDER" Include="$(var.JoinDir)\**" />
     </Feature>
 
+    <!-- docs/design/node-enrollment.md, "Windows MSI properties". JOINCODE is a secret: Hidden keeps it out of the
+         installer's log, the deferred command line built from it is hidden too, and nothing remembers it -->
     <Property Id="JOINCODE" Secure="yes" Hidden="yes" />
     <Property Id="JOINCODEFILE" Secure="yes" />
     <Property Id="COORDINATOR" Secure="yes" />
     <Property Id="CONTAINERS" Secure="yes" />
+    <Property Id="NAME" Secure="yes" />
+    <Property Id="NOLAUNCH" Secure="yes" />
+    <Property Id="SetupWithCode" Hidden="yes" />
 
+    <!-- Setting up the node's service. `oarbank-launcher setup` is idempotent: it installs the agent into the node's
+         home, stages a code when it is given one, and (re)creates the service with the agent's arguments (the staged
+         code's file, the status document, managed policy); an identity the node already has (its certificate, a
+         pending enrollment, agent.json) is kept. A first install runs exactly one of the four, by what it was given:
+         a file, else a code, else an address, else the waiting service. A major upgrade runs the plain one and
+         ignores the properties ("an installed node ignores them"; passing COORDINATOR again would also repoint a node
+         that has since followed a coordinator move): it refreshes the service's arguments and the agent, so a node
+         set up by an older version gets the status document the tray app reads. A node that was enrolling by address
+         and had never reached its coordinator goes back to waiting (oarbank-node join again). Repair and uninstall
+         run none. NodeNameArgument is private (mixed case): the command line cannot set it. -->
+    <SetProperty Id="NodeNameArgument" After="CostFinalize" Sequence="execute" Condition="NAME AND NOT WIX_UPGRADE_DETECTED"
+                 Value="--name &quot;[NAME]&quot;" />
     <SetProperty Id="SetupWithFile" Before="SetupWithFile" Sequence="execute" Condition="JOINCODEFILE"
-                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --join-code-file &quot;[JOINCODEFILE]&quot;" />
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --or-wait --join-code-file &quot;[JOINCODEFILE]&quot; [NodeNameArgument]" />
     <SetProperty Id="SetupWithCode" Before="SetupWithCode" Sequence="execute" Condition="JOINCODE"
-                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --join-code [JOINCODE]" />
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --or-wait --join-code &quot;[JOINCODE]&quot; [NodeNameArgument]" />
     <SetProperty Id="SetupWithUrl" Before="SetupWithUrl" Sequence="execute" Condition="COORDINATOR"
-                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --coordinator [COORDINATOR]" />
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --coordinator &quot;[COORDINATOR]&quot; [NodeNameArgument]" />
+    <SetProperty Id="SetupWaiting" Before="SetupWaiting" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system [NodeNameArgument]" />
     <SetProperty Id="InstallContainers" Before="InstallContainers" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-agent.exe&quot; containers install" />
     <SetProperty Id="ConfigureHelper" Before="ConfigureHelper" Sequence="execute"
@@ -72,9 +139,12 @@
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; remove --scope system" />
     <SetProperty Id="ClearHelper" Before="ClearHelper" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-clear" />
+    <!-- the launcher checks a code offline (its format and check digits) before it changes anything: a malformed code
+         fails the install with nothing set up, where a silent deployment sees it -->
     <CustomAction Id="SetupWithFile" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="SetupWithCode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
     <CustomAction Id="SetupWithUrl" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
+    <CustomAction Id="SetupWaiting" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <!-- 3010 (restart needed) is not a failure, and a machine that cannot run VMs still gets the agent -->
     <CustomAction Id="InstallContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
     <CustomAction Id="ConfigureHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
@@ -85,12 +155,123 @@
 
     <InstallExecuteSequence>
       <Custom Action="ConfigureHelper" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
-      <Custom Action="InstallContainers" After="SetupWithUrl" Condition="CONTAINERS=&quot;1&quot; AND NOT REMOVE=&quot;ALL&quot;" />
-      <Custom Action="SetupWithFile" After="InstallFiles" Condition="NOT Installed AND JOINCODEFILE" />
-      <Custom Action="SetupWithCode" After="SetupWithFile" Condition="NOT Installed AND JOINCODE AND NOT JOINCODEFILE" />
-      <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />
+      <Custom Action="SetupWithFile" After="InstallFiles" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND JOINCODEFILE" />
+      <Custom Action="SetupWithCode" After="SetupWithFile" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND JOINCODE AND NOT JOINCODEFILE" />
+      <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />
+      <Custom Action="SetupWaiting" After="SetupWithUrl" Condition="NOT Installed AND (WIX_UPGRADE_DETECTED OR (NOT JOINCODEFILE AND NOT JOINCODE AND NOT COORDINATOR))" />
+      <Custom Action="InstallContainers" After="SetupWaiting" Condition="CONTAINERS=&quot;1&quot; AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="RemoveNode" Before="ClearHelper" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="ClearHelper" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
+
+    <!-- The attended install: WixUI's common dialogs with no licence page and no welcome page (Microsoft's installer
+         guidance drops pages that ask nothing). A first install opens at the join page, a major upgrade at a one-page
+         summary; then progress; then the last page with "Open Oarbank Node". Repair and removal started from the MSI
+         use WixUI_Minimal's maintenance pages. A silent install (/qn, /qb) shows none of this and launches nothing. -->
+    <UI Id="OarbankNodeUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="ARPNOMODIFY" Value="1" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="ExitDialog" />
+      <DialogRef Id="MaintenanceWelcomeDlg" />
+      <DialogRef Id="MaintenanceTypeDlg" />
+      <DialogRef Id="VerifyReadyDlg" />
+
+      <!-- the join page: the code is optional (without one the agent waits, and Oarbank Node joins later) -->
+      <Dialog Id="JoinDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="290" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Join this PC to your Oarbank fleet" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Oarbank runs jobs on this PC for your coordinator." />
+        <Control Id="Intro" Type="Text" X="20" Y="54" Width="330" Height="24" NoPrefix="yes"
+                 Text="Paste the join code from your Oarbank console, or leave it empty to join later from Oarbank Node." />
+        <Control Id="JoinCodeLabel" Type="Text" X="20" Y="84" Width="330" Height="10" NoPrefix="yes" Text="Join code (optional):" />
+        <!-- a password control: the code is never shown on screen, and JOINCODE is a hidden property -->
+        <Control Id="JoinCode" Type="Edit" X="20" Y="96" Width="330" Height="18" Property="JOINCODE" Password="yes" Text="{1024}" />
+        <Control Id="NameLabel" Type="Text" X="20" Y="122" Width="330" Height="10" NoPrefix="yes"
+                 Text="This PC's name in the fleet (optional; otherwise the code's label or the computer name):" />
+        <Control Id="NodeName" Type="Edit" X="20" Y="134" Width="330" Height="18" Property="NAME" Text="{128}" />
+        <Control Id="Containers" Type="CheckBox" X="20" Y="162" Width="330" Height="18" Property="CONTAINERS" CheckBoxValue="1"
+                 Text="Run &amp;container jobs (installs WSL components; may need a restart)" />
+        <Control Id="Note" Type="Text" X="20" Y="190" Width="330" Height="34" NoPrefix="yes"
+                 Text="Without a code the Oarbank agent installs and waits. Oarbank Node, in the Start menu and the notification area, joins this PC when you are ready." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" ElevationShield="yes" Text="&amp;Install">
+          <!-- the last page offers Oarbank Node, ticked when a join is still to be done there -->
+          <Publish Property="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1"
+                   Condition="NOT JOINCODE AND NOT JOINCODEFILE AND NOT COORDINATOR AND NOLAUNCH &lt;&gt; &quot;1&quot;" Order="1" />
+          <Publish Event="SpawnWaitDialog" Value="WaitForCostingDlg" Condition="CostingComplete = 1" Order="2" />
+          <Publish Event="EndDialog" Value="Return" Condition="OutOfDiskSpace &lt;&gt; 1" Order="3" />
+          <Publish Event="SpawnDialog" Value="OutOfRbDiskDlg"
+                   Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND (PROMPTROLLBACKCOST=&quot;P&quot; OR NOT PROMPTROLLBACKCOST)" Order="4" />
+          <Publish Event="EndDialog" Value="Return" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" Order="5" />
+          <Publish Event="EnableRollback" Value="False" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" Order="6" />
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg"
+                   Condition="(OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 1) OR (OutOfDiskSpace = 1 AND PROMPTROLLBACKCOST=&quot;F&quot;)" Order="7" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- a major upgrade asks nothing: the node keeps its identity and its coordinator -->
+      <Dialog Id="UpgradeDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="290" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Update the Oarbank agent" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Setup updates Oarbank on this PC to version [ProductVersion]." />
+        <Control Id="Summary" Type="Text" X="20" Y="60" Width="330" Height="60" NoPrefix="yes"
+                 Text="This PC keeps its place in the fleet: its node identity, its coordinator and its settings. Jobs running now stop while the agent restarts, and the coordinator runs them again." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Update" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" ElevationShield="yes" Text="&amp;Update">
+          <Publish Event="SpawnWaitDialog" Value="WaitForCostingDlg" Condition="CostingComplete = 1" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Condition="OutOfDiskSpace &lt;&gt; 1" Order="2" />
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg" Condition="OutOfDiskSpace = 1" Order="3" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="JoinDlg" Before="ProgressDlg" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+        <Show Dialog="UpgradeDlg" Before="ProgressDlg" Condition="NOT Installed AND WIX_UPGRADE_DETECTED" />
+      </InstallUISequence>
+
+      <!-- the last page: "Open Oarbank Node" starts the tray app at the join window as the person installing (the
+           installer's own unelevated process, never the service context). WixShellExec passes no arguments, so this
+           launches the installed file itself, asking it to open the join window (ExeCommand) -->
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchNodeTray"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" Order="1" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <!-- WixUI_Minimal's maintenance pages: repair or remove -->
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open Oarbank Node to join this PC" />
+    <SetProperty Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" After="FindRelatedProducts" Sequence="ui" Condition="WIX_UPGRADE_DETECTED"
+                 Value="Open Oarbank Node" />
+    <CustomAction Id="LaunchNodeTray" FileRef="NodeTray" ExeCommand="--join" Return="asyncNoWait" />
   </Package>
 </Wix>

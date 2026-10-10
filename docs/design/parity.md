@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 87 operations, 2 explain kinds, 122 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 89 operations, 2 explain kinds, 122 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -12,7 +12,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `fleet.halt` | T1 | yes | `oarbank halt --all` | yes |
 | `fleet.resume` | T1 | yes | `oarbank resume --all` | yes |
 | `nodes.admit` | T2 | yes | `oarbank node approve <eid>` | yes |
-| `nodes.join_code` | T2 | yes | `oarbank join-code [--label NAME]` | yes |
+| `nodes.join_code` | T2 | yes | `oarbank join-code [--label NAME] [--uses N] [--ttl S]` | yes |
+| `nodes.revoke_join_code` | T1 | yes | `oarbank join-code revoke <id>` | yes |
+| `nodes.admit_code` | T2 | yes | `oarbank node approve-code <CODE>` | yes |
 | `nodes.reject_enrollment` | T1 | yes | `oarbank node reject <eid>` | yes |
 | `nodes.pause` | T0 | yes | `oarbank node state <nid> paused` | yes |
 | `nodes.resume` | T0 | yes | `oarbank node state <nid> active` | yes |

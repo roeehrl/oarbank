@@ -157,9 +157,19 @@ pub struct SetupOpts {
 /// prints the agent arguments without loading a service (image builds, tests). `--join-code` is for the Windows
 /// installer's elevated custom action, whose command line only administrators can read.
 pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
+    // `--or-wait` (the Windows installer): a code that cannot be read or is not a valid code leaves the node installed
+    // and waiting, with a warning, instead of failing the whole install (a person pasted a wrong code on its join page)
+    let or_wait = opts.iter().any(|o| o == "--or-wait");
     let code = match (flag(opts, "--join-code"), flag(opts, "--join-code-file"), opts.iter().any(|o| o == "--join-code-stdin")) {
         (Some(c), _, _) => Some(c),
-        (None, Some(f), _) => Some(std::fs::read_to_string(&f).with_context(|| format!("reading {f}"))?),
+        (None, Some(f), _) => match std::fs::read_to_string(&f) {
+            Ok(c) => Some(c),
+            Err(e) if or_wait => {
+                eprintln!("warning: reading {f}: {e}; the node is installed and waits for a code (oarbank-node join)");
+                None
+            }
+            Err(e) => return Err(anyhow::anyhow!("reading {f}: {e}")),
+        },
         (None, None, true) => {
             let mut s = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
@@ -167,7 +177,14 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
         }
         _ => None,
     };
-    let o = SetupOpts { scope: flag(opts, "--scope").unwrap_or_else(|| "personal".into()), code: code.map(|c| c.trim().to_string()),
+    let code = match code.map(|c| c.trim().to_string()) {
+        Some(c) if or_wait && oarbank_core::joincode::decode(&c).is_err() => {
+            eprintln!("warning: that is not a valid join code; the node is installed and waits for a code (oarbank-node join)");
+            None
+        }
+        c => c,
+    };
+    let o = SetupOpts { scope: flag(opts, "--scope").unwrap_or_else(|| "personal".into()), code,
                         coordinator: flag(opts, "--coordinator"), name: flag(opts, "--name"), agent: flag(opts, "--agent").map(PathBuf::from),
                         no_service: opts.iter().any(|o| o == "--no-service"), dry: opts.iter().any(|o| o == "--dry-run") };
     setup_with(explicit_home, &o).map(|_| ())

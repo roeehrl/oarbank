@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- English strings for oarbank.admx (Codonic, Oarbank, Node). -->
+<policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                           revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <displayName>Oarbank</displayName>
+  <description>Settings for Oarbank nodes: joining a fleet and what the Oarbank Node app offers.</description>
+  <resources>
+    <stringTable>
+      <string id="SUPPORTED_Oarbank_2_8">Oarbank agent 2.8 or later</string>
+      <string id="Codonic">Codonic</string>
+      <string id="Oarbank">Oarbank</string>
+      <string id="Node">Node</string>
+      <string id="Node_Help">How this computer joins an Oarbank fleet. The Oarbank agent reads these settings every 5 seconds while the computer has not joined; a computer that has joined keeps its coordinator.</string>
+      <string id="JoinCode">Join code</string>
+      <string id="JoinCode_Help">A join code (OB2-…) from the Oarbank console's Add machine. While this computer has not joined, the agent checks the code and joins with it as the system service.
+
+Use a multi-use code that needs your approval in the console (Fleet): every user of this computer can read this setting, and a code that approves machines at once would let anyone who reads it add a machine.
+
+Revoking or expiring the code never removes a computer that has already joined.</string>
+      <string id="Coordinator">Coordinator address</string>
+      <string id="Coordinator_Help">Join by the coordinator's address instead of a code, for example https://coordinator.example:7443. The computer asks to join and waits; approve it in the console with the code it shows (Fleet, Approve a machine by its code). A join code, when set, is used instead.</string>
+      <string id="Name">Node name</string>
+      <string id="Name_Help">This computer's name in the fleet when the join code has no label. Not set: the computer's name.</string>
+      <string id="Containers">Run container jobs</string>
+      <string id="Containers_Help">Enabled: the agent installs what container jobs need (the Virtual Machine Platform and WSL) when it joins. Windows may need a restart before the node offers container jobs.
+
+Disabled or not configured: container prerequisites are installed only when someone asks for them.</string>
+      <string id="AllowUserJoin">Allow users to join or leave</string>
+      <string id="AllowUserJoin_Help">Disabled: Oarbank Node hides Join this PC and Leave, so only this policy (or an administrator's command line) joins the computer.
+
+Enabled or not configured: a person using the computer can join it with a code from the Oarbank Node app.</string>
+      <string id="ManagedByOrganizationName">Organization name</string>
+      <string id="ManagedByOrganizationName_Help">The organization shown in Oarbank Node and in the node's status ("Managed by …").</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="JoinCode">
+        <textBox refId="JoinCode">
+          <label>Join code:</label>
+        </textBox>
+      </presentation>
+      <presentation id="Coordinator">
+        <textBox refId="Coordinator">
+          <label>Coordinator address:</label>
+        </textBox>
+      </presentation>
+      <presentation id="Name">
+        <textBox refId="Name">
+          <label>Node name:</label>
+        </textBox>
+      </presentation>
+      <presentation id="ManagedByOrganizationName">
+        <textBox refId="ManagedByOrganizationName">
+          <label>Organization name:</label>
+        </textBox>
+      </presentation>
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>

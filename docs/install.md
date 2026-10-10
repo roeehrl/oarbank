@@ -24,7 +24,10 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 | `oarbank-coordinator-<v>-linux-amd64.deb`, `.rpm` (also `linux-arm64`) | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-linux.sh` | Software-only installer: `/opt/oarbank/coordinator`, application menu entry and `oarbank-setup` |
 | `oarbank-coordinator-<v>-windows-x64.msi` (also `windows-arm64`) | `scripts\build-coordinator.ps1`, then `scripts\package-coordinator-windows.ps1` | Software-only installer: `C:\Program Files\Oarbank\Coordinator\package`, Start menu tray application |
 | `oarbank-coordinator-<v>-<os>-<arch>.tar.gz` | `scripts/build-coordinator.sh` or `scripts\build-coordinator.ps1` | Advanced relocatable build for signed coordinator moves and manual setup; includes its service installer and guided setup |
-| `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-macos-x86_64.pkg` | `scripts/package-macos.sh [<v>] [arm64\|x86_64]` | the node, for Macs with Apple silicon or Intel Macs (each refuses the other): `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}` and the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host) |
+| `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-macos-x86_64.pkg` | `scripts/package-macos.sh [<v>] [arm64\|x86_64]` | the node, for Macs with Apple silicon or Intel Macs (each refuses the other): `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}`, the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host), the join window, `/Applications/Oarbank Node.app` (menu bar) and `/usr/local/bin/oarbank-node` |
+| `oarbank-agent_<v>_amd64.deb`, `oarbank-agent-<v>-1.x86_64.rpm` (also arm64) | `scripts/package-linux.sh` | the node for Linux: `/usr/lib/oarbank`, `/usr/bin/oarbank-node`, the **Oarbank Node** desktop entry |
+| `oarbank-agent-<v>-windows-x64.msi` (also arm64), `oarbank-agent-<v>-windows-admx.zip` | `scripts\package-windows.ps1` | the node for Windows: `C:\Program Files\Oarbank`, `oarbank-node.exe` on PATH, the **Oarbank Node** tray app; the Group Policy template |
+| `oarbank-install.sh`, `oarbank-install.ps1` | `scripts/package-install-scripts.sh` | one-line installers: download this release's node package for the computer, verify it and join |
 | `oarbank-agent-<v>-darwin-arm64`, `oarbank-agent-<v>-darwin-amd64` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
 
 Signing the packages is the owner's: `OARBANK_CODESIGN_IDENTITY` (Developer ID Application) for the binaries,
@@ -36,7 +39,7 @@ x86_64 package builds on Apple silicon with the `x86_64-apple-darwin` Rust targe
 ## 1. The coordinator
 
 Download the native coordinator installer for your computer from the
-[2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0) and verify it against its `SHA256SUMS` file.
+[2.8.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0) and verify it against its `SHA256SUMS` file.
 On macOS, double-click the `.pkg` and follow Installer, then open **Oarbank Coordinator** in Applications.
 On Linux, install the `.deb` or `.rpm` with your package manager, then launch **Oarbank Coordinator** from the
 application menu or run `oarbank-coordinator`. On Windows, run the `.msi`, then open **Oarbank Coordinator** from Start.
@@ -98,32 +101,82 @@ to the setting `console_hosts`. Passkeys need such a name; TOTP works everywhere
 
 ## 2. Nodes
 
-Make a join code on the coordinator (one per node; it names the coordinator's addresses, pins its CA and approves
-the node when it is used):
-```bash
-oarbank join-code --label <node>
-```
-The label names the node: it appears under that name, and keeps it whatever host name its agent reports (a renamed
-machine, `OARBANK_NODE_NAME`). Without `--label`, the node takes the name its agent reports and follows it.
+Every node package installs the node and asks nothing; joining is a separate step with one command,
+`oarbank-node join`, that every way of installing ends in ([design/node-enrollment.md](design/node-enrollment.md)).
+Nothing needs a hand-made file, and the join code is never typed on a command line.
 
-**With the pkg (also MDM).** Put the code where the installer looks, then install:
+**Make a join code** in the console (Fleet, **Add machine…**) or on the coordinator:
 ```bash
-sudo mkdir -p /Library/Oarbank/etc
-echo 'OB1-…' | sudo tee /Library/Oarbank/etc/join-code >/dev/null
-sudo installer -pkg oarbank-agent-<v>-macos-arm64.pkg -target /     # an Intel Mac: oarbank-agent-<v>-macos-x86_64.pkg
+oarbank join-code --label <node>                       # one machine: single use, approved at once, 4 hours
+oarbank join-code --uses 50 --ttl 604800              # many machines (MDM, images): each waits for approval
 ```
-The postinstall sets the node up for the console user (a LaunchAgent) and deletes the code file. Add an empty
-`/Library/Oarbank/etc/system` file first to install it as a system service run by a dedicated `_oarbank` account
-instead (it starts at boot, before anyone logs in). A system install also puts the session helper
-`dev.codonic.oarbank.agent.session` in `/Library/LaunchAgents`: launchd starts it in every GUI login (and the install
-in the sessions open now), and it tells host protection what the `_oarbank` account may not read about that person's
-processes and the app in front, over a socket in `/Library/Application Support/Oarbank/run`. A `coordinator` file
-with a URL works instead of a code; the owner then approves the node on the Fleet page.
+A code names the coordinator's addresses and pins its identity key and certificate authority, so the node checks it is
+talking to your coordinator before it sends anything. The label names the node: it appears under that name and keeps
+it whatever host name its agent reports. Without a label the node takes the name its agent reports (or `--name`).
+`oarbank join-codes` lists outstanding codes and the machines that used them; `oarbank join-code revoke <id>` revokes
+one (machines that already joined stay).
 
-**By hand.** Install the pkg without those files, then:
+**Join, attended.** Open the package. On macOS **Oarbank Node** opens in the menu bar at its join window when Installer
+finishes; on Windows the installer's join page takes the code (or leave it empty and use **Oarbank Node** from Start
+afterwards); on a Linux desktop open **Oarbank Node** from your applications. Paste the code: the window shows the
+coordinator it names and checks the network (DNS, the port, the coordinator's identity and certificate authority, the
+clock) before joining, then follows the node until it is approved and connected. A console's **Open in Oarbank Node**
+link (`oarbank://join?code=…`) fills the code in and asks you to confirm the coordinator first.
+
+**Join from a terminal or SSH** (the code is read hidden, from standard input or from a file):
 ```bash
-/Library/Oarbank/bin/oarbank-launcher setup --join-code 'OB1-…'      # or: sudo … setup --scope system --join-code …
+sudo installer -pkg oarbank-agent-<v>-macos-arm64.pkg -target /      # an Intel Mac: …-macos-x86_64.pkg
+sudo oarbank-node join                                                # prompts for the code
+printf '%s' 'OB2-…' | sudo oarbank-node join --code-stdin           # scripts
 ```
+On macOS `sudo oarbank-node join` installs the system service, run by a dedicated `_oarbank` account (it starts at
+boot, before anyone logs in); `oarbank-node join` without sudo, or `--scope personal`, sets the node up for the user
+running it (a LaunchAgent). A system install also puts the session helper `dev.codonic.oarbank.agent.session` in
+`/Library/LaunchAgents`: launchd starts it in every GUI login, and it tells host protection what the `_oarbank` account
+may not read about that person's processes and the app in front, over a socket in
+`/Library/Application Support/Oarbank/run`.
+
+`oarbank-node join` checks the code and the network first and then waits for the node to join (`--no-wait` returns
+once the code is staged; the service keeps retrying a coordinator it cannot reach until the code expires). Its exit
+codes: 0 joined, 2 malformed code, 3 waiting for approval, 4 code expired, used or revoked, 5 the coordinator's
+identity or certificate authority does not match the code, 6 network, 7 already joined to another coordinator, 8 needs
+root or an administrator. `oarbank-node check` runs the checks without joining, `oarbank-node status [--follow]` shows
+where the node is, `oarbank-node leave` forgets the coordinator, and `oarbank-node doctor` adds the container runtime.
+
+**One line** (downloads the release's package for this computer, verifies its SHA-256 and installs it, then joins;
+it prompts for the code on the terminal, or reads `OARBANK_JOIN_CODE`):
+```bash
+curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh | sudo sh
+```
+```powershell
+irm https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.ps1 | iex
+```
+
+**Without a code (device code).** `sudo oarbank-node join --coordinator https://<host>:7443` checks the coordinator,
+prints its certificate authority's fingerprint to compare with the console's, and enrolls; the node then shows an
+8-letter code (like `WDJB-MJHT`) that the owner enters on the Fleet page under **Approve a machine by its code**
+(`oarbank node approve-code <CODE>`).
+
+**MDM and configuration management.** Deploy the package unchanged and give it a code through managed policy; a node
+that has not joined reads it and joins as the system service. Use a multi-use code: its machines wait for your
+approval on the Fleet page unless you made it approve automatically.
+
+| Where | macOS | Windows | Linux |
+|---|---|---|---|
+| Policy | a configuration profile for the domain `dev.codonic.oarbank.agent` (the console's **Add machine** offers one; it also pre-approves the background items) | `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent` (Group Policy with the release's ADMX template, or Intune) | `/etc/oarbank/policy.json` |
+| Keys | `JoinCode`, `Coordinator`, `Name`, `Containers` (Windows), `AllowUserJoin` (false hides Join and Leave in the app), `ManagedByOrganizationName` | the same names (REG_SZ, REG_DWORD) | the same names (JSON) |
+
+Linux packages also read the installing command's environment, and Windows MSIs take properties:
+```bash
+sudo OARBANK_JOIN_CODE='OB2-…' apt install ./oarbank-agent_<v>_amd64.deb      # also OARBANK_JOIN_CODE_FILE, OARBANK_NAME
+```
+```powershell
+msiexec /i oarbank-agent-<v>-windows-x64.msi /qn JOINCODEFILE=C:\path\join-code.txt   # or JOINCODE=, COORDINATOR=, NAME=, CONTAINERS=1
+```
+For Intune, deploy the MSI as a Win32 app with that command and the detection rule "file
+`%ProgramData%\Oarbank\status\joined` exists" (the agent writes it once the node has joined). With Ansible:
+`printf '%s' "{{ oarbank_join_code }}" | oarbank-node join --code-stdin --no-input --wait 600` with `no_log: true`
+and `creates: /var/lib/oarbank/status/joined`.
 
 The node enrolls with its own key (it never leaves the node), gets a client certificate, installs its release,
 runs each module's doctor and golden jobs, and then takes work. Host protection starts in `moderate` with no
@@ -152,8 +205,10 @@ whole networks (`sudo defaults write com.apple.network.local-network AllowedEthe
 
 ## Removing
 
-- A node: `/Library/Oarbank/bin/oarbank-uninstall` unloads the service; `--purge` also deletes the node's home (its
-  key, certificate, caches and logs); run it with `sudo` to remove the programs too. Retire the node on the Fleet page.
+- A node: `sudo oarbank-node leave` forgets its coordinator (the node's key, certificate, caches and logs go); retire
+  the node on the Fleet page. To remove the programs too: `sudo /Library/Oarbank/bin/oarbank-uninstall --purge` on
+  macOS (also **Oarbank Node.app**), your package manager on Linux (`apt remove` keeps `/var/lib/oarbank`, `apt purge`
+  deletes it), Installed apps on Windows.
 - The coordinator: `launchctl bootout gui/$(id -u)/dev.codonic.oarbank.oarbankd` (and `.console`), then remove the
   two plists from `~/Library/LaunchAgents`. Its state stays in `~/Library/Application Support/Oarbank/coordinator`
   until you delete it. Then delete `/Applications/Oarbank Coordinator.app`; repeat the service cleanup for each user
@@ -167,20 +222,20 @@ whole networks (`sudo defaults write com.apple.network.local-network AllowedEthe
 ## Linux nodes
 
 Built for x86-64 and arm64; the sandbox needs Linux 6.2 or later (6.12 for every capability: see the SDK's
-spec/sandbox/backends/linux.md), and `systemd`. The published 2.7.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
+spec/sandbox/backends/linux.md), and `systemd`. The published 2.8.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
 
 ```bash
 scripts/package-linux.sh                     # on a Linux machine with nFPM: dist/*.deb, *.rpm and a tarball
-sudo install -d /etc/oarbank && echo 'OB1-…' | sudo tee /etc/oarbank/join-code >/dev/null
-sudo apt install ./oarbank-agent_<v>_amd64.deb        # or: sudo dnf install ./oarbank-agent-<v>.x86_64.rpm
+sudo apt install ./oarbank-agent_<v>_amd64.deb        # or: sudo dnf install ./oarbank-agent-<v>-1.x86_64.rpm
+sudo oarbank-node join
 ```
-The postinstall creates the `oarbank` account, sets up `/var/lib/oarbank/agent`, installs the systemd unit
-`dev.codonic.oarbank.agent.service` (with a delegated cgroup, so jobs get cgroup leaves) and deletes the code file. It
-also enables, for every person's user manager, the session helper `dev.codonic.oarbank.agent.session.service`
-(`/etc/systemd/user`), which tells host protection what the `oarbank` account may not read about that person's
-processes and display; it starts at each person's next login (or at once with `systemctl --user start
-dev.codonic.oarbank.agent.session.service`).
-Without a code: `sudo oarbank-launcher setup --scope system --join-code 'OB1-…'`. Containers use rootless Podman when
+The package creates the `oarbank` account, sets up `/var/lib/oarbank/agent`, installs and starts the systemd unit
+`dev.codonic.oarbank.agent.service` (with a delegated cgroup, so jobs get cgroup leaves), which waits for a code, and
+adds **Oarbank Node** to the desktop's applications. It also enables, for every person's user manager, the session
+helper `dev.codonic.oarbank.agent.session.service` (`/etc/systemd/user`), which tells host protection what the
+`oarbank` account may not read about that person's processes and display; it starts at each person's next login (or
+at once with `systemctl --user start dev.codonic.oarbank.agent.session.service`). The node's status is in
+`/var/lib/oarbank/status/node.json`. Containers use rootless Podman when
 it is installed (the `oarbank` account needs subordinate ids: `sudo usermod --add-subuids 100000-165535
 --add-subgids 100000-165535 oarbank`), else Docker Engine.
 
@@ -198,7 +253,7 @@ Windows 10 1809 or later, x64 or arm64.
 
 ```powershell
 scripts\package-windows.ps1 [-Arch arm64]    # on Windows with Rust, uv and WiX 5: dist\oarbank-agent-<v>-windows-<arch>.msi
-msiexec /i oarbank-agent-<v>-windows-arm64.msi /qn JOINCODEFILE=C:\path\join-code.txt
+msiexec /i oarbank-agent-<v>-windows-arm64.msi          # attended: the join page takes the code
 ```
 The script builds for `-Arch` (`x64` or `arm64`), by default the machine's own architecture, which it asks Windows for
 (`IsWow64Process2`, in `scripts\windows-arch.ps1`): an x64 PowerShell on Windows on Arm still builds the arm64 MSI. The
@@ -215,8 +270,11 @@ protection that session's foreground window, last input and command lines, and l
 which the agent's account may not read), and the agent as the service
 `dev.codonic.oarbank.agent` run by its virtual account, with its home in `C:\ProgramData\Oarbank\agent`. Both services start automatically about two minutes after
 boot (Automatic, Delayed Start), and the service manager restarts either one that crashes or stops with an error.
-`JOINCODE=` or `COORDINATOR=` work instead of a file. Module
-processes run in AppContainers.
+It adds `C:\Program Files\Oarbank` to the system PATH (`oarbank-node`), the **Oarbank Node** tray app and the
+`oarbank://` link handler. Silent installs take `JOINCODEFILE=`, `JOINCODE=`, `COORDINATOR=`, `NAME=` and `NOLAUNCH=1`
+([2. Nodes](#2-nodes)); `JOINCODE` is never written to the installer's log (unless the Windows Installer `Debug` policy
+is 7, which logs every command-line value). The node's status is in `C:\ProgramData\Oarbank\status\node.json`.
+Module processes run in AppContainers.
 
 Containers run in a WSL containers session the agent creates and owns (a VM of its own, [design/windows-containers.md](design/windows-containers.md)):
 they need Windows 10 2004 or later, WSL 2.9.3 or later and the Virtual Machine Platform, on a machine with hardware virtualization (nested

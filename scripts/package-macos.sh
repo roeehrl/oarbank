@@ -10,8 +10,14 @@
 # x86_64-apple-darwin Rust target and Rosetta 2, which runs its interpreter and agent for the build's checks. Installer
 # refuses a package on a Mac of the other architecture.
 #
+# Besides the programs it ships (docs/design/node-enrollment.md): the join window (/Library/Oarbank/share/join, from
+# deploy/node), the menu bar app /Applications/Oarbank Node.app (deploy/macos/node/NodeApp.swift, built here for the
+# package's architecture), and the managed-policy job /Library/LaunchDaemons/dev.codonic.oarbank.agent.policy.plist.
+# The postinstall links /usr/local/bin/oarbank-node to the launcher and loads the policy job.
+#
 # Signing is the owner's: nothing here holds keys.
-#   OARBANK_CODESIGN_IDENTITY   "Developer ID Application: …" for the binaries (default: ad-hoc, for local tests)
+#   OARBANK_CODESIGN_IDENTITY   "Developer ID Application: …" for the binaries and the app (default: ad-hoc, for local
+#                               tests)
 #   OARBANK_INSTALLER_IDENTITY  "Developer ID Installer: …" to sign the pkg (default: unsigned)
 #   OARBANK_NOTARY_PROFILE      a notarytool keychain profile: notarize and staple the signed pkg
 #   OARBANK_TUF_ROOT            the vendor's TUF root.json, compiled into the agent (scripts/tuf_vendor.py)
@@ -39,17 +45,60 @@ mkdir -p "$OUT"
     --config "build.rustflags=['--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo']")
 
 PAYLOAD="$WORK/root/Library/Oarbank/bin"
-mkdir -p "$PAYLOAD" "$WORK/root/Library/Oarbank/etc"
+mkdir -p "$PAYLOAD"
 for b in oarbank-agent oarbank-launcher; do
     install -m 755 "$REPO/rust/target/$TARGET/release/$b" "$PAYLOAD/$b"
 done
 install -m 755 "$REPO/deploy/macos/oarbank-uninstall" "$PAYLOAD/oarbank-uninstall"
+# the join window: stdlib Python the runtime below runs, readable by everyone, written by root alone
+JOIN="$WORK/root/Library/Oarbank/share/join"
+mkdir -p "$JOIN"
+for f in join-window.py join-window.html; do
+    [[ -f "$REPO/deploy/node/$f" ]] || { echo "deploy/node/$f is missing: the package has no join window" >&2; exit 1; }
+    install -m 644 "$REPO/deploy/node/$f" "$JOIN/$f"
+done
+# the managed-policy job; Installer's recommended ownership makes it root:wheel, which launchd requires of a daemon
+mkdir -p "$WORK/root/Library/LaunchDaemons"
+plutil -lint -s "$REPO/deploy/macos/dev.codonic.oarbank.agent.policy.plist"
+install -m 644 "$REPO/deploy/macos/dev.codonic.oarbank.agent.policy.plist" "$WORK/root/Library/LaunchDaemons/"
+# Oarbank Node.app, the menu bar app (the coordinator's app is built the same way: scripts/package-coordinator-macos.sh).
+# /Applications keeps the mode it has on every Mac (Installer gives the folder our mode).
+APP="$WORK/root/Applications/Oarbank Node.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+chmod 775 "$WORK/root/Applications"
+cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.codonic.oarbank.node</string>
+<key>CFBundleName</key><string>Oarbank Node</string>
+<key>CFBundleDisplayName</key><string>Oarbank Node</string>
+<key>CFBundleExecutable</key><string>Oarbank Node</string>
+<key>LSUIElement</key><true/>
+<key>CFBundleIconFile</key><string>oarbank.icns</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
+<key>CFBundleVersion</key><string>$VERSION</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
+<key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>dev.codonic.oarbank.node</string>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+    <key>CFBundleURLSchemes</key><array><string>oarbank</string></array>
+</dict></array>
+<key>NSLocalNetworkUsageDescription</key><string>Oarbank Node checks that this Mac can reach your coordinator before it joins.</string>
+</dict></plist>
+PLIST
+plutil -lint -s "$APP/Contents/Info.plist"
+xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement \
+    "$REPO/deploy/macos/node/NodeApp.swift" -o "$APP/Contents/MacOS/Oarbank Node"
 # the node runtime beside the launcher (CPython 3.12 with the module SDK, and uv; scripts/build-node-runtime.sh)
 "$REPO/scripts/build-node-runtime.sh" "$PAYLOAD/runtime" "$PLATFORM"
-# the payload holds no link out of itself and no path of this machine, every native file in it is for the package's
-# architecture, and the runtime runs from elsewhere
+# the payload holds no link out of itself and no path of this machine, every native file in it (the app's too) is for
+# the package's architecture, and the runtime runs from elsewhere
 uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --build-path "$WORK" --build-path "$(uv python dir)" \
-    --platform "$PLATFORM" --run "$PAYLOAD/runtime=bin/python3" "$WORK/root" "$PAYLOAD/oarbank-agent" "$PAYLOAD/oarbank-launcher"
+    --platform "$PLATFORM" --run "$PAYLOAD/runtime=bin/python3" "$WORK/root" "$PAYLOAD/oarbank-agent" "$PAYLOAD/oarbank-launcher" \
+    "$APP/Contents/MacOS/Oarbank Node"
 
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
 for b in oarbank-agent oarbank-launcher; do
@@ -71,6 +120,16 @@ find "$PAYLOAD/runtime" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib'
     if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
     else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
 done
+# the app, sealed as a bundle under its identifier (hardened runtime with a Developer ID); no extended attribute may be
+# on its files when it is signed (codesign refuses Finder information and resource forks)
+xattr -cr "$APP"
+if [[ "$ID" == "-" ]]; then
+    codesign --force --identifier dev.codonic.oarbank.node --sign - "$APP"
+else
+    codesign --force --options runtime --timestamp --identifier dev.codonic.oarbank.node --sign "$ID" "$APP"
+fi
+codesign --verify --deep --strict "$APP"
+[[ "$(codesign -dv "$APP" 2>&1)" == *"Identifier=dev.codonic.oarbank.node"* ]] || { echo "Oarbank Node.app is not signed as dev.codonic.oarbank.node" >&2; exit 1; }
 grep -aq "oarbank-agent-version:$VERSION" "$PAYLOAD/oarbank-agent" || { echo "the agent does not carry version $VERSION" >&2; exit 1; }
 [[ "$("$PAYLOAD/oarbank-agent" --version)" == "oarbank-agent $VERSION" ]] || { echo "the signed agent does not run" >&2; exit 1; }
 
@@ -81,7 +140,18 @@ xattr -cr "$WORK/root" "$WORK/scripts"
 # truncated, the compressed flag set) while its writer still holds the file, after the complete bill was written and
 # synced; the writer's last header writes are then refused, and it prints "write: Permission denied" once each. Those
 # lines go, and the finished package's bill is checked against the payload below instead.
-pkgbuild --quiet --root "$WORK/root" --scripts "$WORK/scripts" --identifier dev.codonic.oarbank.agent \
+# pkgbuild marks the bundles it finds relocatable: Installer would then update a copy of Oarbank Node.app it finds
+# anywhere on the disk (a download in ~/Downloads) instead of installing /Applications/Oarbank Node.app, which the
+# postinstall opens. The component list it analyses pins every bundle where the payload puts it (newer pkgbuilds leave
+# the key out of the list they write: -replace sets it either way).
+pkgbuild --analyze --root "$WORK/root" "$WORK/components.plist" >/dev/null
+n=0
+while plutil -extract "$n.RootRelativeBundlePath" raw -o /dev/null "$WORK/components.plist" 2>/dev/null; do
+    plutil -replace "$n.BundleIsRelocatable" -bool NO "$WORK/components.plist"
+    n=$((n + 1))
+done
+[[ $n -gt 0 ]] || { echo "pkgbuild found no bundle in the payload (Oarbank Node.app)" >&2; exit 1; }
+pkgbuild --quiet --root "$WORK/root" --component-plist "$WORK/components.plist" --scripts "$WORK/scripts" --identifier dev.codonic.oarbank.agent \
     --version "$VERSION" --install-location / --ownership recommended "$WORK/agent.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
 # a provenance attribute macOS will not let us clear still comes through as ._ entries: rebuild the payload without
 # them (libarchive's cpio honours COPYFILE_DISABLE) and its bill of materials. grep reads the whole listing (not -q):

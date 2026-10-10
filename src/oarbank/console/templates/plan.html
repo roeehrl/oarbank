@@ -6,7 +6,7 @@
 <div class="card plan">
   <div class="kv small">
     <span class="mut">operation</span><span class="mono">{{ plan.op }} ({{ entry.tier }})</span>
-    <span class="mut">target</span><span class="mono">{{ plan.target }}</span>
+    {% if plan.target %}<span class="mut">target</span><span class="mono">{{ plan.target }}</span>{% endif %}
     {% if plan.params %}<span class="mut">change</span><pre>{{ plan.params | tojson(indent=1) }}</pre>{% endif %}
     {% if plan.impact.matches is defined %}<span class="mut">live matches</span><span><table class="small">
       {% for r in plan.impact.matches %}<tr><td class="mono">{{ r.rule }}</td><td class="num">{{ r.processes | length }}</td>
@@ -22,7 +22,7 @@
   <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="plan_id" value="{{ plan.plan_id }}">
     <input type="hidden" name="return_to" value="{{ return_to }}">
-    <input type="hidden" name="target" value="{{ plan.target }}">
+    <input type="hidden" name="target" value="{{ plan.target or '' }}">
     <input type="hidden" name="confirm_name" value="{{ plan.confirm_name }}">
     <input type="hidden" name="idem" value="{{ new_key() }}">
     <label class="small">Reason (required)<textarea name="reason" required minlength="3" rows="2">{{ reason }}</textarea></label>

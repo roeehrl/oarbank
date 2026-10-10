@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Add machine · Oarbank{% endblock %}
+{% block body %}
+<h1>Add machine</h1>
+<p class="small mut">This makes a join code. The next page shows it once, with how to install Oarbank Node and join on
+macOS, Linux and Windows, by hand or through MDM and scripts.</p>
+<div class="card add-machine">
+{% call m.op_form("nodes.join_code", "", "Create join code…", cls="pri", return_to="/", inline=False) %}
+  <label class="field">Name <span class="mut">(optional)</span>
+    <input name="label" maxlength="63" autocomplete="off" placeholder="build-07">
+    <span class="hint">The machine's name in the fleet, whatever its host name. Ignored for many machines (each keeps
+      its own host name); there it only labels the code.</span></label>
+
+  <fieldset class="field">
+    <legend>How many machines?</legend>
+    <label class="opt"><input type="radio" name="count" value="one" checked> One machine</label>
+    <label class="opt"><input type="radio" name="count" value="many"> Many machines (MDM, scripts, images)</label>
+    <label class="field many-only">Up to
+      <input type="number" name="uses" min="2" max="10000" step="1" inputmode="numeric" placeholder="50"> machines
+      <span class="hint">Required for many machines: 2 to 10000. The code stops working once that many have joined.</span></label>
+  </fieldset>
+
+  <label class="field">Valid for
+    <select name="ttl">
+      <option value="3600">1 hour</option>
+      <option value="14400" selected>4 hours</option>
+      <option value="86400">1 day</option>
+      <option value="604800">7 days</option>
+      <option value="2592000" class="many-only">30 days (many machines only)</option>
+    </select>
+    <span class="hint">Machines that joined stay joined after the code expires or is revoked.</span></label>
+
+  <fieldset class="field">
+    <legend>Options</legend>
+    <label class="opt many-only"><input type="checkbox" name="approve" value="1"> Approve automatically
+      <span class="hint">For many machines. Off: each machine waits for your approval on the Fleet page. A single
+        machine's code is approved at once.</span></label>
+    <label class="opt"><input type="checkbox" name="system" value="1"> Run as a system service on macOS
+      <span class="hint">Runs with no one logged in. Linux and Windows always run the system service.</span></label>
+    <label class="opt"><input type="checkbox" name="containers" value="1"> Container jobs
+      <span class="hint">Windows installs the WSL components container jobs need.</span></label>
+  </fieldset>
+{% endcall %}
+</div>
+<p><a href="/">Back to Fleet</a></p>
+{% endblock %}

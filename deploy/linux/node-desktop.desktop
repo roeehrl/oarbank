@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Oarbank Node
+Comment=Join this machine to an Oarbank fleet
+Exec=/usr/lib/oarbank/runtime/bin/python3 -I /usr/lib/oarbank/join/join-window.py --launcher /usr/lib/oarbank/oarbank-launcher --link %u
+TryExec=/usr/lib/oarbank/runtime/bin/python3
+Icon=oarbank-node
+Terminal=false
+Categories=System;Network;
+MimeType=x-scheme-handler/oarbank;
+StartupNotify=false

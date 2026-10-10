@@ -265,23 +265,32 @@ fn join(explicit_home: Option<&Path>, o: &Opts, out: &mut Out) -> i32 {
 fn join_inner(explicit_home: Option<&Path>, o: &Opts, out: &mut Out) -> Result<Value, Fail> {
     let coordinator = o.val("--coordinator");
     let code = if coordinator.is_some() { None } else { Some(read_code(o)?) };
-    // the offline checks and the network checks, before anything is written
-    let detail = run_check(code.as_deref(), coordinator.as_deref(), out)?;
-    let scope = default_scope(o, detail["system"] == true);
+    let decoded = code.as_deref().map(oarbank_core::joincode::decode).transpose()
+        .map_err(|e| fail("E_CODE_FORMAT", e.to_string(), 2))?;
+    let scope = default_scope(o, decoded.as_ref().is_some_and(|c| c.system()));
     if scope == "system" && !setup::privileged() {
         return Err(fail("E_PRIVILEGE", if cfg!(windows) { "Joining needs an administrator: run it from an elevated prompt." }
                                         else { "Joining as a system service needs root: run it with sudo." }, 8));
     }
     let home = setup::scope_home(&scope, explicit_home).map_err(|e| fail("E_LOCAL", e.to_string(), 1))?;
-    let target = detail["url"].as_str().unwrap_or("").to_string();
-    if let Some(current) = joined_to(&home) {
-        if current.trim_end_matches('/') == target.trim_end_matches('/') && !o.has("--force") {
-            return Ok(json!({"message": format!("This machine has already joined {current}."), "coordinator": current, "already": true}));
+    // a node that has joined: the same coordinator again is done (configuration management re-runs), another needs
+    // --force, which leaves only after the new coordinator passed its checks
+    let current = joined_to(&home);
+    if let Some(cur) = &current {
+        let cur = cur.trim_end_matches('/');
+        let same = decoded.as_ref().map(|c| c.urls.iter().any(|u| u.trim_end_matches('/') == cur)).unwrap_or(false)
+            || coordinator.as_deref().is_some_and(|u| u.trim_end_matches('/') == cur);
+        if same && !o.has("--force") {
+            return Ok(json!({"message": format!("This machine has already joined {cur}."), "coordinator": cur, "already": true}));
         }
         if !o.has("--force") {
-            return Err(fail("E_ALREADY_JOINED", format!("This machine belongs to {current}. Leave that fleet first (oarbank-node leave), or join with --force."), 7));
+            return Err(fail("E_ALREADY_JOINED", format!("This machine belongs to {cur}. Leave that fleet first (oarbank-node leave), or join with --force."), 7));
         }
-        leave_scope(explicit_home, &scope).map_err(|e| fail("E_LOCAL", format!("leaving {current}: {e:#}"), 1))?;
+    }
+    // the offline checks and the network checks, before anything is written
+    let detail = run_check(code.as_deref(), coordinator.as_deref(), out)?;
+    if let Some(cur) = &current {
+        leave_scope(explicit_home, &scope).map_err(|e| fail("E_LOCAL", format!("leaving {cur}: {e:#}"), 1))?;
     }
     // device code: the person compares the fingerprint with the console before anything is sent
     if code.is_none() && std::io::stdin().is_terminal() && !o.has("--no-input") && !o.has("--json") {

@@ -1,19 +1,36 @@
 #!/bin/sh
-# Remove the Oarbank agent from this Mac: its service, then (with --purge) its home with the node's keys and caches,
-# then the programs. Run with sudo for a system install.
+# Remove the Oarbank node from this Mac: the menu bar app and the managed-policy job (so no profile joins the node again
+# halfway through), the node's service, then (with --purge) its home with the node's keys and caches, then the
+# programs, `oarbank-node` and the status document. Run with sudo for a system install, and for everything the pkg
+# put outside the account (the app, the policy job, the programs).
 set -eu
 BIN=/Library/Oarbank/bin
+POLICY=dev.codonic.oarbank.agent.policy
+APP="/Applications/Oarbank Node.app"
+root=
+[ "$(/usr/bin/id -u)" = 0 ] && root=yes
+# the app quits on SIGTERM; its own instance only, by its executable's name (every account's as root)
+/usr/bin/pkill -x "Oarbank Node" 2>/dev/null || true
+if [ -n "$root" ]; then
+    /bin/launchctl bootout "system/$POLICY" 2>/dev/null || true
+    /bin/rm -f "/Library/LaunchDaemons/$POLICY.plist"
+fi
 scope=personal
 [ -f "/Library/LaunchDaemons/dev.codonic.oarbank.agent.plist" ] && scope=system
-if [ "$scope" = personal ] && [ "$(/usr/bin/id -u)" = 0 ]; then
+if [ "$scope" = personal ] && [ -n "$root" ]; then
     user=$(/usr/bin/stat -f%Su /dev/console)
     /bin/launchctl asuser "$(/usr/bin/id -u "$user")" /usr/bin/sudo -u "$user" "$BIN/oarbank-launcher" remove "$@"
 else
     "$BIN/oarbank-launcher" remove --scope "$scope" "$@"
 fi
-if [ "$(/usr/bin/id -u)" = 0 ]; then
+if [ -n "$root" ]; then
+    /bin/rm -rf "$APP"
+    # oarbank-node only while it is ours: a name someone else's tool took stays
+    [ "$(/usr/bin/readlink /usr/local/bin/oarbank-node 2>/dev/null)" = "$BIN/oarbank-launcher" ] && /bin/rm -f /usr/local/bin/oarbank-node
+    /bin/rm -rf "/Library/Application Support/Oarbank/status"
+    /bin/rm -f /var/log/oarbank-policy.log
     /bin/rm -rf /Library/Oarbank
     /usr/sbin/pkgutil --forget dev.codonic.oarbank.agent >/dev/null 2>&1 || true
 else
-    echo "The programs in /Library/Oarbank stay; remove them with: sudo $0"
+    echo "Oarbank Node.app, the managed-policy job and the programs in /Library/Oarbank stay; remove them with: sudo $0"
 fi

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Group Policy for Oarbank nodes (docs/design/node-enrollment.md, "Managed policy keys"). Copy oarbank.admx and
+  en-US\oarbank.adml into %SystemRoot%\PolicyDefinitions (or the domain's Central Store); the settings appear under
+  Computer Configuration, Administrative Templates, Codonic, Oarbank, Node. They write
+  HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent, which the agent reads every 5 seconds while it has not joined
+  (rust/crates/oarbank-agent/src/policy.rs); Intune can set the same values with this template imported.
+-->
+<policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <policyNamespaces>
+    <target prefix="oarbank" namespace="Codonic.Policies.Oarbank" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+  <supportedOn>
+    <definitions>
+      <definition name="SUPPORTED_Oarbank_2_8" displayName="$(string.SUPPORTED_Oarbank_2_8)" />
+    </definitions>
+  </supportedOn>
+  <categories>
+    <category name="Codonic" displayName="$(string.Codonic)" />
+    <category name="Oarbank" displayName="$(string.Oarbank)">
+      <parentCategory ref="Codonic" />
+    </category>
+    <category name="Node" displayName="$(string.Node)" explainText="$(string.Node_Help)">
+      <parentCategory ref="Oarbank" />
+    </category>
+  </categories>
+  <policies>
+    <policy name="JoinCode" class="Machine" displayName="$(string.JoinCode)" explainText="$(string.JoinCode_Help)"
+            presentation="$(presentation.JoinCode)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <elements>
+        <text id="JoinCode" valueName="JoinCode" maxLength="1024" required="true" />
+      </elements>
+    </policy>
+    <policy name="Coordinator" class="Machine" displayName="$(string.Coordinator)" explainText="$(string.Coordinator_Help)"
+            presentation="$(presentation.Coordinator)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <elements>
+        <text id="Coordinator" valueName="Coordinator" maxLength="255" required="true" />
+      </elements>
+    </policy>
+    <policy name="Name" class="Machine" displayName="$(string.Name)" explainText="$(string.Name_Help)"
+            presentation="$(presentation.Name)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <elements>
+        <text id="Name" valueName="Name" maxLength="128" required="true" />
+      </elements>
+    </policy>
+    <policy name="Containers" class="Machine" displayName="$(string.Containers)" explainText="$(string.Containers_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent" valueName="Containers">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="AllowUserJoin" class="Machine" displayName="$(string.AllowUserJoin)" explainText="$(string.AllowUserJoin_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent" valueName="AllowUserJoin">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="ManagedByOrganizationName" class="Machine" displayName="$(string.ManagedByOrganizationName)"
+            explainText="$(string.ManagedByOrganizationName_Help)" presentation="$(presentation.ManagedByOrganizationName)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <elements>
+        <text id="ManagedByOrganizationName" valueName="ManagedByOrganizationName" maxLength="128" required="true" />
+      </elements>
+    </policy>
+  </policies>
+</policyDefinitions>

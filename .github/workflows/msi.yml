@@ -1,6 +1,7 @@
 # The Windows agent package installed, upgraded and removed for real on a throwaway runner (scripts/ci-windows-msi.ps1):
-# both services with their accounts and start types, the elevated helper's loopback openings across a major upgrade,
-# and an uninstall that leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
+# both services with their accounts and start types, the waiting (unjoined) node and its status document, oarbank-node
+# on PATH, the oarbank:// handler and the tray app's self-test, the elevated helper's loopback openings across a major
+# upgrade, and an uninstall that leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
 name: msi
 on:
   workflow_dispatch:
@@ -14,12 +15,16 @@ on:
     tags: ["v*"]
     paths: &paths
       - deploy/windows/**
+      - deploy/node/**
+      - deploy/icons/oarbank.ico
       - scripts/*windows*
       - scripts/build-node-runtime*
       - scripts/bundle-python*
       - scripts/check-*
       - scripts/fetch-uv.py
       - rust/crates/oarbank-launcher/**
+      - rust/crates/oarbank-agent/**
+      - rust/crates/oarbank-core/**
       - rust/.cargo/config.toml
       - .github/workflows/msi.yml
   pull_request:
@@ -50,6 +55,7 @@ jobs:
       - run: |
           dotnet tool install --global wix --version 5.*
           wix extension add --global WixToolset.Util.wixext/5.0.2
+          wix extension add --global WixToolset.UI.wixext/5.0.2
       - name: two builds of the same tree, the second a patch version later (a major upgrade)
         run: |
           scripts/package-windows.ps1 -Version 2.5.900 -Arch x64

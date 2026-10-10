@@ -69,7 +69,7 @@ Fleet, "Approve a machine by its code"; that approves the pending enrollment wit
 
 ## The node's states and status document
 
-The agent writes `status/node.json` beside its home (`<data root>/status/node.json`; readable by everyone, no secrets):
+The agent writes `status/node.json` beside its home (and a `joined` marker file there while it holds a certificate) (`<data root>/status/node.json`; readable by everyone, no secrets):
 
 ```json
 {"format": 1, "state": "unjoined|checking|joining|pending|joined|connected|error",
@@ -113,7 +113,7 @@ oarbank-node join [--code-stdin | --code-file PATH | --coordinator URL] [--scope
                   [--progress-file PATH]
 oarbank-node status [--json] [--follow]
 oarbank-node check  [--code-stdin | --code-file PATH] [--json]      the checks, nothing sent or written
-oarbank-node leave  [--purge]
+oarbank-node leave
 oarbank-node doctor [--json]
 ```
 
@@ -145,13 +145,12 @@ staged in `state/join-code` (0600, the service account's), then follows the stat
 |---|---|---|
 | `JoinCode` | string | A code (usually multi-use, pending); honoured only while the node has not joined |
 | `Coordinator` | string | Join by URL instead (device code/pending approval) |
-| `Scope` | `system`\|`personal` | macOS only; default `system` when managed |
 | `Containers` | boolean (Windows DWORD) | Install container prerequisites (Windows) |
 | `Name` | string | The node's name when the code has no label |
 | `AllowUserJoin` | boolean | `false` hides Join and Leave in the app |
 | `ManagedByOrganizationName` | string | Shown in the app and status |
 
-Values are never logged. On macOS a root launchd job (`dev.codonic.oarbank.agent.policy`, `WatchPaths` on the
+A managed node is always the system service. Values are never logged. On macOS a root launchd job (`dev.codonic.oarbank.agent.policy`, `WatchPaths` on the
 managed-preferences file) applies policy, so a profile delivered before or after the pkg both work. On Linux and
 Windows the waiting service reads policy every 5 s.
 
@@ -164,9 +163,10 @@ waiting service, stages the code, and exits 0.
 ### Windows MSI properties
 
 `JOINCODE` (Secure, Hidden), `JOINCODEFILE`, `COORDINATOR`, `CONTAINERS`, `NAME`, `NOLAUNCH`. The join page's field is a
-password control (never logged). An installed node ignores them on repair and upgrade. Intune: a Win32 app with
-`msiexec /i oarbank-agent-<v>-windows-x64.msi /qn JOINCODE=…` and the detection rule
-`HKLM\SOFTWARE\Codonic\Oarbank\Agent\Joined = 1` (written once the node has joined).
+password control (never logged). A code that is not valid (a wrong paste) installs the node waiting, with a warning
+in the installer's log, rather than failing the install. An installed node ignores them on repair and upgrade. Intune: a Win32 app with
+`msiexec /i oarbank-agent-<v>-windows-x64.msi /qn JOINCODE=…` and the file detection rule
+`%ProgramData%\Oarbank\status\joined` (the agent writes it once the node has joined, and removes it when it leaves).
 
 ## Join window
 
@@ -174,7 +174,7 @@ One page served by the bundled runtime on 127.0.0.1 (the coordinator setup wizar
 Origin, a capability in the URL fragment, strict CSP), opened in the default browser by the menu bar/tray app, the
 desktop entry, or a deep link. States: Join (code field, Paste, offline summary, options) → Confirm (only for codes
 that arrived by link or file) → checks (rows with plain-language errors and codes, Retry, Copy diagnostics) →
-administrator approval (the OS's own prompt) → Waiting for approval (user code, key fingerprint) → Ready (Open console).
+administrator approval (the OS's own prompt) → Waiting for approval (user code, key fingerprint) → Ready.
 When the node has joined, the page shows its status and Leave (unless policy forbids).
 
 ## Console
@@ -184,3 +184,39 @@ approve automatically). The result shows the code once with Copy, an **Open in O
 (download, attended steps, command line with the code filled in), an MDM tab (`.mobileconfig`, Intune command,
 `policy.json`, Ansible), and live status of the code's enrollments (waiting → pending with Approve/Decline → joined).
 Outstanding codes are listed with uses left and Revoke. **Approve a machine by its code** takes a device code.
+
+### Join window: files and launch contract
+
+Source: `deploy/node/join-window.py` and `deploy/node/join-window.html` (standard library only; run by the node
+package's bundled runtime). Installed at:
+
+| OS | Join window | Runtime Python | Launcher (`oarbank-node`) |
+|---|---|---|---|
+| macOS | `/Library/Oarbank/share/join/` | `/Library/Oarbank/bin/runtime/bin/python3` | `/Library/Oarbank/bin/oarbank-launcher` (symlink `/usr/local/bin/oarbank-node`) |
+| Linux | `/usr/lib/oarbank/join/` | `/usr/lib/oarbank/runtime/bin/python3` | `/usr/lib/oarbank/oarbank-launcher` (symlink `/usr/bin/oarbank-node`) |
+| Windows | `[INSTALLFOLDER]join\` | `[INSTALLFOLDER]runtime\python.exe` (`pythonw.exe` from the tray) | `[INSTALLFOLDER]oarbank-node.exe` |
+
+`python -I join-window.py [--launcher PATH] [--link URL | --code-file PATH] [--no-browser]` serves the page on
+127.0.0.1 (a random port), prints `Open this private link on this computer: http://127.0.0.1:<port>/#<capability>` on
+stdout and opens it in the default browser unless `--no-browser`. A second launch while one is open reopens the open
+one (a private `join.active.json` in the user's temporary directory, as the coordinator setup wizard does).
+`--link oarbank://join?code=…` and `--code-file` prefill the code and show the confirmation screen first. The page
+checks the code unprivileged (`oarbank-node check --code-stdin --json`), then runs `oarbank-node join --code-file F
+--no-input --no-wait --progress-file P` with the OS's own elevation (macOS: personal scope unelevated, system scope via
+the administrator prompt; Linux: `pkexec`; Windows: UAC) and follows the status document.
+
+A bare or empty `--link` means no link (the desktop entry's `--link %u` opened from the menu); a second launch with a
+link hands its code to the open window. An explicit `--launcher` must exist; without one the window looks at
+`OARBANK_NODE_LAUNCHER`, the package layout beside the script, then `oarbank-node` on PATH. The code file and the
+progress file live in a 0700 directory of the user's (`oarbank-join-<uid>` in the temporary directory, with the lock and
+`join.active.json`); the code file goes as soon as the launcher exits, and the window stays open until it has. Without
+`pkexec` Linux asks for `sudo oarbank-node join` in a terminal. The page's API (all `POST`, JSON, with the capability
+in `X-Oarbank-Join`): `/state`, `/check {code}`, `/join {code, scope, containers, name}`, `/progress {offset}`, `/leave`,
+`/prefill {code, source}`, `/ping`, `/close`. Policy reaches the page only as `AllowUserJoin` and
+`ManagedByOrganizationName`, and `AllowUserJoin: false` refuses `/join` and `/leave`.
+
+Native front ends: macOS **Oarbank Node.app** (`/Applications`, menu bar; registers `oarbank://`), Windows **Oarbank
+Node** tray app (`[INSTALLFOLDER]Oarbank Node.exe`, Start menu, registers `oarbank://`), Linux desktop entry
+`dev.codonic.oarbank.node.desktop` (registers `x-scheme-handler/oarbank`). Each shows the status document (state,
+coordinator, errors), offers **Join this machine…** while not joined (hidden when policy `AllowUserJoin` is false) and
+**Status…** once joining started, and runs the join window for both (a node does not know its console's address).

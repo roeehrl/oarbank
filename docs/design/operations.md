@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-87 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+89 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -17,7 +17,9 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
 | `nodes.admit` — Approve an enrollment request (the node gets its client certificate) | T2 | required | yes | admin | natural | nodes.retire | `POST /api/v1/ops/{op}` (op=nodes.admit)<br>`POST /do/{op}` (op=nodes.admit) | oarbank node approve <eid> |
-| `nodes.join_code` — A one-time join code: a machine that enrolls with it is approved at once (expires, single use) | T2 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.join_code)<br>`POST /do/{op}` (op=nodes.join_code) | oarbank join-code [--label NAME] |
+| `nodes.join_code` — A join code for new machines: single use and approved at once by default; multi-use codes cap their uses and leave machines pending unless set to approve automatically (expires) | T2 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.join_code)<br>`POST /do/{op}` (op=nodes.join_code) | oarbank join-code [--label NAME] [--uses N] [--ttl S] |
+| `nodes.revoke_join_code` — Revoke a join code (machines that already joined with it stay) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.revoke_join_code)<br>`POST /do/{op}` (op=nodes.revoke_join_code) | oarbank join-code revoke <id> |
+| `nodes.admit_code` — Approve the waiting machine that shows this code (a node joined by the coordinator's address) | T2 | required | yes | admin | natural | nodes.retire | `POST /api/v1/ops/{op}` (op=nodes.admit_code)<br>`POST /do/{op}` (op=nodes.admit_code) | oarbank node approve-code <CODE> |
 | `nodes.reject_enrollment` — Reject an enrollment request | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.reject_enrollment)<br>`POST /do/{op}` (op=nodes.reject_enrollment) | oarbank node reject <eid> |
 | `nodes.pause` — Stop leasing to a node; running attempts finish | T0 | optional | – | operator | declarative | nodes.resume | `POST /api/v1/ops/{op}` (op=nodes.pause)<br>`POST /do/{op}` (op=nodes.pause) | oarbank node state <nid> paused |
 | `nodes.resume` — Resume leasing to a node | T0 | optional | – | operator | declarative | nodes.pause | `POST /api/v1/ops/{op}` (op=nodes.resume)<br>`POST /do/{op}` (op=nodes.resume) | oarbank node state <nid> active |

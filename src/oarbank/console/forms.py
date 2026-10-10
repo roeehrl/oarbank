@@ -68,7 +68,41 @@ def generic(form) -> dict:
     return out
 
 
+JOIN_TTLS = {3600, 4 * 3600, 86400, 7 * 86400, 30 * 86400}     # the Add machine form's lifetimes, in seconds
+MANY_MIN, MANY_MAX, ONE_MAX_TTL = 2, 10000, 7 * 86400
+
+
+def join_code(form) -> dict:
+    """The Add machine form (node-enrollment.md, "Code types"): one machine is a single-use code approved at once; many
+    machines need a use count (2-10000), may last up to 30 days, and wait for approval unless "approve automatically" is
+    ticked. The coordinator checks the same bounds; checking here names the form's own fields."""
+    many = form.get("count") == "many"
+    try:
+        ttl = int(form.get("ttl") or 4 * 3600)
+    except ValueError:
+        raise ValueError("choose how long the code stays valid")
+    if ttl not in JOIN_TTLS:
+        raise ValueError("choose how long the code stays valid")
+    if many:
+        try:
+            uses = int((form.get("uses") or "").strip())
+        except ValueError:
+            raise ValueError(f"how many machines: a number from {MANY_MIN} to {MANY_MAX}")
+        if not MANY_MIN <= uses <= MANY_MAX:
+            raise ValueError(f"how many machines: a number from {MANY_MIN} to {MANY_MAX}")
+    else:
+        uses = 1
+        if ttl > ONE_MAX_TTL:
+            raise ValueError("a code for one machine lasts at most 7 days (30 days is for many machines)")
+    return {"label": (form.get("label") or "").strip(), "ttl_s": ttl, "uses": uses,
+            "approve": bool(form.get("approve")) if many else True,
+            "system": bool(form.get("system")), "containers": bool(form.get("containers"))}
+
+
 MAPPERS = {
+    "nodes.join_code": lambda f, ctx: join_code(f),
+    # a device code stays a string (WDJB-MJHT); the coordinator folds case and dashes
+    "nodes.admit_code": lambda f, ctx: {"user_code": (f.get("user_code") or "").strip()},
     "nodes.set_caps": lambda f, ctx: limits(f),
     "nodes.set_policy": lambda f, ctx: policy(f),
     "settings.notifications.update": lambda f, ctx: {"url": f.get("ntfy_url"), "token": f.get("ntfy_token"),

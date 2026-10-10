@@ -42,13 +42,16 @@ compatibility).
 The agent home is `<data root>/agent` (docs/design/architecture.md, "Data roots"); its client key and certificate and
 the pinned CA sit beside the config.
 ```json
-{"coordinator": "https://100.64.0.10:7443", "enrollment_id": null, "node_id": "n_…", "heartbeat_s": 10,
+{"coordinator": "https://100.64.0.10:7443", "enrollment_id": null, "node_id": "n_…", "heartbeat_s": 10, "name": null,
  "manage_services": true, "release_seq": 0, "agent_seq": 0, "release_pubkey": null,
  "coordinator_trust": {"cik": "<base64>", "fleet_id": "fleet_…", "max_epoch": 1, "ca_spki_sha256": "…",
                        "ca_next_spki_sha256": null, "retired": [], "fallback": null, "pending_move": null,
                        "owner_keys": [], "owner_version": 0, "owner_rescue": []}}
 ```
 - `manage_services: false` stops the agent from ever starting or stopping module services.
+- While joining, `join_secret` holds a join code's secret until the coordinator answers the enrollment request, and
+  `user_code` the device code of a node joined by address; both go once used. The node's status for people and
+  installers is the separate, readable status document (design/node-enrollment.md).
 - `release_pubkey` and `owner_keys` are pinned on first sight in signing mode (docs/release-signing.md);
   `release_seq` and `agent_seq` are the highest signed seq installed (anti-rollback).
 - `protection.json` beside the agent home is the owner's local protection file. The agent unions it with the central
@@ -58,11 +61,17 @@ the pinned CA sit beside the config.
 
 `POST /v1/agent/enroll` (no client certificate)
 ```json
-{"hostname": "mini-a", "facts": { ...Facts... }, "csr": "-----BEGIN CERTIFICATE REQUEST-----…", "join": null}
+{"hostname": "mini-a", "facts": { ...Facts... }, "csr": "-----BEGIN CERTIFICATE REQUEST-----…",
+ "join": "<code id hex>.<secret hex>", "name": "build-07", "user_code": null}
 ```
-→ `{"enrollment_id": "enr_…", "status": "pending"}`. A request without a CSR is refused (`csr_required`). With a
-valid join code (`join`), the node is approved at once (`"status": "approved"`); a refused code leaves it pending
-(`"join": "refused"`).
+→ `{"enrollment_id": "enr_…", "status": "pending"}`. A request without a CSR is refused (`csr_required`). `join` is a
+join code's id and secret (design/node-enrollment.md; the agent sends it only over a connection verified against the
+code's CA pin, after the identity proof matched the code's key). A single-use code, or one set to approve
+automatically, approves the node at once (`"status": "approved", "join": "approved"`); a multi-use code leaves it
+pending (`"join": "pending_approval"`); a code the coordinator refuses ends the request (`"status": "rejected",
+"join": "refused", "join_error": "unknown|expired|used|revoked"`). `name` is the name the node asks for (a single-use
+code's label wins). Without a code, `user_code` is the 8-letter device code the node shows (RFC 8628 alphabet,
+`XXXX-XXXX`); the owner approves by it (`nodes.admit_code`).
 
 `GET /v1/agent/enroll/{enrollment_id}` → `{"status": "pending"}`, or exactly once after approval
 `{"status": "approved", "node_id": "n_…", "cert_pem": "…", "ca_pem": "…", "cert_not_after": 1792592000.0}`; later

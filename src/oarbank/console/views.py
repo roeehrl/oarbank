@@ -144,9 +144,44 @@ def fleet_data(r, now: float | None = None) -> dict:
     known = {n["ts_node_id"] for n in nodes if n["ts_node_id"]}
     discovered = [d for d in (r.get_setting("discovered", []) or []) if d["ts_node_id"] not in known]
     events = r.q("SELECT * FROM events ORDER BY event_id DESC LIMIT 25")
+    from ..coordinator import joincodes
+    codes = [c for c in joincodes.listing(r) if c["state"] == "active"]
     return {"nodes": nodes, "enrollments": enr, "campaigns": camps, "alerts": alerts, "alerts_pending": pending, "discovered": discovered,
             "events": events, "now": now, "fleet_state": r.get_setting("fleet_state", "active"),
-            "modules_disabled": r.get_setting("modules_disabled", []) or []}
+            "modules_disabled": r.get_setting("modules_disabled", []) or [], "join_codes": codes,
+            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None))}
+
+
+def ca_fingerprint(home) -> str:
+    """The first 16 hex digits of the SHA-256 of the coordinator's TLS CA public key: what `oarbank-node join
+    --coordinator` and the join window print, so the owner can see a machine reached this coordinator and not something
+    in between before approving it by its code (node-enrollment.md, "Device code"). Empty when there is no CA yet."""
+    if home is None:
+        return ""
+    from ..coordinator import tlsca
+    try:
+        return (tlsca.pins(home).get("ca_spki_sha256") or "")[:16]
+    except (OSError, ValueError):
+        return ""
+
+
+def join_code_status(r, code_id: str, now: float | None = None) -> dict:
+    """One join code as the Add machine result and its status page follow it: the code's record and state, the
+    machines that enrolled with it (pending, approved, joined: with their node's lifecycle) and the attempts the
+    coordinator refused (unknown, expired, used up or revoked: core.enroll records them as join_code_refused events
+    with the address they came from). Never the code itself: the coordinator has only its secret's hash."""
+    from ..coordinator import joincodes
+    now = now or time.time()
+    hit = joincodes.listing(r, code_id=code_id)
+    if not hit:
+        return {"jc": None, "refused": [], "now": now}
+    jc = hit[0]
+    for e in jc["enrollments"]:
+        e["online"] = bool(e.get("last_heartbeat_at") and now - e["last_heartbeat_at"] < OFFLINE_AFTER)
+    refused = r.q("SELECT ts, actor, reason FROM events WHERE kind='join_code_refused' AND ts>=? "
+                  "AND json_extract(payload_json, '$.join_code_id')=? ORDER BY event_id DESC LIMIT 20",
+                  (jc["created_at"] or 0, code_id))
+    return {"jc": jc, "refused": refused, "now": now}
 
 
 def node_page(r, nid: str, now: float, manifest_for) -> dict | None:

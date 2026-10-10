@@ -187,8 +187,11 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
   30 days and is renewed in-band. The coordinator stores only certificate fingerprints, so a database leak gives nobody
   a credential; retiring a node clears them. Host names are never checked: the pinned CA is the authentication, so
   LAN addresses, `.local` names and changing addresses all work.
-- **Join codes** (`oarbank join-code`) carry the coordinator's addresses, the CA pin and a one-time secret; a node
-  enrolling with one is approved at once.
+- **Join codes** (`oarbank join-code`; [node-enrollment.md](node-enrollment.md)) carry the coordinator's addresses,
+  its identity key and CA pins, their expiry and a secret; a node checks all of it before it sends the secret. A
+  single-use code approves its node at once; a multi-use code (MDM, images) has a use cap and leaves its machines
+  waiting for the owner unless it was made to approve automatically. A node joined by address shows a device code the
+  owner approves it by (`nodes.admit_code`).
 - **People.** Nothing is admin for being local, and identity headers are never trusted. The owner's admin token
   (`<home>/admin.token`, 0600) serves the CLI on the coordinator's own account; console accounts sign in with a
   password plus TOTP, a passkey (WebAuthn) or a one-time link (`oarbank console login`); sessions are HttpOnly and
@@ -269,13 +272,15 @@ is a named pipe only the agent's account and the module's AppContainer may open.
 ## Packaging and CI
 
 - **One declarative install plan** (`deploy/install-plan.json`: scopes, home, directories with modes, the join code,
-  purge), rendered by `oarbank-launcher setup|remove`. The join code goes to an owner-only file the agent consumes
-  and deletes, never into a service definition.
+  purge), rendered by `oarbank-launcher setup|remove`. Packages install the node unjoined; `oarbank-node join` (the
+  launcher under a second name) checks a code and stages it in an owner-only file the waiting service consumes and
+  deletes, never in a service definition or on a command line. The agent reports joining and its session in a status
+  document every front end reads ([node-enrollment.md](node-enrollment.md)).
 - **Packages:** a macOS pkg per architecture (`scripts/package-macos.sh`: `-macos-arm64.pkg` and `-macos-x86_64.pkg`,
   Developer ID with hardened runtime or ad hoc, a postinstall that runs the install plan;
   `deploy/macos/oarbank-uninstall`), deb, rpm and a tarball through
   nFPM (`scripts/package-linux.sh`, `deploy/linux`), and a WiX MSI (`scripts/package-windows.ps1`,
-  `deploy/windows/oarbank-agent.wxs`; `JOINCODEFILE`, `JOINCODE` or `COORDINATOR`). Coordinator builds from
+  `deploy/windows/oarbank-agent.wxs`; a join page, or `JOINCODEFILE`, `JOINCODE`, `COORDINATOR` silently). Coordinator builds from
   `scripts/build-coordinator.sh` / `.ps1` are wrapped in software-only native `.pkg`, `.deb`/`.rpm`, and `.msi`
   installers by `scripts/package-coordinator-*`. Their application launcher opens the local browser setup wizard;
   submitting configures per-user LaunchAgents/systemd services or Windows services under virtual accounts, then

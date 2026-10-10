@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Join a fleet · Oarbank Node</title>
+<style nonce="__NONCE__">
+:root{--bg:#f4f6f8;--panel:#fff;--text:#182938;--muted:#46586a;--line:#c5ced6;--field:#fff;--accent:#1656a1;--accent-text:#fff;
+--ok:#1d7a3e;--bad:#a72020;--warn-bg:#fff6e0;--warn-line:#d9a520;--soft:#eff3f8;--focus:#1656a1}
+@media (prefers-color-scheme:dark){:root{--bg:#11171d;--panel:#1b232b;--text:#e6ecf1;--muted:#a6b4c0;--line:#3a4753;--field:#141b21;
+--accent:#6ea8ef;--accent-text:#0b1520;--ok:#5fcf86;--bad:#ff8a80;--warn-bg:#33290f;--warn-line:#b08a2a;--soft:#232d36;--focus:#8dbcf5}}
+*{box-sizing:border-box}
+body{font:17px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);margin:0;padding:24px 16px}
+main{max-width:600px;margin:3vh auto;background:var(--panel);padding:28px 32px;border-radius:16px}
+h1{margin:0 0 4px;font-size:15px;font-weight:600;color:var(--muted);letter-spacing:.02em}
+h2{margin:0 0 12px;font-size:24px;line-height:1.25}h2:focus{outline:none}
+p{margin:10px 0}
+label{display:block;margin:18px 0 6px;font-weight:600}
+textarea,input[type=text]{width:100%;padding:10px 12px;font:15px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text);background:var(--field);border:1px solid var(--line);border-radius:6px}
+input[type=text]{font-family:inherit;font-size:17px}
+textarea{resize:vertical;min-height:96px;overflow-wrap:anywhere}
+textarea:focus,input:focus,button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+fieldset{border:0;padding:0;margin:18px 0 0}legend{font-weight:600;padding:0;margin-bottom:6px}
+.choice{display:flex;gap:10px;align-items:flex-start;font-weight:400;margin:8px 0}
+.choice input{margin-top:5px;flex:none;width:18px;height:18px}
+.choice small,.help{display:block;color:var(--muted);font-size:15px;font-weight:400}
+.optional{color:var(--muted);font-weight:400}
+button{display:inline-block;padding:11px 20px;background:var(--accent);color:var(--accent-text);border:1px solid var(--accent);border-radius:6px;font:inherit;cursor:pointer}
+button.secondary{background:transparent;color:var(--accent)}
+button.danger{background:transparent;color:var(--bad);border-color:var(--bad)}
+button.danger.strong{background:var(--bad);color:var(--panel)}
+.small{padding:6px 14px;font-size:15px;margin-top:8px}
+.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}
+.summary{min-height:1.45em;color:var(--muted);margin:8px 0 0}.summary.good{color:var(--ok)}.summary.bad{color:var(--bad)}
+.problem{color:var(--bad)}.problem:empty{display:none}
+.warning{background:var(--warn-bg);border-left:4px solid var(--warn-line);padding:10px 14px;border-radius:4px}
+.notice{background:var(--soft);padding:8px 12px;border-radius:6px;color:var(--muted)}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:16px 0}dl>div{display:contents}
+dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
+.mono,code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px}
+.rows{list-style:none;padding:0;margin:16px 0}
+.rows li{display:grid;grid-template-columns:24px 1fr;gap:4px 10px;padding:8px 0;border-top:1px solid var(--line)}
+.rows li:first-child{border-top:0}
+.icon{font-weight:700;text-align:center}.ok .icon{color:var(--ok)}.fail .icon{color:var(--bad)}
+.rows .what{font-weight:600}.rows .detail{grid-column:2;color:var(--muted);font-size:15px;overflow-wrap:anywhere}
+.failure{border-top:1px solid var(--line);padding-top:12px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+#diag-text{min-height:160px;margin-top:8px}
+[hidden]{display:none!important}
+@media (max-width:520px){main{padding:20px 16px}dl{grid-template-columns:1fr}dd{margin-bottom:6px}}
+</style></head><body><main>
+<h1>Oarbank Node</h1>
+<p id="notice" class="notice" role="status" hidden></p>
+<p id="error" class="problem" role="alert"></p>
+
+<section id="loading"><p id="loading-text" role="status">Loading…</p></section>
+
+<section id="join-screen" hidden aria-labelledby="join-screen-title">
+<h2 id="join-screen-title" tabindex="-1">Join this machine to your fleet</h2>
+<p>Paste the join code from your Oarbank console. You find it under Fleet, Add machine.</p>
+<p id="status-error" class="problem"></p>
+<form id="join-form" novalidate>
+<label for="code">Join code</label>
+<textarea id="code" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="summary code-error"></textarea>
+<button type="button" id="paste" class="secondary small">Paste</button>
+<p id="summary" class="summary" aria-live="polite"></p>
+<p id="code-error" class="problem" role="alert"></p>
+<fieldset id="scope-row" hidden><legend>Run as</legend>
+<label class="choice" for="scope-system"><input type="radio" name="scope" id="scope-system" value="system" checked><span>System service<small>Always on, even when no one is logged in.</small></span></label>
+<label class="choice" for="scope-personal"><input type="radio" name="scope" id="scope-personal" value="personal"><span>Only while I'm logged in<small>No administrator needed.</small></span></label>
+</fieldset>
+<div id="containers-row" hidden><label class="choice" for="containers"><input type="checkbox" id="containers"><span>Run container jobs<small>May need a restart.</small></span></label></div>
+<label for="name">Name <span class="optional">(optional)</span></label>
+<input type="text" id="name" maxlength="63" autocomplete="off" spellcheck="false" aria-describedby="name-help name-error">
+<small id="name-help" class="help">Leave it empty to use the name from the console, or this computer's name.</small>
+<p id="name-error" class="problem" role="alert"></p>
+<div class="actions"><button type="submit" id="join">Join</button><button type="button" id="later" class="secondary">Later</button></div>
+</form>
+</section>
+
+<section id="managed-screen" hidden aria-labelledby="managed-screen-title">
+<h2 id="managed-screen-title" tabindex="-1">Your organization manages this machine</h2>
+<p>It joins a fleet the way your organization set up. Ask your IT team if it should already have joined.</p>
+<div class="actions"><button type="button" id="managed-close" class="secondary">Close</button></div>
+</section>
+
+<section id="confirm-screen" hidden aria-labelledby="confirm-screen-title">
+<h2 id="confirm-screen-title" tabindex="-1">Check this code first</h2>
+<p class="warning">Only continue if this code came from your own Oarbank console. Joining gives the coordinator below control of the jobs this machine runs.</p>
+<dl><dt>Coordinator</dt><dd id="confirm-host"></dd><dt>Fingerprint</dt><dd id="confirm-fp" class="mono"></dd>
+<dt>Expires</dt><dd id="confirm-expiry"></dd><dt>Approval</dt><dd id="confirm-approval"></dd></dl>
+<p>The console shows the same fingerprint next to the code.</p>
+<div class="actions"><button type="button" id="confirm-yes">Continue</button><button type="button" id="confirm-no" class="secondary">Cancel</button></div>
+</section>
+
+<section id="progress-screen" hidden aria-labelledby="progress-screen-title">
+<h2 id="progress-screen-title" tabindex="-1">Checking the connection</h2>
+<p id="progress-text" role="status"></p>
+<ul id="rows" class="rows" aria-live="polite" aria-label="Checks"></ul>
+<div id="failure" class="failure" hidden>
+<p id="failure-message" class="problem" role="alert"></p>
+<p id="failure-hint"></p>
+<p>Error code: <code id="failure-code"></code></p>
+<div class="actions"><button type="button" id="retry">Retry</button><button type="button" id="back" class="secondary">Change the code</button><button type="button" id="copy-diag" class="secondary">Copy diagnostics</button></div>
+<p id="copy-result" role="status"></p>
+<textarea id="diag-text" readonly hidden aria-label="Diagnostics"></textarea>
+</div>
+</section>
+
+<section id="waiting-screen" hidden aria-labelledby="waiting-screen-title">
+<h2 id="waiting-screen-title" tabindex="-1">Waiting for approval</h2>
+<p>Ask an admin to approve this machine on the Fleet page of <span id="wait-coordinator"></span>.</p>
+<dl><dt>Key fingerprint</dt><dd id="wait-key" class="mono"></dd><div id="wait-code-row"><dt>Machine code</dt><dd id="wait-code" class="mono"></dd></div></dl>
+<p>You can close this window. The machine joins as soon as it is approved.</p>
+<p id="wait-problem" class="problem"></p>
+<div class="actions"><button type="button" id="wait-close" class="secondary">Close</button></div>
+</section>
+
+<section id="ready-screen" hidden aria-labelledby="ready-screen-title">
+<h2 id="ready-screen-title" tabindex="-1">This machine has joined</h2>
+<p id="ready-text"></p>
+<p id="ready-restart" hidden>Restart Windows to finish installing container support.</p>
+<div class="actions"><button type="button" id="ready-close">Close</button></div>
+</section>
+
+<section id="status-screen" hidden aria-labelledby="status-screen-title">
+<h2 id="status-screen-title" tabindex="-1">This machine is in a fleet</h2>
+<dl><dt>Coordinator</dt><dd id="st-coordinator"></dd><dt>Name</dt><dd id="st-name"></dd><dt>State</dt><dd id="st-state"></dd>
+<div id="st-scope-row"><dt>Runs as</dt><dd id="st-scope"></dd></div><div id="st-managed-row"><dt>Managed by</dt><dd id="st-managed"></dd></div></dl>
+<p id="st-error" class="problem"></p>
+<div class="actions" id="status-actions"><button type="button" id="status-close" class="secondary">Close</button><button type="button" id="leave" class="danger">Leave this fleet…</button></div>
+<div id="leave-confirm" hidden><p class="warning">Leave the fleet? Jobs on this machine stop and it forgets its identity. You can join again with a new code.</p>
+<div class="actions"><button type="button" id="leave-yes" class="danger strong">Leave</button><button type="button" id="leave-no" class="secondary">Cancel</button></div></div>
+</section>
+
+<section id="closed-screen" hidden aria-labelledby="closed-screen-title">
+<h2 id="closed-screen-title" tabindex="-1">You can close this tab</h2>
+<p>Open Oarbank Node again whenever you need it.</p>
+</section>
+</main><script nonce="__NONCE__">
+'use strict';
+// The OB2 join code, decoded offline (docs/design/node-enrollment.md, "Join code format (OB2)"): the same rules as
+// oarbank.coordinator.joincodes and oarbank_core::joincode, tested against src/oarbank/contracts/vectors/joincode.json.
+const OB2 = (() => {
+  const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  const VALUES = new Map([...ALPHABET].map((c, i) => [c, i]).concat([['I', 1], ['L', 1], ['O', 0]]));
+  const TABLE = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; TABLE[n] = c >>> 0; }
+  function crc32(bytes) { let c = 0xFFFFFFFF; for (const b of bytes) c = TABLE[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+  function refuse(message, code) { const e = new Error(message); e.code = code || 'E_CODE_FORMAT'; return e; }
+  const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  function decode(text) {
+    const s = String(text || '').replace(/\s+/g, '').toUpperCase();
+    if (!s.startsWith('OB2')) {
+      if (s.startsWith('OB1')) throw refuse('That code is from an older coordinator. Make a new one in the console.');
+      throw refuse('That is not an Oarbank join code. Join codes start with OB2-.');
+    }
+    const out = []; let buf = 0, bits = 0;
+    for (const c of s.slice(3).replace(/-/g, '')) {
+      const v = VALUES.get(c);
+      if (v === undefined) throw refuse('The code has a character that is not in it. Copy it again from the console.');
+      buf = (buf << 5) | v; bits += 5;
+      if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 0xFF); buf &= (1 << bits) - 1; }
+    }
+    const raw = Uint8Array.from(out);
+    if (raw.length < 1 + 1 + 4 + 32 + 1 + 1 + 8 + 16 + 4) throw refuse('The code is incomplete. Copy all of it from the console.');
+    const body = raw.subarray(0, raw.length - 4), tail = raw.subarray(raw.length - 4);
+    const crc = ((tail[0] * 16777216) + (tail[1] << 16) + (tail[2] << 8) + tail[3]) >>> 0;
+    if (crc32(body) !== crc) throw refuse('The code is mistyped or incomplete. Copy it again from the console.');
+    if (body[0] !== 2) throw refuse('This code needs a newer Oarbank Node.');
+    try {
+      let i = 6;
+      const cik = btoa(String.fromCharCode(...body.subarray(i, i + 32))); i += 32;
+      const pins = []; let n = body[i]; i += 1;
+      for (let k = 0; k < n; k++) { pins.push(hex(body.subarray(i, i + 32))); i += 32; }
+      const urls = []; n = body[i]; i += 1;
+      const utf8 = new TextDecoder('utf-8', {fatal: true});
+      for (let k = 0; k < n; k++) { const len = body[i]; urls.push(utf8.decode(body.subarray(i + 1, i + 1 + len))); i += 1 + len; }
+      if (i + 24 !== body.length || !pins.length || !urls.length || pins.some(p => p.length !== 64)) throw Error();
+      const flags = body[1];
+      const host = urls[0].split('://').pop().split('/')[0];
+      return {flags, expires_at: ((body[2] * 16777216) + (body[3] << 16) + (body[4] << 8) + body[5]) * 60, cik, pins, urls,
+              id: hex(body.subarray(i, i + 8)), host, fingerprint: pins[0].slice(0, 16),
+              approve: !!(flags & 1), system: !!(flags & 2), containers: !!(flags & 4), multi: !!(flags & 8)};
+    } catch (e) {
+      throw refuse('The code is damaged. Copy it again from the console.');
+    }
+  }
+  function human(s) {
+    s = Math.max(0, s);
+    if (s < 120) return `${Math.round(s)} seconds`;
+    if (s < 7200) return `${Math.round(s / 60)} minutes`;
+    if (s < 172800) return `${(s / 3600).toFixed(1).replace(/\.0$/, '')} hours`;
+    return `${Math.round(s / 86400)} days`;
+  }
+  function check(text, now) {
+    const c = decode(text), left = c.expires_at - now;
+    if (left <= 0) throw refuse(`This code expired ${human(-left)} ago. Make a new one in the console.`, 'E_CODE_EXPIRED');
+    return c;
+  }
+  function summary(c, now) {
+    return `${c.host} · expires in ${human(c.expires_at - now)} · ${c.approve ? 'approved at once' : 'needs approval'}`;
+  }
+  return {decode, check, summary, human, crc32};
+})();
+globalThis.OB2 = OB2;
+
+// ---------------------------------------------------------------- the window
+const token = location.hash.slice(1);
+const $ = id => document.getElementById(id);
+const SCREENS = ['loading', 'join-screen', 'managed-screen', 'confirm-screen', 'progress-screen', 'waiting-screen',
+                 'ready-screen', 'status-screen', 'closed-screen'];
+const ROW_NAMES = {code: 'Join code', dns: 'Name lookup', tcp: 'Connection', identity: 'Coordinator identity',
+                   tls: 'Secure connection', clock: 'Clock', role: 'Coordinator role'};
+const HINTS = {
+  E_CODE_FORMAT: 'Copy the whole code again from the console.', E_CODE_EXPIRED: 'Make a new code in the console.',
+  E_CODE_USED: 'Make a new code in the console.', E_CODE_REVOKED: 'Make a new code in the console.',
+  E_CODE_UNKNOWN: 'Check that the code comes from the coordinator you mean to join.',
+  E_DNS: 'Check this computer\'s network connection, then retry.', E_TCP: 'Check that the coordinator is running and that a firewall allows the connection, then retry.',
+  E_TLS_PIN_MISMATCH: 'Do not continue on this network. A proxy may be inspecting secure connections, or the code is for another coordinator.',
+  E_IDENTITY: 'Do not continue. The server is not the coordinator that made this code.',
+  E_CLOCK_SKEW: 'Turn on automatic date and time in this computer\'s settings, then retry.',
+  E_NOT_ACTIVE: 'Wait a few minutes, then retry.', E_APPROVAL_DENIED: 'The owner declined this machine. Ask them for a new code if that was a mistake.',
+  E_ALREADY_JOINED: 'Leave the current fleet first.', E_PRIVILEGE: 'An administrator has to approve this.',
+  E_CANCELLED: 'Retry when you are ready to approve the administrator prompt.'};
+const view = {state: null, current: 'loading', source: 'typed', confirmed: false, prefillUsed: false, scopeTouched: false,
+              containersTouched: false, busy: false, timer: null, run: null};
+globalThis.JoinWindow = view;
+const now = () => Date.now() / 1000;
+
+async function call(path, body) {
+  const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Oarbank-Join': token},
+                               body: JSON.stringify(body), credentials: 'omit', cache: 'no-store'});
+  const data = await r.json();
+  if (!r.ok) { const e = Error(data.error || 'Request failed.'); e.code = data.code; throw e; }
+  return data;
+}
+
+function show(id) {
+  for (const s of SCREENS) $(s).hidden = s !== id;
+  view.current = id;
+  const heading = $(id + '-title');
+  if (heading && heading.focus) heading.focus();
+}
+
+function stopTimer() { if (view.timer) clearTimeout(view.timer); view.timer = null; }
+function later(fn, ms) { stopTimer(); view.timer = setTimeout(fn, ms); }
+
+function pickStatus() {
+  const s = view.state;
+  for (const scope of s.scopes) {
+    const doc = s.status[scope];
+    if (doc && doc.state && doc.state !== 'unjoined') return {scope, doc};
+  }
+  return {scope: s.scopes[0], doc: s.status[s.scopes[0]] || null};
+}
+
+async function loadState() {
+  stopTimer();
+  try { view.state = await call('/state', {}); } catch (e) {
+    show('loading'); $('loading-text').textContent = '';
+    $('error').textContent = 'Could not reach Oarbank Node. Open it again from the menu bar, the tray or the app menu.';
+    return;
+  }
+  $('error').textContent = '';
+  render();
+}
+
+function render() {
+  const s = view.state;
+  $('scope-row').hidden = s.platform !== 'macos';
+  $('containers-row').hidden = s.platform !== 'windows';
+  $('notice').hidden = !s.policy.managed_by;
+  $('notice').textContent = s.policy.managed_by ? `Managed by ${s.policy.managed_by}` : '';
+  if (s.job && s.job.running) { resume(s.job); return; }
+  view.busy = false;
+  const {scope, doc} = pickStatus(), state = doc && doc.state;
+  if (['joined', 'connected', 'offline'].includes(state)) {
+    // a machine that just joined (after waiting for approval, or while this page followed it) says so once
+    return ['waiting-screen', 'progress-screen'].includes(view.current) ? showReady(doc) : showStatus(scope, doc);
+  }
+  if (state === 'pending') return showWaiting(doc);
+  if (state === 'joining') return showJoining(doc);
+  if (!s.policy.allow_user_join) return show('managed-screen');
+  $('status-error').textContent = state === 'error' && doc.error
+    ? `The last try to join failed: ${doc.error.message} (${doc.error.code})` : '';
+  if (s.prefill && !view.prefillUsed) {
+    view.prefillUsed = true;
+    $('code').value = s.prefill.code;
+    view.source = s.prefill.source; view.confirmed = false;
+    codeChanged();
+    try { return showConfirm(OB2.check(s.prefill.code, now())); } catch (e) { $('code-error').textContent = e.message; }
+  }
+  show('join-screen');
+}
+
+// ---- the Join screen
+function chosenScope() {
+  if (view.state.platform !== 'macos') return 'system';
+  return $('scope-personal').checked ? 'personal' : 'system';
+}
+
+function codeChanged() {
+  const text = $('code').value, out = $('summary');
+  $('code-error').textContent = '';
+  out.className = 'summary';
+  if (!text.trim()) { out.textContent = ''; return null; }
+  try {
+    const c = OB2.check(text, now());
+    out.textContent = OB2.summary(c, now()); out.className = 'summary good';
+    if (!view.scopeTouched) { $('scope-system').checked = c.system; $('scope-personal').checked = !c.system; }
+    if (!view.containersTouched) $('containers').checked = c.containers;
+    return c;
+  } catch (e) {
+    out.textContent = e.message; out.className = 'summary bad';
+    return null;
+  }
+}
+
+function submitJoin(event) {
+  if (event) event.preventDefault();
+  if (view.busy) return;
+  $('code-error').textContent = ''; $('name-error').textContent = '';
+  let c;
+  try { c = OB2.check($('code').value, now()); } catch (e) {
+    $('code-error').textContent = $('code').value.trim() ? e.message : 'Paste the join code first.';
+    $('code').focus(); return;
+  }
+  const name = $('name').value.trim();
+  if (name && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) {
+    $('name-error').textContent = 'Use up to 63 letters, digits, dots, dashes or underscores, starting with a letter or digit.';
+    $('name').focus(); return;
+  }
+  if (view.source !== 'typed' && !view.confirmed) return showConfirm(c);
+  return startJoin({code: $('code').value, scope: chosenScope(), containers: view.state.platform === 'windows' && $('containers').checked, name}, c);
+}
+
+function showConfirm(c) {
+  $('confirm-host').textContent = c.urls.join(', ');
+  $('confirm-fp').textContent = c.fingerprint;
+  $('confirm-expiry').textContent = `in ${OB2.human(c.expires_at - now())}`;
+  $('confirm-approval').textContent = c.approve ? 'Joins at once' : 'An admin approves it in the console';
+  show('confirm-screen');
+}
+
+// ---- checks, the join and its progress
+function addRow(r) {
+  const list = $('rows'), id = 'row-' + String(r.row || 'step').replace(/[^a-z0-9_-]/gi, '');
+  let li = $(id);
+  if (!li) { li = document.createElement('li'); li.id = id; list.appendChild(li); }
+  li.className = r.ok ? 'ok' : 'fail';
+  const icon = document.createElement('span'); icon.className = 'icon'; icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = r.ok ? '✓' : '✕';
+  const what = document.createElement('span'); what.className = 'what';
+  what.textContent = `${ROW_NAMES[r.row] || r.row}: ${r.ok ? 'passed' : 'failed'}`;
+  const detail = document.createElement('span'); detail.className = 'detail'; detail.textContent = r.detail || '';
+  li.replaceChildren(icon, what, detail);
+  if (view.run) { view.run.rows = view.run.rows.filter(x => x.row !== r.row).concat([{row: r.row, ok: !!r.ok, detail: r.detail || ''}]); }
+}
+
+function resetProgress(title, text) {
+  stopTimer();
+  $('progress-screen-title').textContent = title;
+  $('progress-text').textContent = text;
+  $('rows').replaceChildren();
+  $('failure').hidden = true; $('diag-text').hidden = true; $('copy-result').textContent = '';
+  show('progress-screen');
+}
+
+function failure(result) {
+  stopTimer();
+  view.busy = false;
+  if (view.run) view.run.result = {code: result.code, message: result.message};
+  if (view.current !== 'progress-screen') resetProgress('Joining did not finish', '');
+  $('progress-screen-title').textContent = view.run && view.run.kind === 'leave' ? 'Leaving did not finish' : 'Joining did not finish';
+  $('progress-text').textContent = '';
+  $('failure-message').textContent = result.message || 'Something went wrong.';
+  $('failure-hint').textContent = HINTS[result.code] || '';
+  $('failure-code').textContent = result.code || 'E_LOCAL';
+  $('back').hidden = !view.run || view.run.kind !== 'join';
+  $('failure').hidden = false;
+  $('retry').focus();
+}
+
+async function startJoin(options, decoded) {
+  view.busy = true;
+  view.run = {kind: 'join', options, decoded, rows: [], result: null, status: null, restart: false};
+  resetProgress('Checking the connection', 'Checking the code and the coordinator…');
+  let r;
+  try { r = await call('/check', {code: options.code}); } catch (e) { return failure({code: e.code || 'E_LOCAL', message: e.message}); }
+  r.rows.forEach(addRow);
+  if (!r.result.ok) return failure(r.result);
+  $('progress-screen-title').textContent = 'Joining';
+  $('progress-text').textContent = 'Starting…';
+  let j;
+  try { j = await call('/join', options); } catch (e) { return failure({code: e.code || 'E_LOCAL', message: e.message}); }
+  $('progress-text').textContent = j.elevated
+    ? 'Approve the administrator prompt to continue. Oarbank Node needs it to install its service.'
+    : 'Setting up Oarbank on this machine…';
+  follow(0);
+}
+
+function resume(job) {
+  view.busy = true;
+  view.run = {kind: job.kind, options: null, decoded: null, rows: [], result: null, status: null, restart: false};
+  resetProgress(job.kind === 'leave' ? 'Leaving the fleet' : 'Joining', 'Oarbank Node is working on this machine…');
+  follow(0);
+}
+
+function stateLine(st) {
+  if (!st || !st.state) return;
+  if (st.state === 'containers') $('progress-text').textContent = 'Installing what container jobs need. This can take a few minutes…';
+  else if (st.state === 'joining') $('progress-text').textContent = `Joining ${st.coordinator || 'the coordinator'}…`;
+}
+
+async function follow(offset) {
+  let p;
+  try { p = await call('/progress', {offset}); } catch (e) { return failure({code: e.code || 'E_LOCAL', message: e.message}); }
+  for (const line of p.lines) {
+    if (line.type === 'row') addRow(line);
+    else if (line.type === 'state') stateLine(line.status);
+  }
+  if (!p.done) { later(() => follow(p.offset), 700); return; }
+  if (p.result) {
+    if (!p.result.ok) return failure(p.result);
+    if (p.kind === 'leave') {
+      view.busy = false; view.prefillUsed = true; $('code').value = ''; codeChanged();
+      await loadState();
+      $('notice').hidden = false; $('notice').textContent = 'This machine left its fleet.';
+      return;
+    }
+    const d = p.result.detail || {};
+    view.run.restart = !!d.restart;
+    if (d.already) return showReady(d.status || p.status || {coordinator: d.coordinator});
+    return onStatus(p, p.offset);
+  }
+  if (p.cancelled) return failure({code: 'E_CANCELLED', message: 'The administrator prompt was closed. Nothing changed on this machine.'});
+  return failure({code: 'E_LOCAL', message: p.failed || 'Oarbank Node stopped before it finished. Try again, or run "oarbank-node doctor" in a terminal.'});
+}
+
+// after the code is staged: the service joins; follow the status document it writes
+function onStatus(p, offset) {
+  const doc = p.fresh ? p.status : null;
+  if (view.run) view.run.status = doc;
+  const again = () => later(async () => {
+    let q;
+    try { q = await call('/progress', {offset}); } catch (e) { return failure({code: e.code || 'E_LOCAL', message: e.message}); }
+    onStatus(q, offset);
+  }, 1000);
+  if (!doc) {
+    $('progress-text').textContent = now() - p.started_at > 60
+      ? 'The service has not started yet. It keeps trying; you can close this window.' : 'Starting the Oarbank service…';
+    return again();
+  }
+  if (doc.state === 'pending') return showWaiting(doc);
+  if (['joined', 'connected', 'offline'].includes(doc.state)) return showReady(doc);
+  if (doc.state === 'error' && doc.error && !doc.retrying) return failure(doc.error);
+  $('progress-text').textContent = doc.error ? `Trying again: ${doc.error.message}` : `Joining ${doc.coordinator || 'the coordinator'}…`;
+  return again();
+}
+
+function showJoining(doc) {
+  resetProgress('Joining', `Joining ${doc.coordinator || 'the coordinator'}…`);
+  later(loadState, 2000);
+}
+
+function showWaiting(doc) {
+  view.busy = false;
+  $('wait-coordinator').textContent = doc.coordinator || 'your coordinator';
+  $('wait-key').textContent = doc.key_fingerprint || '…';
+  $('wait-code-row').hidden = !doc.user_code;
+  $('wait-code').textContent = doc.user_code || '';
+  $('wait-problem').textContent = doc.error ? `${doc.error.message} (${doc.error.code})` : '';
+  if (view.current !== 'waiting-screen') show('waiting-screen');
+  later(loadState, 3000);
+}
+
+function showReady(doc) {
+  stopTimer();
+  view.busy = false;
+  const who = doc.name || doc.node_id;
+  $('ready-text').textContent = `This machine has joined ${doc.coordinator || 'your fleet'}${who ? ` as ${who}` : ''}.`;
+  $('ready-restart').hidden = !(view.run && view.run.restart);
+  show('ready-screen');
+}
+
+const STATES = {connected: 'Connected', joined: 'Joined, connecting…', offline: 'Offline: not connected to the coordinator right now'};
+function showStatus(scope, doc) {
+  const s = view.state;
+  $('st-coordinator').textContent = doc.coordinator || '—';
+  $('st-name').textContent = doc.name || doc.node_id || '—';
+  $('st-state').textContent = STATES[doc.state] || doc.state;
+  $('st-scope-row').hidden = s.platform !== 'macos';
+  $('st-scope').textContent = scope === 'personal' ? 'Only while you are logged in' : 'System service';
+  const managed = s.policy.managed_by || doc.managed_by;
+  $('st-managed-row').hidden = !managed;
+  $('st-managed').textContent = managed || '';
+  $('st-error').textContent = doc.error ? `${doc.error.message} (${doc.error.code})` : '';
+  $('leave').hidden = !s.policy.allow_user_join;
+  if (view.current !== 'status-screen') { $('leave-confirm').hidden = true; $('status-actions').hidden = false; show('status-screen'); }
+  if ($('leave-confirm').hidden) later(loadState, 5000);
+}
+
+async function leave() {
+  view.busy = true;
+  view.run = {kind: 'leave', options: null, decoded: null, rows: [], result: null, status: null, restart: false};
+  resetProgress('Leaving the fleet', 'Starting…');
+  let j;
+  try { j = await call('/leave', {}); } catch (e) { return failure({code: e.code || 'E_LOCAL', message: e.message}); }
+  $('progress-text').textContent = j.elevated ? 'Approve the administrator prompt to continue.' : 'Leaving…';
+  follow(0);
+}
+
+// ---- diagnostics: what happened, never the code itself
+function diagnostics() {
+  const r = view.run || {}, c = r.decoded, s = view.state || {};
+  const lines = ['Oarbank Node join diagnostics', `Time: ${new Date().toISOString()}`, `Platform: ${s.platform || '?'}`];
+  if (c) {
+    lines.push(`Coordinator: ${c.urls.join(', ')}`, `Fingerprint: ${c.fingerprint}`, `Code id: ${c.id}`,
+               `Code expires: ${new Date(c.expires_at * 1000).toISOString()}`, `Approval: ${c.approve ? 'at once' : 'by an admin'}`);
+  }
+  if (r.options) lines.push(`Scope: ${r.options.scope}`, `Containers: ${r.options.containers ? 'yes' : 'no'}`);
+  lines.push('Checks:');
+  for (const row of r.rows || []) lines.push(`  ${row.ok ? 'ok  ' : 'FAIL'} ${row.row}: ${row.detail}`);
+  if (r.result) lines.push(`Result: ${r.result.code} ${r.result.message}`);
+  const {doc} = s.status ? pickStatus() : {doc: null};
+  if (doc) lines.push(`Status: ${doc.state}${doc.error ? ` ${doc.error.code} ${doc.error.message}` : ''}`);
+  return lines.join('\n');
+}
+
+async function copyDiagnostics() {
+  const text = diagnostics();
+  try { await navigator.clipboard.writeText(text); $('copy-result').textContent = 'Copied. The join code is not included.'; }
+  catch (e) {
+    const area = $('diag-text'); area.value = text; area.hidden = false; area.focus(); if (area.select) area.select();
+    $('copy-result').textContent = 'Select the text below and copy it. The join code is not included.';
+  }
+}
+
+async function closeWindow() {
+  stopTimer();
+  try { await call('/close', {}); } catch (e) { /* already gone */ }
+  show('closed-screen');
+  try { window.close(); } catch (e) { /* a tab the page did not open stays */ }
+}
+
+// ---- wiring
+$('join-form').addEventListener('submit', submitJoin);
+$('code').addEventListener('input', () => { view.source = 'typed'; view.confirmed = false; codeChanged(); });
+$('paste').addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    $('code').value = text.trim(); view.source = 'typed'; view.confirmed = false; codeChanged();
+  } catch (e) {
+    $('code-error').textContent = 'Your browser did not allow pasting from here. Click the field and press Ctrl+V (⌘V on a Mac).';
+  }
+  $('code').focus();
+});
+$('scope-system').addEventListener('change', () => { view.scopeTouched = true; });
+$('scope-personal').addEventListener('change', () => { view.scopeTouched = true; });
+$('containers').addEventListener('change', () => { view.containersTouched = true; });
+$('confirm-yes').addEventListener('click', () => { view.confirmed = true; show('join-screen'); $('join').focus(); });
+$('confirm-no').addEventListener('click', () => {
+  view.confirmed = false; view.source = 'typed'; $('code').value = ''; codeChanged(); show('join-screen'); $('code').focus();
+});
+$('retry').addEventListener('click', () => {
+  const r = view.run;
+  if (r && r.kind === 'join' && r.options) return startJoin(r.options, r.decoded);
+  if (r && r.kind === 'leave') return leave();
+  return loadState();
+});
+$('back').addEventListener('click', () => { view.busy = false; show('join-screen'); $('code').focus(); });
+$('copy-diag').addEventListener('click', copyDiagnostics);
+$('leave').addEventListener('click', () => { stopTimer(); $('leave-confirm').hidden = false; $('status-actions').hidden = true; $('leave-no').focus(); });
+$('leave-no').addEventListener('click', () => { $('leave-confirm').hidden = true; $('status-actions').hidden = false; $('leave').focus(); later(loadState, 5000); });
+$('leave-yes').addEventListener('click', leave);
+for (const id of ['later', 'managed-close', 'wait-close', 'ready-close', 'status-close']) $(id).addEventListener('click', closeWindow);
+
+if (!token) {
+  $('loading-text').textContent = '';
+  $('error').textContent = 'Open Oarbank Node to get a private link to this page.';
+} else {
+  loadState();
+  setInterval(() => call('/ping', {}).catch(() => {
+    if (view.current === 'closed-screen') return;
+    stopTimer();
+    for (const s of SCREENS) $(s).hidden = true;
+    $('error').textContent = 'This window has disconnected. Open Oarbank Node again; nothing was lost.';
+  }), 30000);
+}
+</script></body></html>

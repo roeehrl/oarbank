@@ -413,6 +413,38 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         actor = who(request)
         return HTMLResponse(fragment(request, "_fleet_body.html", {**state.snapshot, "actor": actor}))
 
+    # ------------------------------------------------------------------ adding machines (node-enrollment.md, "Console")
+    @app.get("/add-machine", response_class=HTMLResponse)
+    async def add_machine(request: Request):
+        """The Add machine form: its own page, not part of the live fleet fragment, so a refresh never clears what is
+        being typed. It makes a join code through nodes.join_code (a plan first, as every T2 operation)."""
+        actor = who(request)
+        return render(request, "add_machine.html", {"actor": actor})
+
+    def join_status_html(request, d: dict, newtab: bool = False) -> str:
+        # rendered per request (polled every few seconds by one page), never through the shared fragment cache
+        return T.get_template("_joincode_status.html").render(
+            {**page_context(request, {**d, "newtab": newtab}), "request": request})
+
+    @app.get("/join-codes/{code_id}", response_class=HTMLResponse)
+    async def join_code_page(code_id: str, request: Request):
+        """A join code's machines after its one-time page is gone (the code itself is never shown again)."""
+        actor = who(request)
+        d = await drill(views.join_code_status, code_id)
+        if d is None or d["jc"] is None:
+            return render(request, "error.html", {"message": f"no join code {code_id} (or the database is busy)", "actor": actor}, 404)
+        return render(request, "join_code.html", {**d, "actor": actor})
+
+    @app.get("/frag/joincode/{code_id}", response_class=HTMLResponse)
+    async def frag_joincode(code_id: str, request: Request, tab: str = ""):
+        """Live status of one join code's enrollments (waiting, pending with Approve/Decline, joined). `tab=new` opens
+        Approve and Decline in a new tab: the Add machine result page must keep its one-time code on screen."""
+        who(request)
+        d = await drill(views.join_code_status, code_id)
+        if d is None:
+            return HTMLResponse('<p class="mut">status unavailable (the database is busy); retrying</p>', status_code=503)
+        return HTMLResponse(join_status_html(request, d, newtab=tab == "new"))
+
     @app.get("/nodes/{nid}", response_class=HTMLResponse)
     async def node(nid: str, request: Request):
         actor = who(request)
@@ -953,17 +985,22 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         if op == "secrets.set":
             body["secret"] = form.get("secret") or ""        # beside params: never in a plan, the audit or a log
         r = await http.post(f"/api/v1/ops/{op}", json=body, headers=headers)
-        return _result(op, r, return_to, request)
+        return await _result(op, r, return_to, request)
 
     SECRET_RESULTS = {"access.accounts.create": ("totp_secret", "otpauth"), "access.accounts.reset_totp": ("totp_secret", "otpauth"),
-                      "access.tokens.create": ("token",), "access.login_link": ("url",), "modules.cli_token": ("token",),
-                      "nodes.join_code": ("code", "command")}
+                      "access.tokens.create": ("token",), "access.login_link": ("url",), "modules.cli_token": ("token",)}
 
-    def _result(op, r, return_to, request=None):
+    async def _result(op, r, return_to, request=None):
         body = r.json() if r.text else {}
         if r.status_code != 200:
             return back(return_to, f"{op}: {body.get('error')}: {body.get('detail')}", "bad")
         res = body.get("result") or {}
+        if op == "nodes.join_code" and request is not None and res.get("code"):
+            # shown once, like the secrets below, with what to do with it on each OS and the code's live status
+            from . import joinkit
+            st = await drill(views.join_code_status, res.get("id") or "") or {"jc": None, "refused": [], "now": time.time()}
+            return render(request, "joincode.html", {"result": res, "kit": joinkit.kit(res), "return_to": "/", **st,
+                                                     "newtab": True})
         if op in SECRET_RESULTS and request is not None:          # shown once, never put in a URL or a flash
             return render(request, "secret.html", {"op": op, "result": res, "keys": SECRET_RESULTS[op], "return_to": return_to})
         inner = res.get("result") if isinstance(res.get("result"), dict) else {}
@@ -1001,7 +1038,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                     "confirm_name": form.get("confirm_name"), "tier": entry.tier, "target": form.get("target")}
             return render(request, "plan.html", {"plan": plan, "entry": entry, "return_to": return_to, "actor": actor,
                                                  "reason": body["reason"] or "", "drift": r.json().get("detail")}, 400)
-        return _result(op, r, return_to, request)
+        return await _result(op, r, return_to, request)
 
     # ------------------------------------------------------------------ /api/* passthrough (oarbank via tailscale serve)
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])

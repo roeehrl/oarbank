@@ -1,10 +1,13 @@
 # CI on a throwaway Windows runner (.github/workflows/msi.yml): the agent's MSI installed, upgraded and removed for real.
-# Install -First unattended (the agent's service set up for an unreachable coordinator), check both services, open
-# loopback for a test AppContainer through the elevated helper and see it close when its owner ends; open one again
+# Install -First unattended with no properties: both services run, the node waits unjoined (its status document says
+# so), oarbank-node is on the machine PATH and answers `status --json`, the oarbank:// handler, the join window and the
+# Oarbank Node tray app (with its self-test) are in place; uninstall it and check that PATH and the handler are clean.
+# Install it again for an unreachable coordinator (COORDINATOR=, the node then tries to enroll), check both services,
+# open loopback for a test AppContainer through the elevated helper and see it close when its owner ends; open one again
 # and keep its owner running through a major upgrade to -Second, which keeps it (helper_windows.rs: a restarted helper
 # keeps the openings of owners that still run); then uninstall with an owner still running and check that the
-# services, the helper's filters, provider and exemptions, its state file and Program Files\Oarbank are gone. Every
-# msiexec log is written to -Logs. It changes the machine for good: never run it anywhere else.
+# services, the helper's filters, provider and exemptions, its state file, PATH, the handler and Program Files\Oarbank
+# are gone. Every msiexec log is written to -Logs. It changes the machine for good: never run it anywhere else.
 #
 #   scripts\ci-windows-msi.ps1 -First dist\a.msi -Second dist\b.msi -Logs dist\msi-logs
 param([Parameter(Mandatory)][string]$First, [Parameter(Mandatory)][string]$Second, [Parameter(Mandatory)][string]$Logs)
@@ -111,34 +114,101 @@ function Owner([int]$port) {
   return $o
 }
 
+$Installed = "$env:ProgramFiles\Oarbank"
+$StatusFile = "$env:ProgramData\Oarbank\status\node.json"
+$Protocol = "Registry::HKEY_CLASSES_ROOT\oarbank"
+$Shortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Oarbank Node.lnk"
+
+# the node's status document (docs/design/node-enrollment.md), once it says what $want accepts, or the last one read
+function NodeStatus([scriptblock]$want, [int]$seconds = 90) {
+  $deadline = (Get-Date).AddSeconds($seconds)
+  do {
+    $doc = $null
+    try { $doc = Get-Content -Raw -LiteralPath $StatusFile -ErrorAction Stop | ConvertFrom-Json } catch { }
+    if ($doc -and (& $want $doc)) { return $doc }
+    Start-Sleep -Milliseconds 500
+  } while ((Get-Date) -lt $deadline)
+  $doc
+}
+
+# the machine PATH as a new process gets it: from the registry, not this process's environment
+function MachinePathHasOarbank {
+  $entries = [Environment]::GetEnvironmentVariable("Path", "Machine").Split(";") | ForEach-Object { $_.TrimEnd("\") }
+  $entries -contains $Installed
+}
+
+function CheckNodeParts([string]$when) {
+  Check (Test-Path "$Installed\oarbank-node.exe") "$when`: Program Files\Oarbank holds oarbank-node.exe"
+  Check (MachinePathHasOarbank) "$when`: Program Files\Oarbank is on the machine PATH"
+  $command = (Get-ItemProperty -LiteralPath "$Protocol\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
+  $urlProtocol = (Get-ItemProperty -LiteralPath $Protocol -ErrorAction SilentlyContinue).PSObject.Properties.Name -contains "URL Protocol"
+  Check ($command -eq "`"$Installed\Oarbank Node.exe`" --link `"%1`"" -and $urlProtocol) "$when`: oarbank:// opens Oarbank Node ($command)"
+  Check ((Test-Path "$Installed\Oarbank Node.exe") -and (Test-Path $Shortcut)) "$when`: the Oarbank Node tray app and its Start menu shortcut"
+  Check ((Test-Path "$Installed\join\join-window.py") -and (Test-Path "$Installed\join\join-window.html") -and
+         (Test-Path "$Installed\runtime\pythonw.exe")) "$when`: the join window and the runtime's pythonw.exe"
+}
+
+function CheckNodePartsGone([string]$when) {
+  Check (-not (MachinePathHasOarbank)) "$when`: Program Files\Oarbank is off the machine PATH"
+  Check (-not (Test-Path -LiteralPath $Protocol)) "$when`: the oarbank:// handler is gone"
+  Check (-not (Test-Path $Shortcut)) "$when`: the Start menu shortcut is gone"
+}
+
 function Until([scriptblock]$cond, [int]$seconds = 30) {
   $deadline = (Get-Date).AddSeconds($seconds)
   while (-not (& $cond) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
   & $cond
 }
 
-# 1. install
+# 1. install with nothing: the package installs, the node's service starts and waits for a code
+Msi "/i" $First "install-unjoined.log"
+CheckServices "installed without a code"
+$st = NodeStatus { param($d) $d.state -eq "unjoined" }
+Check ($st -and $st.state -eq "unjoined" -and $st.format -eq 1) "the node waits unjoined ($($st | ConvertTo-Json -Compress))"
+CheckNodeParts "installed without a code"
+# oarbank-node as a new prompt finds it: on the PATH the registry gives a new process
+$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+$cli = (Get-Command oarbank-node.exe -ErrorAction SilentlyContinue).Source
+Check ($cli -eq "$Installed\oarbank-node.exe") "oarbank-node resolves from the machine PATH ($cli)"
+# exit 1 means "not joined" here; the JSON on stdout is what counts
+$out = (& oarbank-node.exe status --json) | Out-String
+$reply = $null
+try { $reply = $out | ConvertFrom-Json } catch { }
+Check ($reply -and $reply.scope -eq "system" -and $reply.status.state -eq "unjoined") "oarbank-node status --json reads the waiting node ($($out.Trim()))"
+$tray = Start-Process -FilePath "$Installed\Oarbank Node.exe" -ArgumentList "--self-test" -Wait -PassThru `
+  -RedirectStandardOutput "$Logs\node-tray.log" -RedirectStandardError "$Logs\node-tray-error.log"
+Check ($tray.ExitCode -eq 0) "the Oarbank Node tray app's self-test: $((Get-Content "$Logs\node-tray.log" -Raw -ErrorAction SilentlyContinue) -replace '\s+$', '') $(Get-Content "$Logs\node-tray-error.log" -Raw -ErrorAction SilentlyContinue)"
+Msi "/x" $First "uninstall-unjoined.log"
+Check (-not (Service $Agent) -and -not (Service $Helper)) "the uninstall removes both services"
+CheckNodePartsGone "uninstalled"
+
+# 2. install for a coordinator that never answers: the node tries to enroll (and retries), the install still succeeds
 Msi "/i" $First "install.log" @("COORDINATOR=https://127.0.0.1:9")
 CheckServices "installed"
 Check (Test-Path "$env:ProgramFiles\Oarbank\oarbank-launcher.exe") "Program Files\Oarbank holds the launcher"
+$st = NodeStatus { param($d) $d.state -eq "joining" -or $d.error.code -eq "E_TCP" }
+Check ($st -and $st.coordinator -eq "https://127.0.0.1:9" -and ($st.state -eq "joining" -or $st.error.code -eq "E_TCP")) `
+  "the node enrolls by address and retries the unreachable coordinator ($($st | ConvertTo-Json -Compress))"
+CheckNodeParts "installed"
 
-# 2. an opening ends with its owner
+# 3. an opening ends with its owner
 $o = Owner 45901
 $n, $e = (Openings 45901), (Exempt)
 Check ($n -eq 2 -and $e) "the opening's permit filters (IPv4, IPv6) and the exemption are in place ($n of the helper's $(HelperFilters) filters, exempt: $e)"
 Stop-Process -Id $o.Id -Force
 Check ($n -eq 2 -and $e -and (Until { (Openings 45901) -eq 0 -and -not (Exempt) })) "the opening and the exemption go when its owner is killed"
 
-# 3. a major upgrade keeps a running owner's opening
+# 4. a major upgrade keeps a running owner's opening, and the node's PATH entry, handler and tray app
 $o = Owner 45902
 Msi "/i" $Second "upgrade.log"
 CheckServices "upgraded"
+CheckNodeParts "upgraded"
 $n, $e = (Openings 45902), (Exempt)
 Check ($n -eq 2 -and $e) "the upgraded helper kept the opening of an owner that still runs ($n of the helper's $(HelperFilters) filters, exempt: $e)"
 Stop-Process -Id $o.Id -Force
 Check ($n -eq 2 -and $e -and (Until { (Openings 45902) -eq 0 -and -not (Exempt) })) "the upgraded helper ends that opening with its owner"
 
-# 4. uninstall, with an owner still running
+# 5. uninstall, with an owner still running
 $o = Owner 45903
 Check ((Openings 45903) -eq 2 -and (Exempt)) "an opening is in place before the uninstall"
 Msi "/x" $Second "uninstall.log"
@@ -147,6 +217,7 @@ Check ((HelperFilters) -eq 0 -and -not (ProviderPresent)) "the helper's filters 
 Check (-not (Exempt)) "the exemption is gone though its owner still runs"
 Check (-not (Test-Path "$env:ProgramData\Oarbank\helper-exemptions.json")) "the helper's state file is gone"
 Check (-not (Test-Path "$env:ProgramFiles\Oarbank")) "Program Files\Oarbank is gone"
+CheckNodePartsGone "uninstalled after the upgrade"
 Stop-Process -Id $o.Id -Force -ErrorAction SilentlyContinue
 
 if ($script:failed) { throw "$($script:failed) check(s) failed (msiexec logs in $Logs)" }

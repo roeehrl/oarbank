@@ -1,57 +1,77 @@
 #!/bin/sh
-# Oarbank agent pkg: runs as root once the payload is in /Library/Oarbank.
+# Oarbank node pkg: runs as root once the payload is in place (docs/design/node-enrollment.md). A package installs; it
+# never joins and never needs the join code. Installer gives this script no caller environment, and its output lands
+# in /var/log/install.log, which every account can read: nothing here prints a code, a managed value or a file's
+# contents.
 #
-# A first install configures the node when the installer was given what it needs, in /Library/Oarbank/etc (an
-# admin or MDM writes these before installing):
-#   join-code     an Oarbank join code (OB1-…); deleted once copied into the agent's home
-#   coordinator   or a coordinator URL (the owner then approves the node)
-#   system        present: install as a system service run as _oarbank (default: the console user's LaunchAgent),
-#                 with the session helper in every GUI login (/Library/LaunchAgents)
-# Without them it only installs the programs and says how to finish. An upgrade restarts the service on the new
-# launcher, and a system install's session helpers on the new agent binary; the agent's own version is the
-# coordinator's to change (self-update).
-set -eu
+#   - `oarbank-node` on PATH: /usr/local/bin/oarbank-node -> /Library/Oarbank/bin/oarbank-launcher.
+#   - The managed-policy job (dev.codonic.oarbank.agent.policy, /Library/LaunchDaemons) is (re)loaded: it joins with an
+#     MDM profile's JoinCode or Coordinator, whether the profile came before this pkg or comes after it.
+#   - An upgrade (a node set up in either scope) restarts the service on the new launcher, and a system install's
+#     session helpers on the new agent binary; the agent's own version is the coordinator's to change (self-update).
+#   - Otherwise a double-click install (Installer.app: COMMAND_LINE_INSTALL unset; `installer` and MDM set it to 1)
+#     with someone at the console and no managed code or address opens Oarbank Node at its join window, as that
+#     person. Anything else says how to join from a terminal.
+#
+# It always exits 0: whatever the network or the console does, the programs are installed.
+set -u
 BIN=/Library/Oarbank/bin
-ETC=/Library/Oarbank/etc
 LABEL=dev.codonic.oarbank.agent
-user=$(/usr/bin/stat -f%Su /dev/console)
+POLICY=dev.codonic.oarbank.agent.policy
+APP="/Applications/Oarbank Node.app"
+MANAGED="/Library/Managed Preferences/$LABEL.plist"
+user=$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || echo root)
 uid=$(/usr/bin/id -u "$user" 2>/dev/null || echo 0)
+# someone at the console: not the login window (the console is root's then) and not a fast-user-switching gap
+console=
+[ "$user" != root ] && [ "$user" != loginwindow ] && [ "$uid" -gt 0 ] && console=yes
 
-if [ -f "$ETC/system" ]; then scope=system; else scope=personal; fi
-if [ "$scope" = system ]; then
-    home="/Library/Application Support/Oarbank/agent"
-    target="system/$LABEL"
-else
-    uhome=$(/usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
-    home="$uhome/Library/Application Support/Oarbank/agent"
-    target="gui/$uid/$LABEL"
+/bin/mkdir -p /usr/local/bin && /bin/ln -sfn "$BIN/oarbank-launcher" /usr/local/bin/oarbank-node
+
+# the policy job's stderr, root's alone, created before launchd would create it world-readable
+log=/var/log/oarbank-policy.log
+[ -f "$log" ] || : > "$log"
+/usr/sbin/chown root:wheel "$log" 2>/dev/null; /bin/chmod 600 "$log" 2>/dev/null
+# bootout first so an upgrade's plist is the one loaded; a bootstrap right after a bootout can find the old job still
+# going away (error 5): once more after a moment, and at worst launchd loads it at the next restart
+/bin/launchctl bootout "system/$POLICY" 2>/dev/null
+/bin/launchctl bootstrap system "/Library/LaunchDaemons/$POLICY.plist" 2>/dev/null \
+    || { /bin/sleep 1; /bin/launchctl bootstrap system "/Library/LaunchDaemons/$POLICY.plist" 2>/dev/null; } \
+    || echo "Oarbank: the managed-policy job starts at the next restart"
+
+upgraded=
+if [ -f "/Library/LaunchDaemons/$LABEL.plist" ]; then
+    /bin/launchctl kickstart -k "system/$LABEL" 2>/dev/null
+    for u in $(/usr/bin/who | /usr/bin/awk '$2 == "console" {print $1}' | /usr/bin/sort -u); do
+        /bin/launchctl kickstart -k "gui/$(/usr/bin/id -u "$u")/$LABEL.session" 2>/dev/null
+    done
+    upgraded=yes
 fi
-
-if [ -f "$home/agent.json" ]; then
-    /bin/launchctl kickstart -k "$target" 2>/dev/null || true
-    if [ "$scope" = system ]; then
-        for u in $(/usr/bin/who | /usr/bin/awk '$2 == "console" {print $1}' | /usr/bin/sort -u); do
-            /bin/launchctl kickstart -k "gui/$(/usr/bin/id -u "$u")/$LABEL.session" 2>/dev/null || true
-        done
+if [ -n "$console" ]; then
+    uhome=$(/usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
+    if [ -n "$uhome" ] && [ -f "$uhome/Library/LaunchAgents/$LABEL.plist" ]; then
+        /bin/launchctl kickstart -k "gui/$uid/$LABEL" 2>/dev/null
+        upgraded=yes
     fi
+fi
+if [ -n "$upgraded" ]; then
     echo "Oarbank: upgraded; the service restarted on the new launcher"
     exit 0
 fi
 
-set --
-[ -f "$ETC/join-code" ] && set -- "$@" --join-code-file "$ETC/join-code"
-[ -f "$ETC/coordinator" ] && set -- "$@" --coordinator "$(/bin/cat "$ETC/coordinator")"
-if [ $# -eq 0 ]; then
-    echo "Oarbank: installed. Finish with: $BIN/oarbank-launcher setup --join-code <code>"
-    exit 0
-fi
+# A management profile joins the node through the policy job: no join window then. The values only feed the test,
+# never the output.
+managed=
+for key in JoinCode Coordinator; do
+    [ -n "$(/usr/bin/plutil -extract "$key" raw -o - "$MANAGED" 2>/dev/null)" ] && managed=yes
+done
 
-if [ "$scope" = system ]; then
-    "$BIN/oarbank-launcher" setup --scope system "$@"
-elif [ "$uid" -gt 0 ] && [ "$user" != root ]; then
-    /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" "$BIN/oarbank-launcher" setup "$@"
-else
-    echo "Oarbank: no one is logged in; finish with: $BIN/oarbank-launcher setup --join-code <code>"
-    exit 0
+if [ -z "${COMMAND_LINE_INSTALL:-}" ] && [ -n "$console" ] && [ -z "$managed" ] && [ -d "$APP" ]; then
+    # `open` hands the launch to LaunchServices and returns at once (no -W), so it cannot hold the install up; it runs
+    # in the foreground because Installer may end this script's process group as soon as the script exits, before a
+    # backgrounded `open` has reached LaunchServices. A failure falls through to the terminal hint.
+    /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open -a "$APP" --args --join >/dev/null 2>&1 \
+        && exit 0
 fi
-/bin/rm -f "$ETC/join-code"
+echo "Installed. Join this Mac with: sudo oarbank-node join"
+exit 0
