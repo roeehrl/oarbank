@@ -49,6 +49,7 @@ class NodeView:
     gpu_apis: dict = field(default_factory=lambda: {"host": [], "containers": []})   # node_gpu_apis(node)
     bootstrap_grants: bool = False    # the agent runs bootstrap jobs with the bootstrap grants (modsandbox.bootstrap_enforced)
     secrets_unset: dict = field(default_factory=dict)  # {module: declared secrets with no readable value for this node}
+    release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
 
     @property
     def certified(self) -> set:
@@ -111,16 +112,24 @@ def _no_module_code(nv: NodeView) -> str:
     return "MODULE_NOT_CERTIFIED"
 
 
+def release_code(nv: NodeView) -> str:
+    """Why a node runs no current release: none exists for its platform yet (no module enabled), the one it needs waits
+    for the owner's signature, or it is installing it."""
+    st = (nv.release_of() if nv.release_of else {}).get("state")
+    return {"none": "NO_RELEASE", "unsigned": "RELEASE_UNSIGNED"}.get(st, "RELEASE_PENDING")
+
+
 def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
     n = nv.node
     checks = [
         lambda: R("fleet_state = active", "OARBANK_PAUSED", nv.fleet_state == "active", nv.fleet_state, "active", "admission"),
         lambda: R("desired_state = active", "NODE_DRAINING" if n["desired_state"] == "draining" else "NODE_PAUSED_BY_ADMIN",
                   n["desired_state"] == "active", n["desired_state"], "active", "admission"),
-        lambda: R("lifecycle = ready", {"quarantined": "NODE_QUARANTINED", "retired": "NODE_RETIRED"}.get(n["lifecycle"], "RELEASE_PENDING"),
+        lambda: R("lifecycle = ready", {"quarantined": "NODE_QUARANTINED", "retired": "NODE_RETIRED"}.get(n["lifecycle"])
+                  or ("RELEASE_PENDING" if n["lifecycle"] == "ready" else release_code(nv)),
                   n["lifecycle"] == "ready", n["lifecycle"], "ready", "admission"),
-        lambda: R("release current", "RELEASE_PENDING", n["release_id"] == nv.current_release, n["release_id"],
-                  nv.current_release, "admission"),
+        lambda: R("release current", "RELEASE_PENDING" if n["release_id"] == nv.current_release else release_code(nv),
+                  n["release_id"] == nv.current_release, n["release_id"], nv.current_release, "admission"),
         lambda: R("free cpu > 0", "INSUFFICIENT_CPU", nv.free_cpu > 0, nv.free_cpu, "> 0", "admission"),
         lambda: R("a module certified (or certifying)", _no_module_code(nv), bool(nv.certified or nv.certifying),
                   sorted(nv.certified | nv.certifying), "non-empty", "admission"),

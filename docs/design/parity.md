@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 89 operations, 2 explain kinds, 122 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 89 operations, 2 explain kinds, 124 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -131,4 +131,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NODE_PAUSED_BY_ADMIN` | `nodes.resume` |
 | `NODE_DRAINING` | `nodes.resume` |
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |
+| `NO_RELEASE` | `modules.install`, `modules.enable` |
+| `RELEASE_UNSIGNED` | `releases.attach_signature` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

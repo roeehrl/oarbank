@@ -93,28 +93,39 @@ def node_exclusions(db: DB, node: dict, offered: set) -> dict:
     not support the node's platform or OS version, needs host tools the registry lacks for the node's OS, needs sandbox
     capabilities the node's backend does not enforce, needs a newer agent (`requires.agent`), or whose runner needs a
     GPU API the node's host does not provide (its doctor's `gpu_apis`)."""
-    from . import modcalls, modstore, platforms
+    from . import modcalls, modstore
     facts = json.loads(node.get("facts_json") or "{}")
     if REQUIRE_SANDBOXED_AGENTS and not (facts.get("sandbox") or {}).get("backend"):
         return {m: "SANDBOX_BACKEND_MISSING" for m in offered}
     out = {}
-    have = node.get("agent_version") or ""
     for name in offered:
         ver = modstore.version_for_node(db, name, node.get("node_id"))
         try:
             man = modcalls.info_for(name, ver).manifest
         except KeyError:
             continue
-        why = platforms.unsupported(db, man, node)
-        if not why and REQUIRE_SANDBOXED_AGENTS and platforms.sandbox_gaps(man, facts):
-            why = "CAPABILITY_NOT_ENFORCED"
-        if not why and man.requires.agent and (not have or not modstore.in_range(have, man.requires.agent)):
-            why = "AGENT_TOO_OLD"
-        if not why and runner_gpu_unmet(man, node):
-            why = "GPU_API_MISSING"
+        why = exclusion(db, man, node)
         if why:
             out[name] = why
     return out
+
+
+def exclusion(db: DB, man, node: dict) -> str | None:
+    """Why this module version (its manifest) must not get work on this node (a reason code), or None: node_exclusions
+    for one manifest, also for a version the module host has not loaded (the readiness checklist)."""
+    from . import modstore, platforms
+    facts = json.loads(node.get("facts_json") or "{}")
+    if REQUIRE_SANDBOXED_AGENTS and not (facts.get("sandbox") or {}).get("backend"):
+        return "SANDBOX_BACKEND_MISSING"
+    have = node.get("agent_version") or ""
+    why = platforms.unsupported(db, man, node)
+    if not why and REQUIRE_SANDBOXED_AGENTS and platforms.sandbox_gaps(man, facts):
+        why = "CAPABILITY_NOT_ENFORCED"
+    if not why and man.requires.agent and (not have or not modstore.in_range(have, man.requires.agent)):
+        why = "AGENT_TOO_OLD"
+    if not why and runner_gpu_unmet(man, node):
+        why = "GPU_API_MISSING"
+    return why
 
 
 def runner_gpu_unmet(manifest, node: dict) -> dict | None:

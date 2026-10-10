@@ -3,6 +3,7 @@
   {{ m.op_form("fleet.halt", "fleet", "Halt fleet", cls="danger", confirm="Halt the fleet? Every live attempt is released and requeued; no new leases.", reason_prompt=True) }}</div>{% endif %}
 {% if fleet_state != 'active' %}<div class="flash bad" role="alert">Fleet {{ fleet_state }}: no new leases.
   {{ m.op_form("fleet.resume", "fleet", "Resume fleet…", cls="pri", reason_prompt=True) }}</div>{% endif %}
+{{ m.release_banner(releases_awaiting) }}
 {% if alerts %}
 <h2>Alerts{% if alerts_pending %} <span class="small mut">({{ alerts_pending }} pending: they notify only if they outlive their rule's pending period)</span>{% endif %}</h2>
 <div class="grid">{% for a in alerts %}
@@ -48,9 +49,10 @@
       <a href="/nodes/{{ n.node_id }}"><b>{{ n.hostname }}</b></a>
       {% if n.platform %}<span class="chip" title="platform {{ n.platform }}{% if n.os_version %}, {{ n.os }} {{ n.os_version }}{% endif %}">{{ {'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}.get(n.os, n.os) or n.platform }}{% if n.arch %} {{ n.arch }}{% endif %}</span>{% endif %}
       {% if not n.online %}<span class="chip bad">offline</span>
-      {% elif n.lifecycle != 'ready' %}<span class="chip warn">{{ n.lifecycle }}</span>
+      {% elif n.lifecycle != 'ready' %}<span class="chip warn"{% if n.release_wait %} title="{{ n.release_wait.title }}"{% endif %}>{{ n.release_wait.text if n.release_wait else n.lifecycle }}</span>
       {% elif n.desired_state != 'active' %}<span class="chip warn">{{ n.desired_state }}</span>
       {% else %}<span class="chip ok">active</span>{% endif %}
+      {% if n.release_wait and (not n.online or n.lifecycle == 'ready') %}<span class="chip warn" title="{{ n.release_wait.title }}">{{ n.release_wait.text }}</span>{% endif %}
       {% if n.cap.binding_limit and n.cap.binding_limit.startswith('cap.') %}<span class="chip acc">capped: {{ n.cap.binding_limit[4:] }}{% if n.limits[n.cap.binding_limit[4:]] is defined %} {{ n.limits[n.cap.binding_limit[4:]] }}{% endif %}</span>{% endif %}
       {% for r in (n.tel.protection or {}).get('active') or [] %}<span class="chip acc" title="protection rule active">protecting: {{ r }}</span>{% endfor %}
       {% if n.tel.guard and n.tel.guard != 'clear' %}<span class="chip warn" title="{{ (n.tel.protection or {}).get('guard_reason') or '' }}">memory guard: {{ n.tel.guard }}</span>{% endif %}

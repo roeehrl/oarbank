@@ -11,6 +11,11 @@ The default composition of each platform (every module at its current version) i
 status 'current'. A node whose composition differs (a canary node, a pinned node) gets its own release through
 `nodes.assigned_release`, built when the channels change (`sync`). Signed releases (D31) cover the whole
 composition: the release is the signed lock of module digests.
+
+With release signing on and an owner key pinned, a built release stays a candidate until the owner signs it offline
+(`oarbank release sign <rid> --promote`): nothing reaches a node before that. `awaiting` lists those releases, the
+console shows them as a banner and `note_awaiting` keeps one `release_awaiting_owner:<rid>` alert per release open
+until it is signed and promoted or a newer build replaces it.
 """
 import json
 import tarfile
@@ -43,6 +48,25 @@ def composition(db: DB, node_id: str | None = None, platform: str | None = None)
         if r and (platform is None or _supports(r["path"], platform)):
             out[name] = {"version": ver, "digest": r["content_digest"], "path": r["path"]}
     return out
+
+
+def composition_json(comp: dict) -> str:
+    """The composition as a release row records it (releases.composition_json): equal compositions, equal text."""
+    return json.dumps({n: {"version": c["version"], "digest": c["digest"]} for n, c in comp.items()}, sort_keys=True)
+
+
+def contents(comp_json: str | None) -> list[str]:
+    """What a release holds, as `module@version` (from its composition_json); empty: no module runs on its platform."""
+    return [f"{n}@{c.get('version')}" for n, c in sorted((jl(comp_json, {}) or {}).items())]
+
+
+def signature_required(db: DB) -> bool:
+    """Releases need the owner's signature before a node may install them (signing on, an owner key pinned)."""
+    return bool(C.RELEASE_SIGNING and db.get_setting("release_pubkey"))
+
+
+def any_module_enabled(db: DB) -> bool:
+    return any(ch["current"] for ch in modstore.channels(db).values())
 
 
 def composition_key(comp: dict, platform: str = "") -> str:
@@ -176,15 +200,17 @@ def build(db: DB, make_current: bool = True, comp: dict | None = None, platform:
             _tar(out, root, modes)
     digest = sha256_file(out)
     prev = db.one("SELECT status, seq, statement, signature FROM releases WHERE release_id=?", (rid,)) or {}
-    comp_json = json.dumps({n: {"version": c["version"], "digest": c["digest"]} for n, c in comp.items()}, sort_keys=True)
+    comp_json = composition_json(comp)
     db.x("INSERT OR REPLACE INTO releases(release_id,created_at,path,sha256,manifest_json,status,seq,statement,signature,"
          "composition_json,platform) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
          (rid, clock.now(), db.rel(out), digest, man, prev.get("status") or "candidate", prev.get("seq"), prev.get("statement"),
           prev.get("signature"), comp_json, platform))
-    signed_needed = C.RELEASE_SIGNING and bool(db.get_setting("release_pubkey")) and not prev.get("signature")
-    if make_current and not signed_needed:
+    signed_needed = signature_required(db) and not prev.get("signature")
+    if make_current and not signed_needed and prev.get("status") != "current":
         promote(db, rid, actor="build")
-    db.event("release_built", reason=f"{rid} ({platform})", sha256=digest, files=len(entries), modules=sorted(comp))
+    if not prev:              # the same composition built again is the same release: only a new one is news
+        db.event("release_built", reason=f"{rid} ({platform})", sha256=digest, files=len(entries), modules=sorted(comp),
+                 **({"next": f"oarbank release sign {rid}" + (" --promote" if make_current else "")} if signed_needed else {}))
     return {"release_id": rid, "platform": platform, "sha256": digest, "path": str(out), "files": len(entries), "modules": sorted(comp),
             "composition": json.loads(comp_json), "needs_signature": signed_needed,
             **({"next": f"oarbank release sign {rid} --promote"} if signed_needed else {})}
@@ -199,6 +225,8 @@ def sync(db: DB) -> dict:
         rel = build(db, make_current=True, platform=plat)
         defaults[plat] = rel["release_id"]
         built[composition_key(composition(db, platform=plat), plat)] = rel["release_id"]
+    # each platform's default release, for awaiting(): a newer build of a platform replaces (supersedes) its older one
+    db.set_setting(DEFAULTS, {**(db.get_setting(DEFAULTS) or {}), **defaults})
     for n in db.q("SELECT node_id, platform, facts_json FROM nodes WHERE lifecycle NOT IN ('retired')"):
         plat = platforms.node_platform(dict(n))
         if not plat:
@@ -212,15 +240,125 @@ def sync(db: DB) -> dict:
             built[key] = build(db, make_current=False, comp=comp, platform=plat)["release_id"]
         db.x("UPDATE nodes SET assigned_release=? WHERE node_id=?", (built[key], n["node_id"]))
         assigned[n["node_id"]] = built[key]
+    note_awaiting(db)
     return {"default": next(iter(defaults.values())), "defaults": defaults, "assigned": assigned}
 
 
 def ensure(db: DB, platform: str | None):
-    """Build the releases of a platform the fleet has none for yet (a node of a new platform enrolled)."""
-    if not platform or db.one("SELECT 1 FROM releases WHERE status='current' AND platform=?", (platform,)):
+    """Build the releases of a platform whose default composition has no release yet (a node of a new platform
+    enrolled, or the composition changed). Every hello asks: a release of this composition that is current, or a
+    candidate waiting for the owner's signature, is the answer, and building it again would change nothing."""
+    if not platform or not any_module_enabled(db):
         return
-    if any(ch["current"] for ch in modstore.channels(db).values()):
-        sync(db)
+    comp = composition_json(composition(db, platform=platform))
+    rows = db.q("SELECT release_id, status FROM releases WHERE platform=? AND composition_json=? AND status IN ('current','candidate') "
+                "ORDER BY status='current' DESC, created_at DESC", (platform, comp))
+    if any(r["status"] == "current" for r in rows) or (rows and signature_required(db)):
+        known = (db.get_setting(DEFAULTS) or {}).get(platform)
+        known_comp = (db.one("SELECT composition_json FROM releases WHERE release_id=?", (known,)) or {}).get("composition_json") \
+            if known else None
+        if known_comp != comp:     # built before awaiting() knew each platform's default (an upgrade): it is this one
+            db.set_setting(DEFAULTS, {**(db.get_setting(DEFAULTS) or {}), platform: rows[0]["release_id"]})
+            note_awaiting(db)
+        return
+    sync(db)
+
+
+def ensure_fleet(db: DB):
+    """ensure() for every platform of the fleet (oarbankd's background loop: also after an upgrade, before any hello)."""
+    if any_module_enabled(db):
+        for plat in platforms.fleet_platforms(db):
+            ensure(db, plat)
+
+
+DEFAULTS = "release_defaults"          # setting: {platform: the release_id sync last built as its default}
+AWAITING = "releases_awaiting"         # setting: awaiting(), as the console shows it
+
+
+def awaiting(db: DB) -> list[dict]:
+    """The releases only the owner can let through: each platform's default release that is not current yet, and the
+    node-specific releases (canary, pinned) nodes are assigned, while they lack the owner's signature. Each names the
+    command that lets it through: `oarbank release sign <rid> --promote` for a platform's release, without `--promote`
+    for a node's own (promoting it would make it every node's)."""
+    if not signature_required(db):
+        return []
+    out = []
+    fleet = set(platforms.fleet_platforms(db))
+    for plat, rid in sorted((db.get_setting(DEFAULTS) or {}).items()):
+        row = db.one("SELECT status, signature, created_at, composition_json FROM releases WHERE release_id=?", (rid,))
+        if plat not in fleet or not row or row["status"] == "current":
+            continue
+        nodes = [n for n in db.q("SELECT node_id, hostname, platform, facts_json FROM nodes WHERE lifecycle NOT IN ('retired') "
+                                 "AND assigned_release IS NULL ORDER BY hostname") if platforms.node_platform(n) == plat]
+        out.append({"release_id": rid, "platform": plat, "kind": "platform", "signed": bool(row["signature"]),
+                    "since": row["created_at"], "modules": contents(row["composition_json"]), "nodes": [n["hostname"] for n in nodes], "node_ids": [n["node_id"] for n in nodes],
+                    "command": f"oarbank release sign {rid} --promote"})
+    by_rid = {}
+    for n in db.q("SELECT n.node_id, n.hostname, n.assigned_release rid, r.platform, r.created_at, r.composition_json FROM nodes n "
+                  "JOIN releases r "
+                  "ON r.release_id=n.assigned_release WHERE n.lifecycle NOT IN ('retired') AND r.signature IS NULL ORDER BY n.hostname"):
+        e = by_rid.setdefault(n["rid"], {"release_id": n["rid"], "platform": n["platform"], "kind": "node", "signed": False,
+                                         "since": n["created_at"], "modules": contents(n["composition_json"]),
+                                         "nodes": [], "node_ids": [],
+                                         "command": f"oarbank release sign {n['rid']}"})
+        e["nodes"].append(n["hostname"])
+        e["node_ids"].append(n["node_id"])
+    return out + list(by_rid.values())
+
+
+def awaiting_text(a: dict) -> str:
+    """One awaiting release as the alert and the console say it."""
+    k = len(a["nodes"])
+    held = (f"Until then the canary or pinned node{'s' if k != 1 else ''} {', '.join(a['nodes'])} stay{'' if k != 1 else 's'} "
+            "on what they run." if a["kind"] == "node" else
+            f"Until then its {k} node{'s' if k != 1 else ''} get{'' if k != 1 else 's'} nothing new." if k else "")
+    holds = ", ".join(a.get("modules") or []) or "no module"
+    none = ("" if a.get("modules") else f" None of the enabled modules runs on {a['platform']}, but its nodes need this "
+            "release to become ready.")
+    return (f"Release {a['release_id']} for {a['platform']} ({holds}) is waiting for the owner's signature: run "
+            f"`{a['command']}` on the machine that holds the owner key.{none} {held}").rstrip()
+
+
+def note_awaiting(db: DB) -> list[dict]:
+    """Record awaiting() for the console (written only when it changed) and keep one `release_awaiting_owner:<rid>`
+    alert open per awaiting release; the others resolve (signed and promoted, or replaced by a newer build)."""
+    from .core import _alert, _resolve_alert
+    items = awaiting(db)
+    if (db.get_setting(AWAITING) or []) != items:
+        db.set_setting(AWAITING, items)
+    want = {f"release_awaiting_owner:{a['release_id']}": a for a in items}
+    for al in db.q("SELECT rule, subject FROM alerts WHERE rule LIKE 'release_awaiting_owner:%' AND state IN ('open','pending')"):
+        if al["rule"] not in want:
+            _resolve_alert(db, al["rule"], al["subject"])
+    for rule, a in want.items():
+        subject, text = f"platform:{a['platform']}", awaiting_text(a)
+        _alert(db, rule, subject, text)
+        db.x("UPDATE alerts SET detail=? WHERE rule=? AND subject=? AND state IN ('open','pending') AND detail!=?",
+             (text, rule, subject, text))         # the nodes it holds back change as machines join
+    return items
+
+
+def node_release(db: DB, node: dict) -> dict:
+    """Where a node stands with its release, in words as well: {state, release, platform, text}. States: `installed`
+    (it runs the release it is assigned), `installing` (assigned one it does not run yet), `unsigned` (the release it
+    needs waits for the owner's signature), `none` (no release for its platform: no module is enabled yet)."""
+    plat = platforms.node_platform(node)
+    rid = assigned(db, node)
+    runs = f" (runs {node['release_id']})" if node.get("release_id") and node.get("release_id") != rid else ""
+    if rid:
+        row = db.one("SELECT signature FROM releases WHERE release_id=?", (rid,)) or {}
+        if signature_required(db) and not row.get("signature"):
+            return {"state": "unsigned", "release": rid, "platform": plat, "text": f"waiting for signature: {rid}{runs}"}
+        if node.get("release_id") == rid:
+            return {"state": "installed", "release": rid, "platform": plat, "text": rid}
+        return {"state": "installing", "release": rid, "platform": plat, "text": f"installing {rid}{runs}"}
+    waiting = (db.get_setting(DEFAULTS) or {}).get(plat) if plat else None
+    row = db.one("SELECT status FROM releases WHERE release_id=?", (waiting,)) if waiting else None
+    if row and row["status"] == "candidate" and signature_required(db):
+        return {"state": "unsigned", "release": waiting, "platform": plat,
+                "text": f"waiting for signature: {waiting}{runs}"}
+    return {"state": "none", "release": None, "platform": plat,
+            "text": "none yet (no module enabled)" if not any_module_enabled(db) else "none yet (building)"}
 
 
 def assigned(db: DB, node: dict) -> str | None:
@@ -278,6 +416,7 @@ def attach_signature(db: DB, release_id: str, stmt: str, signature: str) -> dict
         raise ReleaseRefused(f"seq {s['seq']} is not above the highest signed seq {top}")
     db.x("UPDATE releases SET seq=?, statement=?, signature=? WHERE release_id=?", (int(s["seq"]), stmt, signature, release_id))
     db.event("release_signed", reason=release_id, seq=int(s["seq"]))
+    note_awaiting(db)
     return {"release_id": release_id, "seq": int(s["seq"])}
 
 
@@ -292,3 +431,5 @@ def promote(db: DB, release_id: str, actor: str):
         db.x("UPDATE releases SET status='retired' WHERE status='current' AND platform=?", (row["platform"],))
         db.x("UPDATE releases SET status='current' WHERE release_id=?", (release_id,))
     db.event("release_promoted", actor=actor, reason=release_id)
+    if actor != "build":                  # a build in sync() notes once, after every platform
+        note_awaiting(db)

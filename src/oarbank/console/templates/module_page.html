@@ -8,5 +8,6 @@
   {% for d in man.ui.pages %}<a href="{{ '/modules/' ~ name if d.slot == 'module.overview' else '/m/' ~ name ~ '/' ~ d.id }}"{% if tab == d.id or (tab == 'overview' and d.slot == 'module.overview') %} aria-current="page"{% endif %}>{{ d.title }}</a>{% endfor %}
   <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a>{% if man.secrets %}<a href="/modules/{{ name }}/secrets"{% if tab == 'secrets' %} aria-current="page"{% endif %}>Secrets</a>{% endif %}<a href="/settings">Settings</a><a href="/audit?op=mod.{{ name | replace('-', '_') }}.*">Operations audit</a>
 </nav>
+{% if readiness %}{{ m.readiness(readiness, return_to="/modules/" ~ name) }}{% endif %}
 <div class="live-tile">{{ body | safe }}</div>
 {% endblock %}

@@ -635,6 +635,10 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     async def settings(request: Request):
         actor = who(request)
         d = await drill(views.settings_page) or {"s": {}, "releases": [], "dscount": []}
+        # a readiness checklist's "Map <tool> in Settings → Tools" link opens the tool form with the tool filled in
+        tool = request.query_params.get("tool") or ""
+        d["prefill_tool"] = tool if tool and len(tool) <= 64 and tool.replace("_", "").replace(".", "").replace("-", "").isalnum() else ""
+        d["prefill_trust"] = "code-exec" if request.query_params.get("trust") == "code-exec" else "read"
         mods = await coordinator_json("GET", "/api/v1/modules", actor)
         d["modules"] = mods.json() if mods.status_code == 200 else []
         return render(request, "settings.html", {**d, "actor": actor})
@@ -703,7 +707,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         actor = who(request)
         await refresh_catalog(actor, force=True)
         store = await drill(views.module_store) or {"store": [], "nodes": []}
-        return render(request, "modules.html", {"modules": list(catalog.rows.values()), **store, "actor": actor})
+        rel = await drill(views.release_state) or {"awaiting": []}
+        rd = await coordinator_json("GET", "/api/v1/modules/readiness", actor)
+        ready = {x["name"]: x for x in (rd.json() if rd.status_code == 200 else [])}
+        return render(request, "modules.html", {"modules": list(catalog.rows.values()), **store, "actor": actor,
+                                                "releases_awaiting": rel["awaiting"], "readiness": ready})
 
     @app.get("/coordinator", response_class=HTMLResponse)
     async def coordinator_page(request: Request):
@@ -728,7 +736,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         over = next((d for d in man.ui.pages if d.slot == "module.overview"), None)
         body = await render_module(name, over, request, actor, ctx_for(request)) if over else \
             '<p class="mut">This module declares no overview page.</p>'
-        return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": "overview", "actor": actor})
+        rd = await coordinator_json("GET", f"/api/v1/modules/{name}/readiness", actor)
+        return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": "overview", "actor": actor,
+                                                    "readiness": rd.json() if rd.status_code == 200 else None})
 
     @app.get("/m/{name}/_import", response_class=HTMLResponse)
     async def module_import(name: str, request: Request, op: str = "", dataset: str = "", return_to: str = ""):

@@ -256,7 +256,7 @@ OPS: list[Operation] = [
               tier="T0", category="modify", idempotency="natural", routes=OPR("modules.restart_host"), gui=CON("modules.restart_host")),
 
     # ------------------------------------------------------------------ releases
-    Operation(id="releases.build", area="releases", summary="Build a release bundle from the installed modules (not deployed until promoted)",
+    Operation(id="releases.build", area="releases", summary="Build each fleet platform's release from the enabled modules (nodes get it once it is signed and promoted)",
               tier="T1", min_role="admin", category="create", idempotency="natural",
               routes=OPR("releases.build"), cli=["oarbank release build"], gui=CON("releases.build")),
     Operation(id="releases.attach_signature", area="releases", summary="Attach an offline signature to a release (signing builds only)",
