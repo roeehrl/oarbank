@@ -46,10 +46,17 @@ def test_native_build_activation_is_dry_run_and_preserves_payload(tmp_path):
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='Apple toolchain')
 def test_application_launcher_compiles(tmp_path):
-    result = subprocess.run(['xcrun', 'swiftc', '-O', '-target', f'{platform.machine()}-apple-macos15.0',
-        '-framework', 'AppKit', '-framework', 'ServiceManagement',
-        str(REPO / 'deploy/macos/coordinator/Launcher.swift'), '-o', str(tmp_path / 'launcher')], capture_output=True, text=True)
+    # as scripts/package-coordinator-macos.sh builds it: with the menu bar model it shares with Oarbank Node.app
+    result = subprocess.run(['xcrun', 'swiftc', '-O', '-parse-as-library', '-target', f'{platform.machine()}-apple-macos15.0',
+        '-framework', 'AppKit', '-framework', 'ServiceManagement', str(REPO / 'deploy/macos/coordinator/Launcher.swift'),
+        str(REPO / 'deploy/macos/shared/MenuBar.swift'), '-o', str(tmp_path / 'launcher')], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    assert 'warning:' not in result.stderr, result.stderr
+    packager = (REPO / 'scripts/package-coordinator-macos.sh').read_text()
+    assert '"$REPO/deploy/macos/coordinator/Launcher.swift" "$REPO/deploy/macos/shared/MenuBar.swift"' in packager
+    assert 'xcrun swiftc -O -parse-as-library' in packager
+    assert ('cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-coordinator-symbolic.png" '
+            '"$REPO/deploy/icons/oarbank-coordinator-symbolic@2x.png" "$APP/Contents/Resources/"') in packager
     assert (tmp_path / 'launcher').is_file()
     build = subprocess.run(['xcrun', 'vtool', '-show-build', str(tmp_path / 'launcher')],
                            capture_output=True, text=True, check=True)

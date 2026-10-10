@@ -80,7 +80,7 @@ done
 APP="$WORK/root/Applications/Oarbank Node.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 chmod 775 "$WORK/root/Applications"
-cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"
+cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-node-symbolic.png" "$REPO/deploy/icons/oarbank-node-symbolic@2x.png" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -104,10 +104,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 plutil -lint -s "$APP/Contents/Info.plist"
-# the app with the elevation contract it shares with the helper (its --elevate mode is the join window's)
+# the app with the elevation contract it shares with the helper (its --elevate mode is the join window's) and the menu
+# bar model it shares with Oarbank Coordinator.app (deploy/macos/shared/MenuBar.swift)
 xcrun swiftc -O -parse-as-library -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement \
     -framework Security "$REPO/deploy/macos/node/NodeApp.swift" "$REPO/deploy/macos/node/Elevation.swift" \
-    -o "$APP/Contents/MacOS/Oarbank Node"
+    "$REPO/deploy/macos/shared/MenuBar.swift" -o "$APP/Contents/MacOS/Oarbank Node"
 # the node runtime beside the launcher (CPython 3.12 with the module SDK, and uv; scripts/build-node-runtime.sh)
 "$REPO/scripts/build-node-runtime.sh" "$PAYLOAD/runtime" "$PLATFORM"
 # the payload holds no link out of itself and no path of this machine, every native file in it (the app's too) is for
