@@ -119,7 +119,8 @@ oarbank-node doctor [--json]
 
 With no code source on a terminal, `join` prompts with hidden input; `--no-input` fails instead. There is no
 `--code <value>` flag. `--scope` exists on macOS (default: system when run as root, else personal); Linux and Windows
-always install the system service. `--containers` installs Windows' container prerequisites. `--progress-file` writes
+always install the system service. `--containers` installs Windows' container prerequisites (waiting for any other
+Windows installation to finish first). `--progress-file` writes
 the check rows and states as JSON lines (the join window runs `join` elevated and reads them).
 
 Exit codes: 0 joined (or already joined to this coordinator), 2 usage or a malformed code, 3 pending approval
@@ -164,9 +165,40 @@ waiting service, stages the code, and exits 0.
 
 `JOINCODE` (Secure, Hidden), `JOINCODEFILE`, `COORDINATOR`, `CONTAINERS`, `NAME`, `NOLAUNCH`. The join page's field is a
 password control (never logged). A code that is not valid (a wrong paste) installs the node waiting, with a warning
-in the installer's log, rather than failing the install. An installed node ignores them on repair and upgrade. Intune: a Win32 app with
+in the installer's log, rather than failing the install. An installed node ignores them on repair and upgrade, except
+`CONTAINERS=1`. Intune: a Win32 app with
 `msiexec /i oarbank-agent-<v>-windows-x64.msi /qn JOINCODE=…` and the file detection rule
 `%ProgramData%\Oarbank\status\joined` (the agent writes it once the node has joined, and removes it when it leaves).
+
+**Container support never runs inside the MSI.** `CONTAINERS=1` (the property, the join page's "Run container jobs"
+box) and a code made for container jobs (flag bit 2; `setup --containers-later`, which only the MSI passes) ask for
+the WSL components the container runtime needs (docs/design/windows-containers.md). The WSL package is itself a
+Windows Installer package, and Windows Installer runs one installation at a time: installing it from a custom action
+is a nested installation, which Microsoft deprecates ("Concurrent Installations": hard to service, and they share the outer
+installation's user interface and logging), and on a real PC it failed the agent's install with error 2755 (1622: the log) and
+status 1603 although the node had joined. A bootstrapper (a WiX Burn bundle that chains the WSL package before the MSI)
+would install it outside, but WSL's own installer picks the package (Windows Update, else its GitHub release) at run
+time and may need a restart in between, and the bundle would be a second artifact for every deployment channel. So the
+MSI's deferred action (`ScheduleContainers`, LocalSystem, `Return="ignore"`) runs `oarbank-launcher container-support
+schedule`, which only registers the task `\OarbankContainerSupport`:
+
+| | |
+|---|---|
+| Runs as | LocalSystem, highest privileges, on battery too, one run at a time, at most 2 h |
+| When | the installer logs that it installed or reconfigured the Oarbank agent (Application log, MsiInstaller event 1033 or 1035 with the product's name: the installation has ended), and 1 min after every start of Windows |
+| Does | `oarbank-launcher container-support run`: `oarbank-agent containers install --wait 1800` (which waits until no installation holds the `Global\_MSIExecute` mutex and exits 1618 if one still does), records the outcome, deletes the task once it is `done` or `failed` |
+| Records | `HKLM\SOFTWARE\Codonic\Oarbank\ContainerSupport`: `State` (`scheduled`, `installing`, `waiting`, `restart`, `done`, `failed`), `Detail`, `Attempts`, `Updated`; administrators and SYSTEM write it, everyone reads it (the status directory lets every user create files, which a LocalSystem task must not write through) |
+| Restart | exit 3010 records `restart` and keeps the task: the run after the next start of Windows finds nothing missing and records `done` |
+| Gives up | after 5 runs that still need a restart or found another installation running: `failed` |
+| Again | `"C:\Program Files\Oarbank\oarbank-launcher.exe" container-support run` as an administrator runs it now and records the outcome (`container-support status` prints the record) |
+| Goes | a first install or upgrade that rolls back cancels it (`RollbackContainers`); uninstalling ends and deletes it and the record (`CancelContainers`); a node whose agent is gone deletes it at its next run |
+
+The MSI exits 0 (3010 when Windows Installer itself asks for a restart) whatever WSL makes of it. Oarbank Node shows a line while it is not done ("Installing container
+support…", "Restart Windows to finish container support", "Container support failed: …"); `oarbank-node status` and
+`doctor` print the same line (`container_support` in `--json`). `oarbank-node join --containers` (and a code made for
+container jobs, unless `--no-containers`) runs `oarbank-agent containers install --wait 600` itself, outside any
+installer, records the outcome the same way, and leaves the task behind only when Windows must restart or another
+installation kept running.
 
 ## Join window
 

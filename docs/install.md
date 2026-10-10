@@ -278,8 +278,14 @@ Module processes run in AppContainers.
 
 Containers run in a WSL containers session the agent creates and owns (a VM of its own, [design/windows-containers.md](design/windows-containers.md)):
 they need Windows 10 2004 or later, WSL 2.9.3 or later and the Virtual Machine Platform, on a machine with hardware virtualization (nested
-virtualization in a VM). `CONTAINERS=1` on the `msiexec` command line installs both unattended (restart Windows if the
-Virtual Machine Platform was new); `oarbank-agent containers install` does the same later. `oarbank-agent containers
+virtualization in a VM). `CONTAINERS=1` on the `msiexec` command line (or the join page's "Run container jobs" box, or
+a join code made for container jobs) installs both unattended right after the installer has finished: the MSI
+registers the one-shot task `OarbankContainerSupport`, which runs as LocalSystem once the installation has ended (the
+WSL package is itself an installer package and never runs inside another one), records the outcome and deletes
+itself. The MSI exits 0 either way; Oarbank Node and `oarbank-node status` then show "Restart Windows to finish
+container support" or "Container support failed: …" until it is done (the record is
+`HKLM\SOFTWARE\Codonic\Oarbank\ContainerSupport`). `oarbank-agent containers install` (administrator) does the same
+later. `oarbank-agent containers
 doctor` prints the runtime's state and each missing piece with its fix, and `--probe` runs a container through it.
 The node offers the `containers` pool only while its session is ready.
 

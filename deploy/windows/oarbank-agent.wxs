@@ -9,12 +9,14 @@
     msiexec /i oarbank-agent.msi /qn JOINCODEFILE=C:\path\join-code.txt      (preferred: never on a command line)
     msiexec /i oarbank-agent.msi /qn JOINCODE=OB2-...                        (kept out of the installer's log)
     msiexec /i oarbank-agent.msi /qn COORDINATOR=https://coordinator:7443     (the owner then approves the node)
-  NAME= names the node when the code has no label. CONTAINERS=1 also installs what the agent's container runtime needs
-  (the Virtual Machine Platform and WSL, docs/design/windows-containers.md; Windows may need a restart). NOLAUNCH=1
+  NAME= names the node when the code has no label. CONTAINERS=1 (or a code made for container jobs) also gets what the
+  agent's container runtime needs (the Virtual Machine Platform and WSL, docs/design/windows-containers.md), installed
+  right after this installation by a one-shot task, never inside it: the WSL package is itself a Windows Installer
+  package, and Windows Installer runs one installation at a time (Windows may need a restart afterwards). NOLAUNCH=1
   leaves the last page's "Open Oarbank Node" unticked. A silent install (/qn) shows no page and starts nothing.
   Attended, the join page takes the code in a password field; the last page opens Oarbank Node at the join window.
-  Uninstalling removes the service and the agent's WSL containers session with its storage; the node's home in
-  ProgramData stays.
+  Uninstalling removes the service, the container support task and the agent's WSL containers session with its
+  storage; the node's home in ProgramData stays.
   Built by scripts/package-windows.ps1 with WiX 5 and its Util and UI extensions (wix build -ext WixToolset.Util.wixext
   -ext WixToolset.UI.wixext -d Version=... -d BinDir=... -d RuntimeDir=... -d JoinDir=...).
 -->
@@ -124,15 +126,27 @@
     <SetProperty Id="NodeNameArgument" After="CostFinalize" Sequence="execute" Condition="NAME AND NOT WIX_UPGRADE_DETECTED"
                  Value="--name &quot;[NAME]&quot;" />
     <SetProperty Id="SetupWithFile" Before="SetupWithFile" Sequence="execute" Condition="JOINCODEFILE"
-                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --or-wait --join-code-file &quot;[JOINCODEFILE]&quot; [NodeNameArgument]" />
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --or-wait --containers-later --join-code-file &quot;[JOINCODEFILE]&quot; [NodeNameArgument]" />
     <SetProperty Id="SetupWithCode" Before="SetupWithCode" Sequence="execute" Condition="JOINCODE"
-                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --or-wait --join-code &quot;[JOINCODE]&quot; [NodeNameArgument]" />
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --or-wait --containers-later --join-code &quot;[JOINCODE]&quot; [NodeNameArgument]" />
     <SetProperty Id="SetupWithUrl" Before="SetupWithUrl" Sequence="execute" Condition="COORDINATOR"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system --coordinator &quot;[COORDINATOR]&quot; [NodeNameArgument]" />
     <SetProperty Id="SetupWaiting" Before="SetupWaiting" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; setup --scope system [NodeNameArgument]" />
-    <SetProperty Id="InstallContainers" Before="InstallContainers" Sequence="execute"
-                 Value="&quot;[INSTALLFOLDER]oarbank-agent.exe&quot; containers install" />
+    <!-- Container support (CONTAINERS=1; a join code made for container jobs: setup's containers-later option). Never a nested
+         installation: the WSL package is a Windows Installer package, and an installation started inside this one (a
+         custom action) fails both (error 2755 with 1622 on a real PC; Microsoft deprecates nested installations). The
+         deferred action only registers the task \OarbankContainerSupport, which runs `oarbank-agent containers install`
+         as LocalSystem once the installer has logged the end of this installation, records the outcome in
+         HKLM\SOFTWARE\Codonic\Oarbank\ContainerSupport (Oarbank Node shows it) and deletes itself
+         (rust/crates/oarbank-launcher/src/container_support.rs). A first install or upgrade that rolls back cancels the
+         task again; an uninstall ends and deletes it. -->
+    <SetProperty Id="ScheduleContainers" Before="ScheduleContainers" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; container-support schedule" />
+    <SetProperty Id="RollbackContainers" Before="RollbackContainers" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; container-support cancel" />
+    <SetProperty Id="CancelContainers" Before="CancelContainers" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; container-support cancel" />
     <SetProperty Id="ConfigureHelper" Before="ConfigureHelper" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-config" />
     <SetProperty Id="RemoveNode" Before="RemoveNode" Sequence="execute"
@@ -145,8 +159,10 @@
     <CustomAction Id="SetupWithCode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
     <CustomAction Id="SetupWithUrl" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="SetupWaiting" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
-    <!-- 3010 (restart needed) is not a failure, and a machine that cannot run VMs still gets the agent -->
-    <CustomAction Id="InstallContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
+    <!-- a task that cannot be registered is recorded for Oarbank Node and never fails the install -->
+    <CustomAction Id="ScheduleContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
+    <CustomAction Id="RollbackContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="rollback" Impersonate="no" Return="ignore" HideTarget="no" />
+    <CustomAction Id="CancelContainers" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
     <CustomAction Id="ConfigureHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
     <CustomAction Id="RemoveNode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
     <!-- the helper's filters and loopback exemptions outlive its service (helper_windows.rs): an uninstall removes them,
@@ -155,11 +171,15 @@
 
     <InstallExecuteSequence>
       <Custom Action="ConfigureHelper" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
-      <Custom Action="SetupWithFile" After="InstallFiles" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND JOINCODEFILE" />
+      <!-- the rollback action goes before every action that may register the task (setup with a code, then
+           ScheduleContainers), so a first install or upgrade that fails later removes it again -->
+      <Custom Action="RollbackContainers" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="SetupWithFile" After="RollbackContainers" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND JOINCODEFILE" />
       <Custom Action="SetupWithCode" After="SetupWithFile" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND JOINCODE AND NOT JOINCODEFILE" />
       <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />
       <Custom Action="SetupWaiting" After="SetupWithUrl" Condition="NOT Installed AND (WIX_UPGRADE_DETECTED OR (NOT JOINCODEFILE AND NOT JOINCODE AND NOT COORDINATOR))" />
-      <Custom Action="InstallContainers" After="SetupWaiting" Condition="CONTAINERS=&quot;1&quot; AND NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="ScheduleContainers" After="SetupWaiting" Condition="CONTAINERS=&quot;1&quot; AND NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CancelContainers" Before="RemoveNode" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RemoveNode" Before="ClearHelper" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="ClearHelper" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
@@ -205,7 +225,7 @@
                  Text="This PC's name in the fleet (optional; otherwise the code's label or the computer name):" />
         <Control Id="NodeName" Type="Edit" X="20" Y="134" Width="330" Height="18" Property="NAME" Text="{128}" />
         <Control Id="Containers" Type="CheckBox" X="20" Y="162" Width="330" Height="18" Property="CONTAINERS" CheckBoxValue="1"
-                 Text="Run &amp;container jobs (installs WSL components; may need a restart)" />
+                 Text="Run &amp;container jobs (installs WSL components after setup; may need a restart)" />
         <Control Id="Note" Type="Text" X="20" Y="190" Width="330" Height="34" NoPrefix="yes"
                  Text="Without a code the Oarbank agent installs and waits. Oarbank Node, in the Start menu and the notification area, joins this PC when you are ready." />
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />

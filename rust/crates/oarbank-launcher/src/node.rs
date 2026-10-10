@@ -4,6 +4,7 @@
 //! the node joined, waits for approval, or failed with a stable code. `check`, `status`, `leave` and `doctor` read the
 //! same document; `policy-apply` is what macOS's managed-policy job runs.
 
+use crate::container_support;
 use crate::setup::{self, SetupOpts};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -304,13 +305,28 @@ fn join_inner(explicit_home: Option<&Path>, o: &Opts, out: &mut Out) -> Result<V
             return Err(fail("E_CANCELLED", "Cancelled.", 1));
         }
     }
-    // Windows: container jobs need WSL components, installed now while elevated
+    // Windows: container jobs need WSL components, installed now while elevated. Never inside another installation
+    // (the WSL package is a Windows Installer package): the agent waits for one that runs, and if it still runs, or
+    // Windows must restart, the container support task finishes the job (container_support.rs)
     let containers = o.has("--containers") || (detail["containers"] == true && !o.has("--no-containers"));
     let mut restart = false;
     if cfg!(windows) && containers {
         if let Ok(agent) = agent_bin() {
             out.state(&json!({"state": "containers"}), "  ...   containers  installing the WSL components container jobs need");
-            restart = Command::new(agent).args(["containers", "install"]).status().map(|s| s.code() == Some(3010)).unwrap_or(false);
+            let (code, output) = match Command::new(agent).args(["containers", "install", "--wait", "600"]).output() {
+                Ok(r) => (r.status.code(), format!("{}\n{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))),
+                Err(e) => (Some(1), e.to_string()),
+            };
+            let (state, why) = container_support::outcome(code, &output, 1);
+            if !container_support::final_state(state) {
+                let _ = container_support::schedule();
+            }
+            container_support::record(state, &why, 1);
+            restart = state == "restart";
+            // a restart is said with the result; anything else that is not done, now
+            if let (false, Some(l)) = (restart, container_support::line(state, &why)) {
+                out.state(&json!({"state": "containers", "container_support": state, "detail": why}), &format!("  !     containers  {l}"));
+            }
         }
     }
     let since = now();
@@ -419,7 +435,20 @@ fn status(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
         let found: Vec<(String, Value)> = homes(explicit_home).into_iter().map(|(s, h)| (s, read_status(&h)))
             .filter(|(_, v)| !v.is_null()).collect();
         let (scope, st) = found.into_iter().next().unwrap_or(("".into(), json!({"state": "not installed"})));
-        let text = if o.has("--json") { json!({"scope": scope, "status": st}).to_string() } else { describe(&scope, &st) };
+        let support = container_support::read();
+        let text = if o.has("--json") {
+            let mut v = json!({"scope": scope, "status": st});
+            if let Some(r) = &support {
+                v["container_support"] = r.json();
+            }
+            v.to_string()
+        } else {
+            let mut t = describe(&scope, &st);
+            if let Some(l) = support.as_ref().and_then(|r| container_support::line(&r.state, &r.detail)) {
+                t += &format!("\n  {l}");
+            }
+            t
+        };
         if text != last {
             println!("{text}");
             last = text;
@@ -516,6 +545,10 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
             report["containers"] = serde_json::from_slice(&c.stdout).unwrap_or(Value::Null);
         }
     }
+    let support = container_support::read();
+    if let Some(r) = &support {
+        report["container_support"] = r.json();
+    }
     if o.has("--json") {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -525,6 +558,9 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
         }
         if let Some(c) = report["containers"]["state"].as_str() {
             println!("  containers: {c}");
+        }
+        if let Some(l) = support.as_ref().and_then(|r| container_support::line(&r.state, &r.detail)) {
+            println!("  {l}");
         }
     }
     Ok(if ok { 0 } else { 1 })
