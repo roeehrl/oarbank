@@ -89,7 +89,8 @@ spec/platforms.md):
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
              "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable",
              "grants.bootstrap": "enforced"}},
- "containers": {"gpu": "undetected"},
+ "containers": {"runtime": "colima", "state": "installed", "detail": "the agent's Colima VMs start when a job needs one",
+                "gpu": "virtio-gpu:venus"},
  "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **CPU.** `perf_cores` and `eff_cores` are physical cores (a core running two hardware threads counts once), the
@@ -105,9 +106,15 @@ spec/platforms.md):
   stage's jobs with the bootstrap grants (spec/sandbox.md, "Bootstrap jobs"); only such a node gets them.
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
   `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
-  (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`).
-- **Containers.** `gpu` is how containers get the node's GPUs (`cdi:<kind>`, `virtio-gpu:venus`), else `undetected`;
-  the APIs such a container can use are the doctor report's `gpu_apis.containers` (below). A Windows node adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
+  (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`). An unmapped tool keeps off
+  only the jobs of stages that need certification (and the goldens): a stage that needs none runs without it
+  (docs/design/stage-gating.md), and explain names the tools.
+- **Containers.** `runtime` and `state` say whether the node has a container runtime: on macOS `colima` (the agent's
+  Colima profiles; `installed`: their VMs start when a job needs one), on Linux `podman` or `docker` (`installed`),
+  else `runtime` null and `state` `absent`. `gpu` is how containers get the node's GPUs (`cdi:<kind>`,
+  `virtio-gpu:venus`), else `undetected`, always `undetected` without a runtime; the APIs such a container can use are
+  the doctor report's `gpu_apis.containers` (below), which `oarbank node show` and the node page list only beside a
+  runtime. A Windows node reports its WSL containers session's state instead ([design/windows-containers.md](design/windows-containers.md), "The
   node's report"): `runtime` (`wslc`), `state` (`absent`, `starting`, `ready`, `missing`, `failed`), `session`,
   `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes. A macOS node
   reports its Colima runtime the same way ([design/macos-containers.md](design/macos-containers.md)): `runtime`
@@ -212,12 +219,15 @@ their process groups, deletes their workspaces, and does not report them.
 oarbankd grants jobs:
 
 - whose resources fit `free_cpu` and `free_mem_gb`;
-- whose module is offered in `modules` (its doctor reported healthy) and certified on this node, or, for a job of a
-  bootstrap stage (docs/design/bootstrap-stages.md), certifying there, on a node whose facts report `grants.bootstrap`;
+- whose module is offered in `modules` (its runner started: its doctor printed a DoctorOutput, healthy or not) and
+  certified on this node; or, for a job of a stage that needs no certification (docs/design/stage-gating.md: a
+  bootstrap stage, or one that compares nothing and needs no capability or pool), in any state its doctor decides there
+  (certified, certifying, `doctor_failed`, `undetected`, `golden_failed`; not `revoked`), a bootstrap stage only on a
+  node whose facts report `grants.bootstrap` (docs/design/bootstrap-stages.md);
 - whose datasets are all registered (else `DATASETS_NOT_REGISTERED`) and in `ready_datasets`;
 - whose pool needs fit the node's pools;
-- whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor);
-  otherwise the job waits with `STAGE_CAPABILITY_MISSING`;
+- whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor: a failed
+  check named after a capability takes it away); otherwise the job waits with `STAGE_CAPABILITY_MISSING`;
 - whose stage's secrets (`stages[].secrets`) each have a value the coordinator can read for this node (its own, else
   the module's); otherwise the job waits with `SECRETS_NOT_SET` (docs/design/secrets-and-signed-images.md).
 
@@ -574,9 +584,12 @@ broken) or `undetected` (this node cannot run it). The agent folds in its own ca
                        "toy": {"health": "undetected", "checks": [...]}}}
 ```
 `capabilities` are what the node's offered services and healthy probes provide when the doctors ran (the agent runs
-them again when that set changes); a module's `capabilities` are its own doctor's. Together they are the node's
-capabilities for that module: a job is granted only where they hold every capability its stage requires
-(`stages[].requires.capabilities`), and a unit of work binds only to a class with such a node.
+them again when that set changes); a module's `capabilities` are its own doctor's. Together, less every capability a
+failed check of the module's doctor is named after, they are the node's capabilities for that module: a job is granted
+only where they hold every capability its stage requires (`stages[].requires.capabilities`), and a unit of work binds
+only to a class with such a node. A failed check proves nothing else: one named after no capability (`pysam_import`,
+`disk_free_20gb`) keeps the module from being certified (the doctor is not `healthy`) and so off the stages that need
+certification, never off a stage that needs none.
 `gpu_apis` are the GPU APIs the node provides on the host and inside its containers, each detected by asking the API's
 runtime for a GPU device (`oarbank-agent gpu-apis` prints the same object; docs/design/gpu-placement.md), with what was
 found or why not per API. The agent probes at start and whenever its doctors run, never on a timer. A job is granted
@@ -584,8 +597,13 @@ only where every GPU API group its stage needs is met (`GPU_API_MISSING`; the ru
 platform, on the host or with `in_container` in containers, and those of GPU services it reserves a pool of); a module
 whose runner needs an API the host lacks is not offered there (the agent reports it `undetected`, with a `gpu_apis`
 check) and is excluded by oarbankd. A node that has not reported provides none.
-Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `doctor_failed` and alerts;
-`undetected` is recorded as such and never alerts. Release-install refusals appear as `release_install`.
+Each module's report carries `ran`: true when its runner printed a DoctorOutput, false when the agent wrote the report
+itself because the doctor did not start, crashed, hung or printed something else (then its only check is `doctor`, whose
+detail ends with the last 4000 characters of what the doctor printed). Modules with `ran` true are offered in claims,
+whatever their health; a report without `ran` (an older agent) counts as run unless it is that `doctor` failure. Check
+details are kept and shown whole (`oarbank node show`, the node page). oarbankd records `unhealthy` as `doctor_failed`
+and alerts; `undetected` is recorded as such and never alerts. Neither is certified, so only stages that need no
+certification run there (docs/design/stage-gating.md). Release-install refusals appear as `release_install`.
 
 ## Certification and goldens
 
@@ -601,9 +619,13 @@ Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `d
   stop retrying and alert. Nondeterminism against another node's canonical result quarantines the node.
 - **Stages that do not compare.** A stage whose effective determinism is `none` (`stages[].determinism`, else
   `results.determinism`) is never golden-tested, replicated or compared, and neither takes nor serves a result-cache hit:
-  its results depend on when it ran. Its jobs are otherwise ordinary (fenced, certified nodes only, stage retry,
-  placement). S21 checks it.
-- **Offers.** A node is granted only jobs of modules it is certified for.
+  its results depend on when it ran. Its jobs are otherwise ordinary (fenced, stage retry, placement). S21 checks it.
+- **Stages that need no certification** (docs/design/stage-gating.md): a bootstrap stage, and a stage that compares
+  nothing and requires no capability and no pool (oarbank-sdk `Manifest.certification_exempt`). Their jobs run on any
+  node where the module's runner started, before its goldens pass, and their results carry no certification fence;
+  they never count toward certification. S8 holds them to a state the doctor decides.
+- **Offers.** A node is granted only jobs of modules it is certified for, except jobs of stages that need no
+  certification.
 
 ## Staged jobs (stage chains)
 

@@ -17,11 +17,14 @@ from .db import jl
 def gpu(facts: dict, doctor: dict | None) -> dict:
     """The GPU APIs the node's doctor reports (docs/protocol.md "Doctor"), with the evidence for each API (what was
     found, or why not), and how its containers get the GPU (the facts' `containers.gpu`): `cdi:<kind>` on Linux and
-    Windows, `virtio-gpu:venus` on macOS with krunkit, else none."""
+    Windows, `virtio-gpu:venus` on macOS with krunkit, else none. A node whose facts say it has no container runtime
+    (`containers.state` absent) has no GPU APIs in containers, whatever an older report says."""
     g = (doctor or {}).get("gpu_apis")
-    how = ((facts or {}).get("containers") or {}).get("gpu") or ""
+    ct = (facts or {}).get("containers") or {}
+    how = "" if ct.get("state") == "absent" else ct.get("gpu") or ""
     mechanism = f"{how[4:]} (CDI)" if how.startswith("cdi:") else "Venus over virtio-gpu (krunkit)" if how == "virtio-gpu:venus" else None
-    return {"reported": g is not None, "host": list((g or {}).get("host") or []), "containers": list((g or {}).get("containers") or []),
+    return {"reported": g is not None, "host": list((g or {}).get("host") or []),
+            "containers": list((g or {}).get("containers") or []) if ct.get("state") != "absent" else [],
             "evidence": dict((g or {}).get("evidence") or {}), "mechanism": mechanism}
 
 

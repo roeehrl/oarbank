@@ -48,8 +48,9 @@ pub struct Agent {
     /// Send hello instead of the next heartbeat (a new release is installed: the coordinator records it at hello).
     pub need_hello: bool,
     pub table: Table,
-    /// Modules whose doctor passed in the current release (offered in claims).
-    pub healthy: Vec<String>,
+    /// Modules whose runner started in the current release: their doctor printed a DoctorOutput, healthy or not (offered
+    /// in claims; the coordinator decides which of their stages run here: docs/design/stage-gating.md).
+    pub offered: Vec<String>,
     pub draining: bool,
     pub prot: Option<crate::prot::Protection>,
     /// Serve session helpers (`run --session-hub`: a system install's service).
@@ -111,7 +112,7 @@ impl Agent {
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
         let a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: Value::Null, hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
-                   last_release_error: None, need_hello: false, table: Table::default(), healthy: vec![],
+                   last_release_error: None, need_hello: false, table: Table::default(), offered: vec![],
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
                    containers: None, images: None,
@@ -515,8 +516,7 @@ impl Agent {
                 self.fold_requires(&mut rep);
                 self.fold_gpu_apis(&mut rep);
                 info!(report = %rep["modules"], "doctors ran");
-                self.healthy = rep["modules"].as_object().map(|m| m.iter().filter(|(_, v)| v["health"] == "healthy")
-                    .map(|(k, _)| k.clone()).collect()).unwrap_or_default();
+                self.offered = doctor::offered(&rep);
                 self.doctor = Some(rep);
             }
             Err(e) => warn!(error = %e, "doctor task failed"),
@@ -893,7 +893,7 @@ impl Agent {
     pub async fn claim(&mut self) -> Result<usize, ApiError> {
         let d = &self.directives;
         if self.draining || d["desired_state"].as_str() != Some("active") || d["lifecycle"].as_str() != Some("ready")
-            || self.release.is_none() || self.healthy.is_empty() || self.need_hello {
+            || self.release.is_none() || self.offered.is_empty() || self.need_hello {
             return Ok(0);
         }
         let (cpu, mem) = self.free();
@@ -907,7 +907,7 @@ impl Agent {
         }
         let rel = self.release.clone().expect("checked");
         let cap = self.prot.as_ref().and_then(|p| p.capacity.as_ref());
-        let body = json!({"free_cpu": cpu, "free_mem_gb": mem, "modules": self.healthy, "release_id": rel.id,
+        let body = json!({"free_cpu": cpu, "free_mem_gb": mem, "modules": self.offered, "release_id": rel.id,
                           "ready_datasets": staging::ready(&self.layout), "pool_jobs_only": cap.is_some_and(|c| c.pool_jobs_only),
                           "gpu_jobs": cap.and_then(|c| c.gpu_jobs)});
         let r = self.api().map_err(io_err)?.post("/v1/agent/claim", &body).await?;
@@ -1209,7 +1209,8 @@ pub mod tests {
     }
 
     /// The doctor report carries the GPU probe; a module whose runner needs an API this host lacks is `undetected`
-    /// (never offered or certified here), one that needs it in containers or names none is left to its own doctor.
+    /// (never certified here; the coordinator keeps its jobs off by GPU_API_MISSING), one that needs it in containers or
+    /// names none is left to its own doctor.
     #[test]
     fn the_doctor_report_names_the_gpu_apis_and_a_module_needing_another_is_undetected() {
         let tmp = crate::scratch("agent-gpuapis");

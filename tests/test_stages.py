@@ -1,5 +1,6 @@
 """Stage forms (docs/design/sdk-1.3.md): a stage that does not compare (determinism none) is never replicated, compared,
-cached or golden-tested, and still fenced and certified-only; jobs.enqueue items may name a standalone stage."""
+cached or golden-tested, and still fenced; one that also needs no capability or pool runs before certification, wherever
+the module's runner starts (docs/design/stage-gating.md); jobs.enqueue items may name a standalone stage."""
 import dataclasses
 import json
 import time
@@ -82,17 +83,88 @@ def test_results_never_cross_between_stages_that_compare_and_that_do_not(db):
     assert ok(db)
 
 
-def test_jobs_of_such_a_stage_stay_fenced_and_certified_only(db):
+def test_jobs_of_such_a_stage_stay_fenced_and_need_a_node_that_runs_the_module(db):
     from helpers import enrolled_node
     n1, = certified_fleet(db, ("n1",))
-    _, uncertified = enrolled_node(db, "new")
+    _, enrolled = enrolled_node(db, "new")
     sid = study(db)
     enqueue(db, sid, sync_item())
     g = [x for x in grants(db, n1) if x["job_key"] == SYNC_KEY][0]
     db.x("UPDATE jobs SET generation=generation+1 WHERE job_id=?", (g["job_id"],))
     assert core.complete(db, fresh(db, n1), g["attempt_id"], sync_result())["reason"] == "stale_generation"
-    assert not grants(db, uncertified)                        # not certified for relay: nothing to claim
+    assert not grants(db, enrolled)                           # no release installed, no doctor: nothing to claim
     assert ok(db)
+
+
+# ---------------------------------------------------------------------------- stages that need no certification
+
+SICK = {"modules": {"relay": {"health": "unhealthy", "ran": True, "checks": [
+            {"name": "python_312", "ok": True}, {"name": "pysam_import", "ok": False, "detail": "dlopen(libchtslib.so): "
+                                                 + "x" * 400 + " (mach-o file, but is an incompatible architecture)"}]},
+                    "toy": {"health": "healthy", "checks": []}}}
+
+
+def doctored(db, name, doctor):
+    """A node that installed the release and reported `doctor` (toy certified on it; relay as its doctor says)."""
+    from helpers import certify, enrolled_node
+    return certify(db, enrolled_node(db, name)[1], doctor=doctor)
+
+
+def relay_state(db, node):
+    return core.node_modules(fresh(db, node)).get("relay", {}).get("state")
+
+
+def test_a_stage_that_compares_nothing_and_needs_nothing_runs_where_the_runner_starts_before_certification(db):
+    from oarbank.coordinator import explain
+    sick = doctored(db, "sick", SICK)
+    assert relay_state(db, sick) == "doctor_failed"           # no goldens: relay is not certified there
+    sid = study(db)
+    enqueue(db, sid, sync_item())
+    ev = db.one("SELECT job_id FROM jobs WHERE stage IS NULL AND kind='eval'")["job_id"]
+    sync = db.one("SELECT job_id FROM jobs WHERE job_key=?", (SYNC_KEY,))["job_id"]
+    doc = explain.job_doc(db, sync)
+    assert doc.headline.code == "QUEUED_BEHIND" and doc.system_actions[0].startswith("Needs no certification (stage sync")
+    check = next(r for r in doc.matrix[0].results if r.predicate == "module_runner_ready(relay)")
+    assert (check.outcome, check.observed) == ("pass", "doctor_failed, runner started")
+    # the evaluation needs certification, and explain says why no node has it
+    head = explain.job_doc(db, ev).headline
+    assert head.code == "NO_ELIGIBLE_NODE" and ("Module relay is not ready on this node (doctor: doctor_failed; failed checks "
+                                                "pysam_import) (1 node: 1 darwin-arm64)") in head.text, head.text
+    g = grants(db, sick)
+    assert [(x["job_id"], x["spec"]["stage"]) for x in g] == [(sync, "sync")]
+    r = core.complete(db, fresh(db, sick), g[0]["attempt_id"], sync_result())
+    assert r == {"accepted": True, "canonical": True, "reason": "ok"}   # no certification fence
+    assert relay_state(db, sick) == "doctor_failed"           # and it never certifies anything
+    assert ok(db)
+
+
+def test_a_stage_that_compares_waits_for_certification_and_a_revoked_module_runs_nothing(db, monkeypatch):
+    from oarbank.coordinator import explain
+    sick = doctored(db, "sick", SICK)
+    sid = study(db)
+    enqueue(db, sid, sync_item())
+    sync = db.one("SELECT job_id FROM jobs WHERE job_key=?", (SYNC_KEY,))["job_id"]
+    with monkeypatch.context() as m:
+        relay_stages(m, sync="exact")                         # compared, cached and replicated: certified nodes only
+        assert grants(db, sick) == []
+        first = next(r for r in explain.job_doc(db, sync).matrix[0].results if r.outcome != "pass")
+        assert (first.predicate, first.code) == ("module_certified(relay)", "MODULE_NOT_READY")
+    core.revoke_module(db, sick["node_id"], "relay", "breaker: test")
+    assert grants(db, sick) == []                             # revoked: not until its doctor runs again
+    first = next(r for r in explain.job_doc(db, sync).matrix[0].results if r.outcome != "pass")
+    assert (first.predicate, first.code) == ("module_runner_ready(relay)", "MODULE_NOT_CERTIFIED")
+    assert ok(db)
+
+
+def test_s8_names_an_uncertified_attempt_of_a_stage_that_needs_certification(db, monkeypatch):
+    sick = doctored(db, "sick", SICK)
+    sid = study(db)
+    enqueue(db, sid, sync_item())
+    (g,) = grants(db, sick)
+    assert ok(db)
+    relay_stages(monkeypatch, sync="exact")
+    v = invariants.s8_live_module_certified(db)
+    assert v and f"S8 attempt {g['attempt_id']} runs relay" in v[0]
 
 
 def test_goldens_never_run_a_stage_that_does_not_compare(db, monkeypatch):
@@ -240,3 +312,34 @@ def test_a_staged_job_joins_its_campaigns_unit_with_its_stages_classes(db, monke
     sid = study(db)
     enqueue(db, sid, sync_item())
     assert placement.binding(db, f"c:{sid}")["feasible"] == ["linux-arm64"]
+
+
+def test_a_host_tool_without_a_path_keeps_off_only_the_stages_that_need_certification(db, monkeypatch):
+    """An unmapped host tool serves a capability, which a stage that needs no certification never requires: such a job
+    runs (with the tools that are mapped); the stages that compare, and the goldens, wait with TOOL_UNAVAILABLE, naming
+    the tool."""
+    from oarbank.coordinator import explain, modsandbox
+    from oarbank_sdk import manifest as mf
+    sick = doctored(db, "sick", SICK)
+    info = modcalls.info("relay")
+    sandbox = info.manifest.sandbox.model_copy(update={"tools": [mf.ToolGrant(id="java17", trust="code-exec")]})
+    monkeypatch.setitem(modcalls.CATALOG, "relay", dataclasses.replace(info, manifest=info.manifest.model_copy(
+        update={"sandbox": sandbox})))
+    assert modsandbox.node_exclusions(db, fresh(db, sick), {"relay"}) == {"relay": "TOOL_UNAVAILABLE"}
+    assert modsandbox.node_excluded(db, fresh(db, sick), {"relay"}) == set()
+    sid = study(db)
+    enqueue(db, sid, sync_item())
+    ev = db.one("SELECT job_id FROM jobs WHERE stage IS NULL AND kind='eval'")["job_id"]
+    head = explain.job_doc(db, ev).headline
+    assert ("Module relay needs host tools the tool registry has no darwin paths for: java17 (1 node: 1 darwin-arm64)"
+            in head.text), head.text
+    assert [x["spec"]["stage"] for x in grants(db, sick)] == ["sync"]
+    assert ok(db)
+
+
+def test_which_node_exclusions_spare_which_jobs():
+    from oarbank.coordinator import predicates
+    exempt, boot, plain = {"exempt": True, "bootstrap": False}, {"exempt": True, "bootstrap": True}, {"exempt": False}
+    assert [predicates.spared("TOOL_UNAVAILABLE", j) for j in (exempt, boot, plain)] == [True, True, False]
+    assert [predicates.spared("FOLDER_UNAVAILABLE", j) for j in (exempt, boot, plain)] == [False, True, False]
+    assert not any(predicates.spared(c, boot) for c in ("PLATFORM_UNSUPPORTED", "CAPABILITY_NOT_ENFORCED", "AGENT_TOO_OLD", None))

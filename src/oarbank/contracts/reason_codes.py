@@ -68,7 +68,7 @@ CODES: list[ReasonCode] = [
       remedies=["secrets.set"]),
     C("DATASET_PLATFORM_MISMATCH", "job_pending", "Its dataset is bound to {platforms}; this node is {platform}", remedies=["jobs.cancel"]),
     C("OS_VERSION_UNSUPPORTED", "job_pending", "Module {module} needs another OS version than {os_version} (requires.os)"),
-    C("TOOL_UNAVAILABLE", "job_pending", "Module {module} needs host tools the tool registry has no {os} paths for",
+    C("TOOL_UNAVAILABLE", "job_pending", "Module {module} needs host tools the tool registry has no {os} paths for: {tools}",
       remedies=["settings.tools.update"]),
     C("FOLDER_UNAVAILABLE", "job_pending", "Module {module} needs folders this node does not provide (unmapped, another "
       "access, refused by the node, or awaiting the owner's signature)", remedies=["settings.folders.update"]),

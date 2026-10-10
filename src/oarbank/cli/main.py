@@ -683,6 +683,8 @@ def node_show(target: str, as_json: bool = False):
     if ct and ct.get("runtime"):
         print(f"  containers: {ct['runtime']} {ct.get('state')}" + (f" · {', '.join(ct['platforms'])}" if ct.get("platforms") else "")
               + (f"; {ct['detail']}" if ct.get("detail") else ""))
+    elif ct and ct.get("state") == "absent":
+        print(f"  containers: none ({ct.get('detail') or 'no container runtime'})")
     for m in (ct or {}).get("missing") or []:
         print(f"    missing {m.get('what')}: {m.get('detail')}" + (f"; fix: {m['fix']}" if m.get("fix") else ""))
     if not d["services"]:

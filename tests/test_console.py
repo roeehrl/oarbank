@@ -616,6 +616,33 @@ def test_fragments_are_never_shared_between_sessions(env):
     assert _form_fields(c.get("/frag/fleet").text, "nodes.pause")["csrf"] == other["csrf"] != first
 
 
+def test_node_show_lists_gpu_in_containers_only_with_a_container_runtime_and_doctor_details_whole(monkeypatch, capsys):
+    """A Mac with Colima and krunkit reports its runtime, so its GPU API in containers sits beside a runtime; a node without
+    one shows none (docs/design/stage-gating.md, decision 7). Doctor details print whole, never cut (decision 6)."""
+    from oarbank.cli import main as cli
+    from oarbank.coordinator import detail
+    rep = {"gpu_apis": {"host": ["metal"], "containers": ["vulkan"]}}
+    colima = {"containers": {"runtime": "colima", "state": "installed", "gpu": "virtio-gpu:venus",
+                             "detail": "the agent's Colima VMs start when a job needs one"}}
+    assert detail.gpu(colima, rep)["containers"] == ["vulkan"]
+    none = {"containers": {"runtime": None, "state": "absent", "gpu": "undetected", "detail": "no container runtime installed"}}
+    assert detail.gpu(none, rep) == {"reported": True, "host": ["metal"], "containers": [], "evidence": {}, "mechanism": None}
+    why = "dlopen(/x/libchtslib.so): tried: " + "'/x' (no such file), " * 40 + "(mach-o file, but is an incompatible architecture)"
+    doctor = detail.doctor({"at": 1.0, "release_id": "r_1", "capabilities": [], "modules": {"minos-gatk": {
+        "health": "undetected", "ran": True, "checks": [{"name": "pysam_import", "ok": False, "detail": why}]}}})
+    for facts, line in ((colima, "containers: colima installed; the agent's Colima VMs start when a job needs one"),
+                        (none, "containers: none (no container runtime installed)")):
+        doc = {"node": {"node_id": "n_1", "hostname": "mac", "platform": "darwin-arm64", "lifecycle": "ready",
+                        "desired_state": "active", "online": True, "agent_version": "2.9.0", "quarantine_reason": None},
+               "modules": {}, "doctor": doctor, "gpu": detail.gpu(facts, rep), "containers": facts["containers"], "services": [],
+               "services_at": None, "folders": [], "sandbox": {"backend": "seatbelt", "capabilities": []}}
+        monkeypatch.setattr(cli, "api", lambda method, path, *a, **k: doc)
+        cli.node_show("mac")
+        out = capsys.readouterr().out
+        assert line in out and f"failed pysam_import: {why}" in out
+        assert ("containers vulkan (Venus over virtio-gpu (krunkit))" in out) == (facts is colima), out
+
+
 def test_oarbank_node_show_prints_the_services_report(monkeypatch, capsys):
     from oarbank.cli import main as cli
     from oarbank.coordinator import detail, nodeservices

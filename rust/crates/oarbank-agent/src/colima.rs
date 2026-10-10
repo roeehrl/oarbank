@@ -467,7 +467,8 @@ fn user_name(uid: u32) -> String {
     unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) }.to_string_lossy().into_owned()
 }
 
-#[cfg(test)]
+// macOS logic with macOS paths: Unix path and PATH separators (the module is compiled everywhere, its tests on Unix)
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

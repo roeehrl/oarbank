@@ -12,10 +12,25 @@ from dataclasses import dataclass, field
 
 from oarbank_sdk import gpu as gpuapi
 from oarbank_sdk import platform as pf
+from oarbank_sdk import runner_protocol as rp
 
 from ..contracts.explain import PredicateResult
 
 PASS, FAIL, UNKNOWN = "pass", "fail", "unknown"
+# module states (core._lifecycle_step) in which a node runs a module's certification-exempt stages, given that its runner
+# started (doctor_ran): every state the doctor decides, but not `revoked` (a breaker trip or a golden mismatch, until the
+# doctor runs again) or none at all (no doctor report yet). docs/design/stage-gating.md
+RUNNER_STATES = ("certified", "certifying", "doctor_failed", "undetected", "golden_failed")
+# node exclusions (modsandbox.node_exclusions) that keep only some of a module's jobs off a node: a host tool the registry
+# has no path for matters to no job of a stage that needs no certification (it needs no capability, which is what a tool
+# serves, and a bootstrap job gets no tools at all), and an unmapped folder to no bootstrap job (it gets no folders)
+SPARED = {"TOOL_UNAVAILABLE": "exempt", "FOLDER_UNAVAILABLE": "bootstrap"}
+
+
+def spared(code: str | None, job: dict) -> bool:
+    """Does a node exclusion with this code leave the job free to run there (SPARED)?"""
+    who = SPARED.get(code or "")
+    return bool(who) and bool(job.get("bootstrap") if who == "bootstrap" else (job.get("exempt") or job.get("bootstrap")))
 
 
 def R(predicate, code, ok, observed=None, required=None, layer="placement", unknown=False) -> PredicateResult:
@@ -43,11 +58,12 @@ class NodeView:
     pool_jobs_only: bool = False
     gpu_cap: int | None = None        # the agent's gpu_jobs ceiling (None: not limited)
     gpu_use: int = 0                  # live GPU attempts on the node
-    excluded: dict = field(default_factory=dict)   # {module: reason}: platform, OS version, sandbox, agent (modsandbox)
+    excluded: dict = field(default_factory=dict)   # {module: reason}: platform, OS version, tools, sandbox, agent (modsandbox)
     excluded_why: dict = field(default_factory=dict)   # {module: the module's own words}: requires.unsupported.runner
     capabilities: dict = field(default_factory=dict)   # {module: node_capabilities(node, module)} for the offered modules
     gpu_apis: dict = field(default_factory=lambda: {"host": [], "containers": []})   # node_gpu_apis(node)
     bootstrap_grants: bool = False    # the agent runs bootstrap jobs with the bootstrap grants (modsandbox.bootstrap_enforced)
+    runner_ready: set = field(default_factory=set)   # offered modules whose runner started here (doctor_ran) in a RUNNER_STATE
     secrets_unset: dict = field(default_factory=dict)  # {module: declared secrets with no readable value for this node}
     release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
 
@@ -60,15 +76,49 @@ class NodeView:
         return {m for m, st in self.states.items() if st.get("state") == "certifying"} & self.offered
 
     @property
+    def serving(self) -> set:
+        """Modules some job may run here: certified, certifying (goldens, bootstrap stages) or runner-ready (the stages
+        that need no certification)."""
+        return self.certified | self.certifying | (self.runner_ready & self.offered)
+
+    @property
     def max_new(self) -> int:
         return int(self.limits["jobs"]) - self.live if self.limits.get("jobs") is not None else 10 ** 6
 
 
+def doctor_report(node: dict, module: str) -> dict:
+    """The module's entry in the node's latest doctor report ({} when there is none)."""
+    doc = json.loads(node.get("doctor_json") or "null") or {}
+    return (doc.get("modules") or {}).get(module) or {}
+
+
+def doctor_ran(node: dict, module: str) -> bool:
+    """Did the module's runner start on the node: its doctor printed a DoctorOutput, for the node's current release
+    (docs/protocol.md "Doctor": the agent's `ran`; a report from an agent that predates it counts unless it is the
+    agent's own failure, its `doctor` check)."""
+    doc = json.loads(node.get("doctor_json") or "null") or {}
+    rep = (doc.get("modules") or {}).get(module)
+    if not rep or (doc.get("release_id") and node.get("release_id") and doc["release_id"] != node["release_id"]):
+        return False
+    if rep.get("ran") is not None:
+        return bool(rep["ran"])
+    return not any(c.get("name") == "doctor" and not c.get("ok") for c in rep.get("checks") or [] if isinstance(c, dict))
+
+
+def doctor_failed_checks(node: dict, module: str) -> list[str]:
+    """The names of the module's failed doctor checks on the node (explain's wording)."""
+    return [c.get("name") for c in doctor_report(node, module).get("checks") or []
+            if isinstance(c, dict) and not c.get("ok") and c.get("name")]
+
+
 def node_capabilities(node: dict, module: str) -> set:
     """The capabilities a node has for `module`, from its latest doctor report (docs/protocol.md "Doctor"): those its
-    offered services and healthy probes provide, and the ones the module's own doctor reported."""
+    offered services and healthy probes provide, and the ones the module's own doctor reported, less every capability a
+    failed check of the module's doctor is named after (oarbank-sdk runner_protocol.disproved_capabilities)."""
     doc = json.loads(node.get("doctor_json") or "null") or {}
-    return set(doc.get("capabilities") or []) | set(((doc.get("modules") or {}).get(module) or {}).get("capabilities") or [])
+    rep = (doc.get("modules") or {}).get(module) or {}
+    have = set(doc.get("capabilities") or []) | set(rep.get("capabilities") or [])
+    return have - rp.disproved_capabilities(rep.get("checks"))
 
 
 def node_gpu_apis(node: dict) -> dict:
@@ -89,12 +139,13 @@ def gpu_apis_fit(job: dict, platform: str | None, have: dict) -> bool:
     return not gpu_unmet(job, platform, have)
 
 
-def module_serves(job: dict, state: str | None, bootstrap_grants: bool) -> bool:
+def module_serves(job: dict, state: str | None, bootstrap_grants: bool, ran: bool = False) -> bool:
     """Could a node whose module is in `state` run the job (claim's module and bootstrap-grants checks, for the questions
-    asked of every node): certified; for a bootstrap job, certified or certifying (a healthy doctor) on a node whose agent
-    applies the bootstrap grants."""
-    if job["bootstrap"]:
-        return bootstrap_grants and state in ("certified", "certifying")
+    asked of every node): certified; for a job of a stage that needs no certification (`exempt`: a bootstrap stage, or
+    one that compares nothing and needs no capability or pool), any RUNNER_STATE on a node where the module's runner
+    started (`ran`), and for a bootstrap job only where the agent applies the bootstrap grants."""
+    if job.get("exempt"):
+        return ran and state in RUNNER_STATES and (bootstrap_grants or not job.get("bootstrap"))
     return state == "certified"
 
 
@@ -104,11 +155,13 @@ def capabilities_fit(job: dict, have: set) -> bool:
 
 
 def _no_module_code(nv: NodeView) -> str:
-    """Why no module runs here: the commonest exclusion when modules are excluded (platform, sandbox, agent), else
-    certification."""
+    """Why no module runs here: the commonest exclusion when modules are excluded (platform, sandbox, agent), else a
+    doctor that failed or never ran (no runner started), else certification."""
     if nv.excluded and not (nv.offered & set(nv.states)):
         reasons = sorted(nv.excluded.values())
         return max(set(reasons), key=reasons.count)
+    if any(nv.states.get(m, {}).get("state") in ("doctor_failed", "undetected", "golden_failed") for m in nv.offered):
+        return "MODULE_NOT_READY"
     return "MODULE_NOT_CERTIFIED"
 
 
@@ -131,8 +184,8 @@ def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
         lambda: R("release current", "RELEASE_PENDING" if n["release_id"] == nv.current_release else release_code(nv),
                   n["release_id"] == nv.current_release, n["release_id"], nv.current_release, "admission"),
         lambda: R("free cpu > 0", "INSUFFICIENT_CPU", nv.free_cpu > 0, nv.free_cpu, "> 0", "admission"),
-        lambda: R("a module certified (or certifying)", _no_module_code(nv), bool(nv.certified or nv.certifying),
-                  sorted(nv.certified | nv.certifying), "non-empty", "admission"),
+        lambda: R("a module certified, certifying or runner-ready", _no_module_code(nv), bool(nv.serving),
+                  sorted(nv.serving), "non-empty", "admission"),
         lambda: R("jobs cap", "USER_CAP_BINDING", nv.max_new > 0, nv.live, nv.limits.get("jobs"), "admission"),
     ]
     return _run(checks, first_fail)
@@ -178,17 +231,22 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
     mod = job["module"]
     golden = job["kind"] == "golden"
     boot = job["bootstrap"]                                # a bootstrap stage's job: runs before the goldens pass
+    exempt = job.get("exempt") or boot                     # a stage that needs no certification (docs/design/stage-gating.md)
 
     def module_check():
-        if mod in nv.excluded:
+        if mod in nv.excluded and not spared(nv.excluded[mod], job):
             return R(f"module_runs_here({mod})", nv.excluded[mod], False, nv.excluded_why.get(mod, nv.excluded[mod]), "supported")
         state = nv.states.get(mod, {}).get("state")
         code = "MODULE_DISABLED" if mod in nv.disabled else \
             "MODULE_NOT_READY" if state in ("doctor_failed", "undetected", "golden_failed") \
             else "MODULE_NOT_CERTIFIED"
-        if boot:                                           # the doctor is healthy and the release current: certifying will do
-            return R(f"module_ready_for_bootstrap({mod})", code, mod in (nv.certified | nv.certifying), state,
-                     "certified or certifying")
+        if exempt:                                         # the runner started: the doctor's health does not matter
+            if mod not in nv.disabled and state != "revoked":
+                code = "MODULE_NOT_READY"                  # its doctor has not run, or its runner did not start
+            ready = mod in nv.runner_ready and mod in nv.offered
+            observed = f"{state}, runner started" if ready else f"{state or 'no doctor report'}, runner not started"
+            return R(f"module_ready_for_bootstrap({mod})" if boot else f"module_runner_ready({mod})", code, ready, observed,
+                     "runner started (a doctor report), not revoked")
         ok = mod in nv.certified or (golden and mod in (nv.certified | nv.certifying))
         return R(f"module_certified({mod})", code, ok, state, "certified")
 

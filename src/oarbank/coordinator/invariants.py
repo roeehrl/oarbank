@@ -13,8 +13,9 @@ Safety (must hold after every committed transaction):
   S5  pending / done / cancelled / quarantined jobs have no live attempts
   S6  accepted results are exactly the canonical ones, except results superseded by a later generation
   S7  live attempts only run on ready (not quarantined/retired) nodes
-  S8  a live non-golden attempt runs a module certified on its node, under the current certification, or is a
-      bootstrap job's attempt on a node where the module is certifying or certified
+  S8  a live non-golden attempt runs a module certified on its node, under the current certification, or is an attempt
+      of a stage that needs no certification (a bootstrap stage, or one that compares nothing and needs no capability or
+      pool) on a node where the module is in a state its doctor decides (not revoked, not unknown)
   S9  attempt bookkeeping: ended_at is set iff the attempt is no longer live
   S10 a job's exec_failures never exceeds its failed/killed attempts
   S11 no node holds more live attempts than its `jobs` cap (when set and enforced hard)
@@ -118,10 +119,12 @@ def s8_live_module_certified(db: DB):
     for r in db.q("SELECT a.attempt_id, a.cert_generation, a.module_version, j.module, j.kind, j.stage, n.node_id, n.modules_json "
                   "FROM attempts a JOIN jobs j ON j.job_id=a.job_id JOIN nodes n ON n.node_id=a.node_id WHERE a.state='live'"):
         st = (jl(r["modules_json"], {}) or {}).get(r["module"], {})
-        man = _manifest(r["module"], r["module_version"]) if r["stage"] else None
-        if man is not None and man.is_bootstrap(r["stage"]):
-            if st.get("state") not in ("certifying", "certified"):
-                out.append(f"S8 bootstrap attempt {r['attempt_id']} live but {r['module']} is {st.get('state')} on {r['node_id']}")
+        man = _manifest(r["module"], r["module_version"]) if r["kind"] != "golden" else None
+        if man is not None and man.certification_exempt(r["stage"]):
+            from .predicates import RUNNER_STATES
+            if st.get("state") not in RUNNER_STATES:
+                what = "bootstrap" if man.is_bootstrap(r["stage"]) else "certification-exempt"
+                out.append(f"S8 {what} attempt {r['attempt_id']} live but {r['module']} is {st.get('state')} on {r['node_id']}")
         elif r["kind"] == "golden":
             if st.get("state") not in ("certifying", "certified"):
                 out.append(f"S8 golden attempt {r['attempt_id']} live but {r['module']} is {st.get('state')} on {r['node_id']}")

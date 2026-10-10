@@ -595,10 +595,18 @@ def stage_secrets(name: str, stage: str | None) -> list[str]:
 
 
 def stage_bootstrap(name: str, stage: str | None) -> bool:
-    """Whether a job of this stage is a bootstrap job (oarbank-sdk stages[].bootstrap): it runs where the module's doctor is
-    healthy before its goldens pass, with the bootstrap grants, and its result must be exactly pinned datasets."""
+    """Whether a job of this stage is a bootstrap job (oarbank-sdk stages[].bootstrap): it runs where the module's runner
+    starts, before its goldens pass, with the bootstrap grants, and its result must be exactly pinned datasets."""
     i = CATALOG.get(name)
     return bool(i and i.manifest.is_bootstrap(stage))
+
+
+def stage_exempt(name: str, stage: str | None) -> bool:
+    """Whether a job of this stage needs no certification (oarbank-sdk Manifest.certification_exempt): a bootstrap stage,
+    or one that compares nothing and needs no capability or pool. It runs wherever the module's runner starts
+    (docs/design/stage-gating.md)."""
+    i = CATALOG.get(name)
+    return bool(i and i.manifest.certification_exempt(stage))
 
 
 def resources_on(res: dict, platform: str | None) -> dict:
