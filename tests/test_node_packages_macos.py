@@ -677,7 +677,8 @@ def test_the_package_signs_its_interpreter_with_the_entitlements_and_checks_it()
     helper = CODESIGN.read_text(encoding="utf-8")
     assert 'deploy/macos/python.entitlements"' in helper and '--entitlements "$OARBANK_PYTHON_ENTITLEMENTS"' in helper
     assert "codesign --force --options runtime --timestamp" in helper
-    assert subprocess.run(["bash", "-n", str(CODESIGN)]).returncode == 0
+    if sys.platform != "win32":                         # Windows' bash is WSL's, which cannot open a D:\ path
+        assert subprocess.run(["bash", "-n", str(CODESIGN)]).returncode == 0
 
 
 @darwin
