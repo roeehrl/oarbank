@@ -8,6 +8,8 @@ mod cgroup;
 mod check;
 mod checkpoints;
 mod clock;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod colima;
 mod config;
 mod container_runtime;
 mod coordinstall;
@@ -233,6 +235,18 @@ fn containers(layout: &paths::Layout, action: ContainersCmd) -> anyhow::Result<(
                     report["missing"] = serde_json::json!(now.iter().map(wslc::Missing::json).collect::<Vec<_>>());
                     report["state"] = serde_json::json!("missing");
                 }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // the prerequisites as they are now (as this account sees them: run it as the agent's account), beside
+                // the running agent's last report
+                let now = container_runtime::mac_report_now(&layout.home);
+                if !now.missing.is_empty() {
+                    report["missing"] = serde_json::json!(now.missing.iter().map(colima::Missing::json).collect::<Vec<_>>());
+                    report["state"] = serde_json::json!("missing");
+                    report["gpu"] = serde_json::json!("undetected");
+                }
+                report["gpu_profile"]["missing"] = serde_json::json!(now.gpu_missing.iter().map(colima::Missing::json).collect::<Vec<_>>());
             }
             let mut ok = report["missing"].as_array().is_none_or(|m| m.is_empty());
             if probe {

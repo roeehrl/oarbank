@@ -178,11 +178,11 @@ impl Containers {
 }
 
 /// How containers on this node get the GPU (docs/design/gpu-placement.md): the facts' `containers.gpu`, the `--device`
-/// value, and the GPU APIs a container then has.
-#[cfg(unix)]
+/// value, and the GPU APIs a container then has (Linux; macOS reports it from its runtime's state, crate::colima).
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passthrough {
-    /// `cdi:<kind>` or `virtio-gpu:venus`.
+    /// `cdi:<kind>`.
     pub kind: String,
     pub device: String,
     pub apis: Vec<String>,
@@ -482,9 +482,9 @@ fn engine_home(account_home: Option<PathBuf>, agent_home: &Path) -> PathBuf {
 
 // MARK: Colima
 
-/// Which of the agent's two Colima profiles: `oarbank` runs every container on Virtualization.framework with Rosetta;
-/// `oarbank-gpu` runs the containers of GPU jobs on krunkit, whose virtio-gpu device gives them Vulkan on the Mac's GPU
-/// (Mesa's Venus driver in the container, MoltenVK on the host; docs/design/gpu-placement.md).
+/// Which of the agent's two Colima profiles: `oarbank` runs every container on Virtualization.framework (with Rosetta on
+/// Apple silicon); `oarbank-gpu` runs the containers of GPU jobs on krunkit, whose virtio-gpu device gives them Vulkan on
+/// the Mac's GPU (Mesa's Venus driver in the container, MoltenVK on the host; docs/design/gpu-placement.md).
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
@@ -496,22 +496,49 @@ pub enum Profile {
 impl Profile {
     pub fn name(self) -> &'static str {
         match self {
-            Profile::Cpu => "oarbank",
-            Profile::Gpu => "oarbank-gpu",
+            Profile::Cpu => crate::colima::CPU_PROFILE,
+            Profile::Gpu => crate::colima::GPU_PROFILE,
         }
     }
 }
 
+/// The report both profiles of one agent share (the facts' `containers`, crate::colima::Report), and the agent home
+/// its state file lives in.
 #[cfg(target_os = "macos")]
-/// One of the agent-owned Colima profiles. Only these profiles are ever started or queried; the docker CLI is pointed at
-/// the profile's socket through `DOCKER_HOST` with an empty `DOCKER_CONFIG` of the agent's own, so neither the user's
-/// current context nor `~/.docker` (contexts, credential helpers that reach the keychain) is used.
+pub struct MacShared {
+    report: Mutex<crate::colima::Report>,
+    agent_home: PathBuf,
+    /// Write the state file (the agent; a CLI's probe leaves the running agent's report alone).
+    publish: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl MacShared {
+    fn snapshot(&self) -> crate::colima::Report {
+        self.report.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn update(&self, f: impl FnOnce(&mut crate::colima::Report)) {
+        let mut g = self.report.lock().unwrap_or_else(|e| e.into_inner());
+        let before = g.clone();
+        f(&mut g);
+        if *g != before && self.publish {
+            let _ = crate::fsutil::write_private(&crate::colima::report_file(&self.agent_home),
+                                                 &serde_json::to_vec_pretty(&g.state_json()).unwrap_or_default());
+        }
+    }
+}
+
+/// One of the agent-owned Colima profiles (docs/design/macos-containers.md). Only these profiles are ever started or
+/// queried. Colima runs with an environment of its own: the helper `PATH` (Homebrew's directories whatever launchd's
+/// PATH is), `HOME` and `COLIMA_HOME` where the agent's account may write (crate::colima::dirs: a system install's
+/// account home belongs to root), and an empty `DOCKER_CONFIG` of the agent's own, so neither the user's current docker
+/// context nor `~/.docker` (contexts, credential helpers that reach the keychain) is used.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub struct ColimaRuntime {
     pub profile: Profile,
-    /// The user's home: Colima keeps the profile in `~/.colima/<profile>`.
-    pub home: PathBuf,
-    pub colima: PathBuf,
-    pub docker: PathBuf,
+    pub dirs: crate::colima::Dirs,
     /// The only two host directories the VM mounts.
     pub work: PathBuf,
     pub modules_data: PathBuf,
@@ -519,67 +546,105 @@ pub struct ColimaRuntime {
     pub log: PathBuf,
     pub vm_cpus: u32,
     pub vm_mem_gb: f64,
-    start_lock: Mutex<()>,
+    /// Apple silicon (Rosetta, krunkit).
+    pub arm: bool,
+    start_lock: std::sync::Arc<Mutex<()>>,
+    shared: std::sync::Arc<MacShared>,
 }
-
-#[cfg(target_os = "macos")]
-const HELPER_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// The DRM render node a krunkit guest's virtio-gpu device appears as.
 #[cfg(target_os = "macos")]
 const RENDER_NODE: &str = "/dev/dri/renderD128";
 
 #[cfg(target_os = "macos")]
-fn find_bin(name: &str) -> PathBuf {
-    ["/opt/homebrew/bin", "/usr/local/bin"].iter().map(|d| Path::new(d).join(name)).find(|p| p.exists())
-        .unwrap_or_else(|| Path::new("/opt/homebrew/bin").join(name))
-}
-
-#[cfg(target_os = "macos")]
 fn realpath(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// GPU passthrough on macOS: Colima, docker and krunkit installed (Colima finds krunkit on the helper `PATH`) on Apple
-/// silicon. The krunkit VM gives containers Vulkan through `/dev/dri`.
+/// What the agent finds on this Mac now, before it brings the runtime up (`absent`, or `missing` with each fix).
 #[cfg(target_os = "macos")]
-pub fn gpu_passthrough() -> Option<Passthrough> {
-    let krunkit = find_bin("krunkit");
-    let ok = cfg!(target_arch = "aarch64") && executable(&find_bin("colima")) && executable(&find_bin("docker")) && executable(&krunkit);
-    ok.then(|| Passthrough { kind: "virtio-gpu:venus".into(), device: "/dev/dri".into(), apis: vec!["vulkan".into()],
-                             evidence: format!("virtio-gpu:venus (krunkit at {})", krunkit.display()) })
+pub fn mac_report_now(agent_home: &Path) -> crate::colima::Report {
+    crate::colima::Report::of(&crate::colima::detect(agent_home), crate::colima::State::Absent)
 }
 
 #[cfg(target_os = "macos")]
 impl ColimaRuntime {
-    /// The runtime for this agent's layout and one of its profiles, sized by the host's RAM.
+    /// One profile with a report of its own (tests, the live tests); `pair` shares one between both.
+    #[cfg(test)]
     pub fn new(layout: &crate::paths::Layout, profile: Profile) -> Self {
+        let host = crate::colima::detect(&layout.home);
+        let shared = std::sync::Arc::new(MacShared { report: Mutex::new(crate::colima::Report::of(&host, crate::colima::State::Absent)),
+                                                     agent_home: layout.home.clone(), publish: false });
+        Self::with(layout, profile, host.dirs, shared)
+    }
+
+    fn with(layout: &crate::paths::Layout, profile: Profile, dirs: crate::colima::Dirs, shared: std::sync::Arc<MacShared>) -> Self {
         let ram = crate::facts::sysctl_u64("hw.memsize").unwrap_or(0) as f64 / 1073741824.0;
-        let (mem, cpus, _) = sizing(ram, None, None);
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+        let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
+        // the budget the other runtimes get, within what the host has (half its memory, its processors)
+        let (mem, cpus) = crate::wslc::session_size(ram, logical);
         ColimaRuntime {
-            profile, home, colima: find_bin("colima"), docker: find_bin("docker"), work: layout.work(), modules_data: layout.module_data(),
-            docker_config: layout.run().join("docker"), log: layout.logs().join(format!("colima-{}.log", profile.name())),
-            vm_cpus: cpus, vm_mem_gb: mem, start_lock: Mutex::new(()),
+            profile, dirs, work: layout.work(), modules_data: layout.module_data(), docker_config: layout.run().join("docker"),
+            log: layout.logs().join(format!("colima-{}.log", profile.name())), vm_cpus: cpus, vm_mem_gb: mem,
+            arm: cfg!(target_arch = "aarch64"), start_lock: std::sync::Arc::new(Mutex::new(())), shared,
         }
     }
 
-    /// This runtime's `containers` pool size.
+    /// Both profiles of this agent with one report, which `publish` writes to the agent's state file.
+    pub fn pair(layout: &crate::paths::Layout, publish: bool) -> (ColimaRuntime, ColimaRuntime) {
+        let host = crate::colima::detect(&layout.home);
+        let shared = std::sync::Arc::new(MacShared { report: Mutex::new(crate::colima::Report::of(&host, crate::colima::State::Absent)),
+                                                     agent_home: layout.home.clone(), publish });
+        (Self::with(layout, Profile::Cpu, host.dirs.clone(), shared.clone()), Self::with(layout, Profile::Gpu, host.dirs, shared))
+    }
+
+    /// This runtime's `containers` pool size, once ready.
     pub fn pool_tokens(&self) -> u32 {
         tokens(self.vm_mem_gb)
     }
 
+    fn host(&self) -> crate::colima::Host {
+        crate::colima::detect_with(self.dirs.clone())
+    }
+
+    /// Replace the shared report (tests).
+    #[cfg(test)]
+    pub fn set_report(&self, r: crate::colima::Report) {
+        self.shared.update(|x| *x = r);
+    }
+
+    /// colima, docker, krunkit as found now (installed since the agent started counts).
+    fn tool(&self, name: &str) -> PathBuf {
+        let found = crate::colima::find(name, &crate::colima::search_dirs(std::env::var_os("PATH").as_deref()), &|p: &Path| executable(p));
+        found.usable().map(Path::to_path_buf).unwrap_or_else(|| Path::new(crate::colima::BREW_DIRS[0]).join(name))
+    }
+
+    pub fn colima(&self) -> PathBuf {
+        self.tool("colima")
+    }
+
+    pub fn docker(&self) -> PathBuf {
+        self.tool("docker")
+    }
+
     pub fn installed(&self) -> bool {
-        executable(&self.colima) && executable(&self.docker)
+        executable(&self.colima()) && executable(&self.docker())
     }
 
     pub fn docker_socket(&self) -> PathBuf {
-        self.home.join(".colima").join(self.profile.name()).join("docker.sock")
+        self.dirs.config.join(self.profile.name()).join("docker.sock")
     }
 
     fn base_env(&self) -> Vec<(String, String)> {
-        vec![("PATH".into(), HELPER_PATH.into()), ("HOME".into(), self.home.to_string_lossy().into()),
-             ("DOCKER_CONFIG".into(), self.docker_config.to_string_lossy().into())]
+        let h = self.host();
+        let mut e = vec![("PATH".into(), crate::colima::helper_path(&[&h.colima, &h.limactl, &h.docker, &h.krunkit])),
+                         ("HOME".into(), self.dirs.home.to_string_lossy().into()),
+                         ("USER".into(), h.account.clone()), ("LOGNAME".into(), h.account.clone()),
+                         ("DOCKER_CONFIG".into(), self.docker_config.to_string_lossy().into())];
+        if let Some(c) = &self.dirs.colima_home {
+            e.push(("COLIMA_HOME".into(), c.to_string_lossy().into()));
+        }
+        e
     }
 
     /// Colima's environment: its own `docker context` calls land in the agent's docker config, never the user's.
@@ -593,36 +658,20 @@ impl ColimaRuntime {
         e
     }
 
-    fn fmt_gb(m: f64) -> String {
-        if m == m.round() { format!("{}", m as i64) } else { format!("{m:.1}") }
-    }
-
-    /// The CPU profile on Virtualization.framework with Rosetta for amd64 images; the GPU profile on krunkit (no
-    /// Rosetta; `sshfs`, Colima's name for reverse-sshfs: Lima's krunkit driver refuses 9p, which Colima 0.10.3 picks off
-    /// `vz` for any other type, abiosoft/colima#1607). Both mount only the agent's work and modules-data directories.
     pub fn start_args(&self) -> Vec<String> {
-        let c = self.colima.to_string_lossy().to_string();
-        let mut a = vec![c, "start".into(), self.profile.name().into()];
-        a.extend(match self.profile {
-            Profile::Cpu => ["--vm-type", "vz", "--vz-rosetta"].as_slice(),
-            Profile::Gpu => ["--vm-type", "krunkit", "--mount-type", "sshfs"].as_slice(),
-        }.iter().map(|s| s.to_string()));
-        a.extend(["--arch".into(), "aarch64".into(), "--cpu".into(), self.vm_cpus.to_string(), "--memory".into(),
-                  Self::fmt_gb(self.vm_mem_gb), "--disk".into(), "100".into(),
-                  "--mount".into(), format!("{}:w", realpath(&self.work).to_string_lossy()),
-                  "--mount".into(), format!("{}:w", realpath(&self.modules_data).to_string_lossy())]);
-        a
+        let mounts = [realpath(&self.work).to_string_lossy().to_string(), realpath(&self.modules_data).to_string_lossy().to_string()];
+        crate::colima::start_args(&self.colima().to_string_lossy(), self.profile == Profile::Gpu, self.arm, self.vm_cpus, self.vm_mem_gb, &mounts)
     }
 
     fn colima_cmd(&self, args: &[&str]) -> Vec<String> {
-        let mut v = vec![self.colima.to_string_lossy().to_string()];
+        let mut v = vec![self.colima().to_string_lossy().to_string()];
         v.extend(args.iter().map(|s| s.to_string()));
         v
     }
 
     fn cli(&self, args: &[&str], timeout_s: u64) -> Result<Exec, String> {
         crate::fsutil::private_dir(&self.docker_config).map_err(|e| format!("{}: {e}", self.docker_config.display()))?;
-        let mut argv = vec![self.docker.to_string_lossy().to_string()];
+        let mut argv = vec![self.docker().to_string_lossy().to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         quick(&argv, &self.docker_env(), timeout_s)
     }
@@ -638,6 +687,17 @@ impl ColimaRuntime {
         std::fs::OpenOptions::new().create(true).append(true).open(&self.log).map(Out::File).unwrap_or(Out::Null)
     }
 
+    /// The end of the profile's Colima log: the report carries it (the agent's logs directory is its account's only).
+    fn log_tail(&self) -> String {
+        let text = std::fs::read(&self.log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let t = text.trim_end();
+        let mut i = t.len().saturating_sub(600);
+        while !t.is_char_boundary(i) {
+            i += 1;
+        }
+        t[i..].to_string()
+    }
+
     /// The GPU VM has its virtio-gpu device: the guest has a DRM render node.
     fn has_render_node(&self) -> Result<(), String> {
         let r = quick(&self.colima_cmd(&["--profile", self.profile.name(), "ssh", "--", "test", "-e", RENDER_NODE]),
@@ -648,22 +708,109 @@ impl ColimaRuntime {
             Err(format!("the {} VM has no GPU device ({RENDER_NODE} is missing); see {}", self.profile.name(), self.log.display()))
         }
     }
+
+    /// `colima start <profile>` unless it runs (the first start downloads the VM image).
+    fn start_profile(&self) -> Result<(), String> {
+        if self.running() {
+            return Ok(());
+        }
+        for d in [&self.work, &self.modules_data] {
+            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        if let Some(c) = &self.dirs.colima_home {
+            // Colima honours COLIMA_HOME only when the directory exists
+            crate::fsutil::private_dir(c).map_err(|e| format!("{}: {e}", c.display()))?;
+        }
+        crate::fsutil::private_dir(&self.docker_config).map_err(|e| e.to_string())?;
+        let (o, e) = (self.log_file(), self.log_file());
+        let r = exec(&self.start_args(), &self.colima_env(), Duration::from_secs(600), o, e, &AtomicBool::new(false),
+                     Duration::from_secs(10))?;
+        if !r.ok() {
+            return Err(format!("colima start {} failed ({}{}); see {}: {}", self.profile.name(), r.code,
+                               if r.timed_out { ", timeout" } else { "" }, self.log.display(), self.log_tail()));
+        }
+        Ok(())
+    }
+
+    /// Bring the CPU profile up (docs/design/macos-containers.md, "Bring-up"): check the prerequisites (missing: the
+    /// report says what, with each fix), start the profile, and report ready or failed.
+    pub fn bring_up(&self) -> Result<(), String> {
+        use crate::colima::{Report, State};
+        let _g = self.start_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let host = self.host();
+        let now = Report::of(&host, State::Starting);
+        let keep_gpu = |r: &mut Report, n: &Report| {
+            // a failed or running GPU profile keeps its state; its prerequisites are as found now
+            r.gpu_missing = n.gpu_missing.clone();
+            if !n.gpu_missing.is_empty() {
+                r.gpu_state = crate::colima::GpuState::Unavailable;
+            } else if r.gpu_state == crate::colima::GpuState::Unavailable {
+                r.gpu_state = crate::colima::GpuState::OnDemand;
+            }
+        };
+        if now.state == State::Missing {
+            let line = now.doctor_line();
+            self.shared.update(|r| {
+                keep_gpu(r, &now);
+                (r.state, r.missing, r.detail, r.platforms, r.colima_home) = (State::Missing, now.missing.clone(), None, vec![], now.colima_home.clone());
+            });
+            return Err(line);
+        }
+        self.shared.update(|r| {
+            keep_gpu(r, &now);
+            if r.state != State::Ready {
+                (r.state, r.detail) = (State::Starting, None);
+            }
+            (r.missing, r.colima_home) = (vec![], now.colima_home.clone());
+        });
+        let started = self.start_profile();
+        self.shared.update(|r| match &started {
+            Ok(()) => (r.state, r.detail, r.platforms) = (State::Ready, None, crate::colima::platforms(host.arm)),
+            Err(e) => (r.state, r.detail, r.platforms) = (State::Failed, Some(e.clone()), vec![]),
+        });
+        started
+    }
+
+    fn start_gpu(&self) -> Result<(), String> {
+        use crate::colima::GpuState;
+        let _g = self.start_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = crate::colima::gpu_missing(&self.host()).first() {
+            let line = format!("{}: {} ({})", m.what, m.detail, m.fix);
+            self.shared.update(|r| r.gpu_state = GpuState::Unavailable);
+            return Err(line);
+        }
+        if self.running() {
+            self.shared.update(|r| (r.gpu_state, r.gpu_detail) = (GpuState::Ready, None));
+            return Ok(());
+        }
+        self.shared.update(|r| r.gpu_state = GpuState::Starting);
+        let r = self.start_profile().and_then(|_| self.has_render_node());
+        self.shared.update(|s| match &r {
+            Ok(()) => (s.gpu_state, s.gpu_detail) = (GpuState::Ready, None),
+            Err(e) => (s.gpu_state, s.gpu_detail) = (GpuState::Failed, Some(e.clone())),
+        });
+        r
+    }
 }
 
 #[cfg(target_os = "macos")]
 impl ContainerRuntime for ColimaRuntime {
+    /// The CPU profile offers its pool only while ready (a node whose runtime cannot run containers is not offered
+    /// container work).
     fn pool_tokens(&self) -> u32 {
-        ColimaRuntime::pool_tokens(self)
+        if self.shared.snapshot().ready() { ColimaRuntime::pool_tokens(self) } else { 0 }
     }
 
     /// `colima status <profile> --json`: running, and the VM's memory (colima 0.10 reports bytes). The GPU VM runs
     /// arm64 images only: krunkit has no Rosetta.
     fn status(&self) -> Result<RuntimeStatus, String> {
         if !self.installed() {
-            return Err(format!("{} or {} missing", self.colima.display(), self.docker.display()));
+            let r = self.shared.snapshot();
+            let why = if r.missing.is_empty() { format!("{} or {} missing", self.colima().display(), self.docker().display()) } else { r.doctor_line() };
+            return Err(why);
         }
         let platforms = match self.profile {
-            Profile::Cpu => vec!["linux/arm64".to_string(), "linux/amd64".to_string()],
+            Profile::Cpu => crate::colima::platforms(self.arm),
             Profile::Gpu => vec!["linux/arm64".to_string()],
         };
         let r = quick(&self.colima_cmd(&["status", self.profile.name(), "--json"]), &self.colima_env(), 20)?;
@@ -676,25 +823,10 @@ impl ContainerRuntime for ColimaRuntime {
     }
 
     fn ensure_started(&self) -> Result<(), String> {
-        let _g = self.start_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if self.status()?.running {
-            return Ok(());
-        }
-        for d in [&self.work, &self.modules_data] {
-            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-        }
-        crate::fsutil::private_dir(&self.docker_config).map_err(|e| e.to_string())?;
-        let (o, e) = (self.log_file(), self.log_file());
-        // the first start downloads the VM image
-        let r = exec(&self.start_args(), &self.colima_env(), Duration::from_secs(600), o, e, &AtomicBool::new(false),
-                     Duration::from_secs(10))?;
-        if !r.ok() {
-            return Err(format!("colima start {} failed ({}{}); see {}", self.profile.name(), r.code,
-                               if r.timed_out { ", timeout" } else { "" }, self.log.display()));
-        }
         match self.profile {
-            Profile::Cpu => Ok(()),
-            Profile::Gpu => self.has_render_node(),
+            Profile::Cpu if self.shared.snapshot().ready() && self.running() => Ok(()),
+            Profile::Cpu => self.bring_up(),
+            Profile::Gpu => self.start_gpu(),
         }
     }
 
@@ -705,7 +837,7 @@ impl ContainerRuntime for ColimaRuntime {
 
     fn run(&self, spec: &RunSpec, cancel: &AtomicBool) -> Result<RunResult, String> {
         crate::fsutil::private_dir(&self.docker_config).map_err(|e| e.to_string())?;
-        let mut argv = vec![self.docker.to_string_lossy().to_string()];
+        let mut argv = vec![self.docker().to_string_lossy().to_string()];
         argv.extend(spec.docker_args());
         let file = |f: &Option<std::fs::File>| -> Result<Out, String> {
             Ok(match f {
@@ -726,22 +858,59 @@ impl ContainerRuntime for ColimaRuntime {
 
     /// Only containers carrying the attempt label are ever listed, so only those are removed.
     fn reap(&self) -> Vec<String> {
-        if !self.running() {
+        if !self.installed() || !self.running() {
             return vec![];
         }
         remove_labelled(|a, t| self.cli(a, t), &format!("label={ATTEMPT_LABEL}"))
     }
 
     fn remove_attempt(&self, attempt_id: i64) -> Vec<String> {
-        if !self.running() {
+        if !self.installed() || !self.running() {
             return vec![];
         }
         remove_labelled(|a, t| self.cli(a, t), &format!("label={ATTEMPT_LABEL}={attempt_id}"))
     }
 
-    /// The GPU VM's guest passes its render node through.
+    /// The GPU VM's guest passes its render node through, offered while the report offers the GPU.
     fn gpu_device(&self) -> Option<String> {
-        (self.profile == Profile::Gpu).then(|| "/dev/dri".to_string())
+        (self.profile == Profile::Gpu && self.shared.snapshot().gpu()).then(|| "/dev/dri".to_string())
+    }
+
+    /// The facts' `containers` (both profiles share it; the agent reads the CPU runtime's).
+    fn report(&self) -> Option<serde_json::Value> {
+        (self.profile == Profile::Cpu).then(|| self.shared.snapshot().json())
+    }
+
+    /// The CPU profile comes up when a release first wants containers (the agent calls this when it makes the runtime)
+    /// and again after a release or restart while it is not ready: in the background, so the agent's loop goes on. The
+    /// GPU profile only checks krunkit again and forgets a failed start (its VM starts with the first GPU job).
+    fn recheck(&self) {
+        use crate::colima::{GpuState, State};
+        match self.profile {
+            Profile::Cpu => {
+                let st = self.shared.snapshot().state;
+                if matches!(st, State::Ready | State::Starting) {
+                    return;
+                }
+                self.shared.update(|r| (r.state, r.detail) = (State::Starting, None));
+                let me = self.clone();
+                let _ = std::thread::Builder::new().name("colima-bring-up".into()).spawn(move || {
+                    if let Err(e) = me.bring_up() {
+                        tracing::warn!(error = %e, "the container runtime is not ready");
+                    } else {
+                        tracing::info!(profile = me.profile.name(), "the container runtime is ready");
+                    }
+                });
+            }
+            Profile::Gpu => {
+                let ok = crate::colima::gpu_missing(&self.host()).is_empty();
+                self.shared.update(|r| match (ok, r.gpu_state) {
+                    (false, _) => r.gpu_state = GpuState::Unavailable,
+                    (true, GpuState::Unavailable | GpuState::Failed) => (r.gpu_state, r.gpu_detail) = (GpuState::OnDemand, None),
+                    _ => {}
+                });
+            }
+        }
     }
 }
 
@@ -970,16 +1139,21 @@ pub fn gpu_passthrough() -> Option<Passthrough> {
                        kind: format!("cdi:{}", spec.kind), apis: spec.apis })
 }
 
-/// This node's container runtimes, if it has any: the agent's Colima profiles on macOS (the GPU one where krunkit is
-/// installed), the host's engine on Linux (also the GPU runtime where a CDI spec exists), the agent's WSL containers
+/// This node's container runtimes, if it has any: the agent's Colima profiles on macOS (always: the report says what is
+/// missing; the GPU one on Apple silicon, offered once krunkit is installed and the runtime is ready), the host's engine on Linux (also the GPU runtime where a CDI spec exists), the agent's WSL containers
 /// session on Windows (one runtime for both; it reports what is missing itself, so it always exists there).
 #[cfg(target_os = "macos")]
 pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
-    let cpu = ColimaRuntime::new(layout, Profile::Cpu);
-    cpu.installed().then(|| Containers {
-        cpu: std::sync::Arc::new(cpu),
-        gpu: gpu_passthrough().map(|_| std::sync::Arc::new(ColimaRuntime::new(layout, Profile::Gpu)) as std::sync::Arc<dyn ContainerRuntime>),
-    })
+    for_node_mac(layout, false)
+}
+
+/// The agent's runtimes on macOS: always (the report says what is missing), the GPU profile beside the CPU one on
+/// Apple silicon; `publish` (the agent) writes the report to the state file the facts read.
+#[cfg(target_os = "macos")]
+pub fn for_node_mac(layout: &crate::paths::Layout, publish: bool) -> Option<Containers> {
+    let (cpu, gpu) = ColimaRuntime::pair(layout, publish);
+    let arm = cpu.arm;
+    Some(Containers { cpu: std::sync::Arc::new(cpu), gpu: arm.then(|| std::sync::Arc::new(gpu) as std::sync::Arc<dyn ContainerRuntime>) })
 }
 
 #[cfg(target_os = "linux")]
@@ -1164,12 +1338,25 @@ pub mod tests {
         (d, p)
     }
 
+    /// A runtime laid out as a system install's: Colima in `<agent home>/colima`.
     #[cfg(target_os = "macos")]
     fn colima_at(base: &Path, profile: Profile) -> ColimaRuntime {
         let l = crate::paths::Layout::new(base.join("agent"));
         let mut c = ColimaRuntime::new(&l, profile);
-        c.home = PathBuf::from("/Users/u");
+        c.dirs = crate::colima::dirs(&l.home, Some(Path::new("/Library/Application Support/Oarbank")));
         c
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ready_report(krunkit: bool) -> crate::colima::Report {
+        use crate::colima::{Dirs, Found, Host, Report, State};
+        let d = PathBuf::from("/a/colima");
+        let h = Host { arm: true, colima: Found::Usable("/opt/homebrew/bin/colima".into()), docker: Found::Usable("/opt/homebrew/bin/docker".into()),
+                       limactl: Found::Usable("/opt/homebrew/bin/limactl".into()),
+                       krunkit: if krunkit { Found::Usable("/opt/homebrew/bin/krunkit".into()) } else { Found::Absent }, rosetta: true,
+                       dirs: Dirs { home: d.clone(), config: d.clone(), colima_home: Some(d) }, config_writable: true, account: "_oarbank".into(),
+                       owner: None };
+        Report::of(&h, State::Ready)
     }
 
     #[test]
@@ -1186,42 +1373,60 @@ pub mod tests {
     fn start_mounts_only_the_agent_directories_and_docker_never_uses_the_user_context() {
         let (_base, base) = temp("start");
         let mut c = colima_at(&base, Profile::Cpu);
-        (c.vm_cpus, c.vm_mem_gb) = (6, 10.0);
+        (c.vm_cpus, c.vm_mem_gb, c.arm) = (6, 10.0, true);
         std::fs::create_dir_all(&c.work).unwrap();
         std::fs::create_dir_all(&c.modules_data).unwrap();
         let a = c.start_args();
         let agent = base.join("agent").to_string_lossy().to_string();
         assert_eq!(a[1..], ["start", "oarbank", "--vm-type", "vz", "--vz-rosetta", "--arch", "aarch64", "--cpu", "6", "--memory",
-                            "10", "--disk", "100", "--mount", &format!("{agent}/work:w"), "--mount", &format!("{agent}/modules-data:w")]);
+                            "10", "--disk", "100", "--ssh-config=false", "--mount", &format!("{agent}/work:w"), "--mount", &format!("{agent}/modules-data:w")]);
         assert_eq!(a.iter().filter(|x| *x == "--mount").count(), 2);
-        assert!(!a.iter().any(|x| x.starts_with("/Users/u")));
         let env = c.docker_env();
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("DOCKER_HOST").as_deref(), Some("unix:///Users/u/.colima/oarbank/docker.sock"));
+        // Colima, Lima and their caches stay in the agent's own home, whatever HOME the agent was started with
+        assert_eq!(get("DOCKER_HOST"), Some(format!("unix://{agent}/colima/oarbank/docker.sock")));
+        assert_eq!(get("HOME"), Some(format!("{agent}/colima")));
+        assert_eq!(get("COLIMA_HOME"), Some(format!("{agent}/colima")));
         assert_eq!(get("DOCKER_CONFIG"), Some(format!("{agent}/run/docker")));
+        assert!(get("PATH").unwrap().split(':').any(|d| d == "/opt/homebrew/bin"), "Homebrew is on the helper PATH");
         assert!(get("DOCKER_CONTEXT").is_none());
         assert!(c.colima_env().iter().any(|(k, v)| k == "DOCKER_CONFIG" && *v == format!("{agent}/run/docker")));
         assert_eq!(c.gpu_device(), None);
+        // an Intel Mac's VM is x86_64, without Rosetta
+        c.arm = false;
+        assert_eq!(c.start_args()[3..7], ["--vm-type", "vz", "--arch", "x86_64"]);
     }
 
     /// The GPU profile is a VM of its own on krunkit (no Rosetta, arm64 images only), with the same two mounts and its own
-    /// socket and log, and its containers get `--device /dev/dri`. A CPU job's containers never go there.
+    /// socket and log, and its containers get `--device /dev/dri`, offered only while the shared report offers the GPU
+    /// (a ready runtime with krunkit, whose GPU VM has not failed). A CPU job's containers never go there.
     #[test]
     #[cfg(target_os = "macos")]
     fn the_gpu_profile_is_a_krunkit_vm_of_its_own() {
         let (_base, base) = temp("gpu");
-        let mut g = colima_at(&base, Profile::Gpu);
-        (g.vm_cpus, g.vm_mem_gb) = (6, 10.0);
+        let l = crate::paths::Layout::new(base.join("agent"));
+        let (mut cpu, mut g) = ColimaRuntime::pair(&l, false);
+        for r in [&mut cpu, &mut g] {
+            r.dirs = crate::colima::dirs(&l.home, None);
+            (r.vm_cpus, r.vm_mem_gb, r.arm) = (6, 10.0, true);
+        }
         let agent = base.join("agent").to_string_lossy().to_string();
         assert_eq!(g.start_args()[1..], ["start", "oarbank-gpu", "--vm-type", "krunkit", "--mount-type", "sshfs", "--arch", "aarch64", "--cpu", "6", "--memory",
-                                          "10", "--disk", "100", "--mount", &format!("{agent}/work:w"),
+                                          "10", "--disk", "100", "--ssh-config=false", "--mount", &format!("{agent}/work:w"),
                                           "--mount", &format!("{agent}/modules-data:w")]);
-        assert_eq!(g.docker_socket(), PathBuf::from("/Users/u/.colima/oarbank-gpu/docker.sock"));
+        assert_eq!(g.docker_socket(), PathBuf::from(format!("{agent}/colima/oarbank-gpu/docker.sock")));
         assert!(g.log.ends_with("logs/colima-oarbank-gpu.log"));
-        assert_eq!(g.gpu_device().as_deref(), Some("/dev/dri"));
+        cpu.set_report(crate::colima::Report { state: crate::colima::State::Starting, ..ready_report(true) });
+        assert_eq!(g.gpu_device(), None, "no GPU while the runtime is not ready");
+        g.set_report(ready_report(false));
+        assert_eq!(g.gpu_device(), None, "no GPU without krunkit");
+        cpu.set_report(ready_report(true));
+        assert_eq!(g.gpu_device().as_deref(), Some("/dev/dri"), "one report for both profiles");
+        assert_eq!((cpu.gpu_device(), g.report().is_none()), (None, true), "the CPU runtime reports for both");
+        assert_eq!(cpu.report().unwrap()["gpu"], "virtio-gpu:venus");
         let spec = RunSpec { gpu_device: g.gpu_device(), ..spec("x@sha256:00") };
         assert!(spec.docker_args().windows(2).any(|w| w == ["--device", "/dev/dri"]));
-        let cpu: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(colima_at(&base, Profile::Cpu));
+        let cpu: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(cpu);
         let both = Containers { cpu: cpu.clone(), gpu: Some(std::sync::Arc::new(g)) };
         assert!(std::sync::Arc::ptr_eq(&both.for_job(false), &cpu) && both.for_job(true).gpu_device().is_some());
         assert_eq!(both.all().len(), 2);
@@ -1229,6 +1434,21 @@ pub mod tests {
         assert!(std::sync::Arc::ptr_eq(&none.for_job(true), &cpu) && none.all().len() == 1);
         let same = Containers { cpu: cpu.clone(), gpu: Some(cpu.clone()) };
         assert_eq!(same.all().len(), 1, "on Linux the GPU runtime is the CPU runtime: reaped once");
+    }
+
+    /// The `containers` pool is offered only while the runtime is ready, so a Mac whose runtime cannot run containers is
+    /// not offered container work (2.8.0 offered it whenever colima and docker were installed).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_pool_is_offered_only_by_a_ready_runtime() {
+        let (_base, base) = temp("pool");
+        let c = colima_at(&base, Profile::Cpu);
+        assert!(ColimaRuntime::pool_tokens(&c) > 0);
+        c.set_report(crate::colima::Report { state: crate::colima::State::Starting, ..ready_report(false) });
+        assert_eq!(ContainerRuntime::pool_tokens(&c), 0);
+        c.set_report(ready_report(false));
+        assert_eq!(ContainerRuntime::pool_tokens(&c), ColimaRuntime::pool_tokens(&c));
+        assert!(c.vm_mem_gb <= (crate::facts::sysctl_u64("hw.memsize").unwrap() as f64 / 1073741824.0 / 2.0).max(1.0));
     }
 
     fn spec(image: &str) -> RunSpec {
@@ -1353,15 +1573,32 @@ pub mod tests {
                      Duration::from_secs(1)).is_err());
     }
 
+    /// A runtime that cannot start says why, with the fix, and starts nothing: here Colima's directory is one the
+    /// agent's account may not write (a system install whose account home belongs to root, in 2.8.0).
     #[test]
     #[cfg(target_os = "macos")]
-    fn a_missing_runtime_is_an_error_not_a_stopped_vm() {
+    fn a_missing_piece_stops_the_bring_up_and_the_report_says_which() {
         let (_base, base) = temp("missing");
-        let mut c = colima_at(&base, Profile::Cpu);
-        c.colima = "/nonexistent/colima".into();
-        assert!(c.status().unwrap_err().contains("missing"));
-        assert!(c.ensure_started().is_err());
-        assert!(c.remove_attempt(1).is_empty());
+        let l = crate::paths::Layout::new(base.join("agent"));
+        let (mut c, _) = ColimaRuntime::pair(&l, true);
+        let root_owned = PathBuf::from("/oarbank-test-not-writable/colima");
+        c.dirs = crate::colima::Dirs { home: root_owned.clone(), config: root_owned.clone(), colima_home: Some(root_owned) };
+        if crate::colima::creatable(&c.dirs.config) {
+            eprintln!("this account may write /: skipped");
+            return;
+        }
+        let e = c.ensure_started().unwrap_err();
+        assert!(e.starts_with("colima_home:"), "{e}");
+        let r = c.report().unwrap();
+        assert_eq!((r["runtime"].as_str(), r["state"].as_str(), r["gpu"].as_str()), (Some("colima"), Some("missing"), Some("undetected")));
+        assert!(r["missing"].as_array().unwrap().iter().any(|m| m["what"] == "colima_home"));
+        assert_eq!(ContainerRuntime::pool_tokens(&c), 0);
+        // the agent's runtime publishes the report the facts read
+        assert_eq!(crate::colima::facts(&l.home, || unreachable!())["state"], "missing");
+        assert_eq!(crate::facts::collect(&l.home)["containers"]["state"], "missing");
+        c.recheck();                                    // in the background: missing again, nothing started
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(c.report().unwrap()["state"], "missing");
     }
 
     /// A Mac with krunkit: starts (never stops) the agent's own `oarbank-gpu` profile, builds the Vulkan compute probe
@@ -1376,16 +1613,15 @@ pub mod tests {
             eprintln!("set OARBANK_LIVE_COLIMA=1 to start the oarbank-gpu Colima profile");
             return;
         }
-        let Some(pass) = gpu_passthrough() else {
+        let layout = crate::paths::Layout::new(crate::paths::agent_home());
+        let host = crate::colima::detect(&layout.home);
+        if !crate::colima::missing(&host).is_empty() || !crate::colima::gpu_missing(&host).is_empty() {
             eprintln!("krunkit (or Colima or docker) is not installed: brew tap slp/krun && brew trust slp/krun && brew install krunkit");
             return;
-        };
-        assert_eq!((pass.kind.as_str(), pass.device.as_str(), pass.apis.as_slice()), ("virtio-gpu:venus", "/dev/dri", ["vulkan".to_string()].as_slice()));
-        let layout = crate::paths::Layout::new(crate::paths::agent_home());
-        let containers = for_node(&layout).expect("Colima is installed");
-        let rt = containers.for_job(true);
-        assert_eq!(rt.gpu_device().as_deref(), Some("/dev/dri"));
-        let mut g = ColimaRuntime::new(&layout, Profile::Gpu);
+        }
+        let (cpu, mut g) = ColimaRuntime::pair(&layout, false);
+        cpu.set_report(crate::colima::Report::of(&host, crate::colima::State::Ready));
+        assert_eq!(g.gpu_device().as_deref(), Some("/dev/dri"));
         (g.vm_cpus, g.vm_mem_gb) = (4, 4.0);
         g.ensure_started().unwrap();
         let image = "localhost/oarbank-vkcompute-test:1";
