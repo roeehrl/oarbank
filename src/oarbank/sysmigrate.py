@@ -423,14 +423,21 @@ class Ops:
         where Linux's file system has them."""
         dst.mkdir(mode=0o700)
         for entry in sorted(src.iterdir()):
-            if entry.name in TRANSIENT:
+            # SQLite's shared-memory index is rebuilt on open; it (and a -wal checkpointed away on the last close) can
+            # vanish between the listing and the copy
+            if entry.name in TRANSIENT or entry.name.endswith("-shm"):
                 continue
-            if sys.platform == "darwin":
-                if self.run(["/bin/cp", "-Rpc", entry, dst], check=False).returncode != 0:
-                    shutil.rmtree(dst / entry.name, ignore_errors=True)
-                    self.run(["/bin/cp", "-Rp", entry, dst])
-            else:
-                self.run(["cp", "-a", "--reflink=auto", entry, dst])
+            try:
+                if sys.platform == "darwin":
+                    if self.run(["/bin/cp", "-Rpc", entry, dst], check=False).returncode != 0:
+                        shutil.rmtree(dst / entry.name, ignore_errors=True)
+                        self.run(["/bin/cp", "-Rp", entry, dst])
+                else:
+                    self.run(["cp", "-a", "--reflink=auto", entry, dst])
+            except Exception:
+                if os.path.lexists(entry):
+                    raise
+                shutil.rmtree(dst / entry.name, ignore_errors=True)
 
     def chown_tree(self, path: Path):
         account = "_oarbankd" if self.layout.os == "darwin" else "oarbankd"
