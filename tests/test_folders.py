@@ -1,7 +1,7 @@
 """Folder grants on the coordinator (docs/design/datasets-media-checkpoints.md, #10 "Folder grants"): a module version asks
 for folders by id and an operator approves them; the folder registry maps each id to a path per node; each node gets a
-folder statement with a rising seq (signed by the owner in signing mode); placement follows what the node reports for
-the statement it applied (FOLDER_UNAVAILABLE otherwise); releases carry only the ids."""
+node statement (oarbank.node/v1) with a rising seq (signed by the owner in signing mode); placement follows what the
+node reports for the statement it applied (FOLDER_UNAVAILABLE otherwise); releases carry only the ids."""
 import base64
 import json
 import shutil
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from oarbank.coordinator import core, explain, folders, modsandbox, modstore, ops, releases
+from oarbank.coordinator import core, explain, folders, modsandbox, modstore, ops, releases, statements
 
 from helpers import FACTS, SEATBELT, enrolled_node, fresh, install, make_db, run_op
 
@@ -69,15 +69,16 @@ def test_the_registry_makes_one_statement_per_node_with_a_rising_seq(db):
     _, b = enrolled_node(db, "b", FACTS_FOLDERS)
     r = run_op(db, "settings.folders.update", "inputs", params={"access": "read", "nodes": {a["node_id"]: "/Users/me/in/"}})
     assert r["result"]["statements"] == [a["node_id"]]
-    st = json.loads(folders.statement(db, a["node_id"])["statement"])
-    assert st["type"] == "oarbank.folders/v1" and st["seq"] == 1 and st["folders"] == {"inputs": {"access": "read", "path": "/Users/me/in"}}
-    assert folders.statement(db, b["node_id"]) is None
+    st = json.loads(statements.statement(db, a["node_id"])["statement"])
+    assert st["type"] == "oarbank.node/v1" and st["seq"] == 1 and st["tools"] == []
+    assert st["folders"] == {"inputs": {"access": "read", "path": "/Users/me/in"}}
+    assert statements.statement(db, b["node_id"]) is None
     run_op(db, "settings.folders.update", "outbox", params={"access": "write", "nodes": {a["node_id"]: "/Users/me/out", b["node_id"]: "/srv/out"}})
-    assert json.loads(folders.statement(db, a["node_id"])["statement"])["seq"] == 2
+    assert json.loads(statements.statement(db, a["node_id"])["statement"])["seq"] == 2
     run_op(db, "settings.folders.update", "outbox", params={"access": "write", "nodes": {a["node_id"]: None}})
-    assert json.loads(folders.statement(db, a["node_id"])["statement"])["folders"] == {"inputs": {"access": "read", "path": "/Users/me/in"}}
+    assert json.loads(statements.statement(db, a["node_id"])["statement"])["folders"] == {"inputs": {"access": "read", "path": "/Users/me/in"}}
     d = core.heartbeat(db, fresh(db, a), {"attempts": [], "ready_datasets": []})
-    assert json.loads(d["folders"]["statement"])["seq"] == 3 and d["folders"]["signature"] is None
+    assert json.loads(d["statement"]["statement"])["seq"] == 3 and d["statement"]["signature"] is None
     for bad in [{"access": "exec", "nodes": {}}, {"access": "read", "nodes": {a["node_id"]: "relative/path"}},
                 {"access": "read", "nodes": {a["node_id"]: "/"}}, {"access": "read", "nodes": {a["node_id"]: "/x/../etc"}},
                 {"access": "read", "nodes": {"n_nobody": "/x"}}]:
@@ -88,17 +89,17 @@ def test_the_registry_makes_one_statement_per_node_with_a_rising_seq(db):
 def test_signing_attaches_an_owner_signature_verified_against_the_release_key(db):
     _, a = enrolled_node(db, "a", FACTS_FOLDERS)
     run_op(db, "settings.folders.update", "inputs", params={"access": "read", "nodes": {a["node_id"]: "/data/in"}})
-    stmt = folders.statement(db, a["node_id"])["statement"]
+    stmt = statements.statement(db, a["node_id"])["statement"]
     owner = Ed25519PrivateKey.generate()
     db.set_state("release_pubkey", base64.b64encode(owner.public_key().public_bytes_raw()).decode())
     forged = base64.b64encode(Ed25519PrivateKey.generate().sign(stmt.encode())).decode()
     with pytest.raises(core.ApiError, match="signature"):
-        run_op(db, "folders.sign", a["node_id"], params={"statement": stmt, "signature": forged})
-    with pytest.raises(core.ApiError, match="current folder statement"):
-        run_op(db, "folders.sign", a["node_id"], params={"statement": stmt.replace("/data/in", "/etc"), "signature": forged})
+        run_op(db, "nodes.sign_statement", a["node_id"], params={"statement": stmt, "signature": forged})
+    with pytest.raises(core.ApiError, match="current statement"):
+        run_op(db, "nodes.sign_statement", a["node_id"], params={"statement": stmt.replace("/data/in", "/etc"), "signature": forged})
     good = base64.b64encode(owner.sign(stmt.encode())).decode()
-    run_op(db, "folders.sign", a["node_id"], params={"statement": stmt, "signature": good})
-    assert folders.directive(db, a["node_id"]) == {"statement": stmt, "signature": good}
+    run_op(db, "nodes.sign_statement", a["node_id"], params={"statement": stmt, "signature": good})
+    assert statements.directive(db, a["node_id"]) == {"statement": stmt, "signature": good}
 
 
 def test_a_job_runs_only_where_the_node_reports_every_folder_ok_with_its_access(db):

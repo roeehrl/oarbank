@@ -114,7 +114,7 @@ def _reason_params(j: dict, r: predicates.PredicateResult, nv: predicates.NodeVi
             (f"; failed checks {', '.join(failed)}" if failed else "")
     elif r.code == "CAPABILITY_NOT_ENFORCED":
         v["capability"] = "the bootstrap grants" if r.predicate == "bootstrap grants enforced" else _listed(r.required)
-    elif r.code == "TOOL_UNAVAILABLE":
+    elif r.code in ("TOOL_NOT_FOUND", "TOOL_VERSION_UNMET", "TOOL_REFUSED"):
         v["tools"] = r.observed if isinstance(r.observed, str) and r.observed != r.code else "?"
     elif r.code in ("POOL_ABSENT", "POOL_EXHAUSTED"):
         v.update(pool=r.predicate.split("(", 1)[-1].split(")", 1)[0], need=r.required)

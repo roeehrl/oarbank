@@ -181,7 +181,10 @@ def plan(db, changes) -> dict:
     after = _after(before, norm)
     nodes = _nodes(db)
     names = {n["node_id"]: n["hostname"] for n in nodes} | {g["id"]: g["name"] for g in before.groups}
-    wire_keys = sorted({c["key"] for c in norm if R.REGISTRY[c["key"]].wire or c["key"] == "module.node_settings"})
+    # keys a node takes: the agent's policy and caps, a module's node settings, and host tool paths (tool_pins and the
+    # node statement)
+    wire_keys = sorted({c["key"] for c in norm if R.REGISTRY[c["key"]].wire or c["key"] == "module.node_settings"
+                        or "statement" in R.REGISTRY[c["key"]].effects})
     diff, unaffected, errors, changed_nodes = [], [], [], []
     for n in nodes:
         reach = [c for c in norm if _reaches(before, n, c) and c["key"] in wire_keys]
@@ -255,6 +258,9 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
     for x in p["_diff"]:
         for e in R.REGISTRY[x["key"]].effects:
             hooks.setdefault(e, set()).add(x["node_id"])
+    if any("statement" in R.REGISTRY[c["key"]].effects for c in norm):
+        from .. import statements                 # host tool paths: a path a node did not find goes into its statement
+        statements.refresh(db)
     for nid in sorted(hooks.get("redoctor", ())):
         _redoctor(db, nid, [x for x in p["_diff"] if x["node_id"] == nid and "redoctor" in R.REGISTRY[x["key"]].effects])
     touched = sorted({x["node_id"] for x in p["_diff"]})

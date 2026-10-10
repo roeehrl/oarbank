@@ -49,6 +49,11 @@ def settings_changes(form) -> dict:
     change set itself."""
     if form.get("params"):
         return json.loads(form["params"])
+    if form.get("tool"):                     # a host tool's path on a node (`tool`, `module`, `path`; empty: reset)
+        c = {"scope": form.get("scope") or "node", "scope_id": form.get("scope_id") or "",
+             "module": (form.get("module") or "").strip(), "key": f"tool.{form.get('tool').strip()}.path"}
+        path = (form.get("path") or "").strip()
+        return {"changes": [{**c, "value": path} if path else {**c, "reset": True}]}
     scope, sid = form.get("scope") or "node", form.get("scope_id") or ""
     base = {"scope": scope, "scope_id": sid}
     getlist = getattr(form, "getlist", None)
@@ -107,6 +112,18 @@ def generic(form) -> dict:
     return out
 
 
+def tool_definition(form) -> dict:
+    """Settings → Tools: a definition's extra search patterns, one per line, for every OS (`search_fleet`) or one
+    platform group (`search_darwin`, ...), and an executable's version command (`version_args`, `version_regex`)."""
+    out = {"search": {scope: [x.strip() for x in (form.get(f"search_{scope}") or "").splitlines() if x.strip()]
+                      for scope in ("fleet", "darwin", "linux", "windows")}}
+    if form.get("kind"):
+        out["kind"] = form.get("kind")
+    if (form.get("version_regex") or "").strip():
+        out["version"] = {"args": (form.get("version_args") or "--version").split(), "regex": form.get("version_regex").strip()}
+    return out
+
+
 JOIN_TTLS = {3600, 4 * 3600, 86400, 7 * 86400, 30 * 86400}     # the Add machine form's lifetimes, in seconds
 MANY_MIN, MANY_MAX, ONE_MAX_TTL = 2, 10000, 7 * 86400
 
@@ -146,9 +163,7 @@ MAPPERS = {
     # a core secret's value is the form's `secret` field, sent beside params
     "settings.secrets.set": lambda f, ctx: {},
     "settings.secrets.clear": lambda f, ctx: {},
-    # the whole entry: every OS's paths (the form shows the current ones; an emptied OS loses its paths)
-    "settings.tools.update": lambda f, ctx: {"paths": {os_: [x.strip() for x in (f.get(f"paths_{os_}") or "").splitlines()
-                                                             if x.strip()] for os_ in ("darwin", "linux", "windows")}},
+    "tools.define": lambda f, ctx: tool_definition(f),
     # a folder's path per node, one "<node>=<path>" per line; a node with an empty path is removed
     "settings.folders.update": lambda f, ctx: {"access": f.get("access") or "read", "nodes": {
         k.strip(): v.strip() or None for k, _, v in (x.partition("=") for x in (f.get("nodes") or "").splitlines()) if k.strip()}},

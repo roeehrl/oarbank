@@ -21,10 +21,11 @@ PASS, FAIL, UNKNOWN = "pass", "fail", "unknown"
 # started (doctor_ran): every state the doctor decides, but not `revoked` (a breaker trip or a golden mismatch, until the
 # doctor runs again) or none at all (no doctor report yet). docs/design/stage-gating.md
 RUNNER_STATES = ("certified", "certifying", "doctor_failed", "undetected", "golden_failed")
-# node exclusions (modsandbox.node_exclusions) that keep only some of a module's jobs off a node: a host tool the registry
-# has no path for matters to no job of a stage that needs no certification (it needs no capability, which is what a tool
-# serves, and a bootstrap job gets no tools at all), and an unmapped folder to no bootstrap job (it gets no folders)
-SPARED = {"TOOL_UNAVAILABLE": "exempt", "FOLDER_UNAVAILABLE": "bootstrap"}
+# node exclusions (modsandbox.node_exclusions) that keep only some of a module's jobs off a node: a host tool that does not
+# resolve on the node (not found, too old, or a refused path) matters to no job of a stage that needs no certification (it
+# needs no capability, which is what a tool serves, and a bootstrap job gets no tools at all), and an unmapped folder to
+# no bootstrap job (it gets no folders)
+SPARED = {"TOOL_NOT_FOUND": "exempt", "TOOL_VERSION_UNMET": "exempt", "TOOL_REFUSED": "exempt", "FOLDER_UNAVAILABLE": "bootstrap"}
 
 
 def spared(code: str | None, job: dict) -> bool:

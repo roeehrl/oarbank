@@ -89,22 +89,27 @@ def chain(snap: Snap, node: dict | None, d: R.Setting, module: str = "") -> list
     dv, why = R.default(d, facts_of(node) if node else None)
     out = [_layer("default", "", "Default", m, value=dv, reason=why)]
     out[0]["set"] = False
-    if "fleet" in d.scopes:
-        out.append(_layer("fleet", "", "Fleet", m, snap.get("fleet", "", m, d.key)))
-    if node is None:
-        return out
-    if "group" in d.scopes or d.key in {k for v in store.BUILTIN_VALUES.values() for k in v}:
-        for g in node_groups(snap, node):
-            row = snap.get("group", g["id"], m, d.key) if "group" in d.scopes else None
-            name = f"Group: {g['name']}"
-            if row is None and g["builtin"] and d.key in store.BUILTIN_VALUES.get(g["id"], {}):
-                v, reason = store.BUILTIN_VALUES[g["id"]][d.key]
-                out.append(_layer("group", g["id"], name, m, value=json.loads(json.dumps(v)), reason=reason, builtin=True))
-            else:
-                out.append(_layer("group", g["id"], name, m, row))
-            out[-1]["rank"] = g["rank"]
-    if "node" in d.scopes:
-        out.append(_layer("node", node["node_id"], "This node", m, snap.get("node", node["node_id"], m, d.key)))
+    # a key a module may qualify (`optional`) resolves the plain chain, then the module's own chain above it: a value
+    # set for the module beats a plain value at any scope (docs/design/settings.md, "Resolution")
+    passes = [m] + ([module] if d.qualifier == "optional" and module else [])
+    for mm in passes:
+        tag = f" · {mm}" if mm and d.qualifier == "optional" else ""
+        if "fleet" in d.scopes:
+            out.append(_layer("fleet", "", "Fleet" + tag, mm, snap.get("fleet", "", mm, d.key)))
+        if node is None:
+            continue
+        if "group" in d.scopes or d.key in {k for v in store.BUILTIN_VALUES.values() for k in v}:
+            for g in node_groups(snap, node):
+                row = snap.get("group", g["id"], mm, d.key) if "group" in d.scopes else None
+                name = f"Group: {g['name']}" + tag
+                if row is None and not mm and g["builtin"] and d.key in store.BUILTIN_VALUES.get(g["id"], {}):
+                    v, reason = store.BUILTIN_VALUES[g["id"]][d.key]
+                    out.append(_layer("group", g["id"], name, mm, value=json.loads(json.dumps(v)), reason=reason, builtin=True))
+                else:
+                    out.append(_layer("group", g["id"], name, mm, row))
+                out[-1]["rank"] = g["rank"]
+        if "node" in d.scopes:
+            out.append(_layer("node", node["node_id"], "This node" + tag, mm, snap.get("node", node["node_id"], mm, d.key)))
     return out
 
 

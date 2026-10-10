@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-88 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+90 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -31,6 +31,8 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `nodes.retire` — Retire a node and revoke its client certificate | T3 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.retire)<br>`POST /do/{op}` (op=nodes.retire) | – |
 | `nodes.set_mode` — Set the protection mode (fleet_first | moderate | strict_yield) | T1 | prompted | – | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.set_mode)<br>`POST /do/{op}` (op=nodes.set_mode) | oarbank node mode <nid> <mode> |
 | `nodes.confirm_identity` — Confirm that a node pinned this coordinator's identity key (compare the fingerprints once) | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=nodes.confirm_identity)<br>`POST /do/{op}` (op=nodes.confirm_identity) | oarbank node confirm-identity <node> |
+| `tools.detect` — Ask a node's agent to detect its host tools again (Re-detect) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=tools.detect)<br>`POST /do/{op}` (op=tools.detect) | oarbank tools detect <node> |
+| `nodes.sign_statement` — Attach the owner's signature to a node's statement: its folders and added tool paths (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.sign_statement)<br>`POST /do/{op}` (op=nodes.sign_statement) | oarbank node sign <node> |
 
 ## jobs
 
@@ -139,9 +141,9 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `settings.apply` — Set or reset owner settings at the fleet, a group or a node, as one change set (policy, caps, notifications, access, verification); the preview names every node whose effective value changes | T0 (from each key's danger tier and scope: a node change keeps the key's tier (caps T0, policy T1), a fleet or group change is one tier up, a lock is T3) | optional | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.apply)<br>`POST /do/{op}` (op=settings.apply) | oarbank settings set <key> <value> [--node <node>] [--group <group>]<br>oarbank settings reset <key> [--node <node>] [--group <group>] |
 | `settings.secrets.set` — Set a core secret (the ntfy token): write-only, shown only as a fingerprint | T1 | prompted | – | admin | declarative | settings.secrets.clear | `POST /api/v1/ops/{op}` (op=settings.secrets.set)<br>`POST /do/{op}` (op=settings.secrets.set) | oarbank settings set-secret <name> |
 | `settings.secrets.clear` — Remove a core secret's value (the ntfy token) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=settings.secrets.clear)<br>`POST /do/{op}` (op=settings.secrets.clear) | oarbank settings clear-secret <name> |
-| `settings.tools.update` — Map a host tool id to its paths per OS in the tool registry (modules request tools by id and trust) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.tools.update)<br>`POST /do/{op}` (op=settings.tools.update) | – |
+| `tools.define` — Define a host tool (a detector kind, extra search paths per OS, an executable's version command); jdk and python are built in | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=tools.define)<br>`POST /do/{op}` (op=tools.define) | oarbank tools define <id> --search <os>=<pattern> |
+| `tools.delete` — Delete a host tool definition (a built-in tool loses only its extra search paths) | T2 | required | yes | admin | natural · versioned | – | `POST /api/v1/ops/{op}` (op=tools.delete)<br>`POST /do/{op}` (op=tools.delete) | oarbank tools delete <id> |
 | `settings.folders.update` — Map a folder id to a path on each node in the folder registry (modules request folders by id) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.folders.update)<br>`POST /do/{op}` (op=settings.folders.update) | oarbank folders map <id> --access read|write --node <node>=<path> |
-| `folders.sign` — Attach the owner's signature to a node's folder statement (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=folders.sign)<br>`POST /do/{op}` (op=folders.sign) | oarbank folders sign <node> |
 
 ## access
 

@@ -858,14 +858,14 @@ def _mverify(db, req):
 
 
 def _approve_impact(db, r):
-    from . import modsandbox, platforms
+    from . import modsandbox, tools
     n, v = _name_ver(r)
     st = modsandbox.status(db, n, v)
     return {"module": f"{n} {v}", "grants": modsandbox.describe(st["requests"]),
             "net": (st["requests"].get("net") or {}).get("mode", "none"),
             "allow": (st["requests"].get("net") or {}).get("allow") or [],
-            "tools": {t["id"]: {"trust": t["trust"], "paths": ((platforms.tool_registry(db).get(t["id"]) or {}).get("paths") or {})}
-                      for t in st["requests"].get("tools") or []},
+            "tools": {t["id"]: {"trust": t["trust"], "version": t.get("version"), "arch": t.get("arch") or "any",
+                                "defined": t["id"] in tools.definitions(db)} for t in st["requests"].get("tools") or []},
             "gpu": (st["requests"].get("devices") or {}).get("gpu", "none"),
             "exec_writable": bool(st["requests"].get("exec_writable")),
             "containers": [f"{c['image']} ({c['platform']})" for c in st["requests"].get("containers") or []],
@@ -1493,47 +1493,83 @@ def _core_secret_clear(db, req):
     return out
 
 
-def _tools_impact(db, r):
-    from . import platforms
-    reg = platforms.tool_registry(db)
+def _tool_users(db, tool_id: str) -> list[str]:
+    """The approved module versions whose requests name a tool."""
+    return sorted({f"{m['name']} {m['version']}" for m in db.q("SELECT name, version, requests_json FROM module_grants")
+                   if any(t.get("id") == tool_id for t in (json.loads(m["requests_json"]).get("tools") or []))})
+
+
+def _define_impact(db, r):
+    from . import tools
     try:
-        new = platforms.check_tool(r.target or "", r.params) if r.params.get("paths") else None
-    except ValueError as e:
+        new = tools.check_definition(r.target or "", r.params)
+    except tools.ToolError as e:
         return {"refused": str(e)}
-    users = sorted({f"{m['name']} {m['version']}" for m in db.q("SELECT name, version FROM module_grants")
-                    if any(t.get("id") == r.target for t in (_grant_tools(db, m["name"], m["version"])))})
-    return {"tool": r.target, "before": reg.get(r.target), "after": new, "approved_module_versions": users,
-            "then": "releases are rebuilt so agents get the new paths"}
+    before = tools.definitions(db).get(r.target)
+    return {"tool": r.target, "before": {k: before[k] for k in ("kind", "search", "version")} if before else None,
+            "after": new, "approved_module_versions": _tool_users(db, r.target or ""),
+            "then": "every platform's release is rebuilt with the definitions" + (" and waits for your signature" if _signing() else "")
+                    + "; nodes detect again once they install it"}
 
 
-def _grant_tools(db, name, version):
-    from . import modsandbox
-    a = modsandbox.approval(db, name, version) or {}
-    return (a.get("requests") or {}).get("tools") or []
-
-
-@handler("settings.tools.update", target_type="setting", impact=_tools_impact,
-         snapshot=lambda db, r: {"tool_registry": settings.fleet_value(db, "tool_registry")}, versions=lambda db, r: ["setting:tool_registry"])
-def _tools(db, req):
-    """The tool registry (oarbank-sdk spec/sandbox.md, `tools`): a logical tool id mapped to host paths per OS (the whole
-    entry: every OS's paths, as the Settings form shows them prefilled). No paths removes the id. Releases are rebuilt so
-    every agent gets the paths for its OS. Trust is the module request's, approved with it, never the registry's."""
-    from . import modstore, platforms, releases
-    reg = dict(platforms.tool_registry(db))
-    try:
-        entry = platforms.check_tool(req.target or "", req.params)
-    except ValueError as e:
-        raise core.ApiError(400, "bad_tool", str(e))
-    if entry["paths"]:
-        reg[req.target] = entry
-    else:
-        reg.pop(req.target, None)
-    settings.write_fleet(db, platforms.TOOL_REGISTRY, reg, req.actor, comment=f"tool {req.target}")
-    db.event("settings_changed", actor=req.actor, reason=f"tool_registry {req.target}: "
-             + (", ".join(f"{o}={len(p)}" for o, p in entry["paths"].items()) or "removed"))
+def _sync_releases(db):
+    from . import modstore, releases
     if any(ch["current"] for ch in modstore.channels(db).values()):
         releases.sync(db)
-    return {"tool": req.target, "entry": reg.get(req.target)}
+
+
+def _tool_snap(db, r):
+    from . import tools
+    return {"tool": r.target, "definition": tools.definitions(db).get(r.target or "")}
+
+
+@handler("tools.define", target_type="setting", impact=_define_impact, snapshot=_tool_snap,
+         versions=lambda db, r: [f"tool:{r.target}"])
+def _tools_define(db, req):
+    """A host tool definition (docs/design/host-tools.md): a tool's detector kind and its extra search patterns for every
+    OS (`fleet`) or one platform group, and an executable's version command. jdk and python are built in and take extra
+    patterns only. The releases are rebuilt: they carry the definitions to the agents."""
+    from . import tools
+    try:
+        d = tools.define(db, req.target or "", req.params, req.actor)
+    except tools.ToolError as e:
+        raise core.ApiError(400, "bad_tool", str(e))
+    db.event("settings_changed", actor=req.actor, reason=f"tool {req.target}: {d['kind']}, extra search "
+             + (", ".join(f"{k}={len(v)}" for k, v in d["search"].items()) or "none"))
+    _sync_releases(db)
+    return {"tool": req.target, "definition": d}
+
+
+def _delete_impact(db, r):
+    from . import tools
+    d = tools.definitions(db).get(r.target or "")
+    if not d:
+        return {"refused": f"no tool {r.target!r}"}
+    return {"tool": r.target, "builtin": d["builtin"], "approved_module_versions": _tool_users(db, r.target or ""),
+            "then": ("its extra search paths are removed; the built-in patterns stay" if d["builtin"] else
+                     "modules asking for it run nowhere (TOOL_NOT_FOUND) until it is defined again")}
+
+
+@handler("tools.delete", target_type="setting", impact=_delete_impact, snapshot=_tool_snap,
+         versions=lambda db, r: [f"tool:{r.target}"])
+def _tools_delete(db, req):
+    from . import tools
+    try:
+        out = tools.delete(db, req.target or "")
+    except tools.ToolError as e:
+        raise core.ApiError(404, "no_tool", str(e))
+    db.event("settings_changed", actor=req.actor, reason=f"tool {req.target} deleted" + (" (its extras)" if out["builtin"] else ""))
+    _sync_releases(db)
+    return out
+
+
+@handler("tools.detect", target_type="node", snapshot=_node_snap)
+def _tools_detect(db, req):
+    """Ask a node's agent to detect its host tools again (Re-detect): it reports them with its next heartbeat."""
+    nid = _nid(db, req)
+    db.x("UPDATE nodes SET want_detect=1 WHERE node_id=?", (nid,))
+    db.event("tools_detect_requested", actor=req.actor, node_id=nid)
+    return {"want_detect": True}
 
 
 def _folders_impact(db, r):
@@ -1546,8 +1582,8 @@ def _folders_impact(db, r):
                     if any(f.get("id") == r.target for f in (json.loads(m["requests_json"]).get("folders") or []))})
     return {"folder": r.target, "before": folders.registry(db).get(r.target), "after": new,
             "approved_module_versions": users,
-            "then": "each changed node gets a new folder statement" + (" for the owner to sign (oarbank folders sign <node>)"
-                                                                       if _signing() else "")}
+            "then": "each changed node gets a new statement" + (" for the owner to sign (oarbank node sign <node>)"
+                                                                if _signing() else "")}
 
 
 @handler("settings.folders.update", target_type="setting", impact=_folders_impact,
@@ -1555,8 +1591,8 @@ def _folders_impact(db, r):
 def _folders(db, req):
     """The folder registry (oarbank-sdk spec/sandbox.md, "Folders"): a folder id mapped to a path on each node, with its
     access. `nodes` entries set to null remove the node; an entry with no nodes left removes the id. Every node whose
-    mapping changed gets a new folder statement (signed by the owner in signing mode before nodes apply it)."""
-    from . import folders
+    mapping changed gets a new node statement (signed by the owner in signing mode before nodes apply it)."""
+    from . import folders, statements
     try:
         entry = folders.check_entry(db, req.target or "", req.params)
     except folders.FolderError as e:
@@ -1568,19 +1604,20 @@ def _folders(db, req):
     else:
         reg.pop(req.target, None)
     settings.write_fleet(db, folders.REGISTRY, reg, req.actor, comment=f"folder {req.target}")
-    changed = folders.refresh(db, sorted(before | set(entry["nodes"])))
+    changed = statements.refresh(db, sorted(before | set(entry["nodes"])))
     db.event("settings_changed", actor=req.actor, reason=f"folder_registry {req.target}: {entry['access']} on "
              f"{len(entry['nodes'])} nodes; new statements for {', '.join(changed) or 'none'}")
     return {"folder": req.target, "entry": reg.get(req.target), "statements": changed}
 
 
-@handler("folders.sign", target_type="node", atomic=False)
-def _folders_sign(db, req):
-    from . import folders
+@handler("nodes.sign_statement", target_type="node", atomic=False)
+def _sign_statement(db, req):
+    """Attach the owner's signature to a node's statement (statements.py: its folders and added tool paths)."""
+    from . import statements
     try:
-        return folders.sign(db, req.target or "", req.params.get("statement") or "", req.params.get("signature") or "")
-    except folders.FolderError as e:
-        raise core.ApiError(422, "bad_folder_signature", str(e))
+        return statements.sign(db, req.target or "", req.params.get("statement") or "", req.params.get("signature") or "")
+    except statements.StatementError as e:
+        raise core.ApiError(422, "bad_statement_signature", str(e))
 
 
 def _origins_impact(db, r):

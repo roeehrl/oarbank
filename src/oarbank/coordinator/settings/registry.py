@@ -40,7 +40,8 @@ class Setting:
     applies: str = "agent"            # coordinator | agent | both
     wire: str | None = None           # the agent directive section: policy | limits
     section: str | None = None        # where the console shows it (SECTIONS)
-    qualifier: str | None = None      # None: a core key; "required": a module's own key, set per module
+    qualifier: str | None = None      # None: a core key; "required": a module's own key, set per module; "optional": a
+                                      # core key a module may qualify (its module-qualified chain wins over the plain one)
     writer: str | None = None         # the operation that owns its writes (settings.apply refuses it)
     effects: tuple = ()               # hooks run on nodes whose effective value changed (apply.py)
     hardware: str | None = None       # cores | ram: a node's own value may not exceed its hardware
@@ -75,6 +76,7 @@ SECTIONS = {
     "notifications": ("Notifications", "Push notifications for alerts, through ntfy (self-hosted or ntfy.sh)."),
     "access": ("Access", "Host names the console and the admin API answer to besides localhost (the remote mode)."),
     "verification": ("Data and verification", "How often finished work is re-run on another node to catch a wrong one."),
+    "tools": ("Host tools", "Which installation of a host tool a node grants (docs/design/host-tools.md)."),
 }
 NODE_SECTIONS = ("memory", "presence", "jobs", "caps")
 FLEET_SECTIONS = ("notifications", "access", "verification")
@@ -163,8 +165,6 @@ SETTINGS = (
             {"type": "number", "minimum": 0, "maximum": 1}, default=0.03, scopes=("fleet",), merge="max",
             applies="coordinator", section="verification", lockable=False),
     # ---------------------------------------------------------------- written by their own operations
-    Setting("tool_registry", "Host tools", "A host tool id mapped to its paths per OS.", {"type": "object"}, default={},
-            scopes=("fleet",), applies="coordinator", lockable=False, writer="settings.tools.update", danger="T2"),
     Setting("folder_registry", "Folders", "A folder id mapped to its access and a path on each node.", {"type": "object"},
             default={}, scopes=("fleet",), applies="coordinator", lockable=False, writer="settings.folders.update",
             danger="T2"),
@@ -183,7 +183,43 @@ SETTINGS = (
             advanced=True),
 )
 
-REGISTRY: dict[str, Setting] = {s.key: s for s in SETTINGS}
+# Key families: one definition stands for every key its pattern matches (`tool.<id>.path`, one per host tool).
+TOOL_PATH = re.compile(r"^tool\.([a-z][a-z0-9_.-]{0,63})\.path$")
+# an absolute path (POSIX, or a Windows drive path), not a root, no globs, no `..` component
+TOOL_PATH_VALUE = (r"^(?!.*(^|[/\\])\.\.([/\\]|$))(/[^*?\[\x00\n]*[^/*?\[\x00\n]|[A-Za-z]:\\[^*?\[\x00\n<>|\"]*"
+                   r"[^\\*?\[\x00\n<>|\"])$")
+FAMILIES = (
+    (TOOL_PATH, Setting(
+        "tool.<id>.path", "Host tool path",
+        "Which installation of this host tool the node grants: an installation it found is chosen as it is; any other "
+        "path goes into the node's signed statement and is verified on the node before it is granted.",
+        {"type": "string", "pattern": TOOL_PATH_VALUE, "maxLength": 1024}, default=None, scopes=SCOPES,
+        applies="both", lockable=False, qualifier="optional", effects=("statement",), section="tools", danger="T1",
+        examples=("/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",))),
+)
+
+
+class _Registry(dict):
+    """The declared keys, and every key a family's pattern matches (made on demand)."""
+
+    def get(self, key, default=None):
+        if key in self:
+            return dict.__getitem__(self, key)
+        for pat, d in FAMILIES:
+            m = pat.fullmatch(key or "")
+            if m:
+                import dataclasses
+                return dataclasses.replace(d, key=key, label=f"Path of {m.group(1)}")
+        return default
+
+    def __missing__(self, key):
+        d = self.get(key)
+        if d is None:
+            raise KeyError(key)
+        return d
+
+
+REGISTRY: dict[str, Setting] = _Registry({s.key: s for s in SETTINGS})
 WIRE_POLICY = tuple(s.key for s in SETTINGS if s.wire == "policy")
 WIRE_LIMITS = tuple(s.key for s in SETTINGS if s.wire == "limits")
 NODE_KEYS = tuple(s.key for s in SETTINGS if s.section in NODE_SECTIONS)
@@ -367,9 +403,9 @@ def change_tier(changes) -> str:
 
 
 def schema_doc(module_keys: dict | None = None) -> list[dict]:
-    """GET /api/v1/settings/schema: every definition as data."""
+    """GET /api/v1/settings/schema: every definition as data (a key family once, by its pattern's name)."""
     out = []
-    for d in SETTINGS:
+    for d in (*SETTINGS, *(f for _, f in FAMILIES)):
         dv, why = default(d, None)
         out.append({"key": d.key, "label": d.label, "help": d.help, "unit": d.unit, "schema": d.schema,
                     "default": dv if d.computed is None else None, "computed_default": d.computed_how,

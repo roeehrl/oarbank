@@ -944,6 +944,20 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                                                         "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
                                                         "actor": actor})
 
+    @app.get("/modules/{name}/nodes", response_class=HTMLResponse)
+    async def module_nodes(name: str, request: Request):
+        """The module's Nodes matrix (docs/design/host-tools.md): per node and host tool request, what the node found, the
+        path set for it, the effective installation with its source, and the status with its fix."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        if man is None:
+            return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
+        r = await coordinator_json("GET", f"/api/v1/tools?module={name}", actor)
+        doc = r.json() if r.status_code == 200 else None
+        return render(request, "module_nodes.html", {"name": name, "man": man, "tab": "nodes", "actor": actor,
+                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200]})
+
     @app.get("/modules/{name}/health", response_class=HTMLResponse)
     async def module_page(name: str, request: Request):
         actor = who(request)

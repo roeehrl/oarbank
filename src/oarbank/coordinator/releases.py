@@ -93,12 +93,11 @@ def node_files(m, files: list[dict], platform: str) -> list[dict]:
             or deps.wheel_fits(f["path"].rsplit("/", 1)[1], platform)]
 
 
-def module_entry(name: str, version: str, digest: str, path, platform: str = platforms.DEFAULT_PLATFORM,
-                 tools: dict | None = None) -> dict:
+def module_entry(name: str, version: str, digest: str, path, platform: str = platforms.DEFAULT_PLATFORM) -> dict:
     """modules.json entry for one platform: what the agent needs to run and serve the module generically. Execs stay
     unresolved argv (`python`, `{bundle}`; spec/manifest.md "Exec"): the agent substitutes its interpreter and the
-    module's bundle directory, modules/<name>/. `tools` maps each approved tool id to its host paths on this platform's
-    OS (from the operator's tool registry)."""
+    module's bundle directory, modules/<name>/. Host tools are requests (id, version, arch, trust), never paths: the
+    agent resolves each against what it detected (docs/design/host-tools.md)."""
     from oarbank_sdk import manifest as mf
     path = Path(path)
     m = mf.load(path / "oarbank-module.toml")
@@ -138,12 +137,12 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
             # the module sandbox (spec/sandbox.md): the node-side grants, operator-approved before this version could
             # be enabled, canaried, pinned or promoted (modsandbox); the agent enforces exactly these
             "sandbox": {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": list(sb.net.allow)},
-                        "tools": [{"id": t.id, "trust": t.trust, "paths": list((tools or {}).get(t.id) or [])} for t in sb.tools],
+                        "tools": [{"id": t.id, "trust": t.trust, "version": t.version, "arch": t.arch} for t in sb.tools],
                         "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
                         "containers": [{"image": c.image, "platform": c.platform} for c in sb.containers],
                         # image sets with their keys (only when declared, so other entries keep their bytes)
                         **({"container_sets": modimages.release_sets(m, path)} if sb.container_sets else {}),
-                        # folders: ids only; where they are on each node is the node's signed folder statement
+                        # folders: ids only; where they are on each node is the node's signed statement
                         **({"folders": [{"id": f.id, "access": f.access} for f in sb.folders]} if sb.folders else {})}}
 
 
@@ -182,10 +181,12 @@ def build(db: DB, make_current: bool = True, comp: dict | None = None, platform:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes((src / f["path"]).read_bytes())
                 modes[rel] = int(f["mode"], 8)
-            ids = [t.id for t in m.sandbox.tools]
-            tools = {i: platforms.tool_paths(db, [i], os_)[0] for i in ids}
-            entries_mod.append(module_entry(name, c["version"], c["digest"], src, platform, tools))
-        (root / "modules.json").write_text(json.dumps({"format": MODULES_FORMAT, "platform": platform, "modules": entries_mod},
+            entries_mod.append(module_entry(name, c["version"], c["digest"], src, platform))
+        # the fleet's tool definitions for this OS (extra search patterns, executables' version commands): what the
+        # agent detects, besides its built-in kinds (docs/design/host-tools.md); never a path to grant
+        from . import tools as T
+        (root / "modules.json").write_text(json.dumps({"format": MODULES_FORMAT, "platform": platform, "modules": entries_mod,
+                                                       "tools": T.release_definitions(db, os_)},
                                                       indent=1, sort_keys=True), encoding="utf-8", newline="\n")
         modes["modules.json"] = 0o644
         entries = [{"path": rel, "sha256": sha256_file(root / rel), "mode": oct(modes[rel])}

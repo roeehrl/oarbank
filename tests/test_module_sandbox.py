@@ -107,7 +107,7 @@ def _toy_with_sandbox(tmp_path, version="0.2.0") -> Path:
     shutil.copytree(TOY_DIR, src)
     m = (src / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "0.1.0"', f'version = "{version}"', 1)
     m += ('\n[sandbox]\nnet = { mode = "egress-allowlist", allow = ["api.example.org"] }\n'
-          'tools = [{ id = "java17", trust = "code-exec" }]\n'
+          'tools = [{ id = "jdk", version = ">=17", trust = "code-exec" }]\n'
           'containers = [{ image = "docker.io/org/tool:1@sha256:' + "a" * 64 + '", platform = "linux/amd64" }]\n')
     (src / "oarbank-module.toml").write_text(m)
     return src
@@ -123,45 +123,16 @@ def test_grants_must_be_approved_before_a_version_runs_anywhere(tmp_path, db):
         modstore.pin(db, "toy", "n1", v)
     plan = op(db, "modules.approve", f"toy@{v}", reason="t", dry_run=True)
     impact = json.dumps(plan, default=str)
-    assert "api.example.org" in impact and "java17" in impact and "runs code" in impact and "linux/amd64" in impact
+    assert "api.example.org" in impact and "jdk >=17 (runs code)" in impact and "linux/amd64" in impact
     planned(db, "modules.approve", f"toy@{v}", reason="reviewed")
     assert modsandbox.status(db, "toy", v)["approved"]
     modstore.canary(db, "toy", v, ["n1"])                 # now allowed
-    entry = releases.module_entry("toy", v, r["content_digest"], r["path"], "darwin-arm64",
-                                  {"java17": ["/opt/homebrew/opt/openjdk@17"]})
+    entry = releases.module_entry("toy", v, r["content_digest"], r["path"], "darwin-arm64")
     assert entry["module_id"] == "dev.codonic.oarbank.toy"
     assert entry["sandbox"] == {"contract": 1, "net": {"mode": "egress-allowlist", "allow": ["api.example.org"]},
-                                "tools": [{"id": "java17", "trust": "code-exec", "paths": ["/opt/homebrew/opt/openjdk@17"]}],
+                                "tools": [{"id": "jdk", "trust": "code-exec", "version": ">=17", "arch": "any"}],   # never a path
                                 "devices": {"gpu": "none"}, "exec_writable": False,
                                 "containers": [{"image": "docker.io/org/tool:1@sha256:" + "a" * 64, "platform": "linux/amd64"}]}
-
-
-def test_tool_registry_maps_ids_per_os_and_reaches_the_release(tmp_path, db):
-    from helpers import bundle, enrolled_node, fresh
-    from oarbank.coordinator import platforms
-    r = modstore.install(db, bundle(_toy_with_sandbox(tmp_path)), actor="test", self_test=False)
-    planned(db, "modules.approve", f"toy@{r['version']}", reason="reviewed")
-    with pytest.raises(Exception, match="not an absolute path"):
-        planned(db, "settings.tools.update", "java17", params={"paths": {"darwin": ["opt/jdk"]}})
-    with pytest.raises(Exception, match="not an absolute path"):
-        planned(db, "settings.tools.update", "java17", params={"paths": {"windows": ["/opt/jdk"]}})
-    with pytest.raises(Exception, match="no globs"):
-        planned(db, "settings.tools.update", "java17", params={"paths": {"linux": ["/usr/lib/jvm/*"]}})
-    with pytest.raises(Exception, match="trust is the module's request"):          # the registry holds paths only
-        planned(db, "settings.tools.update", "java17", params={"trust": "code-exec", "paths": {"darwin": ["/opt/jdk"]}})
-    planned(db, "settings.tools.update", "java17", reason="jdk", params={
-        "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"], "windows": ["C:\\Program Files\\jdk-17"]}})
-    assert platforms.tool_registry(db)["java17"] == {"paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"],
-                                                             "windows": ["C:\\Program Files\\jdk-17"]}}
-    assert platforms.tool_paths(db, ["java17"], "darwin") == (["/opt/homebrew/opt/openjdk@17"], [])
-    assert platforms.tool_paths(db, ["java17"], "linux") == ([], ["java17"])
-    from oarbank_sdk import manifest as mf
-    man = mf.load(Path(r["path"]) / "oarbank-module.toml")
-    _, mac = enrolled_node(db, "mac")
-    _, box = enrolled_node(db, "box", facts={**json.loads(fresh(db, mac)["facts_json"]),
-                                             "platform": {"os": "linux", "arch": "amd64", "os_version": "6.8"}})
-    assert platforms.unsupported(db, man, fresh(db, mac)) is None
-    assert platforms.unsupported(db, man, fresh(db, box)) == "TOOL_UNAVAILABLE"         # no Linux path registered
 
 
 def test_a_version_that_requests_nothing_needs_no_approval(db):

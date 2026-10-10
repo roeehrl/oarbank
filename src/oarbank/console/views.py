@@ -286,7 +286,9 @@ def node_conditions(n: dict) -> list[dict]:
 # one value inline
 REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#node-defaults"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
                 "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
-                "settings.tools.update": ("/settings", "/settings"), "settings.folders.update": ("/settings", "/settings"),
+                "tools.detect": ("/nodes/{node}#tools", "/"),
+                "tools.define": ("/settings#tools", "/settings"),
+                "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
                 "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
@@ -500,8 +502,15 @@ def settings_page(r) -> dict:
     value), the tool and folder registries, dataset origins, releases."""
     from ..coordinator.modsecrets import core_state
     from ..coordinator.settings import fleet_value
-    s = {k: fleet_value(r, k) for k in ("tool_registry", "folder_registry", "dataset_origins")}
-    s["folder_statements"] = r.get_state("folder_statements")
+    from ..coordinator import tools
+    s = {k: fleet_value(r, k) for k in ("folder_registry", "dataset_origins")}
+    s["node_statements"] = r.get_state("node_statements")
+    # host tools: the definitions (built-in patterns and extras) and who asks for each (Settings → Tools)
+    s["tool_defs"] = tools.definitions(r)
+    s["tool_users"] = {}
+    for m in r.q("SELECT name, version, requests_json FROM module_grants"):
+        for t in (jl(m["requests_json"], {}) or {}).get("tools") or []:
+            s["tool_users"].setdefault(t.get("id"), []).append(f"{m['name']} {m['version']}")
     s["ntfy_token"] = core_state(r, "ntfy_token")
     s["nodes"] = {n["node_id"]: n for n in r.q("SELECT node_id, hostname, platform, folders_json FROM nodes WHERE lifecycle!='retired' "
                                                 "ORDER BY hostname")}

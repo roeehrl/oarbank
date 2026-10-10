@@ -29,7 +29,7 @@ Each key is one `Setting` (registry.py):
 | `wire` | The agent directive section it travels in: `policy` or `limits` |
 | `section` | The console section that shows it |
 | `qualifier` | `required` for a module's own key, set per module (`pipeline`, `module.settings`, `module.node_settings`) |
-| `writer` | The operation that owns writes to it (`settings.tools.update`, `settings.folders.update`, `settings.origins.update`, `modules.set_pipeline`): `settings.apply` refuses the key and names that operation, which checks it and applies its effects |
+| `writer` | The operation that owns writes to it (`settings.folders.update`, `settings.origins.update`, `modules.set_pipeline`): `settings.apply` refuses the key and names that operation, which checks it and applies its effects |
 | `effects` | Hooks run on the nodes whose effective value changed (`redoctor`: `disabled_services` changes a node's role, so its modules are re-doctored and re-certified) |
 | `hardware` | `cores` or `ram`: a node's own value may not exceed its hardware |
 
@@ -45,9 +45,14 @@ The keys, by section:
   in the encrypted secrets store (write-only, shown as a fingerprint; `settings.secrets.set` / `clear`).
 - **Access** (fleet only): `console_hosts`, a typed list of host names (an optional `:port`).
 - **Data and verification** (fleet only): `replica_rate`, 0 to 1.
-- **Written by their own operations** (fleet only): `tool_registry` (paths per OS, never a trust: trust is the module
-  request's, approved with it), `folder_registry`, `dataset_origins`, `pipeline` per module, `module.settings` (a
-  module's own fleet settings, which its operations write through the `module_settings.update` effect).
+- **Written by their own operations** (fleet only): `folder_registry`, `dataset_origins`, `pipeline` per module,
+  `module.settings` (a module's own fleet settings, which its operations write through the `module_settings.update`
+  effect).
+- **Host tools** (a key family): `tool.<id>.path` at fleet, group or node scope, optionally qualified by a module, the
+  installation of a host tool a node grants ([host-tools.md](host-tools.md)). Its value is an absolute path (no globs,
+  roots or `..`); its effect hook rebuilds the node statements, which carry the node values naming a path the node did
+  not find itself. A key that names a module resolves the module's chain above the plain one: a value set for the
+  module beats a plain value at any scope (the registry's `qualifier = "optional"`).
 - **Per module on a node**: `module.node_settings`, handed to the module's runners and services there
   (`OARBANK_SETTINGS_FILE`).
 
@@ -133,9 +138,10 @@ invalid state never blocks an unrelated save.
   1 pending (offline)".
 
 `settings.apply` replaced `nodes.set_policy`, `nodes.set_caps`, `settings.notifications.update` (its URL fields; the
-token became `settings.secrets.set`) and the raw `settings.update`. The tool, folder and origin operations
-(`settings.tools.update`, `settings.folders.update`, `settings.origins.update`) and `modules.set_pipeline` keep their
-own operations until the host-tools and module-settings phases, because each validates against more than a type (paths
+token became `settings.secrets.set`) and the raw `settings.update`; host tools replaced `settings.tools.update` with tool
+definitions (`tools.define`, `tools.delete`) and the `tool.<id>.path` keys. The folder and origin operations
+(`settings.folders.update`, `settings.origins.update`) and `modules.set_pipeline` keep their own operations until the
+module-settings phase, because each validates against more than a type (paths
 per OS, per node, a module's stage chain) and has its own side effects (release rebuilds, signed folder statements,
 splitting queued jobs); they now store their values as fleet rows through `store.write_fleet`.
 
@@ -170,8 +176,8 @@ heartbeat", "Pending: node offline", "Refused by the node: …", or, for an agen
   to the field with `aria-describedby`.
 - **Fleet Settings** (`/settings`): **Node defaults** (the same sections at fleet scope, each row with "Overridden on N
   nodes" linking to the reverse view `/settings/overrides?key=…`), Notifications (the two URLs and the write-only token),
-  Access (`console_hosts`), Data and verification (`replica_rate`), then the tool registry (each tool's form prefilled
-  with its current paths on every OS, so changing one OS never drops another), folders, dataset origins, releases.
+  Access (`console_hosts`), Data and verification (`replica_rate`), then host tool definitions and search paths
+  ([host-tools.md](host-tools.md)), folders, dataset origins, releases.
 - **Apply-then-Save**: a fleet or group change always opens the preview first (`plan.html`): the summary, the per-node
   old/new table, the nodes that keep their value and why, and a button that says what it does ("Save for 4 nodes"). A
   node change saves at once (T1 keys confirm in the browser).
@@ -203,7 +209,7 @@ the command that resets each.
 
 - The `settings` table splits: owner keys become fleet rows (`ntfy` → `ntfy.url`, `ntfy.click_base`, its token into
   the secrets store; `console_hosts` (a string becomes a one-entry list), `replica_rate`, `default_worker_disabled_services`
-  → the fleet's `disabled_services`, `tool_registry` without its `trust`, `folder_registry`, `dataset_origins` (its
+  → the fleet's `disabled_services`, `tool_registry` → host tool definitions, `folder_registry`, `dataset_origins` (its
   host list), `pipeline:<m>`, `module_settings:<m>` → that module's `module.settings`); `dataset_groups` is dropped (no
   owner control, no reader); every other key is machine state and moves to `system_state`. The table is dropped.
 - For each node, a policy value becomes a node row only where it differs from what the node now inherits (its computed

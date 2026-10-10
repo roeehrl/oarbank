@@ -105,7 +105,8 @@ that wants a check to gate a stage names the check after a capability the stage 
 Tools and folders are module-wide grants with no stage mapping, so a missing mapping excluded the whole module. Now
 `predicates.SPARED` says which jobs an exclusion leaves alone:
 
-- `TOOL_UNAVAILABLE` (the registry has no path for an approved tool on the node's OS) spares jobs of stages that need
+- `TOOL_UNAVAILABLE` (since core 2.9 split into `TOOL_NOT_FOUND`, `TOOL_VERSION_UNMET` and `TOOL_REFUSED`, computed
+  from the node's own tool report: [host-tools.md](host-tools.md)) spares jobs of stages that need
   no certification. A tool serves a capability (`java17`), which such a stage never requires, and a bootstrap job gets
   no tools at all. The job runs with the tools that are mapped; a narrower grant is never less safe. The stages that
   need certification, and the goldens, still wait, and explain names the tools.
@@ -140,7 +141,7 @@ Each summary row carries the same sentence in `detail.text` and its platform cou
 check of an exempt job is its own predicate, `module_runner_ready(<module>)` (bootstrap jobs keep
 `module_ready_for_bootstrap(<module>)`), observed as `<state>, runner started` or `<state>, runner not started`, so
 "its runner did not start" and "not certified" read differently; a system action says the job needs no certification
-and why. `TOOL_UNAVAILABLE`'s message names the tools (`{tools}`).
+and why. The tool codes' messages name the tool, what the node found and what the module needs (`{tools}`).
 
 ### 6. Doctor details are kept whole
 
@@ -176,7 +177,9 @@ On a copy of its coordinator database (with a copy of its module store, under a 
 (`QUEUED_BEHIND`), and a claim from an updated agent is granted them. The two `profile` jobs wait, and explain says why:
 `Module minos-gatk needs host tools the tool registry has no darwin paths for: java17 (5 nodes: 5 darwin-arm64)`.
 Certifying the module there still needs the operator: map `java17` for darwin in the tool registry
-(`settings.tools.update`) and fix the pysam build the darwin venvs load (the `dlopen` failure).
+(`settings.tools.update`) and fix the pysam build the darwin venvs load (the `dlopen` failure). (Core 2.9 replaced the
+registry with host tools detected on each node: minos-gatk asks for `jdk >=17` in a new version, and each node reports
+whether it has one; see [host-tools.md](host-tools.md).)
 
 ## Tests
 

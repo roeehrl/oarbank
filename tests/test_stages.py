@@ -315,25 +315,28 @@ def test_a_staged_job_joins_its_campaigns_unit_with_its_stages_classes(db, monke
     assert placement.binding(db, f"c:{sid}")["feasible"] == ["linux-arm64"]
 
 
-def test_a_host_tool_without_a_path_keeps_off_only_the_stages_that_need_certification(db, monkeypatch):
-    """An unmapped host tool serves a capability, which a stage that needs no certification never requires: such a job
-    runs (with the tools that are mapped); the stages that compare, and the goldens, wait with TOOL_UNAVAILABLE, naming
-    the tool."""
+def test_a_host_tool_too_old_keeps_off_only_the_stages_that_need_certification(db, monkeypatch):
+    """A host tool serves a capability, which a stage that needs no certification never requires: such a job runs
+    (with no tools: docs/design/host-tools.md); the stages that compare, and the goldens, wait with TOOL_VERSION_UNMET,
+    naming the tool, what the node found and what the module needs."""
     from oarbank.coordinator import explain, modsandbox
     from oarbank_sdk import manifest as mf
     sick = doctored(db, "sick", SICK)
+    db.x("UPDATE nodes SET tools_json=? WHERE node_id=?", (json.dumps({"detected_at": 1.0, "native_arch": "arm64", "tools": {"jdk": [
+        {"path": "/Library/Java/JavaVirtualMachines/zulu-11.jdk/Contents/Home", "version": "11.0.2", "arch": "aarch64",
+         "source": "detected", "status": "ok"}]}}), sick["node_id"]))
     info = modcalls.info("relay")
-    sandbox = info.manifest.sandbox.model_copy(update={"tools": [mf.ToolGrant(id="java17", trust="code-exec")]})
+    sandbox = info.manifest.sandbox.model_copy(update={"tools": [mf.ToolGrant(id="jdk", version=">=17", trust="code-exec")]})
     monkeypatch.setitem(modcalls.CATALOG, "relay", dataclasses.replace(info, manifest=info.manifest.model_copy(
         update={"sandbox": sandbox})))
-    assert modsandbox.node_exclusions(db, fresh(db, sick), {"relay"}) == {"relay": "TOOL_UNAVAILABLE"}
+    assert modsandbox.node_exclusions(db, fresh(db, sick), {"relay"}) == {"relay": "TOOL_VERSION_UNMET"}
     assert modsandbox.node_excluded(db, fresh(db, sick), {"relay"}) == set()
     sid = study(db)
     enqueue(db, sid, sync_item())
     ev = db.one("SELECT job_id FROM jobs WHERE stage IS NULL AND kind='eval'")["job_id"]
     head = explain.job_doc(db, ev).headline
-    assert ("Module relay needs host tools the tool registry has no darwin paths for: java17 (1 node: 1 darwin-arm64)"
-            in head.text), head.text
+    assert ("Module relay needs another version of a host tool: jdk >=17: found 11.0.2 at "
+            "/Library/Java/JavaVirtualMachines/zulu-11.jdk/Contents/Home; needs >=17 (1 node: 1 darwin-arm64)" in head.text), head.text
     assert [x["spec"]["stage"] for x in grants(db, sick)] == ["sync"]
     assert ok(db)
 
@@ -341,6 +344,7 @@ def test_a_host_tool_without_a_path_keeps_off_only_the_stages_that_need_certific
 def test_which_node_exclusions_spare_which_jobs():
     from oarbank.coordinator import predicates
     exempt, boot, plain = {"exempt": True, "bootstrap": False}, {"exempt": True, "bootstrap": True}, {"exempt": False}
-    assert [predicates.spared("TOOL_UNAVAILABLE", j) for j in (exempt, boot, plain)] == [True, True, False]
+    for code in ("TOOL_NOT_FOUND", "TOOL_VERSION_UNMET", "TOOL_REFUSED"):
+        assert [predicates.spared(code, j) for j in (exempt, boot, plain)] == [True, True, False]
     assert [predicates.spared("FOLDER_UNAVAILABLE", j) for j in (exempt, boot, plain)] == [False, True, False]
     assert not any(predicates.spared(c, boot) for c in ("PLATFORM_UNSUPPORTED", "CAPABILITY_NOT_ENFORCED", "AGENT_TOO_OLD", None))

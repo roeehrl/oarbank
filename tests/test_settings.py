@@ -207,8 +207,8 @@ def test_facts_moving_a_node_into_another_default_give_it_a_new_revision(db):
 
 def test_writer_owned_keys_go_through_their_own_operation(db):
     with pytest.raises(A.ApplyError) as e:
-        settings_apply(db, {"scope": "fleet", "key": "tool_registry", "value": {}})
-    assert e.value.errors[0]["code"] == "use_typed_operation" and "settings.tools.update" in e.value.errors[0]["message"]
+        settings_apply(db, {"scope": "fleet", "key": "folder_registry", "value": {}})
+    assert e.value.errors[0]["code"] == "use_typed_operation" and "settings.folders.update" in e.value.errors[0]["message"]
     with pytest.raises(A.ApplyError) as e:
         settings_apply(db, {"scope": "node", "scope_id": "nope", "key": "replica_rate", "value": 0.1})
     assert e.value.errors[0]["code"] == "not_settable_here"
@@ -234,7 +234,8 @@ def test_the_settings_api(db):
     set_node(db, n, "job_mem_gb", 3)
     c = TestClient(coord_app.admin_app(db, coord_app.EventBus()), headers=admin_headers(db))
     schema = c.get("/api/v1/settings/schema").json()
-    assert {s["key"] for s in schema["settings"]} == set(R.REGISTRY) and schema["groups"][0]["id"] == "os-darwin"
+    assert {s["key"] for s in schema["settings"]} == set(R.REGISTRY) | {"tool.<id>.path"}           # a key family once
+    assert schema["groups"][0]["id"] == "os-darwin"
     eff = c.get("/api/v1/settings/effective", params={"node": "mini"}).json()
     row = next(x for x in eff["settings"] if x["key"] == "job_mem_gb")
     assert row["value"] == 3 and row["badge"] == "This node" and eff["groups"] == ["macOS"]
@@ -301,9 +302,11 @@ def test_an_earlier_home_is_converted_once_keeping_only_choices(tmp_path):
         "job_mem_gb": 3, "jobs": 2, "enforce": "hard", "module.node_settings": {"vm_mem_gb": 12}}
     assert {(m, k): r["value"] for (s, m, k), r in rows.items() if s == "fleet"} == {
         ("", "ntfy.url"): "https://ntfy.sh/topic", ("", "replica_rate"): 0.05, ("", "console_hosts"): ["oarbank.example.ts.net"],
-        ("", "disabled_services"): ["relay/scorer"], ("", "tool_registry"): {"java17": {"paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"]}}},
+        ("", "disabled_services"): ["relay/scorer"],
         ("", "dataset_origins"): ["example.org"], ("relay", "pipeline"): "split", ("relay", "module.settings"): {"goldens": []}}
     assert db.get_state("release_pubkey") == "abc" and db.get_state("fleet_id")
+    from oarbank.coordinator import tools                             # the tool registry became a host tool definition
+    assert tools.definitions(db)["java17"]["search"] == {"darwin": ["/opt/homebrew/opt/openjdk@17"]}
     assert json.loads(node_row(db, nid["b"])["protection_json"])["node"]["mode"] == "strict_yield"
     ev = db.one("SELECT payload_json FROM events WHERE kind='settings_migrated'")
     report = json.loads(ev["payload_json"])

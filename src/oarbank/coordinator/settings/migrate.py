@@ -4,7 +4,8 @@ once and deleted.
 
 - The `settings` table splits: owner keys become fleet values (`setting_values`), every other key is machine state and
   moves to `system_state`. The ntfy token moves into the secrets store (write-only). `default_worker_disabled_services`
-  becomes the fleet's `disabled_services` (the built-in coordinator-host group still runs every service), `pipeline:<m>`
+  becomes the fleet's `disabled_services` (the built-in coordinator-host group still runs every service), the tool
+  registry becomes host tool definitions (tools.convert_registry), `pipeline:<m>`
   and `module_settings:<m>` become that module's fleet values; `dataset_groups` (no owner control, nothing reads it but
   a retired endpoint) is dropped.
 - `nodes.policy_json` and `nodes.limits_json` go: for each node, a value becomes a node value only where it differs from
@@ -76,8 +77,9 @@ def _owner(db, key: str, v, rev: int, report: dict) -> bool:
         if v:
             fleet("disabled_services", v)
         return True
-    if key == "tool_registry":
-        fleet("tool_registry", {t: {"paths": (e or {}).get("paths") or {}} for t, e in (v or {}).items()})
+    if key == "tool_registry":                       # host tools: definitions with fleet search paths per OS
+        from ..tools import convert_registry
+        report["fleet"] += [f"tool {t}" for t in convert_registry(db, v or {})]
         return True
     if key == "folder_registry":
         fleet("folder_registry", v or {})

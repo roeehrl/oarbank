@@ -2,19 +2,17 @@
 
 A node reports its facts (format 2) in its hello: `platform {os, arch, os_version, os_build, kernel, distro, libc}`, `cpu`, `memory`,
 `gpus`, `addresses`. The platform token is `<os>-<arch>`. A module version runs on a node only when its manifest lists
-that platform (`requires.platforms`), the node's OS version is in `requires.os`, and every host tool it was approved
-for is in the operator's tool registry for that OS, and the node provides every folder it asks for. Anything else is
+that platform (`requires.platforms`), the node's OS version is in `requires.os`, every host tool it asks for resolves to
+an installation the node detected (tools.py), and the node provides every folder it asks for. Anything else is
 refused with a reason code the explainer shows.
 """
 import json
-import re
 
 from oarbank_sdk import portable
 
 from .db import DB
 
 DEFAULT_PLATFORM = "darwin-arm64"       # the release built before any node has said what it is
-TOOL_REGISTRY = "tool_registry"          # setting: {id: {"paths": {os: [abs paths]}}} (trust is the module request's)
 
 
 def facts_platform(facts: dict) -> dict:
@@ -57,56 +55,6 @@ def _ver_in(version: str | None, spec: str | None) -> bool:
         return False
 
 
-TOOL_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
-_WIN_ABS = re.compile(r"^[A-Za-z]:\\[^*?\"<>|]*$")
-
-
-def check_tool(tool_id: str, entry: dict) -> dict:
-    """A registry entry, normalized: {"paths": {os: [absolute paths]}}. Paths are whole directories or files (no globs),
-    absolute for their OS; a path may not be a filesystem root. Trust is not the registry's: the module's request
-    declares it, the owner approves it with the request set, and the release carries it."""
-    if not TOOL_ID.fullmatch(tool_id or ""):
-        raise ValueError(f"tool id {tool_id!r}: lower-case letters, digits, '_', '.', '-'")
-    extra = set(entry) - {"paths"}
-    if extra:
-        raise ValueError(f"a tool entry has paths only, not {sorted(extra)} (trust is the module's request)")
-    out = {}
-    for os_, ps in (entry.get("paths") or {}).items():
-        if os_ not in portable.OSES:
-            raise ValueError(f"paths: unknown OS {os_!r} ({', '.join(portable.OSES)})")
-        clean = []
-        for p in ([ps] if isinstance(ps, str) else ps or []):
-            p = (p or "").strip()
-            if not p:
-                continue
-            ok = _WIN_ABS.fullmatch(p) if os_ == "windows" else p.startswith("/") and "\x00" not in p
-            if not ok or any(c in p for c in "*?[") or p.rstrip("/\\") in ("", "/") or re.fullmatch(r"[A-Za-z]:\\?", p):
-                raise ValueError(f"paths.{os_}: {p!r} is not an absolute path to a directory or file (no globs, not a root)")
-            if "/../" in p + "/" or "\\..\\" in p + "\\":
-                raise ValueError(f"paths.{os_}: {p!r} contains '..'")
-            clean.append(p)
-        if clean:
-            out[os_] = sorted(set(clean))
-    return {"paths": out}
-
-
-def tool_registry(db: DB) -> dict:
-    from .settings import fleet_value
-    return fleet_value(db, TOOL_REGISTRY) or {}
-
-
-def tool_paths(db: DB, tool_ids, os_: str) -> tuple[list[str], list[str]]:
-    """(paths, missing ids) for the approved tools on one OS."""
-    reg, paths, missing = tool_registry(db), [], []
-    for t in tool_ids:
-        p = ((reg.get(t) or {}).get("paths") or {}).get(os_) or []
-        if p:
-            paths += list(p)
-        else:
-            missing.append(t)
-    return paths, missing
-
-
 def sandbox_needs(manifest) -> list[str]:
     """The sandbox capabilities a module needs enforced where it runs (spec/sandbox.md, "Placement"). Every module needs
     the always-on rules; grants add their own capability names. Denying execution of written files
@@ -134,8 +82,9 @@ def sandbox_gaps(manifest, facts: dict) -> list[str]:
     return [c for c in sandbox_needs(manifest) if enf.get(c) != "enforced"]
 
 
-def unsupported(db: DB, manifest, node: dict) -> str | None:
-    """Why this module version cannot run on this node (a reason code), or None."""
+def unsupported(db: DB, manifest, node: dict, name: str = "") -> str | None:
+    """Why this module version (of module `name`) cannot run on this node (a reason code), or None. A host tool that
+    does not resolve there is TOOL_NOT_FOUND, TOOL_VERSION_UNMET or TOOL_REFUSED (tools.unmet)."""
     facts = json.loads(node.get("facts_json") or "{}")
     fp = facts_platform(facts)
     plat = node.get("platform") or fp["platform"]
@@ -152,9 +101,10 @@ def unsupported(db: DB, manifest, node: dict) -> str | None:
             pf = facts.get("platform") or {}
             if not _ver_in(pf.get("kernel"), req.linux.kernel) or not _ver_in(pf.get("libc_version"), req.linux.glibc):
                 return "OS_VERSION_UNSUPPORTED"
-    _, missing = tool_paths(db, [t.id for t in manifest.sandbox.tools], os_)
-    if missing:
-        return "TOOL_UNAVAILABLE"
+    from . import tools
+    miss = tools.unmet(db, manifest, node, name)
+    if miss:
+        return miss[0]
     from . import folders
     if folders.missing(manifest, node):
         return "FOLDER_UNAVAILABLE"

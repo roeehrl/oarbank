@@ -43,8 +43,14 @@ CREATE TABLE IF NOT EXISTS nodes (
   cik_pinned TEXT, cik_confirmed TEXT, cik_confirmed_by TEXT, cik_confirmed_at REAL,   -- the coordinator key the agent pinned
   install_coordinator_json TEXT, coordinator_move_json TEXT,
   folders_json TEXT,              -- the folders of the statement the agent applied: {id: {access, status}} (folders.py)
+  tools_json TEXT,                -- the host tools the agent detected: {detected_at, native_arch, tools: {id: [...]}} (tools.py)
+  want_detect INT DEFAULT 0,      -- tools.detect: ask the agent to detect its host tools again (the next directive)
   services_json TEXT, services_at REAL,   -- the agent's service report: {services: [...], probes: [...]} (protocol.md)
   clock_offset_s REAL);           -- the node's wall clock minus oarbankd's, at its last hello or heartbeat (protocol.md, "Clocks")
+
+-- host tool definitions an admin made or extended (tools.py; jdk and python are built in)
+CREATE TABLE IF NOT EXISTS tool_defs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, detector_json TEXT NOT NULL,
+  updated_by TEXT, updated_at REAL);
 
 CREATE TABLE IF NOT EXISTS node_samples (
   node_id TEXT, ts REAL, telemetry_json TEXT, capacity_json TEXT, busy INT,
@@ -265,7 +271,8 @@ class _TimedLock:
 # Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
 ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
                  "nodes": {"protection_json": "TEXT", "settings_json": "TEXT", "settings_digest": "TEXT",
-                           "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT"}}
+                           "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
+                           "tools_json": "TEXT", "want_detect": "INT DEFAULT 0"}}
 
 
 def _ensure_columns(conn, table: str, cols: dict) -> None:
@@ -308,6 +315,13 @@ class DB:
         self.event_listeners = []   # callables(event_id) for SSE wakeups
         from .settings import migrate as settings_migrate
         settings_migrate.run(self)              # a home made before the settings model: converted once
+        # host tools (docs/design/host-tools.md, "Migration"): the old tool registry becomes tool definitions, and the
+        # folder statements node statements
+        from .statements import migrate as statements_migrate
+        from .tools import migrate_registry
+        with self.tx():
+            migrate_registry(self)
+            statements_migrate(self)
 
     # -- low level ---------------------------------------------------------
     # Stored file paths are relative to the coordinator's home (the database's directory) whenever the file is inside

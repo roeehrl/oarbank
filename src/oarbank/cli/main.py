@@ -702,6 +702,17 @@ def node_show(target: str, as_json: bool = False):
     for f in d["folders"]:
         print(f"  folder {f['id']}: {f['access'] or '?'} {f['path'] or '(no longer mapped)'}, {f['status']}"
               + (f" (statement {f['statement_seq']}, {'signed' if f['signed'] else 'unsigned'})" if f["statement_seq"] else ""))
+    t = d.get("tools") or {}
+    if not t.get("reported"):
+        print("  host tools: not reported yet")
+    for tid, insts in sorted((t.get("tools") or {}).items()):
+        for i in insts:
+            print(f"  tool {tid}: {i.get('version') or '?'} {i.get('arch') or ''} at {i.get('path')}, {i.get('status')} [{i.get('source')}]")
+    for mod, rows in sorted((t.get("modules") or {}).items()):
+        for r in rows:
+            got = r["detail"] if r["status"] != "ok" else f"{(r['installation'] or {}).get('version')} at {(r['installation'] or {}).get('path')}"
+            print(f"  {mod} needs {r['need']}: {r['status']} ({got})"
+                  + "".join(f"\n    {f['label']}: {f['command']}" for f in r.get("fixes") or [] if f.get("command")))
     sb = d["sandbox"]
     print(f"  sandbox: {sb['backend'] or 'no backend: no module work'}")
     for c in sb["capabilities"]:
@@ -724,6 +735,13 @@ def cmd_node(a):
         return node_show(a.target, a.json)
     if a.action == "confirm-identity":
         res = run_op("nodes.confirm_identity", a.target, {}, yes=True)
+    elif a.action == "sign":
+        from .. import signing
+        stmt = (api("GET", "/api/v1/statements")["statements"].get(a.target) or {}).get("statement")
+        if not stmt:
+            sys.exit(f"{a.target} has no statement (it gets one once a folder or an added tool path is set for it)")
+        sig = signing.sign(stmt, Path(a.key) if a.key else signing.DEFAULT_KEY)
+        res = run_op("nodes.sign_statement", a.target, {"statement": stmt, "signature": sig}, a.reason, True)
     elif a.action == "approve":
         res = run_op("nodes.admit", a.target, reason=a.reason, yes=a.yes)
     elif a.action == "approve-code":
@@ -1091,8 +1109,8 @@ def cmd_dataset(a):
 
 
 def cmd_folders(a):
-    """oarbank folders <list|map|sign>: the folder registry (modules ask for folders by id; the operator maps each to a
-    path per node) and, in signing mode, the owner's signature on each node's folder statement."""
+    """oarbank folders <list|map>: the folder registry (modules ask for folders by id; the operator maps each to a path
+    per node). In signing mode each node applies its mapping once the owner signed its statement (oarbank node sign)."""
     if a.action == "list":
         v = api("GET", "/api/v1/folders")
         for fid, e in sorted(v["registry"].items()):
@@ -1103,20 +1121,62 @@ def cmd_folders(a):
                 print(f"{fid:<16} {e['access']:<6} {n.get('hostname', nid):<20} {path}  "
                       f"{st.get('status', 'not applied yet')}{'  (statement unsigned)' if v['signing'] and not stmt.get('signature') else ''}")
         return
-    if a.action == "map":
-        if not a.what or a.access not in ("read", "write"):
-            sys.exit("oarbank folders map <id> --access read|write --node <node>=<path> [--node ...]")
-        nodes = {k: v or None for k, _, v in (x.partition("=") for x in a.node or [])}
-        res = run_op("settings.folders.update", a.what, {"access": a.access, "nodes": nodes}, a.reason, a.yes)
-    else:
-        if not a.what:
-            sys.exit("oarbank folders sign <node> [--key PATH]")
-        from .. import signing
-        stmt = (api("GET", "/api/v1/folders")["statements"].get(a.what) or {}).get("statement")
-        if not stmt:
-            sys.exit(f"{a.what} has no folder statement")
-        sig = signing.sign(stmt, Path(a.key) if a.key else signing.DEFAULT_KEY)
-        res = run_op("folders.sign", a.what, {"statement": stmt, "signature": sig}, a.reason, True)
+    if not a.what or a.access not in ("read", "write"):
+        sys.exit("oarbank folders map <id> --access read|write --node <node>=<path> [--node ...]")
+    nodes = {k: v or None for k, _, v in (x.partition("=") for x in a.node or [])}
+    res = run_op("settings.folders.update", a.what, {"access": a.access, "nodes": nodes}, a.reason, a.yes)
+    print(json.dumps(res, indent=1, default=str))
+
+
+def _inst(i: dict) -> str:
+    return f"{i.get('version') or '?'} {i.get('arch') or ''} {i.get('path')}".replace("  ", " ")
+
+
+def cmd_tools(a):
+    """oarbank tools [list] [--node N] [--module M] | detect <node> | define <id> ... | delete <id> |
+    host tools (docs/design/host-tools.md). A tool's path on a node is a setting: oarbank settings set tool.<id>.path <path>
+    --node <node> [--module <module>]."""
+    if a.action in (None, "list"):
+        q = "&".join(f"{k}={v}" for k, v in (("node", a.node), ("module", a.module)) if v)
+        v = api("GET", "/api/v1/tools" + (f"?{q}" if q else ""))
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        if "module" in v:
+            m = v["module"]
+            for r in m["rows"]:
+                eff = _inst(r["installation"]) if r["status"] == "ok" else r["detail"]
+                print(f"{r['hostname'] or r['node_id']:<20} {r['need']:<24} {r['status']:<14} {eff}")
+                for f in r.get("fixes") or []:
+                    if f.get("command"):
+                        print(f"{'':<20}   {f['label']}: {f['command']}")
+            return
+        for d in v["definitions"]:
+            extra = "; ".join(f"{k}: {', '.join(p)}" for k, p in d["search"].items())
+            print(f"{d['id']:<12} {d['kind']:<10} {'built in' if d['builtin'] else 'defined'}{'  extra ' + extra if extra else ''}")
+        for n in v["nodes"]:
+            print(f"\n{n['hostname']} ({n.get('platform') or '?'})" + ("" if n["reported"] else ": no tools reported yet"))
+            for tid, insts in sorted(n["tools"].items()):
+                for i in insts:
+                    print(f"  {tid:<10} {i.get('status'):<10} {_inst(i)}  [{i.get('source')}]")
+            for mod, rows in sorted(n["modules"].items()):
+                for r in rows:
+                    eff = _inst(r["installation"]) if r["status"] == "ok" else r["detail"]
+                    print(f"  {mod}: {r['need']} -> {r['status']}: {eff}")
+        return
+    if a.action == "detect":
+        res = run_op("tools.detect", a.what, {}, a.reason, True)
+    elif a.action == "define":
+        search = {}
+        for kv in a.search or []:
+            scope, _, pat = kv.partition("=")
+            search.setdefault(scope, []).append(pat)
+        params = {"search": search, **({"kind": a.kind} if a.kind else {})}
+        if a.version_regex:
+            params["version"] = {"args": a.version_args.split() if a.version_args else ["--version"], "regex": a.version_regex}
+        res = run_op("tools.define", a.what, params, a.reason, a.yes)
+    elif a.action == "delete":
+        res = run_op("tools.delete", a.what, {}, a.reason, a.yes)
     print(json.dumps(res, indent=1, default=str))
 
 
@@ -1186,12 +1246,14 @@ def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="oarbank")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fleet").set_defaults(fn=cmd_fleet)
-    n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, sandbox, "
-                                    "settings it sets), approve, reject, state, mode, confirm-identity (its settings: oarbank settings)")
-    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "confirm-identity"])
+    n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, host tools, "
+                                    "sandbox, settings it sets), approve, reject, state, mode, confirm-identity, sign (its "
+                                    "statement) (its settings: oarbank settings)")
+    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "confirm-identity", "sign"])
     n.add_argument("target")
     n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES))
     n.add_argument("--json", action="store_true", help="show: the node's detail document as JSON")
+    n.add_argument("--key", help="sign: the owner's release key (default: the configured one)")
     n.add_argument("--reason")
     n.add_argument("--yes", action="store_true")
     n.set_defaults(fn=cmd_node)
@@ -1251,15 +1313,30 @@ def parser() -> argparse.ArgumentParser:
     cp.add_argument("--yes", "-y", action="store_true")
     cp.add_argument("--confirm")
     cp.set_defaults(fn=cmd_campaign)
-    fo = sub.add_parser("folders", help="folders modules may read or write on nodes: list, map, sign (signing mode)")
-    fo.add_argument("action", choices=["list", "map", "sign"])
-    fo.add_argument("what", nargs="?", help="map: a folder id; sign: a node id")
+    fo = sub.add_parser("folders", help="folders modules may read or write on nodes: list, map (signing mode: oarbank node sign)")
+    fo.add_argument("action", choices=["list", "map"])
+    fo.add_argument("what", nargs="?", help="map: a folder id")
     fo.add_argument("--access", choices=["read", "write"])
     fo.add_argument("--node", action="append", help="map: <node>=<path> (an empty path removes the node)")
-    fo.add_argument("--key", help="sign: the owner's release key (default: the configured one)")
     fo.add_argument("--reason")
     fo.add_argument("--yes", "-y", action="store_true")
     fo.set_defaults(fn=cmd_folders)
+    tl = sub.add_parser("tools", help="host tools: list (definitions, what each node found, each module's resolution), "
+                                      "detect <node>, define <id>, delete <id> (a tool's path on a node: oarbank settings set "
+                                      "tool.<id>.path <path> --node <node>)")
+    tl.add_argument("action", nargs="?", choices=["list", "detect", "define", "delete"])
+    tl.add_argument("what", nargs="?", help="detect: a node; define, delete: a tool id")
+    tl.add_argument("--node", help="list: one node")
+    tl.add_argument("--module", help="list: one module's Nodes matrix")
+    tl.add_argument("--kind", choices=["jdk", "python", "executable"], help="define: the detector kind")
+    tl.add_argument("--search", action="append", metavar="SCOPE=PATTERN",
+                    help="define: an extra search pattern for fleet, darwin, linux or windows (repeatable)")
+    tl.add_argument("--version-args", help="define, executable: the version command's arguments (default --version)")
+    tl.add_argument("--version-regex", help="define, executable: the regex whose first group is the version")
+    tl.add_argument("--json", action="store_true")
+    tl.add_argument("--reason")
+    tl.add_argument("--yes", "-y", action="store_true")
+    tl.set_defaults(fn=cmd_tools)
     jc = sub.add_parser("join-code", help="a join code for new machines (single use and approved at once by default); "
                                           "join-code revoke <id> revokes one")
     jc.add_argument("action", nargs="?", choices=["create", "revoke"], default="create")
