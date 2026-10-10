@@ -36,6 +36,12 @@ pub struct Config {
     /// A join code's one-time secret, sent with the enrollment (then dropped).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join_secret: Option<String>,
+    /// The name this node asks for (`oarbank-node join --name`, policy `Name`); a single-use code's label wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The device code this node shows while it waits for approval after joining by address (RFC 8628 alphabet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
     /// The owner's release key, pinned on first sight (signing mode).
     pub release_pubkey: Option<String>,
     pub agent_seq: i64,
@@ -44,7 +50,7 @@ pub struct Config {
 impl Config {
     pub fn new(coordinator: &str) -> Self {
         Config { coordinator: coordinator.trim_end_matches('/').to_string(), enrollment_id: None, node_id: None,
-                 heartbeat_s: 10.0, manage_services: true, coordinator_trust: Trust::default(), release_seq: 0, join_secret: None, release_pubkey: None, agent_seq: 0 }
+                 heartbeat_s: 10.0, manage_services: true, coordinator_trust: Trust::default(), release_seq: 0, join_secret: None, name: None, user_code: None, release_pubkey: None, agent_seq: 0 }
     }
 
     pub fn load(p: &Path) -> anyhow::Result<Option<Config>> {

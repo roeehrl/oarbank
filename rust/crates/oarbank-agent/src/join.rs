@@ -1,95 +1,150 @@
-//! Join codes (the coordinator's joincodes.py): candidate addresses, the coordinator CA's SPKI hash, and a one-time
-//! secret that approves this enrollment. The pin makes the first connection authenticated (no trust on first use).
+//! Joining with a code (docs/design/node-enrollment.md): the offline checks, then each of the code's coordinator URLs is
+//! probed (check.rs) until one passes; the agent then pins that coordinator's identity key and CA from the code, sends
+//! the secret over the pinned connection, and reports what the coordinator decided. A refused code, a pin mismatch or
+//! a forged identity ends the attempt; an unreachable coordinator is retried until the code expires.
 
-use anyhow::{bail, Context, Result};
-use serde_json::Value;
+use crate::agent::Agent;
+use crate::check::{self, Fail, Row};
+use crate::paths::Layout;
+use crate::status::{self, Status};
+use oarbank_core::joincode::JoinCode;
+use serde_json::json;
+use std::time::Duration;
+use tracing::{info, warn};
 
-pub struct Join {
-    pub urls: Vec<String>,
-    pub ca_spki: String,
-    pub secret: String,
+/// A join given up for a newly staged code (not an error the status document shows).
+pub const SUPERSEDED: &str = "E_SUPERSEDED";
+
+/// The RFC 8628 user-code alphabet (no vowels, no look-alikes): what a node shows when it joins by address.
+pub const USER_CODE_ALPHABET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+pub fn new_user_code() -> String {
+    let s: String = (0..8).map(|_| USER_CODE_ALPHABET[rand::random::<u32>() as usize % 20] as char).collect();
+    format!("{}-{}", &s[..4], &s[4..])
 }
 
-const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+/// The error code for a coordinator's `join_error`.
+pub fn refusal(join_error: &str) -> Fail {
+    match join_error {
+        "expired" => Fail::new("E_CODE_EXPIRED", "This code has expired. Make a new one in the console."),
+        "used" => Fail::new("E_CODE_USED", "This code was already used (or has no uses left). Make a new one in the console."),
+        "revoked" => Fail::new("E_CODE_REVOKED", "This code was revoked in the console. Make a new one."),
+        _ => Fail::new("E_CODE_UNKNOWN", "The coordinator doesn't know this code. It may have been made by another coordinator."),
+    }
+}
 
-fn b32_decode(s: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let (mut buf, mut bits) = (0u64, 0u32);
-    for c in s.bytes().filter(|&c| c != b'=') {
-        let v = B32.iter().position(|&x| x == c)? as u64;
-        buf = (buf << 5) | v;
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
+pub enum EnrollError {
+    /// The coordinator refused the code or the machine (final).
+    Refused(Fail),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for EnrollError {
+    fn from(e: anyhow::Error) -> Self {
+        EnrollError::Other(e)
+    }
+}
+
+/// One attempt: probe the code's URLs, then enroll with the first that passes. Ok: the agent, enrollment requested
+/// (approved or pending). Err: why, and whether trying again later can help (`Fail::retryable`).
+pub async fn attempt(layout: &Layout, code: &JoinCode, name: Option<&str>, status: &Status,
+                     emit: &mut (dyn FnMut(Row) + Send)) -> Result<Agent, Fail> {
+    let mut last: Option<Fail> = None;
+    for url in &code.urls {
+        let p = check::probe(url, &code.pins, Some(&code.cik), emit).await;
+        if let Some(f) = p.fail {
+            warn!(url = %url, code = f.code, "join check failed: {}", f.message);
+            let fatal = !f.retryable();
+            last = Some(f);
+            if fatal {
+                break;                       // a forged identity or a pin mismatch: no other address is tried
+            }
+            continue;
+        }
+        // a fresh agent.json for this coordinator: nothing from an earlier, failed join is trusted
+        let _ = std::fs::remove_file(layout.config());
+        let mut a = Agent::open(Layout::new(layout.home.clone()), Some(&p.url)).map_err(|e| Fail::new("E_LOCAL", format!("{e:#}")))?;
+        a.status = status.clone();
+        let t = &mut a.cfg.coordinator_trust;
+        t.cik = Some(code.cik.clone());
+        t.ca_spki_sha256 = code.pins.first().cloned();
+        t.ca_next_spki_sha256 = code.pins.get(1).cloned();
+        a.cfg.join_secret = Some(code.token());
+        a.cfg.name = name.map(str::to_string);
+        a.cfg.save(&a.layout.config()).map_err(|e| Fail::new("E_LOCAL", format!("{e:#}")))?;
+        match a.request_enrollment().await {
+            Ok(_) => return Ok(a),
+            Err(EnrollError::Refused(f)) => {
+                let _ = std::fs::remove_file(layout.config());
+                return Err(f);
+            }
+            Err(EnrollError::Other(e)) => {
+                warn!(url = %url, error = %e, "enrollment request failed");
+                last = Some(Fail::new("E_TCP", format!("The coordinator at {} did not take the request: {e:#}", p.url)));
+            }
         }
     }
-    Some(out)
+    Err(last.unwrap_or_else(|| Fail::new("E_TCP", "No coordinator address in the code answered.")))
 }
 
-fn b32_encode(data: &[u8]) -> String {
-    let mut out = String::new();
-    let (mut buf, mut bits) = (0u64, 0u32);
-    for &b in data {
-        buf = (buf << 8) | b as u64;
-        bits += 8;
-        while bits >= 5 {
-            bits -= 5;
-            out.push(B32[((buf >> bits) & 31) as usize] as char);
+/// Join with `code`, retrying a coordinator that cannot be reached until the code expires. Ok: enrolled or pending;
+/// Err: a final failure (the status document says which).
+pub async fn join(layout: &Layout, code: &str, name: Option<&str>, staged: Option<&std::path::Path>,
+                  status: &mut Status) -> Result<Agent, Fail> {
+    let c = match check::offline(code) {
+        Ok(c) => c,
+        Err(f) => {
+            status.fail(status::ERROR, f.code, &f.message, json!({}));
+            return Err(f);
+        }
+    };
+    status.set(status::JOINING, json!({"coordinator": c.urls[0], "fingerprint": c.fingerprint(),
+                                       "code_expires_at": c.expires_at, "enrollment_id": null, "node_id": null,
+                                       "checks": null, "retrying": null}));
+    let mut backoff = Duration::from_secs(2);
+    loop {
+        let mut rows = vec![];
+        match attempt(layout, &c, name, status, &mut |r: Row| rows.push(r.json())).await {
+            Ok(a) => {
+                info!(coordinator = %a.cfg.coordinator, "join code accepted");
+                *status = a.status.clone();
+                return Ok(a);
+            }
+            Err(f) if f.retryable() && (c.expires_at as f64) > now() + backoff.as_secs_f64() => {
+                status.fail(status::ERROR, f.code, &f.message, json!({"checks": rows, "retrying": true}));
+                // a newly staged code replaces the one being retried
+                let until = std::time::Instant::now() + backoff;
+                while std::time::Instant::now() < until {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if staged.and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|s| s.trim() != code.trim()) {
+                        return Err(Fail::new(SUPERSEDED, "another code was staged"));
+                    }
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
+            Err(f) => {
+                let f = if f.retryable() {
+                    Fail::new("E_CODE_EXPIRED", format!("The code expired before the coordinator could be reached. {}", f.message))
+                } else { f };
+                status.fail(status::ERROR, f.code, &f.message, json!({"checks": rows, "retrying": null}));
+                return Err(f);
+            }
         }
     }
-    if bits > 0 {
-        out.push(B32[((buf << (5 - bits)) & 31) as usize] as char);
-    }
-    out
 }
 
-fn crc32(data: &[u8]) -> u32 {
-    let mut c = 0xffff_ffffu32;
-    for &b in data {
-        c ^= b as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0xedb8_8320 } else { c >> 1 };
-        }
-    }
-    !c
-}
-
-pub fn decode(code: &str) -> Result<Join> {
-    let code: String = code.split_whitespace().collect::<String>().to_ascii_uppercase();
-    let rest = code.strip_prefix("OB1-").context("not an Oarbank join code")?;
-    let (body, chk) = rest.rsplit_once('-').context("not an Oarbank join code")?;
-    let want: String = b32_encode(&crc32(body.as_bytes()).to_be_bytes()).chars().take(4).collect();
-    if want != chk {
-        bail!("the join code is mistyped (check characters do not match)");
-    }
-    let raw = b32_decode(body).context("the join code is not base32")?;
-    let v: Value = serde_json::from_slice(&raw).context("the join code does not decode")?;
-    let urls: Vec<String> = v["u"].as_array().cloned().unwrap_or_default().iter().filter_map(|u| u.as_str().map(str::to_string)).collect();
-    let (Some(p), Some(t)) = (v["p"].as_str(), v["t"].as_str()) else { bail!("incomplete join code") };
-    if urls.is_empty() {
-        bail!("the join code names no coordinator address");
-    }
-    Ok(Join { urls, ca_spki: p.to_ascii_lowercase(), secret: t.to_string() })
+fn now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn decodes_what_the_coordinator_encodes_and_refuses_typos() {
-        // produced by oarbank.coordinator.joincodes.encode(["https://h:7443"], "ab" * 32, "s3cret")
-        let raw = r#"{"u":["https://h:7443"],"p":"abababababababababababababababababababababababababababababababab","t":"s3cret"}"#;
-        let body = b32_encode(raw.as_bytes());
-        let chk: String = b32_encode(&crc32(body.as_bytes()).to_be_bytes()).chars().take(4).collect();
-        let code = format!("OB1-{body}-{chk}");
-        let j = decode(&code.to_lowercase()).unwrap();
-        assert_eq!((j.urls[0].as_str(), j.secret.as_str()), ("https://h:7443", "s3cret"));
-        let mut typo = code.clone();
-        typo.replace_range(10..11, if &code[10..11] == "A" { "B" } else { "A" });
-        assert!(decode(&typo).is_err());
-        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+    fn user_codes_use_the_rfc_8628_alphabet() {
+        for _ in 0..50 {
+            let c = super::new_user_code();
+            assert_eq!(c.len(), 9);
+            assert!(c.chars().filter(|&ch| ch != '-').all(|ch| super::USER_CODE_ALPHABET.contains(&(ch as u8))), "{c}");
+        }
     }
 }

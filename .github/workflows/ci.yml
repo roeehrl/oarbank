@@ -309,6 +309,8 @@ jobs:
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update -q && sudo apt-get install -y -q nfpm
       - run: scripts/package-linux.sh "${VERSION#v}"
+      # the one-line installers (oarbank-install.sh, .ps1) and SHA256SUMS-install-<v>: the same files on both runners
+      - run: scripts/package-install-scripts.sh "${VERSION#v}" dist
       - run: scripts/build-coordinator.sh "${VERSION#v}"
       - run: scripts/package-coordinator-linux.sh
       - run: scripts/ci-coordinator-linux-packages.sh
@@ -350,6 +352,7 @@ jobs:
       - run: |
           dotnet tool install --global wix --version 5.*
           wix extension add --global WixToolset.Util.wixext/5.0.2
+          wix extension add --global WixToolset.UI.wixext/5.0.2
       - run: scripts/package-windows.ps1 -Version "$($env:VERSION.TrimStart('v'))" -Arch ${{ matrix.arch }}
         shell: pwsh
       - run: scripts/build-coordinator.ps1 -Version "$($env:VERSION.TrimStart('v'))"

@@ -56,6 +56,40 @@
     ta.scrollIntoView({block: "center"});
   });
 
+  // Copy buttons (the Add machine result): data-copy names the element whose text is copied. The Clipboard API needs a
+  // secure context (https or localhost); a console reached over plain http on a tailnet falls back to selecting the
+  // text and the legacy copy command, and if that fails too the text stays selected for Cmd/Ctrl+C.
+  function selectText(el) {
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  function copied(b, ok) {
+    var was = b.dataset.label || b.textContent;
+    b.dataset.label = was;
+    b.textContent = ok ? "Copied" : "Press Cmd/Ctrl+C";
+    setTimeout(function () { b.textContent = was; }, 1800);
+  }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-copy]") : null;
+    if (!b) return;
+    var el = document.getElementById(b.dataset.copy);
+    if (!el) return;
+    function legacy() {
+      selectText(el);
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      copied(b, ok);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(el.textContent).then(function () { copied(b, true); }, legacy);
+      return;
+    }
+    legacy();
+  });
+
   // Node chart (uPlot) from a data attribute.
   function chart() {
     var el = document.getElementById("chart");

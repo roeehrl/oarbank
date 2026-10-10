@@ -56,7 +56,16 @@ done
 if [[ "$ID" == "-" ]]; then codesign --force --sign - "$APP"
 else sign_with_timestamp "$APP"; fi
 codesign --verify --deep --strict "$APP"
-pkgbuild --quiet --root "$WORK/root" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
+# pkgbuild marks the bundles it finds relocatable: Installer would then update a copy of the app it finds anywhere on the
+# disk instead of installing /Applications/Oarbank Coordinator.app. Pin every bundle where the payload puts it.
+pkgbuild --analyze --root "$WORK/root" "$WORK/components.plist" >/dev/null
+n=0
+while plutil -extract "$n.RootRelativeBundlePath" raw -o /dev/null "$WORK/components.plist" 2>/dev/null; do
+    plutil -replace "$n.BundleIsRelocatable" -bool NO "$WORK/components.plist"
+    n=$((n + 1))
+done
+[[ $n -gt 0 ]] || { echo "pkgbuild found no bundle in the payload (Oarbank Coordinator.app)" >&2; exit 1; }
+pkgbuild --quiet --root "$WORK/root" --component-plist "$WORK/components.plist" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
 # macOS can retain provenance attributes despite xattr -cr. pkgbuild then embeds
 # AppleDouble siblings; omit those without changing signed app resources, link
 # targets, file modes or Installer's recommended root ownership.

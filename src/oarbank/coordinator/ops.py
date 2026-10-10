@@ -1648,20 +1648,69 @@ def _join_urls(db) -> list[str]:
     return list(dict.fromkeys(u.rstrip("/") for u in urls)) or [f"https://{C.AGENT_BIND}:{C.AGENT_PORT}"]
 
 
-@handler("nodes.join_code", target_type="node",
-         impact=lambda db, r: {"urls": _join_urls(db), "expires_in_s": float(r.params.get("ttl_s") or 3600),
-                               "label": r.params.get("label") or "",
-                               "then": "a machine that enrolls with this code is approved at once (single use)"})
+def _join_params(r) -> dict:
+    p = r.params
+    uses = int(p.get("uses") or 1)
+    approve = p.get("approve")
+    return {"label": (p.get("label") or "").strip(), "ttl_s": float(p.get("ttl_s") or joincodes_default_ttl()),
+            "uses": uses, "approve": (uses == 1) if approve in (None, "") else _truthy(approve),
+            "system": _truthy(p.get("system")), "containers": _truthy(p.get("containers"))}
+
+
+def _truthy(v) -> bool:
+    return v is True or str(v).lower() in ("1", "true", "yes", "on")
+
+
+def joincodes_default_ttl() -> float:
+    from . import joincodes
+    return joincodes.DEFAULT_TTL_S
+
+
+def _join_impact(db, r):
+    p = _join_params(r)
+    then = ("a machine that joins with this code is approved at once" if p["approve"]
+            else "machines that join with this code wait for your approval on the Fleet page")
+    return {"urls": _join_urls(db), "expires_in_s": p["ttl_s"], "label": p["label"], "uses": p["uses"],
+            "then": then + (" (single use)" if p["uses"] == 1 else f" (up to {p['uses']} machines)")}
+
+
+@handler("nodes.join_code", target_type="node", impact=_join_impact)
 def _join_code(db, req):
     from pathlib import Path
-    from . import joincodes, tlsca
+    from . import identity, joincodes, tlsca
+    p = _join_params(req)
     try:
-        out = joincodes.create(db, _join_urls(db), tlsca.pins(Path(db.path).parent)["ca_spki_sha256"], req.actor,
-                               req.params.get("label") or "", float(req.params.get("ttl_s") or joincodes.DEFAULT_TTL_S))
+        t = tlsca.pins(Path(db.path).parent)
+        pins = [x for x in (t.get("ca_spki_sha256"), t.get("ca_next_spki_sha256")) if x]
+        out = joincodes.create(db, urls=_join_urls(db), pins=pins, cik=identity.key(Path(db.path).parent).public_b64, actor=req.actor, **p)
     except (joincodes.JoinError, FileNotFoundError) as e:
-        raise core.ApiError(409, "join_code", str(e))
-    db.event("join_code_created", actor=req.actor, reason=out["label"] or "")
-    return {**out, "command": f"oarbank-agent run --join {out['code']}"}
+        raise core.ApiError(409 if isinstance(e, FileNotFoundError) else 400, "join_code", str(e))
+    db.event("join_code_created", actor=req.actor, reason=out["label"] or "", join_code_id=out["id"], uses=out["uses"])
+    return {**out, "command": "oarbank-node join"}
+
+
+@handler("nodes.revoke_join_code", target_type="join_code",
+         snapshot=lambda db, r: db.one("SELECT code_id, revoked_at, uses, max_uses FROM join_codes WHERE code_id=?", (r.target,)))
+def _revoke_join_code(db, req):
+    from . import joincodes
+    try:
+        out = joincodes.revoke(db, req.target or "", req.actor)
+    except joincodes.JoinError as e:
+        raise core.ApiError(404, "not_found", str(e))
+    db.event("join_code_revoked", actor=req.actor, join_code_id=req.target)
+    return out
+
+
+def _user_code_enrollment(db, r):
+    code = core.normalize_user_code(r.params.get("user_code") or r.target)
+    return db.one("SELECT enrollment_id, hostname, peer_ip, status, user_code FROM enrollments WHERE user_code=? AND "
+                  "status='pending' ORDER BY created_at DESC", (code,)) if code else None
+
+
+@handler("nodes.admit_code", target_type="enrollment",
+         impact=lambda db, r: {"enrollment": _user_code_enrollment(db, r)})
+def _admit_code(db, req):
+    return core.admit_by_user_code(db, req.params.get("user_code") or req.target or "", req.actor)
 
 
 @handler("modules.cli_token", target_type="module", target=_module_name)

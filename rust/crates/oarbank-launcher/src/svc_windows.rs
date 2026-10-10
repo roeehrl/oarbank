@@ -88,6 +88,9 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 ok(&sc(&oarbank_core::service::sc_create_args(&name, "Oarbank agent", &program, flag(opts, "--user").as_deref()), dry)?, "sc create")?;
                 // its virtual account exists now: the home becomes its own before the service first starts
                 ok(&icacls(&oarbank_core::service::icacls_home_args(&name, &home_dir.display().to_string()), dry)?, "icacls")?;
+                if let Some(st) = flag(agent_args, "--status-file").and_then(|f| std::path::Path::new(&f).parent().map(|d| d.display().to_string())) {
+                    ok(&icacls(&oarbank_core::service::icacls_status_args(&name, &st), dry)?, "icacls status")?;
+                }
                 ok(&sc(&s(&["description", &name, "Runs Oarbank jobs on this machine for its coordinator"]), dry)?, "sc description")?;
                 recovery(&name, dry)?;
                 ok(&sc(&s(&["start", &name]), dry)?, "sc start")?;

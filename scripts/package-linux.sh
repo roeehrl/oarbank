@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build the Linux agent packages on a Linux host: dist/oarbank-agent_<version>_<arch>.deb, .rpm and a static
-# tarball, with nFPM (https://nfpm.goreleaser.com) from deploy/linux/nfpm.yaml.
+# tarball, with nFPM (https://nfpm.goreleaser.com) from deploy/linux/nfpm.yaml. The packages also carry the join window
+# (deploy/node/join-window.py and .html) and its desktop entry; the one-line installers that fetch them are
+# scripts/package-install-scripts.sh's.
 #
 #   scripts/package-linux.sh [version]
 set -euo pipefail
@@ -25,7 +27,10 @@ uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --buil
     --platform "linux-$ARCH" --run "$RUNTIME_DIR=bin/python3" "$RUNTIME_DIR" "$BIN_DIR/oarbank-agent" "$BIN_DIR/oarbank-launcher"
 cd "$REPO/deploy/linux"
 # nFPM expands variables in some fields only: fill them in a copy beside the scripts it names
-sed -e "s|\${ARCH}|$ARCH|g" -e "s|\${VERSION}|$VERSION|g" -e "s|\${BIN_DIR}|$BIN_DIR|g" -e "s|\${RUNTIME_DIR}|$RUNTIME_DIR|g" nfpm.yaml > .nfpm.build.yaml
+sed -e "s|\${ARCH}|$ARCH|g" -e "s|\${VERSION}|$VERSION|g" -e "s|\${BIN_DIR}|$BIN_DIR|g" -e "s|\${RUNTIME_DIR}|$RUNTIME_DIR|g" \
+    -e "s|\${REPO}|$REPO|g" nfpm.yaml > .nfpm.build.yaml
+# the desktop entry that opens the join window and handles oarbank:// links, checked where the tool is at hand
+if command -v desktop-file-validate >/dev/null; then desktop-file-validate node-desktop.desktop; fi
 for fmt in deb rpm; do
     nfpm package --config .nfpm.build.yaml --packager "$fmt" --target "$OUT/"
 done

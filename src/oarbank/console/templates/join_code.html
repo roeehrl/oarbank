@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Join code {{ jc.label or jc.id }} · Oarbank{% endblock %}
+{# A join code after its one-time page: what it allows and the machines that used it. The code itself is never shown
+   again (the coordinator has only its secret's hash); make a new one under Add machine. #}
+{% block body %}
+<h1>Join code {% if jc.label %}{{ jc.label }} {% endif %}<span class="mono small mut">{{ jc.id }}</span></h1>
+<div class="card">
+  <dl class="kv small">
+    <dt class="mut">Made</dt><dd>{{ jc.created_at | ts }}{% if jc.created_by %} by {{ jc.created_by }}{% endif %}</dd>
+    <dt class="mut">Uses</dt><dd>{{ jc.uses }} of {{ jc.max_uses }}</dd>
+    <dt class="mut">Approval</dt><dd>{{ 'approved at once' if jc.approve else 'each machine waits for your approval' }}</dd>
+    <dt class="mut">Expires</dt><dd>{{ jc.expires_at | ts }}</dd>
+  </dl>
+  {% if jc.state == 'active' %}<div class="row" style="margin-top:8px">
+    {{ m.op_form("nodes.revoke_join_code", jc.id, "Revoke", cls="danger", return_to="/join-codes/" ~ jc.id, confirm="Revoke this join code? Machines that already joined with it stay.") }}
+    <span class="small mut">The code is shown only once, when it is made. To add more machines after it is gone, use <a href="/add-machine">Add machine</a>.</span></div>{% endif %}
+</div>
+<h2>Machines using this code</h2>
+<div id="joincode-status" class="live-tile" hx-get="/frag/joincode/{{ jc.id }}" hx-trigger="sse:tick, sse:resync, every 3s" hx-swap="innerHTML">
+{% include "_joincode_status.html" %}
+</div>
+<p><a href="/">Back to Fleet</a></p>
+{% endblock %}

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The node's managed-policy job (docs/design/node-enrollment.md, "Managed policy keys"): launchd runs it as root at
+  boot, when the pkg's postinstall loads it, and whenever an MDM profile for dev.codonic.oarbank.agent arrives, changes
+  or goes, so a profile delivered before or after the pkg both join the node. `oarbank-launcher policy-apply` joins
+  with the profile's JoinCode or Coordinator unless the node has joined, and returns at once without a profile.
+
+  Logs: stdout goes nowhere (the outcome is in the status document, readable by everyone and free of secrets: the
+  menu bar app, `oarbank-node status`); stderr, where the launcher's failures go, is root's alone. The launcher never
+  prints a code, but a managed value or a coordinator's error text is no business of other accounts, and launchd
+  creates a missing log file world-readable: the postinstall creates it 0600 root:wheel first (launchd appends to
+  what is there), and Umask 077 covers a log someone deleted.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.codonic.oarbank.agent.policy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Oarbank/bin/oarbank-launcher</string>
+        <string>policy-apply</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Managed Preferences/dev.codonic.oarbank.agent.plist</string>
+    </array>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/oarbank-policy.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

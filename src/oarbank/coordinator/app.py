@@ -217,7 +217,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     async def enroll(request: Request):
         b = await request.json()
         return await run_in_threadpool(core.enroll, db, b.get("hostname") or "unknown", b.get("facts") or {}, peer(request),
-                                       b.get("csr") or "", b.get("join"))
+                                       b.get("csr") or "", b.get("join"), b.get("name"), b.get("user_code"))
 
     @app.post("/v1/agent/cert")
     async def renew_cert(request: Request, node=Depends(node_dep)):
@@ -697,6 +697,12 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         from ..contracts.alert_rules import policy
         rows = db.q("SELECT * FROM alerts WHERE (?='all' OR state=?) ORDER BY opened_at DESC LIMIT ?", (state, state, max(1, min(limit, 2000))))
         return [{**a, "severity": policy(a["rule"])["severity"], "runbook": policy(a["rule"])["runbook"]} for a in rows]
+
+    @app.get("/api/v1/join-codes")
+    def api_join_codes(spent: bool = False, id: str | None = None, actor=Depends(who), _=Depends(need_admin)):
+        """Join codes with their state and the machines that used them (node-enrollment.md, "Code types")."""
+        from . import joincodes
+        return joincodes.listing(db, include_spent=spent, code_id=id)
 
     @app.get("/api/v1/alerts/precision")
     def api_alert_precision(days: float = 7.0, actor=Depends(who)):

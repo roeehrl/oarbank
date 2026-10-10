@@ -26,7 +26,7 @@ table { width:100%; border-collapse:collapse; background:var(--card) } th,td { t
 td.num, th.num { text-align:right; font-variant-numeric:tabular-nums }
 .pos { color:var(--ok) } .neg { color:var(--bad) }
 button, .btn { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:7px;
-  padding:4px 10px; cursor:pointer; font-size:13px } button.pri { background:var(--accf); color:#fff; border-color:var(--accf) }
+  padding:4px 10px; cursor:pointer; font-size:13px } button.pri, a.btn.pri { background:var(--accf); color:#fff; border-color:var(--accf) } a.btn.pri { text-decoration:none }
 button.danger { color:var(--bad) } form.inline { display:inline }
 input, select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:3px 6px }
 .alert { border-left:4px solid var(--bad); } pre { white-space:pre-wrap; word-break:break-all; max-height:420px; overflow:auto;
@@ -52,3 +52,24 @@ textarea { width:100%; background:var(--card); color:var(--fg); border:1px solid
 main.login { max-width: 26rem; margin: 3rem auto; }
 main.login form.card label { display: block; margin: .5rem 0; }
 main.login form.card input { width: 100%; }
+
+/* Add machine (add_machine.html) and its one-time result (joincode.html) */
+.add-machine .field { display:block; margin:0 0 12px } .add-machine fieldset { border:0; padding:0 }
+.add-machine legend { font-weight:600; padding:0; margin-bottom:4px } .add-machine .opt { display:block; margin:3px 0 }
+.add-machine input[name=label] { display:block; width:min(100%,24rem); margin-top:3px }
+.add-machine .hint, .snippet .hint { display:block; color:var(--mut); font-size:12px; margin-left:1.6em }
+.add-machine label.field > .hint { margin-left:0 }
+.add-machine form:has(input[name=count][value=one]:checked) .many-only { display:none }
+.joincode .codebox { background:var(--chip); border-radius:8px; padding:10px 12px; font-family:ui-monospace,Menlo,monospace;
+  font-size:13px; word-break:break-all; user-select:all }
+.snippet { margin:8px 0 } .snippet-row { display:flex; gap:6px; align-items:flex-start }
+.snippet-row pre { flex:1; margin:2px 0 0; font-size:12px } button.copy { flex:none }
+.tabs { display:flex; flex-wrap:wrap; gap:0 4px } .tabs > input { position:absolute; opacity:0; pointer-events:none }
+.tabs > label { padding:6px 12px; border:1px solid var(--line); border-bottom:0; border-radius:8px 8px 0 0; cursor:pointer;
+  background:var(--chip); color:var(--mut) }
+.tabs > input:checked + label { background:var(--card); color:var(--fg); font-weight:600 }
+.tabs > input:focus-visible + label { outline:2px solid var(--acc) }
+.tabs > .tab-panel { display:none; width:100%; border-top-left-radius:0 } .tab-panel h3 { font-size:13px; margin:14px 0 4px }
+#tab-mac:checked ~ .panel-mac, #tab-linux:checked ~ .panel-linux, #tab-win:checked ~ .panel-win,
+#tab-mdm:checked ~ .panel-mdm { display:block }
+.enrollment { margin:6px 0 } .approve-code { margin:6px 0 10px } .approve-code input { text-transform:uppercase }

@@ -1,0 +1,51 @@
+{# One join code's machines (views.join_code_status): the Add machine result and the code's own page poll this.
+   `newtab` opens Approve and Decline in a new tab, so the one-time code stays on screen. #}
+{% import "_macros.html" as m with context %}
+{% if not jc %}
+<p class="mut">This coordinator does not know this join code.</p>
+{% else %}
+{% set back = "/join-codes/" ~ jc.id %}
+<div class="row small" style="margin-bottom:6px">
+  <span class="chip {{ 'ok' if jc.state == 'active' else 'bad' if jc.state == 'revoked' else '' }}">{{ {'active': 'active', 'used': 'used up', 'expired': 'expired', 'revoked': 'revoked'}.get(jc.state, jc.state) }}</span>
+  <span>{{ jc.uses }} of {{ jc.max_uses }} {{ 'use' if jc.max_uses == 1 else 'uses' }}</span>
+  <span class="mut">{% if jc.state == 'active' %}expires {{ jc.expires_at | ts }}{% elif jc.state == 'expired' %}expired {{ jc.expires_at | ts }}{% endif %}</span>
+</div>
+{% for e in jc.enrollments %}
+<div class="card enrollment row">
+  <b>{{ e.node_name or e.hostname or 'unnamed machine' }}</b>
+  {% if e.node_name and e.hostname and e.node_name != e.hostname %}<span class="small mut">host {{ e.hostname }}</span>{% endif %}
+  {% if e.peer_ip %}<span class="chip">{{ e.peer_ip }}</span>{% endif %}
+  {% if e.user_code %}<span class="chip mono" title="the code the machine shows">{{ e.user_code }}</span>{% endif %}
+  <span class="small mut">{{ e.created_at | ago }}</span>
+  <span class="sp"></span>
+  {% if e.status == 'pending' %}
+    <span class="chip warn">waiting for approval</span>
+    {{ m.op_form("nodes.admit", e.enrollment_id, "Approve…", cls="pri", return_to=back, newtab=newtab) }}
+    {{ m.op_form("nodes.reject_enrollment", e.enrollment_id, "Decline", cls="danger", return_to=back, newtab=newtab, confirm="Decline " ~ (e.hostname or "this machine") ~ "? It cannot join with this request.") }}
+  {% elif e.status == 'approved' %}
+    <span class="chip acc">approved</span><span class="small mut">the machine is picking up its certificate</span>
+  {% elif e.status == 'claimed' %}
+    {% if e.lifecycle == 'ready' %}<span class="chip ok">ready</span>
+    {% elif e.lifecycle == 'enrolled' %}<span class="chip warn">checking modules</span>
+    {% elif e.lifecycle %}<span class="chip warn">{{ e.lifecycle }}</span>{% endif %}
+    {% if e.lifecycle and not e.online %}<span class="chip bad">offline</span>{% endif %}
+    {% if e.node_id %}<a href="/nodes/{{ e.node_id }}">Open node</a>{% endif %}
+  {% elif e.status == 'rejected' %}
+    <span class="chip bad">declined</span>
+  {% else %}
+    <span class="chip">{{ e.status }}</span>
+  {% endif %}
+</div>
+{% endfor %}
+{% if jc.state == 'active' %}
+<p class="mut waiting" role="status">{% if jc.enrollments %}Waiting for more machines ({{ jc.max_uses - jc.uses }} {{ 'use' if jc.max_uses - jc.uses == 1 else 'uses' }} left)…{% else %}Waiting for a machine to use this code…{% endif %}</p>
+{% elif not jc.enrollments %}
+<p class="mut">No machine joined with this code.</p>
+{% endif %}
+{% if refused %}
+<h3>Refused attempts</h3>
+<table class="small"><tr><th>When</th><th>Machine</th><th>Why</th></tr>
+{% for x in refused %}<tr><td class="mut">{{ x.ts | ts }}</td><td>{{ x.actor }}</td><td>{{ x.reason }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+{% endif %}

@@ -17,6 +17,19 @@ use tracing::{info, warn};
 
 pub const VERSION: &str = crate::VERSION;
 
+/// An enrollment that cannot go on (the code was refused, the owner declined the machine): the agent goes back to
+/// waiting for a code. `.0` is the status error code.
+#[derive(Debug)]
+pub struct EnrollmentEnded(pub &'static str, pub String);
+
+impl std::fmt::Display for EnrollmentEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.0, self.1)
+    }
+}
+
+impl std::error::Error for EnrollmentEnded {}
+
 pub struct Agent {
     pub layout: Layout,
     pub cfg: Config,
@@ -66,6 +79,8 @@ pub struct Agent {
     pub coord_install: crate::coordinstall::CoordInstall,
     /// Services were stopped because the node is not active and has no work (a drain); resumed when it is again.
     services_halted: bool,
+    /// The status document (status.rs): joining, pending, connected, and errors with their codes.
+    pub status: crate::status::Status,
 }
 
 /// What the session asks of the rest of the agent each round (releases, jobs, protection), so the session logic can
@@ -103,30 +118,11 @@ impl Agent {
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
-            services_halted: false, coord_install: Default::default(), layout };
+            services_halted: false, coord_install: Default::default(), status: Default::default(), layout };
         // folder entries a statement or a release no longer grants are removed when the agent starts, too
         #[cfg(windows)]
         crate::sandbox_windows::reconcile_folder_grants(&a.layout, a.release.as_ref(), &a.folders);
         Ok(a)
-    }
-
-    /// Open with a join code: the first of its addresses whose coordinator proves its identity with the pinned CA.
-    pub async fn open_with_join(layout: Layout, code: &str) -> Result<Agent> {
-        let j = crate::join::decode(code)?;
-        let mut last = None;
-        for url in &j.urls {
-            let mut a = Agent::open(Layout::new(layout.home.clone()), Some(url))?;
-            a.cfg.coordinator_trust.ca_spki_sha256 = Some(j.ca_spki.clone());
-            match a.prove_identity().await {
-                Ok(_) => {
-                    a.cfg.join_secret = Some(j.secret.clone());
-                    a.cfg.save(&a.layout.config())?;
-                    return Ok(a);
-                }
-                Err(e) => last = Some(e),
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow::anyhow!("no coordinator address answered")))
     }
 
     /// Fetch and check the identity proof; on first use pin the key, fleet and CA. Returns the CA PEM it vouches for.
@@ -188,28 +184,71 @@ impl Agent {
         Ok(Arc::new(Api::new(&self.cfg.coordinator, client, self.cfg.coordinator_trust.max_epoch)))
     }
 
-    /// Enroll: a CSR for the node's own key; wait for the owner's approval; store the certificate.
-    pub async fn enroll(&mut self, poll: Duration, max_wait: Option<Duration>) -> Result<()> {
+    /// Ask for enrollment: prove the coordinator's identity, then send a CSR for the node's own key with the join code's
+    /// secret (kept until the coordinator answers, so a request lost on the way is sent again with it) or, joining by
+    /// address, the device code this node shows its person. A code the coordinator refuses is final.
+    pub async fn request_enrollment(&mut self) -> std::result::Result<Value, crate::join::EnrollError> {
+        use crate::join::EnrollError;
+        use crate::status::{JOINING, PENDING, ERROR};
         let ca_pem = self.prove_identity().await?;
         let key = keys::ensure_key(&self.layout)?;
         let pins = identity::pins(&self.cfg.coordinator_trust);
         let anon = Api::new(&self.cfg.coordinator, tls::pinned_client(&ca_pem, &pins, None)?, self.cfg.coordinator_trust.max_epoch);
-        let eid = match &self.cfg.enrollment_id {
-            Some(e) => e.clone(),
-            None => {
-                let body = json!({"hostname": facts::hostname(), "facts": facts::collect(&self.layout.home),
-                                  "csr": keys::csr_pem(&key, &facts::hostname())?, "join": self.cfg.join_secret.take()});
-                let r = anon.post("/v1/agent/enroll", &body).await?;
-                let e = r["enrollment_id"].as_str().context("enroll: no enrollment id")?.to_string();
-                self.cfg.enrollment_id = Some(e.clone());
-                self.cfg.save(&self.layout.config())?;
-                info!(enrollment = %e, "enrollment requested: approve it on the coordinator (oarbank node approve {e})");
-                e
+        if self.cfg.join_secret.is_none() && self.cfg.user_code.is_none() {
+            self.cfg.user_code = Some(crate::join::new_user_code());
+        }
+        let user_code = if self.cfg.join_secret.is_some() { None } else { self.cfg.user_code.clone() };
+        let body = json!({"hostname": facts::hostname(), "facts": facts::collect(&self.layout.home),
+                          "csr": keys::csr_pem(&key, &facts::hostname())?, "join": self.cfg.join_secret,
+                          "name": self.cfg.name, "user_code": user_code});
+        let r = anon.post("/v1/agent/enroll", &body).await.map_err(|e| EnrollError::Other(anyhow::anyhow!("{e}")))?;
+        self.cfg.join_secret = None;
+        if r["join"] == "refused" {
+            self.cfg.save(&self.layout.config())?;
+            let f = crate::join::refusal(r["join_error"].as_str().unwrap_or(""));
+            self.status.fail(ERROR, f.code, &f.message, json!({}));
+            return Err(EnrollError::Refused(f));
+        }
+        let e = r["enrollment_id"].as_str().context("enroll: no enrollment id")?.to_string();
+        self.cfg.enrollment_id = Some(e.clone());
+        self.cfg.save(&self.layout.config())?;
+        let approved = r["status"] == "approved";
+        self.status.set(if approved { JOINING } else { PENDING }, json!({
+            "coordinator": self.cfg.coordinator, "enrollment_id": e, "key_fingerprint": keys::fingerprint(&key),
+            "user_code": user_code, "name": self.cfg.name,
+            "fingerprint": self.cfg.coordinator_trust.ca_spki_sha256.as_deref().map(|p| &p[..16.min(p.len())])}));
+        if !approved {
+            info!(enrollment = %e, "enrollment requested: approve it on the coordinator{}",
+                  user_code.map(|c| format!(" (Fleet, Approve a machine by its code: {c})")).unwrap_or_default());
+        }
+        Ok(r)
+    }
+
+    /// Enroll: request it if not done yet, wait for the owner's approval, store the certificate.
+    pub async fn enroll(&mut self, poll: Duration, max_wait: Option<Duration>) -> Result<()> {
+        if self.cfg.enrollment_id.is_none() {
+            match self.request_enrollment().await {
+                Ok(_) => {}
+                Err(crate::join::EnrollError::Refused(f)) => bail!(EnrollmentEnded(f.code, f.message)),
+                Err(crate::join::EnrollError::Other(e)) => return Err(e),
             }
-        };
+        }
+        let ca_pem = self.prove_identity().await?;
+        let pins = identity::pins(&self.cfg.coordinator_trust);
+        let anon = Api::new(&self.cfg.coordinator, tls::pinned_client(&ca_pem, &pins, None)?, self.cfg.coordinator_trust.max_epoch);
+        let eid = self.cfg.enrollment_id.clone().context("no enrollment")?;
         let started = std::time::Instant::now();
         loop {
-            let st = anon.get(&format!("/v1/agent/enroll/{eid}")).await?;
+            let st = match anon.get(&format!("/v1/agent/enroll/{eid}")).await {
+                Ok(st) => st,
+                Err(e) if e.code() == "not_found" => {
+                    // the coordinator lost the request (restored from a backup, or another coordinator): ask again
+                    self.cfg.enrollment_id = None;
+                    self.cfg.save(&self.layout.config())?;
+                    bail!("the coordinator no longer knows enrollment {eid}: requesting again");
+                }
+                Err(e) => return Err(anyhow::anyhow!("{e}")),
+            };
             match st["status"].as_str() {
                 Some("approved") => {
                     let cert = st["cert_pem"].as_str().context("enroll: approved without a certificate")?;
@@ -218,14 +257,19 @@ impl Agent {
                     self.cfg.node_id = st["node_id"].as_str().map(str::to_string);
                     self.node_id = self.cfg.node_id.clone();
                     self.cfg.enrollment_id = None;
+                    self.cfg.user_code = None;
                     self.cfg.save(&self.layout.config())?;
+                    self.status.set(crate::status::JOINED, json!({"node_id": self.node_id, "enrollment_id": null,
+                                                                  "user_code": null, "coordinator": self.cfg.coordinator}));
                     info!(node = ?self.node_id, "enrolled");
                     return Ok(());
                 }
                 Some("rejected") => {
                     self.cfg.enrollment_id = None;
                     self.cfg.save(&self.layout.config())?;
-                    bail!("the owner rejected this node's enrollment");
+                    let m = "The owner declined this machine in the console.";
+                    self.status.fail(crate::status::ERROR, "E_APPROVAL_DENIED", m, json!({"enrollment_id": null}));
+                    bail!(EnrollmentEnded("E_APPROVAL_DENIED", m.into()));
                 }
                 Some("claimed") => {
                     self.cfg.enrollment_id = None;
@@ -926,6 +970,9 @@ impl Agent {
             }
             if !keys::have_cert(&self.layout) {
                 if let Err(e) = self.enroll(Duration::from_secs(10), None).await {
+                    if e.downcast_ref::<EnrollmentEnded>().is_some() {
+                        return Err(e);                  // refused or declined: main goes back to waiting for a code
+                    }
                     warn!(error = %e, "enrollment failed");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(300));
@@ -936,6 +983,10 @@ impl Agent {
                 self.connect().await.map_err(|e| ApiError::Http { status: 0, code: "identity".into(), detail: e.to_string(),
                                                                   retry_after: None, body: Box::default() })?;
                 self.hello().await?;
+                if self.status.state() != crate::status::CONNECTED {
+                    self.status.set(crate::status::CONNECTED, json!({"node_id": self.node_id, "coordinator": self.cfg.coordinator,
+                                                                     "enrollment_id": null, "user_code": null}));
+                }
                 if let Some(api) = self.api.clone() {
                     outbox::flush(&api, &self.layout).await;
                 }
@@ -1005,6 +1056,7 @@ impl Agent {
                         }
                         _ => {
                             warn!(error = %e, "session lost");
+                            self.status.fail(crate::status::OFFLINE, "E_TCP", &format!("The session with the coordinator was lost: {e}"), json!({}));
                             self.rescue_check(true).await;
                         }
                     }

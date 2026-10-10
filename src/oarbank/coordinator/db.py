@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS enrollments (
   enrollment_id TEXT PRIMARY KEY, hostname TEXT, facts_json TEXT, peer_ip TEXT,
   ts_node_id TEXT, status TEXT NOT NULL,            -- pending|approved|claimed|rejected
   node_id TEXT, created_at REAL, decided_at REAL, decided_by TEXT,
-  csr_pem TEXT, cert_json TEXT);                    -- the agent's CSR; the issued certificate until claimed
+  csr_pem TEXT, cert_json TEXT,                     -- the agent's CSR; the issued certificate until claimed
+  join_code_id TEXT,                                -- the join code it presented (a multi-use code's machines wait here)
+  user_code TEXT,                                   -- the device code the node shows (node-enrollment.md, "Device code")
+  requested_name TEXT);                             -- the name the node asked for (`oarbank-node join --name`)
 
 CREATE TABLE IF NOT EXISTS nodes (
   node_id TEXT PRIMARY KEY, ts_node_id TEXT, hostname TEXT, ts_ip TEXT, facts_json TEXT,
@@ -259,6 +262,17 @@ class _TimedLock:
         self.release()
 
 
+# Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
+ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"}}
+
+
+def _ensure_columns(conn, table: str, cols: dict) -> None:
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for name, decl in cols.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 class DB:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -280,8 +294,11 @@ class DB:
             from .access import SCHEMA as ACCESS_SCHEMA
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
+            from .joincodes import migrate as join_migrate
+            join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
             self.conn.executescript("BEGIN;" + SCHEMA + ACCESS_SCHEMA + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
+            _ensure_columns(self.conn, "enrollments", ADDED_COLUMNS["enrollments"])
         self.event_listeners = []   # callables(event_id) for SSE wakeups
 
     # -- low level ---------------------------------------------------------

@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Join code · Oarbank{% endblock %}
+{# The Add machine result (node-enrollment.md, "Console"): the code shown once, what to do with it on each OS, and the
+   machines that use it. Copy buttons are app.js (data-copy names the element whose text they copy); tabs are radio
+   buttons and CSS. Nothing here is stored: reloading or leaving the page loses the code. #}
+{% macro snippet(id, text, label="") -%}
+<div class="snippet">{% if label %}<div class="small mut">{{ label }}</div>{% endif %}
+<div class="snippet-row"><pre id="{{ id }}">{{ text }}</pre><button type="button" class="copy" data-copy="{{ id }}" data-always aria-label="Copy {{ label or 'this' }}">Copy</button></div></div>
+{%- endmacro %}
+{% block body %}
+{% set k = kit %}{% set s = k.snippets %}{% set a = k.assets %}
+<h1>Join code{% if result.label %} for {{ result.label }}{% endif %}</h1>
+<p class="small mut">Shown once: copy it now. The coordinator keeps only a hash of its secret, so it cannot show it again.</p>
+
+<div class="card joincode">
+  <div class="codebox"><code id="join-code">{{ k.code }}</code></div>
+  <div class="row" style="margin-top:8px">
+    <button type="button" class="pri copy" data-copy="join-code" data-always>Copy</button>
+    <a class="btn" href="{{ k.deep_link }}">Open in Oarbank Node</a>
+    <span class="small mut">For a machine that already has Oarbank Node installed: it shows this coordinator and its
+      fingerprint and asks you to confirm before joining.</span>
+  </div>
+  <dl class="kv small" style="margin-top:10px">
+    <dt class="mut">Expires</dt><dd>{{ result.expires_at | ts }} (in {{ (result.expires_at - now) | secs }})</dd>
+    <dt class="mut">Uses</dt><dd>{% if k.multi %}up to {{ result.uses }} machines{% else %}one machine{% endif %}</dd>
+    <dt class="mut">Approval</dt><dd>{% if result.approve %}approved at once{% else %}each machine waits for your approval{% endif %}</dd>
+    <dt class="mut">Suggested</dt><dd>{{ 'system service on macOS' if result.system else 'personal service on macOS' }}{% if result.containers %}, container jobs{% endif %}</dd>
+    {% if k.coordinator %}<dt class="mut">Coordinator</dt><dd class="mono">{{ k.coordinator }}</dd>{% endif %}
+  </dl>
+</div>
+{% if k.multi and not result.approve %}
+<div class="flash" role="note">Machines that use this code wait for your approval: below, and on the Fleet page.</div>
+{% elif k.multi %}
+<div class="flash" role="note">Machines that use this code are approved automatically. Anyone who has it can add up to
+  {{ result.uses }} machines until it expires: revoke it on the Fleet page when you are done.</div>
+{% endif %}
+
+<h2>Install and join</h2>
+<div class="tabs">
+  <input type="radio" name="os-tab" id="tab-mac" class="tab-mac" checked><label for="tab-mac">macOS</label>
+  <input type="radio" name="os-tab" id="tab-linux" class="tab-linux"><label for="tab-linux">Linux</label>
+  <input type="radio" name="os-tab" id="tab-win" class="tab-win"><label for="tab-win">Windows</label>
+  <input type="radio" name="os-tab" id="tab-mdm" class="tab-mdm"><label for="tab-mdm">MDM &amp; automation</label>
+
+  <section class="card tab-panel panel-mac" aria-label="macOS">
+    <p>Download the installer: <a href="{{ a.mac_arm64[1] }}">Apple silicon</a> · <a href="{{ a.mac_x86_64[1] }}">Intel</a>
+      <span class="small mut">(Oarbank {{ k.version }})</span></p>
+    <ol><li>Open the installer.</li><li>Oarbank Node opens when it finishes.</li><li>Paste the code.</li></ol>
+    <h3>Command line (SSH, scripts)</h3>
+    {{ snippet("s-mac-install", s.mac_install, "Install, then join (use the " ~ a.mac_x86_64[0] ~ " package on Intel Macs). This installs the system service.") }}
+    {{ snippet("s-mac-oneliner", s.mac_oneliner, "Or in one line, downloading the right package for this Mac") }}
+    <p class="small mut">sudo passes <span class="mono">OARBANK_JOIN_CODE</span> on to the installer when your sudo rule
+      allows every command (the usual administrator rule); otherwise run <span class="mono">sudo oarbank-node join</span>
+      afterwards and paste the code when it asks.</p>
+  </section>
+
+  <section class="card tab-panel panel-linux" aria-label="Linux">
+    <p>Download: Debian and Ubuntu <a href="{{ a.deb_amd64[1] }}">amd64</a> · <a href="{{ a.deb_arm64[1] }}">arm64</a>;
+      Fedora and RHEL <a href="{{ a.rpm_x86_64[1] }}">x86_64</a> · <a href="{{ a.rpm_aarch64[1] }}">aarch64</a>
+      <span class="small mut">(Oarbank {{ k.version }})</span></p>
+    <p>On a desktop: install the package, open <b>Oarbank Node</b> from your applications and paste the code.</p>
+    <h3>Command line</h3>
+    {{ snippet("s-deb", s.deb, "Debian, Ubuntu (" ~ a.deb_arm64[0] ~ " on arm64)") }}
+    {{ snippet("s-rpm", s.rpm, "Fedora, RHEL (" ~ a.rpm_aarch64[0] ~ " on aarch64)") }}
+    {{ snippet("s-linux-join", s.linux_join, "Or install the package first, then join (sudo oarbank-node join also asks for the code)") }}
+    {{ snippet("s-linux-oneliner", s.linux_oneliner, "Or in one line") }}
+  </section>
+
+  <section class="card tab-panel panel-win" aria-label="Windows">
+    <p>Download the installer: <a href="{{ a.msi_x64[1] }}">x64</a> · <a href="{{ a.msi_arm64[1] }}">Arm64</a>
+      <span class="small mut">(Oarbank {{ k.version }})</span></p>
+    <ol><li>Open the installer.</li><li>Paste the code on its join page, or leave it empty and use Oarbank Node
+      (in the tray) afterwards.</li></ol>
+    <h3>Silent install</h3>
+    {{ snippet("s-msi", s.msi, "From an administrator prompt (" ~ a.msi_arm64[0] ~ " on Arm64)") }}
+    {{ snippet("s-msi-file", s.msi_file, "Or with the code in a file only administrators can read") }}
+    {{ snippet("s-win-oneliner", s.win_oneliner, "Or in one line from an administrator PowerShell (it asks for the code)") }}
+  </section>
+
+  <section class="card tab-panel panel-mdm" aria-label="MDM and automation">
+    <p class="small mut">Use the packages unchanged and hand the code over as managed policy: a node that has not joined
+      reads it and joins as the system service. Anyone who has these files can join a machine while the code is valid:
+      keep them in your MDM or vault.</p>
+    <h3>macOS: configuration profile</h3>
+    <p><a class="btn" download="oarbank-node.mobileconfig" href="{{ k.mobileconfig_href }}">Download oarbank-node.mobileconfig</a></p>
+    <p class="small mut">Upload it to your MDM with the installer package, in either order. It sets the code for
+      <span class="mono">{{ k.paths.domain }}</span> and allows the Oarbank Node background items so macOS does not ask
+      anyone (macOS applies that part only to profiles an MDM installs).</p>
+    <h3>Windows: Intune</h3>
+    {{ snippet("s-intune", s.intune_install, "Win32 app install command") }}
+    {{ snippet("s-intune-detect", s.intune_detect, "Detection rule: this file exists (the node writes it once it has joined)") }}
+    <h3>Windows: Group Policy</h3>
+    {{ snippet("s-gpo", s.gpo, "Registry policy (the ADMX template in the release sets the same values)") }}
+    <h3>Linux: policy file</h3>
+    {{ snippet("s-policy", s.policy_json, k.paths.linux_policy ~ " (readable by root only)") }}
+    <h3>Ansible</h3>
+    {{ snippet("s-ansible", s.ansible, "A task that joins once and leaves the code out of the logs") }}
+  </section>
+</div>
+
+<h2>Machines using this code</h2>
+<div id="joincode-status" class="live-tile" hx-get="/frag/joincode/{{ result.id }}?tab=new" hx-trigger="sse:tick, sse:resync, every 3s" hx-swap="innerHTML">
+{% include "_joincode_status.html" %}
+</div>
+<p class="small mut">Leaving this page loses the code. You can follow its machines later from Fleet, Outstanding join codes.</p>
+<p><a href="/">Done</a></p>
+{% endblock %}

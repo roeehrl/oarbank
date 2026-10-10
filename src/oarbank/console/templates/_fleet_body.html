@@ -23,7 +23,7 @@
 {% if enrollments %}
 <h2>Waiting for approval</h2>
 <div class="grid">{% for e in enrollments %}
-  <div class="card"><div class="row"><b>{{ e.hostname }}</b><span class="chip">{{ e.peer_ip }}</span><span class="sp"></span>
+  <div class="card"><div class="row"><b>{{ e.hostname }}</b><span class="chip">{{ e.peer_ip }}</span>{% if e.user_code %}<span class="chip mono" title="the code the machine shows">{{ e.user_code }}</span>{% endif %}<span class="sp"></span>
     {{ m.op_form("nodes.admit", e.enrollment_id, "Approve…", cls="pri") }}
     {{ m.op_form("nodes.reject_enrollment", e.enrollment_id, "Reject", cls="danger", confirm="Reject " ~ e.hostname ~ "?") }}</div>
     {% set hw = e.hw %}
@@ -32,8 +32,15 @@
 {% endif %}
 
 <h2>Nodes</h2>
-<div class="row small">{% call m.op_form("nodes.join_code", "", "Join code for a new machine…") %}<input name="p.label" aria-label="name for the new machine" placeholder="node name (optional)">{% endcall %}
-  <span class="mut">On the new machine: <span class="mono">oarbank-agent run --join &lt;code&gt;</span>; it is approved at once.</span></div>
+<div class="row small add-row"><a class="btn pri" href="/add-machine">Add machine…</a>
+  <span class="mut">A join code for one machine or many, with the installers and commands for macOS, Linux and Windows.</span></div>
+{# preserved across the live refresh (hx-preserve): a refresh never clears a code being typed #}
+<div class="row small approve-code" id="approve-by-code" hx-preserve>
+  {% call m.op_form("nodes.admit_code", "", "Approve…") %}<label>Approve a machine by its code
+    <input name="user_code" placeholder="WDJB-MJHT" required autocomplete="off" spellcheck="false" size="11" maxlength="12"></label>{% endcall %}
+  {% if ca_fingerprint %}<span class="mut">Your coordinator's fingerprint: <span class="mono">sha256:{{ ca_fingerprint }}…</span>
+    (it should match what <span class="mono">oarbank-node join --coordinator</span> prints on the machine)</span>{% endif %}
+</div>
 <div class="grid">
 {% for n in nodes %}
   <div class="card">
@@ -82,9 +89,21 @@
     </div>
   </div>
 {% else %}
-  <div class="card mut">No nodes yet. Install the agent on a machine (macOS, Linux or Windows) and approve it here.</div>
+  <div class="card mut">No nodes yet. Use <a href="/add-machine">Add machine…</a> to make a join code and install Oarbank Node on a machine (macOS, Linux or Windows).</div>
 {% endfor %}
 </div>
+
+{% if join_codes %}
+<h2>Outstanding join codes</h2>
+<table class="small join-codes"><tr><th>Code</th><th>Name</th><th class="num">Used</th><th>Approval</th><th>Expires</th><th>State</th><th></th></tr>
+{% for c in join_codes %}
+<tr><td><a class="mono" href="/join-codes/{{ c.id }}">{{ c.id }}</a></td><td>{{ c.label or '–' }}</td>
+  <td class="num">{{ c.uses }} / {{ c.max_uses }}</td>
+  <td>{{ 'automatic' if c.approve else 'you approve' }}{% if c.enrollments | selectattr('status', 'equalto', 'pending') | list %} <span class="chip warn">{{ c.enrollments | selectattr('status', 'equalto', 'pending') | list | length }} waiting</span>{% endif %}</td>
+  <td>{{ c.expires_at | ts }}</td><td><span class="chip ok">{{ c.state }}</span></td>
+  <td>{{ m.op_form("nodes.revoke_join_code", c.id, "Revoke", cls="danger", return_to="/", confirm="Revoke join code " ~ (c.label or c.id) ~ "? Machines that already joined with it stay.") }}</td></tr>
+{% endfor %}</table>
+{% endif %}
 
 {% if discovered %}
 <h2>On the tailnet, not enrolled</h2>

@@ -47,7 +47,7 @@ fn system_data() -> PathBuf {
 }
 
 /// Whether this process may install a system service: root on Unix, an elevated administrator on Windows.
-fn privileged() -> bool {
+pub fn privileged() -> bool {
     #[cfg(unix)]
     return unsafe { libc::geteuid() } == 0;
     #[cfg(windows)]
@@ -133,12 +133,67 @@ fn plan_path(home: &Path, rel: &str) -> PathBuf {
     rel.split('/').filter(|c| !c.is_empty()).fold(home.to_path_buf(), |p, c| p.join(c))
 }
 
-/// `setup [--scope personal|system] [--join-code-file F | --join-code C] [--coordinator URL] [--agent PATH]
-/// [--no-service] [--dry-run]`; `--no-service` lays out the home and prints the agent arguments without loading a
-/// service (image builds, tests).
+/// Where the agent keeps its status document (node-enrollment.md): `status/node.json` in the scope's data directory,
+/// beside the (private) home, readable by everyone.
+pub fn status_file(home: &Path) -> PathBuf {
+    home.parent().unwrap_or(home).join("status").join("node.json")
+}
+
+/// What `setup` needs, from flags or from `oarbank-node join`.
+#[derive(Default)]
+pub struct SetupOpts {
+    pub scope: String,
+    pub code: Option<String>,
+    pub coordinator: Option<String>,
+    pub name: Option<String>,
+    pub agent: Option<PathBuf>,
+    pub no_service: bool,
+    pub dry: bool,
+}
+
+/// `setup [--scope personal|system] [--join-code-file F | --join-code-stdin | --join-code C] [--coordinator URL]
+/// [--name NAME] [--agent PATH] [--no-service] [--dry-run]`. Without a code or a coordinator the service starts and
+/// waits for one (`oarbank-node join` stages it later, or managed policy names it). `--no-service` lays out the home and
+/// prints the agent arguments without loading a service (image builds, tests). `--join-code` is for the Windows
+/// installer's elevated custom action, whose command line only administrators can read.
 pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
-    let st = Step { dry: opts.iter().any(|o| o == "--dry-run") };
-    let scope = flag(opts, "--scope").unwrap_or_else(|| "personal".into());
+    // `--or-wait` (the Windows installer): a code that cannot be read or is not a valid code leaves the node installed
+    // and waiting, with a warning, instead of failing the whole install (a person pasted a wrong code on its join page)
+    let or_wait = opts.iter().any(|o| o == "--or-wait");
+    let code = match (flag(opts, "--join-code"), flag(opts, "--join-code-file"), opts.iter().any(|o| o == "--join-code-stdin")) {
+        (Some(c), _, _) => Some(c),
+        (None, Some(f), _) => match std::fs::read_to_string(&f) {
+            Ok(c) => Some(c),
+            Err(e) if or_wait => {
+                eprintln!("warning: reading {f}: {e}; the node is installed and waits for a code (oarbank-node join)");
+                None
+            }
+            Err(e) => return Err(anyhow::anyhow!("reading {f}: {e}")),
+        },
+        (None, None, true) => {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+            Some(s)
+        }
+        _ => None,
+    };
+    let code = match code.map(|c| c.trim().to_string()) {
+        Some(c) if or_wait && oarbank_core::joincode::decode(&c).is_err() => {
+            eprintln!("warning: that is not a valid join code; the node is installed and waits for a code (oarbank-node join)");
+            None
+        }
+        c => c,
+    };
+    let o = SetupOpts { scope: flag(opts, "--scope").unwrap_or_else(|| "personal".into()), code,
+                        coordinator: flag(opts, "--coordinator"), name: flag(opts, "--name"), agent: flag(opts, "--agent").map(PathBuf::from),
+                        no_service: opts.iter().any(|o| o == "--no-service"), dry: opts.iter().any(|o| o == "--dry-run") };
+    setup_with(explicit_home, &o).map(|_| ())
+}
+
+/// The install plan for `o`; returns the home.
+pub fn setup_with(explicit_home: Option<&Path>, o: &SetupOpts) -> Result<PathBuf> {
+    let st = Step { dry: o.dry };
+    let scope = o.scope.clone();
     let p = plan();
     let sc = &p["scopes"][&scope];
     if sc.is_null() {
@@ -148,13 +203,8 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
     if system && !st.dry && !privileged() {
         bail!("a system install needs root (sudo) or an elevated administrator");
     }
-    let code = match (flag(opts, "--join-code"), flag(opts, "--join-code-file")) {
-        (Some(c), _) => Some(c),
-        (None, Some(f)) => Some(std::fs::read_to_string(&f).with_context(|| format!("reading {f}"))?.trim().to_string()),
-        _ => None,
-    };
-    if code.as_ref().is_some_and(|c| !c.starts_with("OB1-")) {
-        bail!("that is not an Oarbank join code (they start with OB1-)");
+    if let Some(c) = &o.code {
+        oarbank_core::joincode::decode(c).map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     let home = scope_home(&scope, explicit_home)?;
     // the dedicated account, per OS (Windows: the service's virtual account, nothing to create)
@@ -171,39 +221,46 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
             chmod(&dir, mode)
         })?;
     }
+    let status = status_file(&home);
+    let status_dir = status.parent().unwrap().to_path_buf();
+    st.run(&format!("mkdir -m 755 {}", status_dir.display()), || {
+        std::fs::create_dir_all(&status_dir)?;
+        chmod(&status_dir, 0o755)
+    })?;
     let me = std::fs::canonicalize(std::env::current_exe()?)?;
-    let agent = flag(opts, "--agent").map(PathBuf::from)
-        .unwrap_or_else(|| me.with_file_name(format!("oarbank-agent{}", std::env::consts::EXE_SUFFIX)));
+    let agent = o.agent.clone().unwrap_or_else(|| me.with_file_name(format!("oarbank-agent{}", std::env::consts::EXE_SUFFIX)));
     st.run(&format!("install {} as the current version", agent.display()), || {
         crate::install(&crate::Home(home.clone()), &agent).map(|rel| println!("current -> {rel}"))
     })?;
-    let mut agent_args: Vec<String> = vec![];
     let jc = &p["join_code"];
     let join_to = plan_path(&home, jc["to"].as_str().unwrap_or("state/join-code"));
-    if let Some(code) = code {
-        st.run(&format!("write the join code to {} (0600)", join_to.display()), || {
-            std::fs::write(&join_to, &code)?;
-            chmod(&join_to, 0o600)
+    if let Some(code) = &o.code {
+        st.run(&format!("stage the join code in {} (0600)", join_to.display()), || {
+            write_owner_only(&join_to, code.as_bytes())
         })?;
-        agent_args.extend(["--join-file".into(), join_to.display().to_string()]);
     }
-    if let Some(url) = flag(opts, "--coordinator") {
-        agent_args.extend(["--coordinator".into(), url]);
+    // the agent always knows where a code is staged, where to report, and to read managed policy while not joined
+    let mut agent_args: Vec<String> = vec!["--join-file".into(), join_to.display().to_string(),
+                                           "--status-file".into(), status.display().to_string(), "--policy".into()];
+    if let Some(url) = &o.coordinator {
+        agent_args.extend(["--coordinator".into(), url.clone()]);
     }
-    if agent_args.is_empty() && !home.join("agent.json").exists() {
-        bail!("give --join-code-file, --join-code or --coordinator: this node does not know its coordinator yet");
+    if let Some(n) = o.name.as_ref().filter(|n| !n.trim().is_empty()) {
+        agent_args.extend(["--name".into(), n.trim().to_string()]);
     }
     // Windows names no account: the service's virtual account gets the home when the service is created (svc_windows.rs)
     if let (true, Some(a)) = (system, account) {
         st.run(&format!("chown -R {a} {}", home.display()), || sh(&["chown", "-R", &format!("{a}:{a}"), &home.display().to_string()]).map(|_| ()))?;
+        st.run(&format!("chown {a} {}", status_dir.display()), || sh(&["chown", "-R", &format!("{a}:{a}"), &status_dir.display().to_string()]).map(|_| ()))?;
         if cfg!(target_os = "linux") {
             // rootless containers need the account's runtime directory, which only lingering keeps without a login
             st.run(&format!("loginctl enable-linger {a}"), || { let _ = sh(&["loginctl", "enable-linger", a]); Ok(()) })?;
         }
     }
-    if opts.iter().any(|o| o == "--no-service") {
+    // OARBANK_SETUP_NO_SERVICE: the same without loading a service, for `oarbank-node join` in tests and image builds
+    if o.no_service || std::env::var_os("OARBANK_SETUP_NO_SERVICE").is_some() {
         println!("agent arguments: run {}", agent_args.join(" "));
-        return Ok(());
+        return Ok(home);
     }
     let mut svc: Vec<String> = vec!["service".into(), "install".into(), "--label".into(), p["label"].as_str().unwrap_or(crate::LABEL).into()];
     if system {
@@ -217,7 +274,23 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
     }
     svc.push("--".into());
     svc.extend(agent_args);
-    crate::service(&crate::Home(home), &svc)
+    crate::service(&crate::Home(home.clone()), &svc)?;
+    Ok(home)
+}
+
+/// Write `data` owner-only from the first byte (the staged join code).
+fn write_owner_only(p: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let _ = std::fs::remove_file(p);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(p)?.write_all(data)?;
+    Ok(())
 }
 
 /// `remove [--scope personal|system] [--purge] [--dry-run]`: unload and delete the service; `--purge` also deletes

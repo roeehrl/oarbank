@@ -91,35 +91,73 @@ def tailscale_peers() -> list[dict]:
 
 
 # ---------------------------------------------------------------- enrollment
-def enroll(db: DB, hostname: str, facts: dict, peer_ip: str, csr: str, join: str | None = None) -> dict:
-    """An enrollment request with the agent's CSR: approval issues a client certificate for the node's own key."""
+USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"     # RFC 8628 section 6.1: no vowels, no look-alikes
+
+
+def normalize_user_code(code: str | None) -> str | None:
+    """A device code as `XXXX-XXXX`, or None when it is not one (8 letters of the RFC 8628 alphabet)."""
+    s = "".join(ch for ch in (code or "").upper() if ch.isalnum())
+    if len(s) != 8 or any(ch not in USER_CODE_ALPHABET for ch in s):
+        return None
+    return f"{s[:4]}-{s[4:]}"
+
+
+def enroll(db: DB, hostname: str, facts: dict, peer_ip: str, csr: str, join: str | None = None,
+           name: str | None = None, user_code: str | None = None) -> dict:
+    """An enrollment request with the agent's CSR: approval issues a client certificate for the node's own key.
+
+    `join` is a join code's `<id>.<secret>`: a single-use code (or one the owner set to approve automatically) approves
+    at once; a multi-use code leaves the machine pending for the owner; a code the coordinator refuses ends the request
+    (`join: refused`, `join_error`: unknown|expired|used|revoked), so the node reports why instead of waiting. `name` is
+    the name the node asks for (a single-use code's label wins); `user_code` the device code it shows its person."""
     from cryptography import x509
     try:
         x509.load_pem_x509_csr(csr.encode())
     except ValueError:
         raise ApiError(400, "csr_required", "enrolling needs a PEM certificate request")
+    name = (name or "").strip()[:63] or None
+    user_code = normalize_user_code(user_code)
     who = tailscale_whois(peer_ip)
     ts_node_id = who["ts_node_id"] if who else None
-    if ts_node_id:
+    if ts_node_id and not join:
         existing = db.one("SELECT enrollment_id,status FROM enrollments WHERE ts_node_id=? "
                           "AND status='pending'", (ts_node_id,))
         if existing:
             return {"enrollment_id": existing["enrollment_id"], "status": "pending"}
     eid = "enr_" + secrets.token_hex(6)
-    db.x("INSERT INTO enrollments(enrollment_id,hostname,facts_json,peer_ip,ts_node_id,status,created_at,csr_pem)"
-         " VALUES(?,?,?,?,?,'pending',?,?)", (eid, hostname, json.dumps(facts), peer_ip, ts_node_id, now(), csr))
+    db.x("INSERT INTO enrollments(enrollment_id,hostname,facts_json,peer_ip,ts_node_id,status,created_at,csr_pem,"
+         "requested_name,user_code) VALUES(?,?,?,?,?,'pending',?,?,?,?)",
+         (eid, hostname, json.dumps(facts), peer_ip, ts_node_id, now(), csr, name, user_code))
     db.event("enroll_requested", actor=hostname, reason=peer_ip, enrollment_id=eid, ts=who)
-    if join:
-        from . import joincodes
-        jc = joincodes.redeem(db, join)
-        if jc is None:
-            db.event("join_code_refused", actor=hostname, reason=peer_ip, enrollment_id=eid)
-            return {"enrollment_id": eid, "status": "pending", "join": "refused"}
-        approve_enrollment(db, eid, f"join:{jc['created_by']}", label=jc["label"])
-        node = db.one("SELECT node_id FROM enrollments WHERE enrollment_id=?", (eid,))
-        db.x("UPDATE join_codes SET node_id=? WHERE code_hash=?", (node["node_id"], jc["code_hash"]))
-        return {"enrollment_id": eid, "status": "approved"}
-    return {"enrollment_id": eid, "status": "pending"}
+    if not join:
+        return {"enrollment_id": eid, "status": "pending"}
+    from . import joincodes
+    jc, refused = joincodes.redeem(db, join)
+    if jc is None:
+        db.x("UPDATE enrollments SET status='rejected', decided_at=?, decided_by='join_code' WHERE enrollment_id=?",
+             (now(), eid))
+        db.event("join_code_refused", actor=hostname, reason=f"{refused} (from {peer_ip})", enrollment_id=eid,
+                 join_code_id=join.partition(".")[0][:16])
+        return {"enrollment_id": eid, "status": "rejected", "join": "refused", "join_error": refused}
+    db.x("UPDATE enrollments SET join_code_id=? WHERE enrollment_id=?", (jc["code_id"], eid))
+    if not jc["approve"]:
+        db.event("join_code_pending", actor=hostname, reason=peer_ip, enrollment_id=eid, join_code_id=jc["code_id"])
+        return {"enrollment_id": eid, "status": "pending", "join": "pending_approval"}
+    label = jc["label"] if jc["max_uses"] == 1 else None
+    approve_enrollment(db, eid, f"join:{jc['created_by']}", label=label)
+    return {"enrollment_id": eid, "status": "approved", "join": "approved"}
+
+
+def admit_by_user_code(db: DB, user_code: str, actor: str) -> dict:
+    """Approve the pending enrollment whose node shows this device code (made within the last day)."""
+    code = normalize_user_code(user_code)
+    if not code:
+        raise ApiError(400, "bad_user_code", "a machine's code is 8 letters, like WDJB-MJHT")
+    e = db.one("SELECT enrollment_id FROM enrollments WHERE user_code=? AND status='pending' AND created_at>? "
+               "ORDER BY created_at DESC", (code, now() - 86400))
+    if not e:
+        raise ApiError(404, "not_found", f"no machine is waiting with the code {code}")
+    return {"enrollment_id": e["enrollment_id"], **approve_enrollment(db, e["enrollment_id"], actor)}
 
 
 def enroll_status(db: DB, eid: str) -> dict:
@@ -144,6 +182,7 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
         e = db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,))
         if not e or e["status"] != "pending":
             raise ApiError(409, "not_pending", eid)
+        label = label or e["requested_name"]
         facts = jl(e["facts_json"], {})
         # Re-enrolment of a known Tailscale node keeps its node_id (and history).
         node = db.one("SELECT node_id FROM nodes WHERE ts_node_id=? AND ts_node_id IS NOT NULL",

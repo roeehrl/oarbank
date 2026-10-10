@@ -53,3 +53,17 @@ def test_bad_codes_and_missing_coordinators_are_refused(tmp_path):
     r = subprocess.run([str(LAUNCHER), "--home", str(tmp_path / "b"), "setup", "--scope", "nowhere", "--dry-run"],
                        capture_output=True, text=True)
     assert r.returncode != 0 and "unknown scope" in r.stderr
+
+
+def test_or_wait_installs_a_waiting_node_when_the_code_is_wrong(agent_bin, tmp_path):
+    """The Windows installer's setup: a wrong code pasted on its join page, or an unreadable code file, leaves the node
+    installed and waiting with a warning instead of failing the whole install."""
+    for args in (["--join-code", "OB2-NOTACODE"], ["--join-code-file", str(tmp_path / "missing.txt")]):
+        home = tmp_path / f"agent-{args[0]}"
+        r = subprocess.run([str(LAUNCHER), "--home", str(home), "setup", "--or-wait", *args, "--agent", str(agent_bin),
+                            "--no-service"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "waits for a code" in r.stderr and not (home / "state" / "join-code").exists()
+    r = subprocess.run([str(LAUNCHER), "--home", str(tmp_path / "strict"), "setup", "--join-code", "OB2-NOTACODE",
+                        "--agent", str(agent_bin), "--no-service"], capture_output=True, text=True)
+    assert r.returncode != 0                      # without --or-wait a wrong code is refused before anything changes

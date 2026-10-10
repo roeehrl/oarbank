@@ -35,9 +35,11 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Release 2.7.0** is out: the installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI) and
-> native coordinator installers and advanced coordinator archives are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0). [Get started](https://docs.codonic.dev/oarbank/get-started)
-> walks through the setup.
+> **Release 2.8.0** is out: install, then join. Node packages ask nothing; paste the join code into **Oarbank Node**
+> or run `sudo oarbank-node join`, and the console's **Add machine…** shows what to run on each system. Installers
+> (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI), one-line installers and native coordinator
+> installers are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0).
+> [Get started](https://docs.codonic.dev/oarbank/get-started) walks through the setup.
 
 ## What it does
 
@@ -55,7 +57,7 @@ the owner's own work first, every job in the operating system's sandbox.</p>
 - **Runs any kind of batch work as a module.** Parameter sweeps, simulations, renders, benchmarks, test matrices. A
   module is a bundle built with the open-source [Oarbank SDK](https://github.com/roeehrl/oarbank-sdk) (Apache-2.0), with
   its own console pages.
-- **Answers to you only.** Nodes join with a one-time join code and talk to the coordinator over mutual TLS. Releases,
+- **Answers to you only.** Nodes join with a join code that pins your coordinator's keys, and talk to it over mutual TLS. Releases,
   agent updates and coordinator moves need your signature as the owner, and every change is an audited operation.
 
 ### Start a campaign; its jobs spread to every node
@@ -103,7 +105,7 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Download the packages for your computers from the [2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0), check the
+Download the packages for your computers from the [2.8.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0), check the
 [Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
 packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1` for agents;
@@ -114,11 +116,14 @@ from Applications or your application menu (**Oarbank Coordinator** in Windows S
 your administrator name and password. Scan the displayed QR code with your authenticator, then enter its current six-digit code. If you reopen pending setup, your address and account are saved; enter the original password to continue. It creates and pins your primary and backup
 owner signing keys. Installing the package alone does not configure or start a fleet.
 
-After setup, open the console and create one join code per computer. The coordinator needs its own agent too
-if you want it to execute jobs.
+After setup, open the console and choose **Add machine…** on the Fleet page. It makes a join code and shows, for each
+operating system, the installer to download and what to run. The coordinator needs its own node too if you want it
+to execute jobs.
 
-Then install the agent on each computer with its join code (the macOS pkg, the deb or rpm, or the Windows MSI). The
-node joins, installs its release, runs each module's doctor and golden jobs, and takes work.
+Install the node package on each computer (the macOS pkg, the deb or rpm, or the Windows MSI); it asks nothing. Then
+paste the code into **Oarbank Node**, which opens after a desktop install, or run `sudo oarbank-node join` over SSH.
+MDM, Intune and Ansible deployments give the code through managed policy instead. The node checks that the code's
+coordinator is really yours, joins, installs its release, runs each module's doctor and golden jobs, and takes work.
 
 **With an AI agent.** The [Oarbank skill](https://github.com/roeehrl/oarbank-sdk/tree/main/skills/oarbank) lets
 Claude Code, Codex and other coding agents help you install, run, troubleshoot and build modules, reading the current
@@ -174,7 +179,7 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Yes: the [2.7.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.7.0) has the installers for macOS, Linux and Windows.
+**Can I install it today?** Yes: the [2.8.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0) has the installers for macOS, Linux and Windows.
 [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the

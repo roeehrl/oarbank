@@ -8,6 +8,7 @@
 //! within 10 minutes and within three starts, or the launcher flips back to the previous version and records
 //! `rolled_back` with the reason, which the old agent reports. Updates never replace the launcher.
 
+mod node;
 mod setup;
 #[cfg_attr(target_os = "macos", path = "svc_launchd.rs")]
 #[cfg_attr(windows, path = "svc_windows.rs")]
@@ -302,7 +303,17 @@ fn main() -> Result<()> {
             rest.push(a);
         }
     }
+    // `oarbank-node`: the launcher under its second name; its commands also work as `oarbank-launcher join` etc.
+    let invoked = std::env::args().next().map(|a| Path::new(&a).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()).unwrap_or_default();
+    if invoked == "oarbank-node" && rest.is_empty() {
+        eprintln!("{}", node::USAGE);
+        std::process::exit(2);
+    }
     match rest.first().map(String::as_str) {
+        Some("join" | "check" | "status" | "leave" | "doctor" | "policy-apply") => {
+            let code = node::main(home.as_deref(), &rest)?;
+            std::process::exit(code);
+        }
         Some("setup") => return setup::setup(home.as_deref(), &rest),
         Some("remove") => return setup::remove(home.as_deref(), &rest),
         #[cfg(windows)]
