@@ -7,6 +7,7 @@
   <resources>
     <stringTable>
       <string id="SUPPORTED_Oarbank_2_8">Oarbank agent 2.8 or later</string>
+      <string id="SUPPORTED_Oarbank_2_9">Oarbank agent 2.9 or later</string>
       <string id="Codonic">Codonic</string>
       <string id="Oarbank">Oarbank</string>
       <string id="Node">Node</string>
@@ -29,6 +30,14 @@ Disabled or not configured: container prerequisites are installed only when some
       <string id="AllowUserJoin_Help">Disabled: Oarbank Node hides Join this PC and Leave, so only this policy (or an administrator's command line) joins the computer.
 
 Enabled or not configured: a person using the computer can join it with a code from the Oarbank Node app.</string>
+      <string id="ShowStatusIcon">Show Oarbank Node in the notification area</string>
+      <string id="ShowStatusIcon_Help">Disabled: Oarbank Node shows no icon in the notification area for anyone using this computer and does not start at sign-in. Opening Oarbank Node from the Start menu still opens the join window. The node itself keeps running: it is a Windows service that starts with the computer.
+
+Enabled: the icon is shown and people cannot hide it.
+
+Not configured: each person chooses in Oarbank Node (Show in the notification area; on once they open it).
+
+Either way the setting is greyed out in Oarbank Node with "Managed by" your organization.</string>
       <string id="ManagedByOrganizationName">Organization name</string>
       <string id="ManagedByOrganizationName_Help">The organization shown in Oarbank Node and in the node's status ("Managed by …").</string>
     </stringTable>

@@ -26,7 +26,7 @@ for cmd in oarbank oarbank-setup; do
     ln -s "$ROOT/bin/$cmd" "$WORK/linked/$cmd"
     "$WORK/linked/$cmd" --help >/dev/null || { echo "bin/$cmd does not run through a link to it" >&2; exit 1; }
 done
-cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"
+cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-coordinator-symbolic.png" "$REPO/deploy/icons/oarbank-coordinator-symbolic@2x.png" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,7 +44,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSLocalNetworkUsageDescription</key><string>Oarbank connects your computers to this coordinator to run the jobs you choose.</string>
 </dict></plist>
 PLIST
-xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement "$REPO/deploy/macos/coordinator/Launcher.swift" -o "$APP/Contents/MacOS/Oarbank Coordinator"
+# the menu bar app, with the menu bar model it shares with Oarbank Node.app (deploy/macos/shared/MenuBar.swift)
+xcrun swiftc -O -parse-as-library -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement \
+    "$REPO/deploy/macos/coordinator/Launcher.swift" "$REPO/deploy/macos/shared/MenuBar.swift" -o "$APP/Contents/MacOS/Oarbank Coordinator"
 # Remove inherited extended attributes before sealing the application (and from the scripts: no ._ files).
 cp -R "$REPO/deploy/macos/coordinator/scripts" "$WORK/scripts"
 xattr -cr "$WORK/root" "$WORK/scripts"

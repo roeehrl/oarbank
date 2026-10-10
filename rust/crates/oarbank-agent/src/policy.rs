@@ -16,6 +16,10 @@ pub struct Policy {
     pub name: Option<String>,
     pub allow_user_join: Option<bool>,
     pub managed_by: Option<String>,
+    /// `ShowStatusIcon`: false hides Oarbank Node's menu bar (macOS) or notification-area (Windows) icon on every
+    /// account, true keeps it shown; set either way, the app's own setting is greyed out ("Managed by …"). The agent
+    /// only reports it (`oarbank-agent policy`): the apps read the policy themselves.
+    pub show_status_icon: Option<bool>,
 }
 
 impl Policy {
@@ -32,7 +36,8 @@ impl Policy {
             _ => None,
         });
         Policy { join_code: s("JoinCode"), coordinator: s("Coordinator"), scope: s("Scope"), containers: b("Containers"),
-                 name: s("Name"), allow_user_join: b("AllowUserJoin"), managed_by: s("ManagedByOrganizationName") }
+                 name: s("Name"), allow_user_join: b("AllowUserJoin"), managed_by: s("ManagedByOrganizationName"),
+                 show_status_icon: b("ShowStatusIcon") }
     }
 
     #[cfg(test)]
@@ -100,17 +105,18 @@ mod tests {
     #[test]
     fn keys_and_types_are_read_leniently() {
         let p = Policy::from_json(&json!({"JoinCode": " OB2-X ", "Containers": 1, "AllowUserJoin": "false",
-                                          "Scope": "system", "ManagedByOrganizationName": "Example", "Name": ""}));
+                                          "Scope": "system", "ManagedByOrganizationName": "Example", "Name": "",
+                                          "ShowStatusIcon": 0}));
         assert_eq!(p, Policy { join_code: Some("OB2-X".into()), coordinator: None, scope: Some("system".into()),
                                containers: Some(true), name: None, allow_user_join: Some(false),
-                               managed_by: Some("Example".into()) });
+                               managed_by: Some("Example".into()), show_status_icon: Some(false) });
         assert!(Policy::from_json(&json!({})).is_empty());
     }
 
     #[test]
     fn registry_output_parses() {
-        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Codonic\\Oarbank\\Agent\r\n    JoinCode    REG_SZ    OB2-ABC\r\n    Containers    REG_DWORD    0x1\r\n\r\n";
+        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Codonic\\Oarbank\\Agent\r\n    JoinCode    REG_SZ    OB2-ABC\r\n    Containers    REG_DWORD    0x1\r\n    ShowStatusIcon    REG_DWORD    0x0\r\n\r\n";
         let p = Policy::from_json(&parse_reg(out));
-        assert_eq!((p.join_code.as_deref(), p.containers), (Some("OB2-ABC"), Some(true)));
+        assert_eq!((p.join_code.as_deref(), p.containers, p.show_status_icon), (Some("OB2-ABC"), Some(true), Some(false)));
     }
 }

@@ -43,6 +43,8 @@ def test_user_agent_definition(launcher, tmp_path):
     assert p["Label"] == "dev.example.test" and p["KeepAlive"] is True and p["ProcessType"] == "Standard"
     assert p["ProgramArguments"][1:] == ["--home", str(tmp_path / "a b"), "run", "--coordinator", "https://c.example:7443"]
     assert p["StandardOutPath"] == str(tmp_path / "a b" / "logs" / "launcher.log") and "UserName" not in p
+    # Login Items, Allow in the Background lists it as Oarbank Node (with the app's icon), not as the signing team
+    assert p["AssociatedBundleIdentifiers"] == ["dev.codonic.oarbank.node"]
     assert f"launchctl bootstrap gui/{os.getuid()} " in out
     if shutil.which("plutil"):
         f = tmp_path / "x.plist"
@@ -55,6 +57,7 @@ def test_system_daemon_runs_as_the_named_user(launcher, tmp_path):
     out = run(launcher, "--home", str(tmp_path), "service", "install", "--system", "--user", "oarbank", "--dry-run")
     assert out.startswith("# /Library/LaunchDaemons/dev.codonic.oarbank.agent.plist")
     assert "<key>UserName</key><string>oarbank</string>" in out and "launchctl bootstrap system " in out
+    assert "<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>" in out
     out = run(launcher, "--home", str(tmp_path), "service", "uninstall", "--system", "--dry-run")
     assert "launchctl bootout system/dev.codonic.oarbank.agent" in out
 

@@ -331,7 +331,7 @@ fn main() -> anyhow::Result<()> {
             let p = policy::read();
             println!("{}", serde_json::json!({"JoinCode": p.join_code, "Coordinator": p.coordinator, "Scope": p.scope,
                 "Containers": p.containers, "Name": p.name, "AllowUserJoin": p.allow_user_join,
-                "ManagedByOrganizationName": p.managed_by}));
+                "ManagedByOrganizationName": p.managed_by, "ShowStatusIcon": p.show_status_icon}));
             Ok(())
         }
         Cmd::Status => rt.block_on(async {

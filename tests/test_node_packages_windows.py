@@ -405,7 +405,7 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
             switches[p.get("valueName")] = (p.find("p:enabledValue/p:decimal", GP).get("value"),
                                             p.find("p:disabledValue/p:decimal", GP).get("value"))
     assert set(texts) == {"JoinCode", "Coordinator", "Name", "ManagedByOrganizationName"}
-    assert switches == {"Containers": ("1", "0"), "AllowUserJoin": ("1", "0")}       # REG_DWORD 1 / 0
+    assert switches == {"Containers": ("1", "0"), "AllowUserJoin": ("1", "0"), "ShowStatusIcon": ("1", "0")}  # REG_DWORD 1 / 0
     rust = POLICY_RS.read_text(encoding="utf-8")
     assert POLICY_KEY in rust
     for value in texts:
@@ -420,8 +420,13 @@ def test_the_tray_app_reads_the_status_document_and_policy_and_runs_the_join_win
     src = TRAY.read_text(encoding="utf-8")
     assert '"Oarbank", "status", "node.json"' in src and "CommonApplicationData" in src
     assert f'@"{POLICY_KEY}"' in src and '"AllowUserJoin"' in src and '"ManagedByOrganizationName"' in src
-    for item in ('"Join this PC…"', '"Status…"', '"Start at sign-in"', '"Quit Oarbank Node"', '"Oarbank Node"'):
+    for item in ('"Join this PC…"', '"Status…"', '"Hide from notification area"', '"This PC\'s node keeps running"', '"Oarbank Node"'):
         assert item in src, item
+    # one setting (docs/design/node-enrollment.md, "Menu bar and tray"): shown = the HKCU Run value; never "Quit"
+    assert "Start at sign-in" not in src and '"Quit Oarbank Node"' not in src
+    assert 'PolicyValue("ShowStatusIcon")' in src and "ApplySetting(!background)" in src
+    assert "SetStartup(false); } catch" in src and "Close();" in src
+    assert "if(!test && (ShowPolicy() == false || (background && !StartupEnabled())))" in src
     for state in ("Not joined", "Waiting for approval", "Connected to ", "Offline", "Joining failed: "):
         assert state in src, state
     for arg in ('"--join"', '"--link"', '"--background"', '"--self-test"'):

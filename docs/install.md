@@ -62,8 +62,13 @@ while that user is logged in. State is in `~/Library/Application Support/Oarbank
 Enable lingering with `sudo loginctl enable-linger <user>` if the Linux coordinator should run from boot without
 that user's login. Windows uses system services and protected `C:\ProgramData\Oarbank\coordinator` state.
 
-In **Preferences**, enable **Start automatically at sign-in** if you want the companion to launch quietly for your account.
-**Quit** closes the companion and leaves coordinator services running.
+On macOS the coordinator's menu bar item has one setting, **Show Oarbank Coordinator in the menu bar** (Settings…):
+on, the item is shown and the app opens when you log in (it is on after the app's first launch); **Hide from Menu
+Bar** (⌘Q) turns it off and quits the app. The coordinator's services keep running either way. Open the app from
+Applications to get its window back. When the node package is installed on the same Mac, this menu also shows **This
+Mac's Node**, and Oarbank Node keeps out of the menu bar ([Menu bar and tray](design/node-enrollment.md#menu-bar-and-tray)).
+On Windows and Linux, the companion's **Preferences** has **Start automatically at sign-in**; **Quit** closes the
+companion and leaves coordinator services running.
 
 If you close the wizard before verification, choose **Open web app** again. The saved address and account are shown;
 enter the original password to continue. Existing accounts and keys are preserved. Reopening completed setup opens the console login.
@@ -133,6 +138,15 @@ an administrator has authenticated), on Linux "Oarbank Node wants to join this c
 on Windows the UAC prompt. A console's **Open in Oarbank Node**
 link (`oarbank://join?code=…`) fills the code in and asks you to confirm the coordinator first.
 
+**Oarbank Node in the menu bar or tray.** The node itself is a service that starts with the computer, before anyone
+signs in; Oarbank Node only shows it. Its one setting, **Show Oarbank Node in the menu bar** (Windows: **in the
+notification area**), is on after the app first opens: the icon is shown and the app opens at login. **Hide from Menu
+Bar** (⌘Q; Windows: **Hide from notification area**) turns it off and quits the app: the node keeps running and stays
+joined. To show it again, open Oarbank Node from Applications (its window has the setting) or from the Start menu. On a
+Mac that also runs the coordinator, the coordinator's menu shows this Mac's node instead. If macOS says the node is
+turned off in **Login Items → Allow in the Background**, the window offers **Open Login Items…**: switch **Oarbank
+Node** back on there. Managed policy `ShowStatusIcon` (below) hides or pins the icon fleet-wide.
+
 **Join from a terminal or SSH** (the code is read hidden, from standard input or from a file):
 ```bash
 sudo installer -pkg oarbank-agent-<v>-macos-arm64.pkg -target /      # an Intel Mac: …-macos-x86_64.pkg
@@ -177,7 +191,7 @@ approval on the Fleet page unless you made it approve automatically.
 | Where | macOS | Windows | Linux |
 |---|---|---|---|
 | Policy | a configuration profile for the domain `dev.codonic.oarbank.agent` (the console's **Add machine** offers one; it also pre-approves the background items) | `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent` (Group Policy with the release's ADMX template, or Intune) | `/etc/oarbank/policy.json` |
-| Keys | `JoinCode`, `Coordinator`, `Name`, `Containers` (Windows), `AllowUserJoin` (false hides Join and Leave in the app), `ManagedByOrganizationName` | the same names (REG_SZ, REG_DWORD) | the same names (JSON) |
+| Keys | `JoinCode`, `Coordinator`, `Name`, `Containers` (Windows), `AllowUserJoin` (false hides Join and Leave in the app), `ManagedByOrganizationName`, `ShowStatusIcon` (false hides Oarbank Node's menu bar or tray icon on every account; true keeps it shown) | the same names (REG_SZ, REG_DWORD) | the same names (JSON; `ShowStatusIcon` has no effect: Linux has no node tray) |
 
 Linux packages also read the installing command's environment, and Windows MSIs take properties:
 ```bash

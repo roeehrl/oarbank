@@ -14,6 +14,11 @@ use std::process::Command;
 /// Where a system install's agent serves session helpers (oarbank-protection's platform/macos/session.rs).
 const SESSION_DIR: &str = "/Library/Application Support/Oarbank/run";
 
+/// Oarbank Node.app (scripts/package-macos.sh): the app the node's jobs belong to in System Settings, Login Items,
+/// "Allow in the Background" (launchd `AssociatedBundleIdentifiers`). Without it macOS lists them under the signing
+/// team's name, and switching that entry off silently stops the node.
+const NODE_APP_BUNDLE: &str = "dev.codonic.oarbank.node";
+
 /// Where the service's definition lives and the launchctl domain it loads into: a LaunchAgent in the user's GUI
 /// session, or with `--system` a LaunchDaemon (run as `--user`, or root).
 struct ServiceTarget {
@@ -139,6 +144,7 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 user: account.clone(),
                 keep_alive: true,
                 restart_on_failure: false,
+                associated_bundle: Some(NODE_APP_BUNDLE.into()),
             };
             let plist = oarbank_core::service::launchd_plist(&spec);
             if dry {
@@ -164,7 +170,7 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
             // the agent binary installed beside the launcher (root's), never the service account's current version
             let helper_agent = exe.with_file_name("oarbank-agent");
             if account.is_some() && helper_agent.exists() {
-                let text = oarbank_core::service::session_helper_plist(&helper_label, &helper_agent.display().to_string());
+                let text = oarbank_core::service::session_helper_plist(&helper_label, &helper_agent.display().to_string(), Some(NODE_APP_BUNDLE));
                 if dry {
                     println!("# {}\n{text}", helper_plist.display());
                 } else {

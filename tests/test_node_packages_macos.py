@@ -25,6 +25,8 @@ HELPER_JOB = MACOS / "dev.codonic.oarbank.agent.helper.plist"
 NODE_APP = MACOS / "node" / "NodeApp.swift"
 ELEVATION = MACOS / "node" / "Elevation.swift"
 HELPER = MACOS / "node" / "NodeHelper.swift"
+SHARED = MACOS / "shared" / "MenuBar.swift"
+COORDINATOR_APP = MACOS / "coordinator" / "Launcher.swift"
 PACKAGE = REPO / "scripts" / "package-macos.sh"
 SECRET = "OB2-0SECRETCODE0DONOTPRINT0"
 
@@ -231,6 +233,21 @@ def test_the_helper_job_is_an_on_demand_mach_service_of_root():
     assert 'static let machService = "dev.codonic.oarbank.agent.helper"' in ELEVATION.read_text(encoding="utf-8")
 
 
+def test_every_node_job_belongs_to_oarbank_node_in_login_items():
+    # System Settings, Login Items, Allow in the Background groups launchd jobs by AssociatedBundleIdentifiers: without
+    # it they show under the signing team's name, and switching that off silently stops the node
+    for path in (POLICY, HELPER_JOB):
+        with open(path, "rb") as f:
+            assert plistlib.load(f)["AssociatedBundleIdentifiers"] == ["dev.codonic.oarbank.node"], path.name
+    assert _info_plist()["CFBundleIdentifier"] == "dev.codonic.oarbank.node"
+    text = PACKAGE.read_text(encoding="utf-8")
+    assert 'plutil -extract AssociatedBundleIdentifiers.0 raw -o - "$REPO/deploy/macos/$job.plist")" == dev.codonic.oarbank.node' in text
+    # the agent's own job and the session helper the launcher writes (svc_launchd.rs)
+    launchd = (REPO / "rust/crates/oarbank-launcher/src/svc_launchd.rs").read_text(encoding="utf-8")
+    assert 'const NODE_APP_BUNDLE: &str = "dev.codonic.oarbank.node";' in launchd
+    assert "associated_bundle: Some(NODE_APP_BUNDLE.into())" in launchd and "Some(NODE_APP_BUNDLE));" in launchd
+
+
 @pytest.mark.skipif(not shutil.which("plutil"), reason="macOS plutil")
 def test_the_policy_job_lints():
     for job in (POLICY, HELPER_JOB):
@@ -261,16 +278,19 @@ def test_the_uninstaller_removes_the_app_the_policy_job_and_oarbank_node():
 
 def test_the_app_follows_the_launch_contract():
     swift = NODE_APP.read_text(encoding="utf-8")
+    shared = SHARED.read_text(encoding="utf-8")
     for needle in ('"/Library/Application Support/Oarbank/status/node.json"', '"Library/Application Support/Oarbank/status/node.json"',
-                   '"\\(installRoot)/bin/runtime/bin/python3"', '"\\(installRoot)/share/join/join-window.py"',
+                   '"dev.codonic.oarbank.agent" as CFString', "CFPreferencesCopyAppValue",
+                   'Oarbank.policy("AllowUserJoin") as? Bool != false', '"Waiting for approval"', '"Not joined"',
+                   '"Connected to \\(host)"', '"Joining failed: \\(message)"', "SMAppService.mainApp.register()",
+                   "SMAppService.mainApp.unregister()", ".requiresApproval", "isTemplate = true"):
+        assert needle in shared, needle
+    for needle in ('"\\(installRoot)/bin/runtime/bin/python3"', '"\\(installRoot)/share/join/join-window.py"',
                    '"\\(installRoot)/bin/oarbank-launcher"', '["-I", joinWindow, "--launcher", launcher]', '["--link", $0]',
-                   'CommandLine.arguments.contains("--join")', "kAEGetURL", "kInternetEventClass",
-                   'policyValue("AllowUserJoin") as? Bool != false', '"dev.codonic.oarbank.agent" as CFString',
-                   "CFPreferencesCopyAppValue", "SMAppService.mainApp.register()", "SMAppService.mainApp.unregister()",
-                   ".requiresApproval", "setActivationPolicy(.accessory)", "isTemplate = true", 'keyEquivalent: ","',
-                   'keyEquivalent: "q"', '"Join this Mac…"', '"Status…"', '"Waiting for approval"', '"Not joined"',
-                   '"Connected to \\(host)"', '"Joining failed: \\(message)"', '"Managed by \\(', "withTimeInterval: 30",
-                   "Timer(timeInterval: 5", "applicationShouldHandleReopen"):
+                   'CommandLine.arguments.contains("--join")', 'CommandLine.arguments.contains("--settings")', "kAEGetURL",
+                   "kInternetEventClass", "setActivationPolicy(.accessory)", 'keyEquivalent: ","', '"Join this Mac…"', '"Status…"',
+                   '"Managed by \\(', "withTimeInterval: 30", "Timer(timeInterval: 5", "applicationShouldHandleReopen",
+                   'menuBarGlyph("oarbank-node-symbolic")'):
         assert needle in swift, needle
     # it never handles a code itself: a link goes to the join window, which asks before anything joins; --elevate only
     # relays the join window's code from its standard input to the helper
@@ -282,8 +302,92 @@ def test_the_app_follows_the_launch_contract():
     assert "XPC_CONNECTION_MACH_SERVICE_PRIVILEGED" in swift and "withExtendedLifetime(delegate)" in swift
     # no shortcut around the helper: no osascript, no AuthorizationExecuteWithPrivileges, no shell
     for banned in ("osascript", "AuthorizationExecuteWithPrivileges", "/bin/sh", "do shell script"):
-        for f in (NODE_APP, ELEVATION, HELPER):
+        for f in (NODE_APP, ELEVATION, HELPER, SHARED):
             assert banned not in f.read_text(encoding="utf-8"), (banned, f.name)
+
+
+def test_the_app_has_one_menu_bar_setting_and_never_says_quit_for_the_node():
+    swift = NODE_APP.read_text(encoding="utf-8")
+    shared = SHARED.read_text(encoding="utf-8")
+    # one setting: shown means the app's login item is registered; the first launch turns it on; policy decides instead
+    assert '"Show Oarbank Node in the menu bar"' in swift
+    assert 'MenuBarSetting(managed: { Oarbank.policyBool("ShowStatusIcon") })' in swift
+    assert "var isOn: Bool { managed ?? registered }" in shared
+    assert "if allowFirstLaunch && managed == nil { try? set(true) }" in shared and "if let managed { try? set(managed) }" in shared
+    # the old two-meaning preference is gone: no "Start automatically at sign-in", no unconditional Login Items button
+    for gone in ("Start automatically at sign-in", "Applies to your account", "Quit Oarbank Node\", action: #selector(quitApp)",
+                 "oarbank-symbolic\""):
+        assert gone not in swift, gone
+    # Hide from Menu Bar takes ⌘Q, says the node keeps running, and turns the setting off
+    assert '"Hide from Menu Bar", action: #selector(hideFromMenuBar), keyEquivalent: "q"' in swift
+    assert 'hide.subtitle = "This Mac\'s node keeps running"' in swift
+    assert "setMenuBar(false)" in swift and "NSApp.terminate(nil)" in swift
+    # the window: the node's two sections, the service in plain words, and the fix action only when macOS needs one
+    assert '("This Mac’s node", node), ("Menu bar", menuBar)' in swift
+    assert "Running as a system service — starts with the Mac, before anyone signs in, and keeps running when this app quits." in shared
+    assert "The node is turned off in Login Items → Allow in the Background. Turn Oarbank Node back on there." in shared
+    assert "SMAppService.statusForLegacyPlist(at: URL(fileURLWithPath: path)) == .requiresApproval" in shared
+    assert '"/Library/LaunchDaemons/dev.codonic.oarbank.agent.plist"' in shared
+    assert "approvalButton.isHidden = !(managed == nil && !coordinatorHere && setting.needsApproval)" in swift
+    assert 'menuBarNote.stringValue = "Managed by \\(organization ?? "your organization")."' in swift
+    # one item per Mac: where Oarbank Coordinator is, the node shows none and opens nothing at login
+    assert "let show = setting.isOn && !coordinatorHere" in swift
+    assert "if coordinatorHere { try? setting.set(false) } else { setting.launched() }" in swift
+    assert "static var coordinatorBundleID: String { coordinatorBundleBase + buildSuffix }" in shared
+    assert 'static let coordinatorBundleBase = "dev.codonic.oarbank.coordinator"' in shared
+    # with nothing left to show, the app quits; the node is never stopped from here
+    assert "guard statusItem == nil, window?.isVisible != true, child?.isRunning != true else { return }" in swift
+    for word in ("launchctl", "bootout", "kickstart"):
+        assert word not in swift and word not in shared, word
+
+
+def test_the_coordinator_app_shares_the_model_and_shows_this_macs_node():
+    swift = COORDINATOR_APP.read_text(encoding="utf-8")
+    assert "@main" in swift and "private let setting = MenuBarSetting()" in swift
+    assert '"Show Oarbank Coordinator in the menu bar"' in swift and 'menuBarGlyph("oarbank-coordinator-symbolic")' in swift
+    assert '"Hide from Menu Bar", action: #selector(hideFromMenuBar), keyEquivalent: "q"' in swift
+    assert 'hide.subtitle = "The coordinator keeps running"' in swift
+    assert 'NSMenuItem.sectionHeader(title: "This Mac’s Node")' in swift
+    assert 'Oarbank.open(Oarbank.nodeBundleID, arguments: ["--join"])' in swift and "Oarbank.open(Oarbank.nodeBundleID)" in swift
+    assert 'CommandLine.arguments.contains("--open-web")' in swift
+    assert "Library/LaunchAgents/dev.codonic.oarbank.\\($0).plist" in swift and "switchedOffInLoginItems(coordinatorJobPlists)" in swift
+    for gone in ("Start automatically at sign-in", "Quit Oarbank Coordinator\", action:", "oarbank-symbolic\""):
+        assert gone not in swift, gone
+    # Oarbank Node's Open Console opens it
+    assert 'Oarbank.open(Oarbank.coordinatorBundleID, arguments: ["--open-web"])' in NODE_APP.read_text(encoding="utf-8")
+
+
+def test_the_menu_bar_glyphs_are_two_rendered_template_pairs():
+    icons = REPO / "deploy/icons"
+    assert not (icons / "oarbank-symbolic.png").exists()
+    for name in ("oarbank-node-symbolic", "oarbank-coordinator-symbolic"):
+        svg = (icons / f"{name}.svg").read_text(encoding="utf-8")
+        assert 'viewBox="0 0 18 18"' in svg and "currentColor" in svg
+        for suffix, size in (("", 18), ("@2x", 36)):
+            data = (icons / f"{name}{suffix}.png").read_bytes()
+            assert data[:8] == b"\x89PNG\r\n\x1a\n"
+            assert int.from_bytes(data[16:20], "big") == int.from_bytes(data[20:24], "big") == size, (name, suffix)
+    # different drawings: one oar (a machine) and three (the fleet)
+    node, coordinator = ((icons / f"oarbank-{n}-symbolic.svg").read_text(encoding="utf-8") for n in ("node", "coordinator"))
+    assert node.count("z") == 1 and coordinator.count("z") == 3
+    assert (icons / "oarbank-node-symbolic.png").read_bytes() != (icons / "oarbank-coordinator-symbolic.png").read_bytes()
+    script = (REPO / "scripts/render-menu-bar-icons.swift").read_text(encoding="utf-8")
+    assert '["oarbank-node-symbolic", "oarbank-coordinator-symbolic"]' in script and '[(1, ""), (2, "@2x")]' in script
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("xcrun"), reason="Apple toolchain")
+def test_the_rendered_glyphs_match_their_svgs(tmp_path):
+    # rendering is deterministic: the committed PNGs are what the script makes from the committed SVGs
+    work = tmp_path / "repo"
+    (work / "deploy/icons").mkdir(parents=True)
+    (work / "scripts").mkdir()
+    shutil.copy(REPO / "scripts/render-menu-bar-icons.swift", work / "scripts")
+    for svg in (REPO / "deploy/icons").glob("*-symbolic.svg"):
+        shutil.copy(svg, work / "deploy/icons")
+    r = subprocess.run(["xcrun", "swift", str(work / "scripts/render-menu-bar-icons.swift")], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    for png in (work / "deploy/icons").glob("*.png"):
+        assert png.read_bytes() == (REPO / "deploy/icons" / png.name).read_bytes(), png.name
 
 
 def test_the_helper_checks_the_client_the_request_and_the_launcher():
@@ -326,7 +430,7 @@ def swiftc(out: Path, *sources: Path, frameworks=("Security",)):
 @pytest.fixture(scope="module")
 def node_app(tmp_path_factory):
     out = tmp_path_factory.mktemp("app") / "Oarbank Node"
-    return swiftc(out, NODE_APP, ELEVATION, frameworks=("AppKit", "ServiceManagement", "Security"))
+    return swiftc(out, NODE_APP, ELEVATION, SHARED, frameworks=("AppKit", "ServiceManagement", "Security"))
 
 
 def helper_build(tmp_path: Path, pin: str) -> Path:
@@ -539,7 +643,7 @@ def test_the_app_bundle_registers_oarbank_links_and_hides_from_the_dock():
     assert info["NSLocalNetworkUsageDescription"].strip()
     # the coordinator app's artwork, from the official logo (deploy/icons/README.md)
     assert info["CFBundleIconFile"] == "oarbank.icns" and (REPO / "deploy/icons/oarbank.icns").is_file()
-    assert (REPO / "deploy/icons/oarbank-symbolic.png").is_file()
+    assert (REPO / "deploy/icons/oarbank-node-symbolic.png").is_file() and (REPO / "deploy/icons/oarbank-node-symbolic@2x.png").is_file()
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -552,8 +656,9 @@ def test_the_package_builds_signs_and_ships_the_app_the_join_window_and_the_poli
     assert 'APP="$WORK/root/Applications/Oarbank Node.app"' in text
     assert 'xcrun swiftc -O -parse-as-library -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement' in text
     assert '"$REPO/deploy/macos/node/NodeApp.swift" "$REPO/deploy/macos/node/Elevation.swift"' in text
-    assert '-o "$APP/Contents/MacOS/Oarbank Node"' in text
-    assert 'cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"' in text
+    assert '"$REPO/deploy/macos/shared/MenuBar.swift" -o "$APP/Contents/MacOS/Oarbank Node"' in text
+    assert ('cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-node-symbolic.png" '
+            '"$REPO/deploy/icons/oarbank-node-symbolic@2x.png" "$APP/Contents/Resources/"') in text
     assert "codesign --force --options runtime --timestamp --identifier dev.codonic.oarbank.node --sign \"$ID\" \"$APP\"" in text
     assert 'codesign --force --identifier dev.codonic.oarbank.node --sign - "$APP"' in text
     assert 'codesign --verify --deep --strict "$APP"' in text
@@ -601,6 +706,8 @@ def test_a_built_node_package_holds_the_app_the_join_window_and_the_policy_job(t
     files = set(subprocess.run(["pkgutil", "--payload-files", str(pkg)], capture_output=True, text=True, check=True).stdout.split("\n"))
     for f in ("./Applications/Oarbank Node.app/Contents/MacOS/Oarbank Node", "./Applications/Oarbank Node.app/Contents/Info.plist",
               "./Applications/Oarbank Node.app/Contents/Resources/oarbank.icns",
+              "./Applications/Oarbank Node.app/Contents/Resources/oarbank-node-symbolic.png",
+              "./Applications/Oarbank Node.app/Contents/Resources/oarbank-node-symbolic@2x.png",
               "./Applications/Oarbank Node.app/Contents/_CodeSignature/CodeResources",
               "./Library/Oarbank/share/join/join-window.py", "./Library/Oarbank/share/join/join-window.html",
               "./Library/LaunchDaemons/dev.codonic.oarbank.agent.policy.plist", "./Library/Oarbank/bin/oarbank-launcher",

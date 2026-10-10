@@ -11,6 +11,9 @@
   helper asks for); oarbank-uninstall unloads it. No RunAtLoad and no KeepAlive: nothing runs until the app asks.
   Logs go to the unified log (subsystem dev.codonic.oarbank, category helper); stdout and stderr go nowhere. launchd's
   default umask (022) stays: the launcher writes the status document everyone reads, as when it runs from a terminal.
+
+  AssociatedBundleIdentifiers: System Settings, Login Items, "Allow in the Background" lists this job under Oarbank
+  Node (the app's name and icon) with the node's other jobs, not under the signing team's name.
 -->
 <plist version="1.0">
 <dict>
@@ -30,6 +33,10 @@
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>/dev/null</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>dev.codonic.oarbank.node</string>
+    </array>
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>
