@@ -65,7 +65,7 @@ def test_a_secret_is_write_only_and_never_stored_in_the_clear(db):
     assert out["set"] and out["fingerprint"].startswith("fp:") and KEY not in json.dumps(out)
     listing = modsecrets.listing(db, "vault")
     assert listing == [{"name": "api_key", "description": "The provider key the call stage uses", "stages": ["call"],
-                        "coordinator": True, "set": True, "nodes": [],
+                        "coordinator": True, "set": True, "nodes": [], "groups": [],
                         "module": {"node_id": None, "hostname": None, "fingerprint": out["fingerprint"],
                                    "set_at": out["set_at"], "set_by": "test", "readable": True}}]
     dump = everything_stored(db)
@@ -118,6 +118,42 @@ def test_only_the_declaring_stage_gets_it_resolved_for_its_node(db):
     run_op(db, "secrets.clear", "vault", {"name": "api_key"})
     assert modsecrets.missing_for(db, "vault", ["api_key"], n["node_id"]) == ["api_key"]
     assert KEY.encode() not in everything_stored(db) and NODE_KEY.encode() not in everything_stored(db)
+
+
+GROUP_KEY = "sk-group-laptops-5b1e70"
+TRAVEL_KEY = "sk-group-travel-0c44d2"
+
+
+def test_secrets_resolve_along_the_chain_node_then_groups_by_rank_then_the_module(db):
+    """Secrets on the settings chain (docs/design/settings.md, "Secrets on the chain"): a group's value reaches its
+    members, the higher-ranked group wins, a node's own value beats both, and each is write-only (a fingerprint)."""
+    a, b, c = node(db, "a"), node(db, "b"), node(db, "c")
+    run_op(db, "groups.create", "Laptops", {"members": ["a", "b"]})
+    run_op(db, "groups.create", "Travel", {"members": ["b"]})            # created last: ranks highest
+    set_secret(db)
+    out = run_op(db, "secrets.set", "vault", {"name": "api_key", "group": "Laptops"}, secret=GROUP_KEY)["result"]
+    assert out["group"] == "laptops" and out["scope"] == "group Laptops" and GROUP_KEY not in json.dumps(out)
+    run_op(db, "secrets.set", "vault", {"name": "api_key", "group": "travel"}, secret=TRAVEL_KEY)
+    got = {n["hostname"]: modsecrets.for_job(db, "vault", ["api_key"], n["node_id"])["api_key"] for n in (a, b, c)}
+    assert got == {"a": GROUP_KEY, "b": TRAVEL_KEY, "c": KEY}
+    assert modsecrets.source(db, "vault", "api_key", b["node_id"])["text"] == "group Travel"
+    set_secret(db, NODE_KEY, node_id=b["node_id"])
+    assert modsecrets.for_job(db, "vault", ["api_key"], b["node_id"]) == {"api_key": NODE_KEY}
+    listing = modsecrets.listing(db, "vault")[0]
+    assert [g["group"] for g in listing["groups"]] == ["Travel", "Laptops"] and all(g["fingerprint"].startswith("fp:")
+                                                                                    for g in listing["groups"])
+    assert [n["hostname"] for n in listing["nodes"]] == ["b"]
+    # clearing a group's value: its members fall back along the chain; deleting a group deletes its values
+    run_op(db, "secrets.clear", "vault", {"name": "api_key", "group": "Laptops"})
+    assert modsecrets.for_job(db, "vault", ["api_key"], a["node_id"]) == {"api_key": KEY}
+    run_op(db, "groups.delete", "Travel")
+    assert not db.one("SELECT 1 FROM secrets WHERE node_id='group:travel'")
+    for v in (GROUP_KEY, TRAVEL_KEY):
+        assert v.encode() not in everything_stored(db)
+        assert v not in json.dumps(db.q("SELECT * FROM audit"), default=str)
+    with pytest.raises(ops.OpError) as e:
+        run_op(db, "secrets.set", "vault", {"name": "api_key", "group": "Nope"}, secret="x" * 8)
+    assert e.value.code == "unknown_group"
 
 
 def test_a_retired_node_takes_its_own_values_with_it(db):

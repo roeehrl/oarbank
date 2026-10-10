@@ -82,6 +82,8 @@ def row(snap: V.Snap, d: R.Setting, scope: str, node: dict | None, counts: dict 
                    "comment": own["comment"], "enforced": bool(own["enforced"])} if own else None,
            "inherited": {"value": inh["value"], "text": R.show(d.key, inh["value"]), "badge": V.badge(inh)},
            "locked_by": res["locked_by"] if res["locked_by"] and res["locked_by"]["scope"] != scope else None,
+           "lock_text": lock_text(res["locked_by"]) if res["locked_by"] and res["locked_by"]["scope"] != scope else None,
+           "locked_here": bool(own and own["enforced"]),
            "chain": res["chain"], "default": {**res["default"], "text": R.show(d.key, res["default"]["value"])},
            "errors": list((errors or {}).get(d.key, [])), "form_errors": [], "typed": False,
            "override_count": (counts or {}).get(d.key, 0) if scope == "fleet" else None,
@@ -108,6 +110,13 @@ def row(snap: V.Snap, d: R.Setting, scope: str, node: dict | None, counts: dict 
         if hw:
             out["hw_note"] = f"this node has {hw:g} GB of RAM" if d.hardware == "ram" else f"this node has {hw} cores"
     return out
+
+
+def lock_text(lock: dict) -> str:
+    """"Locked by Fleet settings" or "Locked by the group Laptops" (the row's lock button and its popover)."""
+    if lock["scope"] == "fleet":
+        return "Locked by Fleet settings"
+    return f"Locked by the group {lock['name'].removeprefix('Group: ')}"
 
 
 def sections(snap: V.Snap, scope: str, node: dict | None, keys_by_section: tuple, counts: dict | None = None,
@@ -182,7 +191,13 @@ def effective_doc(r, nid: str | None = None, module: str = "") -> dict:
     return {"node": {"node_id": node["node_id"], "hostname": node["hostname"], "settings_rev": node.get("settings_rev"),
                      "settings_applied_rev": node.get("settings_applied_rev")},
             "applied": applied_state(node, None, now), "groups": [g["name"] for g in V.node_groups(snap, node)],
-            "settings": rows}
+            "labels": snap.node_labels(node), "memberships": membership_rows(snap, node), "settings": rows}
+
+
+def membership_rows(snap: V.Snap, node: dict) -> list[dict]:
+    """The node's groups, highest rank first, each with why it is a member ("member because …")."""
+    return [{"id": g["id"], "name": g["name"], "rank": g["rank"], "builtin": bool(g["builtin"]), "why": g["why"]}
+            for g in reversed(V.memberships(snap, node)) if g["member"]]
 
 
 def explain_doc(r, key: str, nid: str | None = None, module: str = "") -> dict | None:

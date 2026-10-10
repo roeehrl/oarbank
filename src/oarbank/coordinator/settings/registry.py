@@ -45,6 +45,7 @@ class Setting:
     writer: str | None = None         # the operation that owns its writes (settings.apply refuses it)
     effects: tuple = ()               # hooks run on nodes whose effective value changed (apply.py)
     hardware: str | None = None       # cores | ram: a node's own value may not exceed its hardware
+    campaign: bool = False            # a campaign may override it while it runs (bounded by locks; apply.campaign_refusals)
     note: str | None = None           # beside the row (for example: not applied by agents yet)
     examples: tuple = field(default=())
 

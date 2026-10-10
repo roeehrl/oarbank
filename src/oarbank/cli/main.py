@@ -148,13 +148,14 @@ def cmd_secret(a):
         d = api("GET", f"/api/v1/modules/{a.module}/secrets")
         for s in d["secrets"]:
             scopes = ([f"module {s['module']['fingerprint']}{'' if s['module']['readable'] else ' (unreadable here)'}"]
-                      if s["module"] else []) + [f"{n['hostname'] or n['node_id']} {n['fingerprint']}" for n in s["nodes"]]
+                      if s["module"] else []) + [f"group {g['group']} {g['fingerprint']}" for g in s.get("groups") or []] \
+                + [f"{n['hostname'] or n['node_id']} {n['fingerprint']}" for n in s["nodes"]]
             print(f"{s['name']:<24} {'set' if s['set'] else 'NOT SET':<8} stages={','.join(s['stages']) or '-'}"
                   f"{' +coordinator' if s['coordinator'] else ''}  {'; '.join(scopes)}")
         return
     if not a.name:
         sys.exit(f"oarbank secret {a.action} <module> <name>")
-    params = {"name": a.name, **({"node": a.node} if a.node else {})}
+    params = {"name": a.name, **({"node": a.node} if a.node else {}), **({"group": a.group} if a.group else {})}
     if a.action == "clear":
         print(json.dumps(run_op("secrets.clear", a.module, params, a.reason, a.yes)["result"], default=str))
         return
@@ -167,7 +168,7 @@ def cmd_secret(a):
         value = sys.stdin.read()
         value = value[:-1] if value.endswith("\n") else value
     res = run_op("secrets.set", a.module, params, a.reason, True, secret=value)["result"]
-    print(f"{a.module}/{a.name} set for {res['node'] or 'the module'}: fingerprint {res['fingerprint']}")
+    print(f"{a.module}/{a.name} set for {res.get('scope') or 'the module'}: fingerprint {res['fingerprint']}")
 
 
 MARK = {"done": "[done]   ", "blocked": "[BLOCKED]", "waiting": "[waiting]", "next": "[next]   ", "skipped": "[n/a]    "}
@@ -245,9 +246,10 @@ def cmd_module(a):
                 print(f"  {'✓' if x['ok'] else '✗'} {x['name']}" + (f": {x['detail']}" if x.get("detail") else ""))
         sys.exit(0 if (res.get("result") or {}).get("ok") else 1)
     elif a.action == "canary":
-        if not a.node:
-            sys.exit("oarbank module canary <name>@<version> --node N [--node M]")
-        res = run_op("modules.enable_canary", a.what, {"nodes": a.node}, **ask)
+        if not a.node and not a.group:
+            sys.exit("oarbank module canary <name>@<version> --node N [--node M] | --group G")
+        res = run_op("modules.enable_canary", a.what, {**({"nodes": a.node} if a.node else {}),
+                                                       **({"group": a.group} if a.group else {})}, **ask)
     elif a.action in ("pin", "unpin"):
         if not a.node or len(a.node) != 1:
             sys.exit(f"oarbank module {a.action} <name>@<version> --node N")
@@ -722,6 +724,11 @@ def node_show(target: str, as_json: bool = False):
     st = d.get("settings") or {}
     if st:
         print(f"  settings: {st['applied']['text']}; groups {', '.join(st.get('groups') or []) or 'none'}")
+        labs = st.get("labels") or {}
+        if labs.get("all"):
+            print(f"  labels: {', '.join(labs['owner']) or '-'}" + (f" (from facts: {', '.join(labs['facts'])})" if labs.get("facts") else ""))
+        for g in st.get("memberships") or []:
+            print(f"    in {g['name']} because {', '.join(g['why']) or 'it matches'}")
         for x in st["settings"]:
             if (x.get("source") or {}).get("scope") in ("node", "group") or x.get("errors"):
                 print(f"    {x['key']} ({x['label']}): {x['value_text']} · {x['badge']}"
@@ -752,6 +759,18 @@ def cmd_node(a):
         if a.value not in PROTECTION_MODES:
             sys.exit(f"oarbank node mode <node> {'|'.join(PROTECTION_MODES)}")
         res = run_op("nodes.set_mode", a.target, {"mode": a.value}, a.reason, a.yes)
+    elif a.action == "label":
+        labels = [x.strip() for x in (a.value or "").split(",") if x.strip()]
+        if not labels:
+            sys.exit("oarbank node label <node> <label>[,<label>...] [--remove]")
+        res = run_op("nodes.label", a.target, {"remove" if a.remove else "add": labels}, a.reason, a.yes, preview=True)
+        r = (res or {}).get("result") or {}
+        for nid, labs in (r.get("labels") or {}).items():
+            print(f"{nid}: labels {', '.join(labs) or 'none'}")
+        for x in (r.get("joins") or []) + (r.get("leaves") or []):
+            print(f"  {x}")
+        print(r.get("message") or "")
+        return
     elif a.action == "state":
         if a.value not in NODE_STATE_OPS:
             sys.exit(f"oarbank node state <node> {'|'.join(NODE_STATE_OPS)}")
@@ -826,7 +845,7 @@ def cmd_settings(a):
         res = run_op("settings.secrets.set", a.key, {}, a.reason, True, secret=value)["result"]
         print(f"{a.key} set: fingerprint {res['fingerprint']}")
         return
-    if a.action in ("explain", "overrides", "set", "reset") and not a.key:
+    if a.action in ("explain", "overrides", "set", "reset", "promote") and not a.key:
         sys.exit(f"oarbank settings {a.action} <key>")
     if a.action == "get" and not a.key:
         d = api("GET", "/api/v1/settings/effective?" + q(node=a.node or "", module=a.module or ""))
@@ -855,19 +874,108 @@ def cmd_settings(a):
         if not d["values"]:
             print("  no group or node sets it")
         return
-    scope, sid = _scope(a)
-    change = {"scope": scope, "scope_id": sid, "key": a.key, **({"module": a.module} if a.module else {})}
+    if a.action == "promote":
+        if not a.group:
+            sys.exit("oarbank settings promote <key> --group G [--to fleet|<group>]: moves the group's value up")
+        params = {"key": a.key, "group": a.group, "to": a.to or "fleet", **({"module": a.module} if a.module else {}),
+                  **({"comment": a.comment} if a.comment else {})}
+        res = run_op("settings.promote", a.key, params, a.reason, a.yes, a.confirm, dry_run=a.dry_run, preview=True)
+        r = (res or {}).get("result") or {}
+        print(r.get("message") or json.dumps(r, indent=1, default=str))
+        return
+    if a.action == "set" and a.value is None:
+        sys.exit("oarbank settings set <key> <value> [--node N | --group G | --nodes A,B | --label L]")
+    base = {"key": a.key, **({"module": a.module} if a.module else {})}
     if a.action == "set":
-        if a.value is None:
-            sys.exit("oarbank settings set <key> <value> [--node N | --group G]")
-        change["value"] = _setting_value(a.key, a.value)
-        if a.enforce:
-            change["enforce"] = True
+        base["value"] = _setting_value(a.key, a.value)
     else:
-        change["reset"] = True
-    params = {"changes": [change], **({"comment": a.comment} if a.comment else {})}
-    res = run_op("settings.apply", sid or scope, params, a.reason, a.yes, a.confirm, dry_run=a.dry_run, preview=True)
+        base["reset"] = True
+    if a.nodes or a.label:                                # bulk: the same change on every selected node
+        if a.node or a.group or a.enforce:
+            sys.exit("--nodes and --label set each node's own value: not with --node, --group or --enforce")
+        q = lambda **kw: "&".join(f"{k}={v}" for k, v in kw.items() if v)
+        picked = [x.strip() for x in (a.nodes or "").split(",") if x.strip()]
+        if a.label:
+            eff = api("GET", "/api/v1/groups")["labels"]
+            picked += [h for h, labs in sorted(eff.items()) if a.label.lower() in labs["all"]]
+            if not picked:
+                sys.exit(f"no node carries the label {a.label!r}")
+        changes = [{**base, "scope": "node", "scope_id": h} for h in dict.fromkeys(picked)]
+        target = f"{len(changes)} nodes"
+    else:
+        scope, sid = _scope(a)
+        changes = [{**base, "scope": scope, "scope_id": sid, **({"enforce": True} if a.enforce else {})}]
+        target = sid or scope
+    params = {"changes": changes, **({"comment": a.comment} if a.comment else {})}
+    res = run_op("settings.apply", target, params, a.reason, a.yes, a.confirm, dry_run=a.dry_run, preview=True)
     r = (res or {}).get("result") or {}
+    print(r.get("message") or json.dumps(r, indent=1, default=str))
+
+
+def _group_params(a) -> dict:
+    """A group's fields from the command line: selector terms from flags (or --selector JSON), members, name and
+    description; only what was given (an update keeps the rest)."""
+    out = {}
+    sel = json.loads(a.selector) if a.selector else {}
+    for k, v in (("os", a.os), ("arch", a.arch), ("labels", a.label), ("hostname", a.hostname), ("ram_gb_min", a.ram_min),
+                 ("ram_gb_max", a.ram_max), ("cores_min", a.cores_min)):
+        if v not in (None, []):
+            sel[k] = v[0] if isinstance(v, list) and len(v) == 1 and k in ("os", "arch", "hostname") else v
+    if a.battery is not None:
+        sel["battery"] = a.battery
+    if sel or a.selector or a.no_selector:
+        out["selector"] = {} if a.no_selector else sel
+    if a.member is not None or a.no_members:
+        out["members"] = [] if a.no_members else [m for x in a.member for m in x.split(",") if m.strip()]
+    if a.name:
+        out["name"] = a.name
+    if a.description is not None:
+        out["description"] = a.description
+    return out
+
+
+def cmd_groups(a):
+    """oarbank groups list|show|create|update|rank|delete (docs/design/settings.md, "Groups and labels")."""
+    if a.action in ("list", "show") and not (a.action == "show" and not a.group):
+        d = api("GET", "/api/v1/groups" + (f"/{a.group}" if a.action == "show" else ""))
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        for g in ([d["group"]] if a.action == "show" else d["groups"]):
+            kind = "built in" if g["builtin"] else f"rank {g['rank']}"
+            print(f"{g['name']} ({g['id']}, {kind}): {g['rule']}" + (f"  — {g['description']}" if g.get("description") else ""))
+            print(f"  members ({len(g['members_list'])}): " + (", ".join(m["hostname"] for m in g["members_list"]) or "none"))
+            if a.action == "show":
+                for m in g["members_list"]:
+                    print(f"    {m['hostname']}: {', '.join(m['why'])}")
+            for v in g["builtin_values"]:
+                print(f"  sets {v['key']} = {v['value_text']} ({v['reason']})")
+            for v in g["values"]:
+                print(f"  sets {v['key']}{' [' + v['module'] + ']' if v['module'] else ''} = {v['value_text']}"
+                      + (" (locked)" if v["enforced"] else "") + f"  rev {v['rev']} by {v['by']}")
+        if a.action == "list":
+            print("labels:")
+            for host, labs in sorted(d["labels"].items()):
+                print(f"  {host}: {', '.join(labs['owner']) or '-'}" + (f"  (from facts: {', '.join(labs['facts'])})" if labs["facts"] else ""))
+        return
+    if not a.group:
+        sys.exit(f"oarbank groups {a.action} <group>")
+    if a.action == "create":
+        res = run_op("groups.create", a.group, _group_params(a), a.reason, a.yes, preview=True)
+    elif a.action == "update":
+        params = _group_params(a)
+        if not params:
+            sys.exit("oarbank groups update <group> with what to change: --name, --os, --label, --member, --selector, ...")
+        res = run_op("groups.update", a.group, params, a.reason, a.yes)
+    elif a.action == "rank":
+        if a.move not in ("up", "down", "top", "bottom"):
+            sys.exit("oarbank groups rank <group> up|down|top|bottom")
+        res = run_op("groups.rank", a.group, {"move": a.move}, a.reason, a.yes)
+    else:
+        res = run_op("groups.delete", a.group, {}, a.reason, a.yes, a.confirm)
+    r = (res or {}).get("result") or {}
+    for x in (r.get("joins") or []) + (r.get("leaves") or []):
+        print(f"  {x}")
     print(r.get("message") or json.dumps(r, indent=1, default=str))
 
 
@@ -1249,22 +1357,31 @@ def parser() -> argparse.ArgumentParser:
     n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, host tools, "
                                     "sandbox, settings it sets), approve, reject, state, mode, confirm-identity, sign (its "
                                     "statement) (its settings: oarbank settings)")
-    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "confirm-identity", "sign"])
+    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "confirm-identity", "sign",
+                                      "label"])
     n.add_argument("target")
-    n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES))
+    n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES)
+                                            + "; label: labels, comma-separated")
+    n.add_argument("--remove", action="store_true", help="label: remove these labels instead of adding them")
     n.add_argument("--json", action="store_true", help="show: the node's detail document as JSON")
     n.add_argument("--key", help="sign: the owner's release key (default: the configured one)")
     n.add_argument("--reason")
     n.add_argument("--yes", action="store_true")
     n.set_defaults(fn=cmd_node)
     st = sub.add_parser("settings", help="owner settings: get (effective values and where they come from), set, reset, "
-                                         "overrides (who overrides a fleet default), explain (the whole chain), schema, "
-                                         "set-secret / clear-secret (the ntfy token)")
-    st.add_argument("action", choices=["get", "set", "reset", "overrides", "explain", "schema", "set-secret", "clear-secret"])
+                                         "overrides (who overrides a fleet default), explain (the whole chain), promote (a "
+                                         "group's value to the fleet: canary, then promote), schema, set-secret / "
+                                         "clear-secret (the ntfy token)")
+    st.add_argument("action", choices=["get", "set", "reset", "overrides", "explain", "promote", "schema", "set-secret",
+                                       "clear-secret"])
     st.add_argument("key", nargs="?", help="a setting's key (oarbank settings schema lists them), or a core secret's name")
     st.add_argument("value", nargs="?", help="set: JSON (true, 2, 1.5, null, [\"a\"]) or text; a list setting also takes a,b")
     st.add_argument("--node", help="a node (id or name): its own value; get/explain: the value in effect on it")
-    st.add_argument("--group", help="a group (id or name): built in are macOS, Linux, Windows, Coordinator host")
+    st.add_argument("--group", help="a group (id or name): built in are macOS, Linux, Windows, Coordinator host; promote: "
+                                    "the group whose value moves up")
+    st.add_argument("--nodes", help="set/reset: each of these nodes' own value (comma-separated names): one change set")
+    st.add_argument("--label", help="set/reset: each node carrying this label: its own value, one change set")
+    st.add_argument("--to", help="promote: fleet (the default) or a wider group")
     st.add_argument("--module", help="the module of a module's own setting")
     st.add_argument("--enforce", action="store_true", help="set at the fleet or a group: lock it (lower scopes may not set it)")
     st.add_argument("--explain", action="store_true", help="get: the whole chain for the key")
@@ -1275,6 +1392,31 @@ def parser() -> argparse.ArgumentParser:
     st.add_argument("--confirm")
     st.add_argument("--yes", "-y", action="store_true")
     st.set_defaults(fn=cmd_settings)
+    gr = sub.add_parser("groups", help="node groups: list (by rank, with members and labels), show (members and why), "
+                                       "create, update, rank (up|down|top|bottom), delete")
+    gr.add_argument("action", choices=["list", "show", "create", "update", "rank", "delete"])
+    gr.add_argument("group", nargs="?", help="a group's id or name (create: its name)")
+    gr.add_argument("move", nargs="?", help="rank: up, down, top or bottom")
+    gr.add_argument("--name", help="update: a new name")
+    gr.add_argument("--os", action="append", help="selector: darwin (macOS), linux or windows (repeat for any of several)")
+    gr.add_argument("--arch", action="append", help="selector: arm64 or amd64")
+    gr.add_argument("--label", action="append", help="selector: nodes carrying this label (repeat: every one)")
+    gr.add_argument("--hostname", action="append", help="selector: a node name or glob (mac-*)")
+    gr.add_argument("--battery", action=argparse.BooleanOptionalAction, default=None,
+                    help="selector: nodes with (--battery) or without (--no-battery) a battery")
+    gr.add_argument("--ram-min", type=float, help="selector: at least this many GB of RAM")
+    gr.add_argument("--ram-max", type=float, help="selector: at most this many GB of RAM")
+    gr.add_argument("--cores-min", type=float, help="selector: at least this many CPU cores")
+    gr.add_argument("--selector", help="the selector as JSON (merged under the flags)")
+    gr.add_argument("--no-selector", action="store_true", help="update: members only, no selector")
+    gr.add_argument("--member", action="append", help="an explicit member (name or id; repeat or comma-separate)")
+    gr.add_argument("--no-members", action="store_true", help="update: no explicit members")
+    gr.add_argument("--description")
+    gr.add_argument("--json", action="store_true")
+    gr.add_argument("--reason")
+    gr.add_argument("--confirm")
+    gr.add_argument("--yes", "-y", action="store_true")
+    gr.set_defaults(fn=cmd_groups)
     jb = sub.add_parser("job", help="a job: show (attempts, checkpoint, results, why), retry, cancel")
     jb.add_argument("action", choices=["show", "retry", "cancel"])
     jb.add_argument("id")
@@ -1398,6 +1540,7 @@ def parser() -> argparse.ArgumentParser:
                                             "(rollback, disable, verify, check, show: where it runs, per platform; ready: what stands between it and "
                                             "running work, every module without a name)")
     mo.add_argument("--node", action="append", help="canary or pin node (repeat for several canary nodes)")
+    mo.add_argument("--group", help="canary: on the members of this node group (as it stands when the canary starts)")
     mo.add_argument("--reason")
     mo.add_argument("--yes", action="store_true")
     mo.add_argument("--dry-run", action="store_true")
@@ -1407,6 +1550,7 @@ def parser() -> argparse.ArgumentParser:
     se.add_argument("module")
     se.add_argument("name", nargs="?")
     se.add_argument("--node", help="a node's own value (hostname or id) instead of the module's")
+    se.add_argument("--group", help="a node group's value: its members use it unless they have their own")
     se.add_argument("--reason")
     se.add_argument("--yes", action="store_true")
     se.set_defaults(fn=cmd_secret)

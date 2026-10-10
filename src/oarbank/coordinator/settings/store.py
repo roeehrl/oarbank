@@ -4,9 +4,10 @@
   missing row means inherit; Reset deletes the row and never writes a default as a value, so a later upstream change
   still flows down and "overridden here" stays truthful. `enforced` is a lock (fleet and group only): lower scopes may
   not set the key while it holds.
-- `node_groups` are named selectors over node facts with a unique rank: a node in several groups resolves by rank,
-  highest wins. Built-in groups (one per OS and the coordinator's own machine) have system-defined membership and the
-  lowest ranks; owner groups come later and rank above them.
+- `node_groups` are named selectors over node facts and labels, with explicit members and a unique rank: a node in
+  several groups resolves by rank, highest wins. Built-in groups (one per OS and the coordinator's own machine) have
+  system-defined membership and the lowest ranks; owner groups rank above them (groups.py). `node_labels` holds the
+  owner's labels on each node.
 - Every save is one change set with one revision (`system_state.settings_rev`), shared by its rows; a node's effective
   settings carry the revision at which they last changed (apply.sync_nodes)."""
 import json
@@ -28,8 +29,15 @@ CREATE TABLE IF NOT EXISTS setting_values (
   PRIMARY KEY (scope, scope_id, module, key));
 CREATE INDEX IF NOT EXISTS setting_values_key ON setting_values(key, module);
 CREATE TABLE IF NOT EXISTS node_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, rank INTEGER UNIQUE NOT NULL,
-  selector_json TEXT NOT NULL, builtin INTEGER NOT NULL DEFAULT 0);
+  selector_json TEXT NOT NULL, builtin INTEGER NOT NULL DEFAULT 0,
+  members_json TEXT NOT NULL DEFAULT '[]',  -- explicit members (node ids), beside the selector (groups.py)
+  description TEXT, updated_by TEXT, updated_at REAL);
+CREATE TABLE IF NOT EXISTS node_labels (node_id TEXT NOT NULL, label TEXT NOT NULL, set_by TEXT, set_at REAL,
+  PRIMARY KEY (node_id, label));
 """
+# columns added to node_groups after it first shipped (db.ADDED_COLUMNS)
+GROUP_COLUMNS = {"members_json": "TEXT NOT NULL DEFAULT '[]'", "description": "TEXT", "updated_by": "TEXT",
+                 "updated_at": "REAL"}
 
 # id, name, rank, selector: the built-in groups (the coordinator's own machine above the OS groups)
 BUILTIN_GROUPS = (("os-darwin", "macOS", 1, {"os": "darwin"}),
@@ -38,7 +46,7 @@ BUILTIN_GROUPS = (("os-darwin", "macOS", 1, {"os": "darwin"}),
                   ("coordinator-host", "Coordinator host", 4, {"coordinator_host": True}))
 # values a built-in group sets by itself (shown with their reason; a node may still override them)
 BUILTIN_VALUES = {"coordinator-host": {"disabled_services": ([], "the coordinator's own machine runs every service")}}
-OWNER_RANK_MIN = 100            # owner groups (phase 4) rank above every built-in group
+OWNER_RANK_MIN = 100            # owner groups rank above every built-in group
 
 
 def ensure(conn) -> None:
@@ -49,9 +57,20 @@ def ensure(conn) -> None:
 
 
 def groups(r) -> list[dict]:
-    out = r.q("SELECT id, name, rank, selector_json, builtin FROM node_groups ORDER BY rank")
+    """Every group, lowest rank first: {id, name, rank, selector, members, description, builtin, updated_by, updated_at}."""
+    out = r.q("SELECT id, name, rank, selector_json, builtin, members_json, description, updated_by, updated_at "
+              "FROM node_groups ORDER BY rank")
     for g in out:
         g["selector"] = json.loads(g.pop("selector_json") or "{}")
+        g["members"] = json.loads(g.pop("members_json") or "[]")
+    return out
+
+
+def labels(r) -> dict:
+    """{node_id: [owner labels]}."""
+    out: dict = {}
+    for x in r.q("SELECT node_id, label FROM node_labels ORDER BY label"):
+        out.setdefault(x["node_id"], []).append(x["label"])
     return out
 
 

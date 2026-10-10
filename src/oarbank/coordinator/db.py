@@ -309,7 +309,7 @@ class DB:
             # one transaction: a reader (the console) sees the whole schema or none of it
             self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + ACCESS_SCHEMA + COORD_BUILDS_SCHEMA
                                     + JOIN_SCHEMA + "COMMIT;")
-            for table, cols in ADDED_COLUMNS.items():
+            for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
                 _ensure_columns(self.conn, table, cols)
             settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
