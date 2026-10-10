@@ -24,7 +24,7 @@ def _estimated_view(db: DB, node: dict, body: dict | None) -> predicates.NodeVie
                 "free_mem_gb": cap.get("mem_gb_free") if cap.get("mem_gb_free") is not None else 1e9,
                 "ready_datasets": jl(node["ready_datasets_json"], []) or [],
                 "pool_jobs_only": bool(cap.get("pool_jobs_only")), "gpu_jobs": cap.get("gpu_jobs")}
-    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db)
+    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
     return core.node_view_for_claim(db, node, offered, set(body.get("ready_datasets") or []), free_cpu, free_mem, body)

@@ -66,6 +66,7 @@ class NodeView:
     bootstrap_grants: bool = False    # the agent runs bootstrap jobs with the bootstrap grants (modsandbox.bootstrap_enforced)
     runner_ready: set = field(default_factory=set)   # offered modules whose runner started here (doctor_ran) in a RUNNER_STATE
     secrets_unset: dict = field(default_factory=dict)  # {module: declared secrets with no readable value for this node}
+    settings_unset: dict = field(default_factory=dict)  # {module: its required settings with no value for this node}
     release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
 
     @property
@@ -289,6 +290,9 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
                                 [f"{gpuapi.describe(g)} ({g['source']})" for g in miss] or None))(gpu_unmet(job, plat, nv.gpu_apis)),
         lambda: (lambda miss: R("secrets set for this node", "SECRETS_NOT_SET", not miss, miss, job["secrets"]))(
             sorted(set(job["secrets"]) & nv.secrets_unset.get(mod, set()))),
+        # a bootstrap job gets no settings (spec/sandbox.md), so it needs none of them
+        lambda: (lambda miss: R("required settings set for this node", "SETTINGS_NOT_SET", not miss, miss, "[]"))(
+            [] if boot else sorted(nv.settings_unset.get(mod) or [])),
         lambda: R("job platforms", "STAGE_PLATFORM_UNSUPPORTED", bool(plat) and pf.matches(plat, pl["platforms"]) if pl["platforms"]
                   else True, plat, pl["platforms"]),
         lambda: R("a feasible class of its unit", "STAGE_PLATFORM_UNSUPPORTED",

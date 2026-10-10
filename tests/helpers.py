@@ -60,7 +60,8 @@ def make_db(path, modules=(TOY_DIR, RELAY_DIR)) -> DB:
     for m in modules:
         install(d, m)
     modcalls.use(d)
-    set_fleet(d, "module.settings", {"goldens": [GOLDEN]}, "relay")
+    if RELAY_DIR in modules:
+        set_module(d, "relay", {"goldens": [GOLDEN]})
     for did in READY:
         d.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at) VALUES(?,?,?,?,?,?)",
             (did, did.split(":")[0], "relay", json.dumps({"frames": "1-24", "scene": "atrium"}), "[]", clock.now()))
@@ -123,16 +124,23 @@ def settings_apply(db, *changes, actor="test") -> dict:
 
 
 def set_fleet(db, key, value, module=""):
-    """An owner's fleet value: through settings.apply, or for a key another operation owns (a registry, a module's
-    pipeline or settings) through that key's store as its operation writes it."""
+    """An owner's fleet value: through settings.apply (a module's core key with `module`), or for a key another operation
+    owns (the folder registry, dataset origins) through that key's store as its operation writes it."""
     from oarbank.coordinator.settings import REGISTRY, apply, write_fleet
-    d = REGISTRY[key]
-    if d.writer or d.qualifier:
+    d = REGISTRY.get(key)
+    if d is not None and d.writer:
         with db.tx():
             write_fleet(db, key, value, "test", module)
             apply.sync_nodes(db)
         return None
-    return settings_apply(db, {"scope": "fleet", "key": key, "value": value})
+    return settings_apply(db, {"scope": "fleet", "key": key, "value": value, **({"module": module} if module else {})})
+
+
+def set_module(db, module, values: dict, actor="test"):
+    """A module's own settings at fleet scope ({key: value}, None resets), validated against its settings schema."""
+    from oarbank.coordinator.settings import modkeys
+    with db.tx():
+        return modkeys.write(db, module, values, actor)
 
 
 def set_node(db, node, key, value=None, reset=False, module=""):

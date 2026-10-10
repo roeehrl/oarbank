@@ -66,6 +66,8 @@ CODES: list[ReasonCode] = [
       remedies=["nodes.run_doctor"]),
     C("SECRETS_NOT_SET", "job_pending", "Its stage receives secrets {missing}, which have no value for this node",
       remedies=["secrets.set"]),
+    C("SETTINGS_NOT_SET", "job_pending", "Module {module} needs settings {missing}, which have no value for this node",
+      remedies=["settings.apply"]),
     C("DATASET_PLATFORM_MISMATCH", "job_pending", "Its dataset is bound to {platforms}; this node is {platform}", remedies=["jobs.cancel"]),
     C("OS_VERSION_UNSUPPORTED", "job_pending", "Module {module} needs another OS version than {os_version} (requires.os)"),
     C("TOOL_NOT_FOUND", "job_pending", "Module {module} needs a host tool this node does not have: {tools}",

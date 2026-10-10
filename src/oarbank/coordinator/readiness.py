@@ -5,7 +5,8 @@ the owner's signature, no node has a host tool it asks for in a version it accep
 pool its stages need. This walks the whole path, one step after another, each with its status, the reason and the
 exact action (an operation the console offers as a button or a link, and the command):
 
-  installed -> sandbox grants approved -> enabled -> where it runs (the fleet's platforms it supports) -> release
+  installed -> sandbox grants approved -> enabled -> required settings (the keys its manifest marks required, set for
+  the fleet or on each node) -> where it runs (the fleet's platforms it supports) -> release
   built per platform -> release signed and current per platform -> host tools on the nodes (per request, how many
   nodes resolve it and why the others do not) -> nodes that can run each stage (and why the others cannot) ->
   certified nodes -> next: the module's own operations.
@@ -138,6 +139,53 @@ def _group(rows: list[tuple[str, list[str]]]) -> list[dict]:
     return [{"reasons": list(r), "nodes": hosts} for r, hosts in out.items()]
 
 
+def _settings_step(db: DB, name: str, man, nodes: list[dict], needs: list) -> dict:
+    """"Required settings": the keys the module's settings schema marks required, with a value for the fleet or, for a
+    node setting, on every node of a platform it supports; the nodes still missing one, grouped by what they miss."""
+    from .settings import modkeys
+    from .settings import resolve as V
+    snap = V.snapshot(db)
+    keys = [k for k in modkeys.declared(db, name) if k.required]
+    href = f"/modules/{name}/settings"
+    if not keys:
+        n = len(modkeys.declared(db, name))
+        return _step("settings", "Required settings", "done", f"it declares {_plural(n, 'setting')}, none required" if n else
+                     "it declares no settings", [_act("Settings", href=href)] if n else [])
+    fleet_missing = set(modkeys.unset(snap, None, name))
+    mine = [n for n in nodes if platforms.node_platform(n) in man.requires.platforms]
+    per_node = {n["hostname"]: modkeys.unset(snap, n, name) for n in mine}
+    short = [(h, [f"{k} not set here" for k in miss]) for h, miss in per_node.items() if miss]
+    cmd = lambda k: f"oarbank settings set {k} <value> --module {name}"
+    items, blocking = [], []
+    for k in keys:
+        lacking = [h for h, miss in per_node.items() if k.name in miss]
+        if k.name not in fleet_missing:
+            items.append({"status": "done", "text": f"{k.label} ({k.name}): set for the fleet"})
+            continue
+        if k.scope == "fleet" or (mine and len(lacking) == len(mine)) or not mine:
+            blocking.append(k.name)
+            items.append({"status": "blocked", "text": f"{k.label} ({k.name}, a {k.scope} setting): no value"
+                          + (" on any node" if k.scope == "node" and mine else ""), "command": cmd(k.name)})
+        else:
+            items.append({"status": "waiting" if lacking else "done",
+                          "text": f"{k.label} ({k.name}): no fleet value; set on {len(mine) - len(lacking)} of "
+                                  f"{_plural(len(mine), 'node')}" + (f", missing on {', '.join(lacking)}" if lacking else "")})
+    if short:
+        items.append({"status": "waiting", "text": f"{len(short)} of {_plural(len(mine), 'node')}: {name}'s work waits there "
+                      "(SETTINGS_NOT_SET)", "groups": _group(short)})
+    if blocking:
+        needs.append(f"set {', '.join(blocking)}")
+        return _step("settings", "Required settings", "blocked",
+                     f"{name} needs {', '.join(blocking)} before its work runs (SETTINGS_NOT_SET): set "
+                     f"{'it' if len(blocking) == 1 else 'them'} in its Settings tab",
+                     [_act("Set in Settings", href=href, command=cmd(blocking[0]))], items)
+    if short:
+        return _step("settings", "Required settings", "done", f"every required setting has a value, except on "
+                     f"{_plural(len(short), 'node')} where its work waits", [_act("Settings", href=href)], items)
+    return _step("settings", "Required settings", "done", f"every required setting has a value ({', '.join(k.name for k in keys)})",
+                 [_act("Settings", href=href)], items)
+
+
 def module(db: DB, name: str, now: float | None = None) -> dict | None:
     """The checklist of one installed module: {name, version, state, summary, needs, steps}."""
     from oarbank_sdk import manifest as mf
@@ -170,6 +218,7 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
 
     # 3. enabled
     enabled = bool(ch["current"]) and not ch["disabled"]
+    nodes = [n for n in db.q("SELECT * FROM nodes WHERE lifecycle NOT IN ('retired') ORDER BY hostname")]
     if enabled:
         steps.append(_step("enabled", "Enabled", "done", f"{ver} is the current version on every node"))
     elif ch["current"] and ch["disabled"]:
@@ -182,8 +231,10 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
                            "installing enables nothing" + ("" if granted else "; approve its grants first"),
                            [_act("Enable", op="modules.enable", target=f"{name}@{ver}", command=f"oarbank module enable {name}@{ver}")]))
 
+    # 3b. required settings: keys the module marks required need a value before its work runs (SETTINGS_NOT_SET)
+    steps.append(_settings_step(db, name, man, nodes, needs))
+
     # 4. where it runs
-    nodes = [n for n in db.q("SELECT * FROM nodes WHERE lifecycle NOT IN ('retired') ORDER BY hostname")]
     by_plat = {}
     for n in nodes:
         by_plat.setdefault(platforms.node_platform(n) or "?", []).append(n)

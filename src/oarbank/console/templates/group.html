@@ -34,6 +34,12 @@ which nodes it reaches first. To roll a change out, set it here on a small group
 <div class="settings-sections">
 {% for sec in sections %}{{ S.section_form(sec, "group", g.id, "group:" ~ g.id, "/groups/" ~ g.id, "the group " ~ g.name, explain) }}{% endfor %}
 </div>
+{% if modules %}<h3 id="modules">Modules on its members</h3>
+<p class="small mut">Per module: whether it runs on the group's members, the services it does not run there, and its own node
+settings. A value set here reaches only that module's runners and services; lock it so members cannot override it.</p>
+<div class="settings-sections">
+{% for sec in modules %}{{ S.section_form(sec, "group", g.id, "group:" ~ g.id, "/groups/" ~ g.id, sec.module ~ " on the group " ~ g.name, explain) }}{% endfor %}
+</div>{% endif %}
 {{ S.promote_forms(sections, g.id, "/groups/" ~ g.id) }}
 
 <div class="grid">

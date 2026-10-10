@@ -15,8 +15,10 @@ from . import registry as R
 
 OUT = Path(__file__).resolve().parents[4] / "rust" / "crates" / "oarbank-protection" / "src" / "settings_table.rs"
 
-# the policy section also carries what is not a registry key: each module's node settings and the protection section
-EXTRA_POLICY = (("module_settings", "Object", False, {}), ("protection", "Object", True, None))
+# the policy section also carries what is not one registry key: per module, the services a node does not run (each
+# module's `services.disabled`, as module/service) and its node-scoped settings, and the protection section
+EXTRA_POLICY = (("disabled_services", "Strings", False, []), ("module_settings", "Object", False, {}),
+                ("protection", "Object", True, None))
 
 
 def _kind(d: R.Setting) -> str:

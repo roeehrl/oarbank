@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS modules (
   PRIMARY KEY (name, version));
 CREATE TABLE IF NOT EXISTS module_channels (
   name TEXT PRIMARY KEY, current TEXT, previous TEXT, canary TEXT, canary_nodes_json TEXT DEFAULT '[]',
-  disabled INT DEFAULT 0, updated_at REAL);
+  updated_at REAL);                               -- whether it runs is the setting [module] enabled
 CREATE TABLE IF NOT EXISTS module_pins (name TEXT NOT NULL, node_id TEXT NOT NULL, version TEXT NOT NULL,
   PRIMARY KEY (name, node_id));
 -- Module secrets (modsecrets.py): write-only values, encrypted under the coordinator's secrets key; node_id '' is the
@@ -303,11 +303,12 @@ class DB:
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
+            from .settings import modkeys as settings_modkeys
             from .settings import store as settings_store
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
-            self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + ACCESS_SCHEMA + COORD_BUILDS_SCHEMA
-                                    + JOIN_SCHEMA + "COMMIT;")
+            self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + settings_modkeys.SCHEMA + ACCESS_SCHEMA
+                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
             for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
                 _ensure_columns(self.conn, table, cols)
             settings_store.ensure(self.conn)

@@ -1003,8 +1003,11 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     @app.get("/api/v1/settings/schema")
     def api_settings_schema(actor=Depends(who)):
         from .settings import registry, store
-        return {"settings": registry.schema_doc(), "sections": {k: {"title": t, "help": h} for k, (t, h) in registry.SECTIONS.items()},
-                "groups": store.groups(db), "scopes": list(registry.SCOPES)}
+        from .settings import resolve as V
+        snap = V.snapshot(db)
+        return {"settings": registry.schema_doc(snap.defs), "sections": {k: {"title": t, "help": h} for k, (t, h) in registry.SECTIONS.items()},
+                "groups": store.groups(db), "scopes": list(registry.SCOPES), "modules": snap.modules,
+                "module_core_keys": list(registry.MODULE_CORE_KEYS)}
 
     @app.get("/api/v1/settings/effective")
     def api_settings_effective(node: str = "", module: str = "", campaign: str = "", actor=Depends(who)):

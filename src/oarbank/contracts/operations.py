@@ -206,9 +206,6 @@ OPS: list[Operation] = [
               gui=CON("settings.origins.update")),
 
     # ------------------------------------------------------------------ modules
-    Operation(id="modules.set_pipeline", area="modules", summary="Run a module single-stage or split",
-              tier="T2", preview=True, min_role="admin", category="modify", idempotency="declarative",
-              routes=OPR("modules.set_pipeline"), cli=["oarbank pipeline single|split --module <module>"], gui=CON("modules.set_pipeline")),
     Operation(id="modules.install", area="modules", summary="Install a module bundle: verify every file hash and the digest, check compatibility, self-test (enables nothing)",
               tier="T2", preview=True, min_role="admin", category="create", reverses="modules.uninstall", idempotency="natural",
               routes=[*OPR("modules.install"), R("POST", "/api/v1/modules/bundles")], cli=["oarbank module install <bundle.mfb>"],

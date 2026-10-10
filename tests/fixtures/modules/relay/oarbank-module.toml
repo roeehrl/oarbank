@@ -73,6 +73,9 @@ yieldable = true
 [bundle]
 executables = ["services/*.sh"]
 
+[settings]
+schema = "schemas/settings.schema.json"
+
 [results]
 schema = "schemas/result.schema.json"
 schema_version = 1

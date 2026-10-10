@@ -611,11 +611,17 @@ def bulk_page(r, group: str = "", label: str = "") -> dict:
 
 
 def overrides_page(r, key: str, module: str = "") -> dict | None:
-    """The reverse view: who overrides a fleet default, with what."""
-    from ..coordinator.settings import REGISTRY
-    if key not in REGISTRY:
+    """The reverse view: who overrides a fleet default (or a module's fleet value), with what."""
+    from ..coordinator.settings import SettingError
+    try:
+        return settings_views.overrides_doc(r, key, module)
+    except SettingError:
         return None
-    return settings_views.overrides_doc(r, key, module)
+
+
+def module_settings_page(r, name: str) -> dict | None:
+    """A module's Settings tab (settings/views.module_page)."""
+    return settings_views.module_page(r, name)
 
 
 # ------------------------------------------------------------------ protection editor

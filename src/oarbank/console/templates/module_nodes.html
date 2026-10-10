@@ -5,7 +5,7 @@
 <div class="row"><h1>{{ name }}</h1><span class="chip">{{ man.module.id }} {{ man.module.version }}</span></div>
 <nav class="row small mod-tabs-nav" aria-label="module sections">
   {% for d in man.ui.pages %}<a href="{{ '/modules/' ~ name if d.slot == 'module.overview' else '/m/' ~ name ~ '/' ~ d.id }}">{{ d.title }}</a>{% endfor %}
-  <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a><a href="/modules/{{ name }}/nodes" aria-current="page">Nodes</a>{% if man.secrets %}<a href="/modules/{{ name }}/secrets">Secrets</a>{% endif %}
+  <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a><a href="/modules/{{ name }}/nodes" aria-current="page">Nodes</a>{% if man.secrets %}<a href="/modules/{{ name }}/secrets">Secrets</a>{% endif %}<a href="/modules/{{ name }}/settings">Settings</a>
 </nav>
 <h2>Host tools on each node</h2>
 <p class="small mut">It asks for {% for q in (matrix.requests if matrix else []) %}<span class="mono">{{ q.id }}{% if q.version %} {{ q.version }}{% endif %}{% if q.arch != 'any' %} ({{ q.arch }}){% endif %}</span>{{ ', ' if not loop.last }}{% else %}no host tools{% endfor %}.

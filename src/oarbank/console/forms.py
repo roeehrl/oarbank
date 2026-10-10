@@ -28,10 +28,10 @@ def _setting_value(form, key: str, kind: str):
             return json.loads(raw or "{}")
         except ValueError:
             raise FieldErrors([{"key": key, "message": "not valid JSON"}])
-    if kind == "number":
+    if kind in ("number", "selectnum"):
         if raw == "":
             d = REGISTRY.get(key)
-            if d is not None and d.nullable:
+            if (d is not None and d.nullable) or form.get(f"null.{key}") == "1":
                 return None
             raise FieldErrors([{"key": key, "message": "enter a number"}])
         try:
@@ -57,7 +57,7 @@ def settings_changes(form) -> dict:
     if form.get("bulk"):
         return bulk_changes(form)
     scope, sid = form.get("scope") or "node", form.get("scope_id") or ""
-    base = {"scope": scope, "scope_id": sid}
+    base = {"scope": scope, "scope_id": sid, **({"module": form.get("module").strip()} if form.get("module") else {})}
     getlist = getattr(form, "getlist", None)
     keys = getlist("keys") if getlist else [form.get("keys")] if form.get("keys") else []
     reset = (form.get("reset") or "").strip()
@@ -261,7 +261,6 @@ MAPPERS = {
     "secrets.clear": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {}),
                                      **({"group": f.get("p.group")} if f.get("p.group") else {})},
     "jobs.set_priority": lambda f, ctx: {"priority": int(f.get("priority") or 0)},
-    "modules.set_pipeline": lambda f, ctx: {"mode": f.get("mode")},
 }
 
 

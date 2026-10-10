@@ -294,7 +294,8 @@ def host_callbacks(db) -> dict:
         return {"exists": bool(r), "size": r["size"] if r else None}
 
     def settings_get(module, p):
-        return {"value": (fleet_value(_db(), "module.settings", module) or {}).get(p.get("key"))}
+        from . import effects
+        return {"value": effects.module_settings(_db(), module).get(p.get("key"))}
 
     def secrets_get(module, p):
         from . import modsecrets

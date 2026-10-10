@@ -493,7 +493,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no group {gid} (or the database is busy)", "actor": actor}, 404)
         d["explain"] = request.query_params.get("explain") or ""
         _saved(d, request)
-        _with_errors(d["sections"], None, None)
+        _with_errors(d["sections"] + d["modules"], None, None)
         return render(request, "group.html", {**d, "actor": actor})
 
     @app.get("/frag/groups/preview", response_class=HTMLResponse)
@@ -530,8 +530,30 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return None
         d["explain"] = request.query_params.get("explain") or ""
         _saved(d, request)
-        _with_errors(d["sections"], errors, form)
+        _with_errors(d["sections"] + d["modules"], errors, form)
         return d
+
+    async def module_settings_ctx(name: str, request: Request, actor: str, errors: list | None = None, form=None):
+        """A module's Settings tab (docs/design/settings.md, "Module settings"): its keys at fleet scope, the values set
+        below the fleet, and its readiness on top; after a refused save, the refusals beside their fields."""
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        d = await drill(views.module_settings_page, name)
+        if man is None or d is None:
+            return None
+        d["explain"] = request.query_params.get("explain") or ""
+        _saved(d, request)
+        _with_errors(d["sections"], errors, form)
+        rd = await coordinator_json("GET", f"/api/v1/modules/{name}/readiness", actor)
+        return {**d, "name": name, "man": man, "tab": "settings", "readiness": rd.json() if rd.status_code == 200 else None}
+
+    @app.get("/modules/{name}/settings", response_class=HTMLResponse)
+    async def module_settings(name: str, request: Request):
+        actor = who(request)
+        d = await module_settings_ctx(name, request, actor)
+        if d is None:
+            return render(request, "error.html", {"message": f"no module {name} (or the database is busy)", "actor": actor}, 404)
+        return render(request, "module_settings.html", {**d, "actor": actor})
 
     def _saved(d: dict, request) -> None:
         """After a save, its message sits in the saved section's own status line (one announcement, not two)."""
@@ -542,15 +564,17 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     def _with_errors(sections: list, errors: list | None, form) -> None:
         by_key: dict = {}
         for e in errors or []:
-            by_key.setdefault(e.get("key") or "", []).append(e.get("message") or "")
+            by_key.setdefault((e.get("key") or "", e.get("module") or ""), []).append(e.get("message") or "")
         for sec in sections:
             sec["form_errors"] = []
             for r in sec["rows"] + sec["advanced"]:
-                msgs = by_key.get(r["key"])
+                msgs = by_key.get((r["key"], r.get("module") or ""))
+                if not msgs and (form is None or (form.get("module") or "") == (r.get("module") or "")):
+                    msgs = by_key.get((r["key"], ""))            # a refusal before the key was read as the module's
                 if not msgs:
                     continue
                 r["form_errors"] = msgs
-                sec["form_errors"] += [{"key": r["key"], "label": r["label"], "message": m} for m in msgs]
+                sec["form_errors"] += [{"key": r["key"], "dom": r.get("dom"), "label": r["label"], "message": m} for m in msgs]
                 if form is not None and form.get(f"o.{r['key']}"):
                     r["form_value"], r["typed"] = form.get(f"v.{r['key']}") or "", True
                     r["typed_lock"] = bool(form.get(f"enf.{r['key']}"))
@@ -1164,6 +1188,10 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             d = await node_settings_ctx(page[5:], request, errors, form)
             if d is not None:
                 return render(request, "node_settings.html", {**d, "actor": actor, "tab": "settings"}, 400)
+        if page.startswith("module:"):
+            d = await module_settings_ctx(page[7:], request, actor, errors, form)
+            if d is not None:
+                return render(request, "module_settings.html", {**d, "actor": actor}, 400)
         if page == "fleet":
             d = await settings_ctx(request, actor)
             _with_errors(d["fs"]["node_defaults"] + d["fs"]["fleet"], errors, form)
@@ -1172,7 +1200,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             d = await drill(views.group_page, page[6:])
             if d is not None:
                 d["explain"], d["saved"] = "", ""
-                _with_errors(d["sections"], errors, form)
+                _with_errors(d["sections"] + d["modules"], errors, form)
                 return render(request, "group.html", {**d, "actor": actor}, 400)
         if page == "bulk":
             d = await drill(views.bulk_page, "", "")

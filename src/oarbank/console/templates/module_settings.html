@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% import "_settings.html" as S with context %}
+{% block title %}{{ name }} settings · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>{{ name }}</h1><span class="chip">{{ man.module.id }} {{ man.module.version }}</span></div>
+<nav class="row small mod-tabs-nav" aria-label="module sections">
+  {% for d in man.ui.pages %}<a href="{{ '/modules/' ~ name if d.slot == 'module.overview' else '/m/' ~ name ~ '/' ~ d.id }}">{{ d.title }}</a>{% endfor %}
+  <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a>{% if man.sandbox.tools %}<a href="/modules/{{ name }}/nodes">Nodes</a>{% endif %}{% if man.secrets %}<a href="/modules/{{ name }}/secrets">Secrets</a>{% endif %}<a href="/modules/{{ name }}/settings" aria-current="page">Settings</a>
+</nav>
+{% if readiness %}{{ m.readiness(readiness, return_to="/modules/" ~ name ~ "/settings") }}{% endif %}
+<div class="card small settings-intro">
+  <p class="mut" style="margin:0">{{ name }}'s settings for the whole fleet. A node setting can also be set for a node group or one
+  node (each node's Settings tab, under {{ name }}); it reaches only {{ name }}'s runners and services there. Reset to inherited
+  deletes the value, so the default applies again.{% if registration %} Declared by {{ name }} {{ registration.version }}.{% endif %}</p>
+  {% if unset %}<p class="field-error" role="status"><span class="sr-only">Error:</span> Required settings with no value:
+    {% for k in unset %}<a href="#s-{{ name }}-module-{{ name }}-{{ k }}" class="mono">{{ k }}</a>{{ ', ' if not loop.last }}{% endfor %}. {{ name }}'s work waits (SETTINGS_NOT_SET) until they are set.</p>
+  {% elif unset_nodes %}<p class="field-error" role="status"><span class="sr-only">Error:</span> Required settings with no value on
+    {% for h, ks in unset_nodes | dictsort %}{{ h }} ({{ ks | join(', ') }}){{ ', ' if not loop.last }}{% endfor %}: set them for the fleet or on those nodes.</p>{% endif %}
+</div>
+<div class="settings-sections">
+{% for sec in sections %}{{ S.section_form(sec, "fleet", "", "module:" ~ name, "/modules/" ~ name ~ "/settings", name ~ " on the whole fleet", explain) }}{% endfor %}
+</div>
+<section class="card small" aria-labelledby="h-below"><h2 id="h-below">Set for groups and nodes</h2>
+{% if below %}<table class="small"><caption class="sr-only">{{ name }}'s settings set below the fleet</caption>
+<tr><th scope="col">where</th><th scope="col">setting</th><th scope="col">value</th><th scope="col">changed</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+{% for b in below %}<tr><td>{% if b.scope == 'node' %}<a href="/nodes/{{ b.scope_id }}/settings#s-{{ b.dom }}">{{ b.name }}</a>{% else %}group {{ b.name }}{% endif %}</td>
+  <td>{{ b.label }} <span class="mono mut">{{ b.key }}</span></td><td class="mono">{{ b.value_text }}</td>
+  <td class="mut">rev {{ b.rev }} · {{ b.by }} · {{ b.at | ago }}</td>
+  <td class="actions">{{ m.op_form("settings.apply", b.scope_id, "Reset to inherited", params={"changes": [{"scope": b.scope, "scope_id": b.scope_id, "module": name, "key": b.key, "reset": true}]}, confirm="Reset " ~ b.label ~ " on " ~ b.name ~ "? It inherits again.", tier="T1", return_to="/modules/" ~ name ~ "/settings") }}</td></tr>
+{% endfor %}</table>
+{% else %}<p class="mut">No group or node sets any of {{ name }}'s settings: every node gets the values above.</p>{% endif %}
+</section>
+{% if orphans %}<section class="card small" aria-labelledby="h-orphans"><h2 id="h-orphans">Values {{ name }} no longer declares</h2>
+<p class="mut">{{ name }} {{ registration.version if registration else '' }} does not declare these keys: their values are kept, unused,
+in case a later version declares them again.</p>
+<table class="small"><tr><th scope="col">key</th><th scope="col">where</th><th scope="col">value</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+{% for o in orphans %}<tr><td class="mono">{{ o.name }}</td><td>{{ o.where }}</td><td class="mono">{{ o.value_text }}</td>
+  <td class="actions">{{ m.op_form("settings.apply", o.scope_id or o.scope, "Delete", params={"changes": [{"scope": o.scope, "scope_id": o.scope_id, "module": name, "key": o.key, "reset": true}]}, confirm="Delete the kept value of " ~ o.name ~ "?", tier="T1", return_to="/modules/" ~ name ~ "/settings") }}</td></tr>
+{% endfor %}</table></section>{% endif %}
+{% endblock %}

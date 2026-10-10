@@ -45,7 +45,7 @@ BUILTIN_GROUPS = (("os-darwin", "macOS", 1, {"os": "darwin"}),
                   ("os-windows", "Windows", 3, {"os": "windows"}),
                   ("coordinator-host", "Coordinator host", 4, {"coordinator_host": True}))
 # values a built-in group sets by itself (shown with their reason; a node may still override them)
-BUILTIN_VALUES = {"coordinator-host": {"disabled_services": ([], "the coordinator's own machine runs every service")}}
+BUILTIN_VALUES = {"coordinator-host": {"services.disabled": ([], "the coordinator's own machine runs every service")}}
 OWNER_RANK_MIN = 100            # owner groups rank above every built-in group
 
 

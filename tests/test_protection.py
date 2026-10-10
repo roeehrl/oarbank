@@ -9,7 +9,7 @@ import pytest
 from oarbank.coordinator import core, invariants, modcalls
 
 from helpers import certify, enrolled_node, fresh, make_db
-from helpers import put_node, set_fleet, set_protection
+from helpers import put_node, set_fleet, set_module, set_protection
 
 
 @pytest.fixture
@@ -56,9 +56,9 @@ def test_s17_flags_admission_under_a_memory_floor(db):
 def test_disabled_service_zeroes_its_pools(db):
     n = enrolled_node(db)[1]
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"scorer": 4}}), n["node_id"]))
-    put_node(db, n, "disabled_services", ["relay/scorer"])
+    put_node(db, n, "services.disabled", ["scorer"], "relay")
     assert core._node_pools(fresh(db, n)) == {"scorer": 0}
-    put_node(db, n, "disabled_services", [])
+    put_node(db, n, "services.disabled", [], "relay")
     assert core._node_pools(fresh(db, n)) == {"scorer": 4}
     from oarbank.coordinator import modcalls
     assert modcalls.node_class(fresh(db, n), "relay")["pools"] == {"scorer": 1}
@@ -80,7 +80,7 @@ def test_golden_node_class_has_the_agents_own_pools_and_the_doctors_capabilities
     assert "own" not in modcalls.node_class(fresh(db, n), "toy")["capabilities"]      # another module's doctor
     # a pool only disabled services provide stays off, whatever the node reports
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"containers": 2, "scorer": 4}}), n["node_id"]))
-    put_node(db, n, "disabled_services", ["relay/scorer"])
+    put_node(db, n, "services.disabled", ["scorer"], "relay")
     assert modcalls.node_class(fresh(db, n), "relay")["pools"] == {"containers": 1, "scorer": 0}
     from oarbank_sdk.module_protocol import NodeClass
     NodeClass.model_validate(c)
@@ -109,8 +109,8 @@ def test_goldens_per_platform_certify_each_platform_on_its_own_expectation(db):
     from helpers import GOLDEN, READY, DOCTOR_OK, POOLS, facts_for, relay_result
     from oarbank.coordinator import modcalls, releases
     win_exp = {"score": "0.900000", "tiles": 1536, "image_sha256": "W"}
-    set_fleet(db, "module.settings", {"goldens": [{**GOLDEN, "expected_by_platform": {"windows": win_exp}},
-                                                  {**GOLDEN, "name": "G-linux", "platforms": ["linux"]}]}, "relay")
+    set_module(db, "relay", {"goldens": [{**GOLDEN, "expected_by_platform": {"windows": win_exp}},
+                                         {**GOLDEN, "name": "G-linux", "platforms": ["linux"]}]})
 
     def run(name, platform, result):
         _, n = enrolled_node(db, name, facts=facts_for(platform, os_version="10.0.26100" if platform.startswith("windows") else "6.8"))

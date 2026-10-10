@@ -300,8 +300,6 @@ def _node_directives(db: DB, node: dict) -> dict:
             "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
             "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
-            # the kill switch: a disabled module's services stop on every node (its attempts are revoked)
-            "modules_disabled": sorted(modstore.disabled_names(db)),
             **coordmove.directives(db), **owner.directives(db)}
 
 
@@ -744,7 +742,7 @@ def prefetch_for(db: DB, node: dict) -> list[str]:
 # ---------------------------------------------------------------- dispatch
 # ---------------------------------------------------------------- staged pipelines
 def node_disabled_services(node: dict) -> list[str]:
-    """Services the owner disabled on this node ("<module>/<service>" or "*/<service>"): its effective setting."""
+    """Services the owner disabled on this node, as "<module>/<service>": each module's effective `services.disabled`."""
     from .settings.apply import node_values
     return list((node_values(node).get("policy") or {}).get("disabled_services") or [])
 
@@ -778,26 +776,6 @@ def expand_pipeline(db: DB, job_id: int) -> int | None:
     if hit:
         db.x("UPDATE jobs SET state='done', canonical_result_id=?, done_at=? WHERE job_id=?", (hit, now(), cid))
     return cid
-
-
-def set_pipeline(db: DB, module: str, mode: str, actor: str) -> dict:
-    """Switch a module between single-stage and split (its stage chain). Enabling split expands every queued
-    (pending, never started) eval job into head -> tail, so queued work is not funnelled to the nodes that
-    can run the tail. Disabling leaves already-split jobs as they are (they finish as staged jobs). The
-    module's golden.list gives nodes that can run only the head its head-stage goldens."""
-    if mode not in ("single", "split") or (mode == "split" and not modcalls.info(module).splittable):
-        raise ApiError(400, "bad_pipeline", f"{module}: {mode}")
-    out = {"module": module, "mode": mode, "expanded": 0}
-    with db.tx():
-        from .settings import write_fleet
-        write_fleet(db, "pipeline", mode, actor, module)
-        if mode == "split":
-            for j in db.q("SELECT job_id FROM jobs WHERE module=? AND kind='eval' AND state='pending' AND depends_on IS NULL "
-                          "AND stage IS NULL AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.job_id=jobs.job_id)", (module,)):
-                if expand_pipeline(db, j["job_id"]):
-                    out["expanded"] += 1
-    db.event("pipeline_changed", actor=actor, reason=f"{module}: {mode} ({out['expanded']} queued jobs split)", module=module)
-    return out
 
 
 def _dep_result(db: DB, j: dict) -> dict | None:
@@ -895,15 +873,17 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         names = list(modsecrets.declared(m))
         if names:
             unset[m] = set(modsecrets.missing_for(db, m, names, nid))
+    from .settings.apply import node_values
+    settings_unset = {m: set(v) for m, v in (node_values(node).get("settings_unset") or {}).items() if m in runs}
     return predicates.NodeView(
-        secrets_unset=unset,
+        secrets_unset=unset, settings_unset=settings_unset,
         node=node, states=node_modules(node), offered=runs, excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in runs},
         gpu_apis=predicates.node_gpu_apis(node),
         bootstrap_grants=modsandbox.bootstrap_enforced(node),
         runner_ready={m for m in runs if runner_ready(node, m)},
-        disabled=modstore.disabled_names(db),
+        disabled=modstore.disabled_names(db, node),
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
         live=db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"],
         limits=node_limits(node), fleet_state=db.get_state("fleet_state", "active"),
@@ -976,7 +956,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
         return {"grants": []}
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
-    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db)
+    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
     from . import modsandbox
     offered -= modsandbox.node_excluded(db, node, offered)     # platform, OS version, sandbox or agent mismatch
     ready = set(body.get("ready_datasets") or [])
@@ -1324,8 +1304,8 @@ def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: s
     another node's checkpoint, whose writer `exclude` names: the replica runs on a third node)."""
     if not modcalls.compares(j["module"], j["stage"], version):
         return
-    from .settings import fleet_value
-    rate = float(fleet_value(db, "replica_rate"))
+    from .settings import resolve as V
+    rate = float(V.resolve(V.snapshot(db), None, "replica_rate", j["module"] or "")["value"])   # the module's, when higher
     if not force and (rate <= 0 or int(j["job_key"][:8], 16) / 0xFFFFFFFF >= rate):
         return
     if db.one("SELECT 1 FROM jobs WHERE kind='replica' AND job_key=?", (j["job_key"] + ":replica",)):

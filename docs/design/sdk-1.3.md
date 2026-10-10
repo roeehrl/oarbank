@@ -137,7 +137,7 @@ exactly one sets it (the old "first standalone stage" rule was ambiguous); needs
 **Coordinator.**
 - `stage` must name a declared standalone stage (422 `bad_stage`): a chain stage alone has no input (tail) or would
   leave its tail behind (head).
-- The job stores its stage; only stage-less jobs expand (`expand_pipeline`, `modules.set_pipeline`), so a utility job
+- The job stores its stage; only stage-less jobs expand (`expand_pipeline`, the setting `[module] pipeline`), so a utility job
   never spends a tail job.
 - Resources default to that stage's; its timeout, retry and platforms are that stage's. Item `platforms` must leave a
   platform the stage runs on (422 `placement_infeasible`), and the job's placement unit is joined with that stage's

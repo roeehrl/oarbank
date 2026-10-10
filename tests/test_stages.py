@@ -222,7 +222,8 @@ def test_a_staged_job_runs_its_stage_and_never_the_chain(db):
     assert json.loads(sync["resources_json"]) == {"cpu": 0.5, "mem_gb": 0.5}      # the sync stage's own reservation
     dflt = db.one("SELECT * FROM jobs WHERE job_key=?", (DEFAULT_KEY,))
     assert (dflt["stage"], dflt["depends_on"]) == ("eval", None)                  # named: not split either
-    assert core.set_pipeline(db, "relay", "split", "test")["expanded"] == 0
+    set_fleet(db, "pipeline", "split", "relay")                                    # named stages never expand
+    assert db.one("SELECT COUNT(*) n FROM jobs WHERE campaign_id=? AND kind='call'", (sid,))["n"] == 1
     g = {x["job_id"]: x for x in grants(db, n1, free=8)}
     assert g[sync["job_id"]]["spec"]["stage"] == "sync" and g[sync["job_id"]]["spec"]["resources"]["cpu"] == 0.5
     assert g[dflt["job_id"]]["spec"]["stage"] is None                             # the default stage stays absent

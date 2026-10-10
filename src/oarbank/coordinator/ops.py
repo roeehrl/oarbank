@@ -704,8 +704,8 @@ def _register_dataset(db, req):
 # is refused with the form it does take, never misread as a module name.
 
 def _module_name(db, req):
-    """Operations on a module, whatever version runs (rollback, disable, set_pipeline, restart_host, check, verify,
-    cli_token): the target is its name."""
+    """Operations on a module, whatever version runs (rollback, disable, restart_host, check, verify, cli_token): the
+    target is its name."""
     t = req.target or ""
     if "@" in t:
         n = t.split("@", 1)[0]
@@ -735,13 +735,6 @@ def _module_canary(db, req):
     if v and v != canary:
         raise OpError(409, "not_canary", f"{n}'s canary is {canary}, not {v}: promote {n} or {n}@{canary}")
     req.target = n
-
-
-@handler("modules.set_pipeline", target_type="module", target=_module_name, snapshot=lambda db, r: {"pipeline": settings.fleet_value(db, "pipeline", r.target)},
-         impact=lambda db, r: {"pending_eval_jobs": db.one("SELECT COUNT(*) n FROM jobs WHERE module=? AND kind='eval' "
-                                                           "AND state='pending' AND depends_on IS NULL AND stage IS NULL", (r.target,))["n"]})
-def _pipeline(db, req):
-    return core.set_pipeline(db, req.target, req.params["mode"], req.actor)
 
 
 @handler("modules.restart_host", target_type="module", target=_module_name)
@@ -835,6 +828,8 @@ def _uninstall(db, req):
     if not r:
         raise core.ApiError(404, "not_found", f"{n} {v}")
     db.x("DELETE FROM modules WHERE name=? AND version=?", (n, v))
+    from .settings import modkeys
+    modkeys.register(db, n, req.actor)         # the registered version may have been this one (or the last one)
     import shutil
     shutil.rmtree(r["path"], ignore_errors=True)
     db.event("module_uninstalled", actor=req.actor, reason=f"{n} {v}", module=n)
@@ -892,7 +887,7 @@ def _enable(db, req):
     def fn(db, req):
         from . import modstore
         n, v = _name_ver(req)
-        ch = modstore.enable(db, n, v)
+        ch = modstore.enable(db, n, v, req.actor)
         db.event("module_enabled", actor=req.actor, reason=f"{n} {ch['current']}", module=n)
         req.target = n
         return {"channel": ch}
@@ -990,12 +985,8 @@ def _mrollback(db, req):
 def _disable(db, req):
     def fn(db, req):
         from . import modstore
-        ch = modstore.disable(db, req.target)
-        for a in db.q("SELECT a.attempt_id, a.node_id FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
-                      "WHERE a.state='live' AND j.module=?", (req.target,)):
-            core._end_attempt(db, a["attempt_id"], "released", "module_disabled", count_failure=False)
-            core._push(db, a["node_id"], "revoke", a["attempt_id"])
-        db.event("module_disabled", actor=req.actor, reason=req.target, module=req.target)
+        # the fleet's [module] enabled off: the change set's effects release its live attempts and record the event
+        ch = modstore.disable(db, req.target, req.actor, req.reason)
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 

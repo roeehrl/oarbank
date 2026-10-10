@@ -390,7 +390,19 @@ def impact(db, before, after, extra: dict | None = None) -> dict:
         da = A.node_document(after, n)
         flat_b = {**db_["policy"], **db_["limits"]}
         flat_a = {**da["policy"], **da["limits"]}
-        moved = [k for k in sorted(set(flat_b) | set(flat_a)) if not R.same(flat_b.get(k), flat_a.get(k))]
+        moved = [k for k in sorted(set(flat_b) | set(flat_a)) if not R.same(flat_b.get(k), flat_a.get(k))
+                 and k != "disabled_services"]
+        # per module: whether it runs here and the services it does not run (their effect hooks act on that module)
+        off_b, off_a = set(db_.get("modules_disabled") or []), set(da.get("modules_disabled") or [])
+        svc = lambda d, m: sorted(x.split("/", 1)[1] for x in d["policy"].get("disabled_services") or [] if x.startswith(m + "/"))
+        for m in sorted({x.split("/", 1)[0] for d in (db_, da) for x in d["policy"].get("disabled_services") or []}
+                        | off_b | off_a):
+            for k, o, v in (("enabled", m not in off_b, m not in off_a), ("services.disabled", svc(db_, m), svc(da, m))):
+                if o != v:
+                    old, new = R.show(k, o), R.show(k, v)
+                    diff.append({"node_id": n["node_id"], "hostname": n["hostname"], "key": k, "module": m,
+                                 "label": f"{R.REGISTRY[k].label} [{m}]", "old": o, "new": v, "old_text": old, "new_text": new})
+                    changed.append(f"{n['hostname']}: {R.REGISTRY[k].label} [{m}] {old} → {new}")
         for k in moved:
             label = R.REGISTRY[k].label if k in R.REGISTRY else {"protection": "Protection", "module_settings":
                                                                  "Module settings"}.get(k, k)

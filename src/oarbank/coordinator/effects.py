@@ -37,9 +37,10 @@ def _own_campaign(db: DB, module: str, cid: str) -> dict:
 
 
 def module_settings(db, module: str) -> dict:
-    """The module's own fleet-wide settings (settings key `module.settings`, set for the module)."""
-    from .settings import fleet_value
-    return fleet_value(db, "module.settings", module) or {}
+    """The module's own settings as its coordinator side reads them: every key its settings schema declares, at fleet
+    scope, the owner's value else its default (docs/design/settings.md, "Module settings")."""
+    from .settings import resolve as V
+    return V.module_settings(V.snapshot(db), None, module, scope=None)
 
 
 def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
@@ -108,9 +109,12 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
         raise EffectError(502, "undeclared_effect", f"{module} asked for {kind!r}, which it did not declare")
     rec = {"kind": kind}
     if kind == "module_settings.update":
-        from .settings import write_fleet
-        write_fleet(db, "module.settings", {**module_settings(db, module), **a}, f"module:{module}", module,
-                    comment=f"{module}'s own operation")
+        from .settings import modkeys
+        from .settings.apply import ApplyError
+        try:                                            # each key declared, each value valid, or none of it is written
+            modkeys.write(db, module, a, f"module:{module}", f"{module}'s own operation")
+        except ApplyError as ae:
+            raise EffectError(422, "bad_settings", f"{module}: {ae.detail}"[:400])
         rec["keys"] = sorted(a)
     elif kind == "campaigns.create":
         cid = a.get("campaign_id", "")

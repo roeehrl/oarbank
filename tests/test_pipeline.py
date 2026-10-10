@@ -6,11 +6,11 @@ import json
 
 import pytest
 
-from oarbank.coordinator import clock, core, invariants
+from oarbank.coordinator import clock, core, effects, invariants
 
 from helpers import (release_id, create_study, SCENES, MODE, PARAMS, READY, agent_client, certified_fleet,
                      enrolled_node, fresh, make_db, node_headers)
-from helpers import put_node, set_fleet, set_node
+from helpers import put_node, set_fleet, set_module, set_node
 from oarbank.coordinator.settings import fleet_value
 
 
@@ -30,8 +30,8 @@ def ok(db):
 
 
 def roles(db, worker, scorer, tokens=2):
-    put_node(db, worker, "disabled_services", ["relay/scorer"])
-    put_node(db, scorer, "disabled_services", [])
+    put_node(db, worker, "services.disabled", ["scorer"], "relay")
+    put_node(db, scorer, "services.disabled", [], "relay")
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"scorer": 0}}), worker["node_id"]))
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"scorer": tokens}}), scorer["node_id"]))
 
@@ -209,11 +209,11 @@ def test_retrying_a_render_reruns_its_scores(db):
 
 def test_render_only_node_certifies_on_a_byte_identical_frame(db):
     set_fleet(db, "pipeline", "split", "relay")
-    st = fleet_value(db, "module.settings", "relay")
-    st["goldens"][0]["expected"]["image_sha256"] = "GOLDFRAME"
-    set_fleet(db, "module.settings", st, "relay")
+    goldens = effects.module_settings(db, "relay")["goldens"]
+    goldens[0]["expected"]["image_sha256"] = "GOLDFRAME"
+    set_module(db, "relay", {"goldens": goldens})
     _, node = enrolled_node(db, "worker")
-    put_node(db, node, "disabled_services", ["relay/scorer"])
+    put_node(db, node, "services.disabled", ["scorer"], "relay")
     from helpers import DOCTOR_OK, FACTS
     core.hello(db, fresh(db, node), {"release_id": release_id(db), "facts": FACTS, "live_attempts": [], "ready_datasets": READY})
     core.heartbeat(db, fresh(db, node), {"doctor": DOCTOR_OK, "attempts": [], "ready_datasets": READY})
@@ -229,12 +229,13 @@ def test_render_only_node_certifies_on_a_byte_identical_frame(db):
 
 
 def test_changing_a_nodes_vm_role_recertifies_it(db):
-    set_fleet(db, "disabled_services", ["relay/scorer"])
+    set_fleet(db, "services.disabled", ["scorer"], "relay")
     (n,) = certified_fleet(db, ("n1",))
     assert set(core.certified_modules(fresh(db, n))) == {"relay", "toy"}
     assert core.node_disabled_services(fresh(db, n)) == ["relay/scorer"]   # a worker: not the coordinator's Mac
-    set_node(db, n, "disabled_services", [])
-    assert not core.certified_modules(fresh(db, n)) and fresh(db, n)["want_doctor"] == 1
+    set_node(db, n, "services.disabled", [], module="relay")
+    # relay's role there changed: relay alone re-certifies; toy, whose services nobody touched, stays certified
+    assert core.certified_modules(fresh(db, n)) == ["toy"] and fresh(db, n)["want_doctor"] == 1
     db.x("UPDATE nodes SET want_doctor=0 WHERE node_id=?", (n["node_id"],))
     set_node(db, n, "nice", 5)                                     # unrelated change: no re-doctor
     assert fresh(db, n)["want_doctor"] == 0
@@ -242,13 +243,13 @@ def test_changing_a_nodes_vm_role_recertifies_it(db):
 
 
 def test_a_fleet_services_change_redoctors_exactly_the_nodes_whose_value_moves(db):
-    """A fleet-wide disabled_services reaches every worker that inherits it (they re-doctor), never a node that sets
-    its own value."""
+    """A module's fleet-wide services.disabled reaches every worker that inherits it (they re-doctor), never a node that
+    sets its own value for the module."""
     a, b = certified_fleet(db, ("a", "b"))
-    set_node(db, b, "disabled_services", [])
+    set_node(db, b, "services.disabled", [], module="relay")
     for n in (a, b):
         db.x("UPDATE nodes SET want_doctor=0 WHERE node_id=?", (n["node_id"],))
-    set_fleet(db, "disabled_services", ["relay/scorer"])
+    set_fleet(db, "services.disabled", ["scorer"], "relay")
     assert core.node_disabled_services(fresh(db, a)) == ["relay/scorer"] and fresh(db, a)["want_doctor"] == 1
     assert core.node_disabled_services(fresh(db, b)) == [] and fresh(db, b)["want_doctor"] == 0
     assert ok(db)
@@ -259,13 +260,15 @@ def test_vm_service_defaults_to_the_coordinators_own_mac(db, monkeypatch):
     import socket
     from oarbank.coordinator.settings import resolve as V
     monkeypatch.setattr(socket, "gethostname", lambda: "coord.local")
-    set_fleet(db, "disabled_services", ["relay/scorer"])
+    set_fleet(db, "services.disabled", ["scorer"], "relay")
     snap = V.snapshot(db)
-    coord = V.resolve(snap, {"node_id": "n_c", "facts_json": json.dumps({"hostname": "coord", "memory_gb": 64})}, "disabled_services")
-    worker = V.resolve(snap, {"node_id": "n_w", "facts_json": json.dumps({"hostname": "mini-a", "memory_gb": 24})}, "disabled_services")
+    coord = V.resolve(snap, {"node_id": "n_c", "facts_json": json.dumps({"hostname": "coord", "memory_gb": 64})},
+                      "services.disabled", "relay")
+    worker = V.resolve(snap, {"node_id": "n_w", "facts_json": json.dumps({"hostname": "mini-a", "memory_gb": 24})},
+                       "services.disabled", "relay")
     assert coord["value"] == [] and coord["source"]["name"] == "Group: Coordinator host"
     assert V.badge(coord) == "Group: Coordinator host · the coordinator's own machine runs every service"
-    assert worker["value"] == ["relay/scorer"] and worker["source"]["scope"] == "fleet"
+    assert worker["value"] == ["scorer"] and worker["source"]["scope"] == "fleet"
 
 
 def test_score_failure_on_the_only_scorer_does_not_strand_it(db):
@@ -286,17 +289,20 @@ def test_set_pipeline_splits_queued_jobs_and_render_only_nodes_get_render_golden
     (n1,) = certified_fleet(db, ("n1",))
     create_study(db, "s", [{"label": "c1", "params": {**PARAMS, "samples": 25}}],
                  SCENES[:2], {"label": "base", "params": PARAMS})
-    out = core.set_pipeline(db, "relay", "split", "test")
-    assert out["expanded"] == 4 and fleet_value(db, "pipeline", "relay") == "split"
+    set_fleet(db, "pipeline", "split", "relay")                                       # settings.apply: [relay] pipeline
+    assert fleet_value(db, "pipeline", "relay") == "split"
+    assert "relay: split (4 queued jobs split)" in db.one("SELECT reason FROM events WHERE kind='pipeline_changed'")["reason"]
     from oarbank.coordinator import modcalls
-    put_node(db, n1, "disabled_services", ["relay/scorer"])
+    put_node(db, n1, "services.disabled", ["scorer"], "relay")
     g = modcalls.goldens(db, "relay", fresh(db, n1))[0]
     assert g["stage"] == "render" and g["expected"] == {"tiles": 1536, "image_sha256": "v1"} and g["key"].endswith(":render")
     assert modcalls.goldens(db, "relay", None)[0]["stage"] is None                     # every service on: the whole job
     assert len(db.q("SELECT 1 FROM jobs WHERE kind='call'")) == 4
-    assert core.set_pipeline(db, "relay", "split", "test")["expanded"] == 0          # idempotent
-    with pytest.raises(core.ApiError):
-        core.set_pipeline(db, "toy", "split", "test")                                    # toy has no stage chain
+    set_fleet(db, "pipeline", "split", "relay")                                       # the same value: nothing to do
+    assert len(db.q("SELECT 1 FROM jobs WHERE kind='call'")) == 4
+    from oarbank.coordinator.settings.apply import ApplyError
+    with pytest.raises(ApplyError, match="toy has no stage chain"):
+        set_fleet(db, "pipeline", "split", "toy")
     assert ok(db)
 
 
