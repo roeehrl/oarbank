@@ -140,7 +140,7 @@ def test_selectors_and_names_are_checked(db):
 
 # ------------------------------------------------------------------ locks: the phase-4 exit test
 
-def test_a_laptops_group_with_locked_run_on_battery_holds_against_node_and_campaign_overrides(db, monkeypatch):
+def test_a_laptops_group_with_locked_run_on_battery_holds_against_node_and_campaign_overrides(db):
     """Phase 4's exit test (docs/design/settings.md, "Locks"). A node that already ran on battery by its own choice is
     held off battery by the lock; setting its own value again is refused naming the group; the node's value is kept but
     ignored, and comes back if the lock goes; a campaign override is refused the same way, and a campaign value that
@@ -175,15 +175,19 @@ def test_a_laptops_group_with_locked_run_on_battery_holds_against_node_and_campa
     r = views.row(V.snapshot(db), R.REGISTRY["run_on_battery"], "node", row(db, mbp))
     assert r["locked_by"]["name"] == "Group: Laptops" and r["lock_text"] == "Locked by the group Laptops"
     # campaigns: the hook a campaign override goes through refuses it with the same lock, even for a key a campaign
-    # could otherwise override; and a campaign value written anyway is ignored under the lock
-    monkeypatch.setitem(R.REGISTRY, "run_on_battery", __import__("dataclasses").replace(R.REGISTRY["run_on_battery"], campaign=True))
+    # may override; a campaign value written anyway is ignored under the lock, and (run_on_battery being a safety key
+    # a campaign may only tighten) a looser one applies nowhere else either
+    db.x("INSERT INTO campaigns(campaign_id, module, name, state, created_at) VALUES('c_1', 'toy', 'one', 'running', 0)")
     refused = A.campaign_refusals(db, "c_1", "run_on_battery")
     assert [x["message"] for x in refused] == ["Run jobs on battery: locked by the group Laptops on macbook: change it there"]
     store.put(db, "campaign", "c_1", "", "run_on_battery", True, "test", 99)
     res = V.resolve(V.snapshot(db), row(db, mbp), "run_on_battery", campaign="c_1")
     assert res["value"] is False and res["chain"][-1]["scope"] == "campaign" and res["chain"][-1]["role"] == "ignored"
-    assert V.resolve(V.snapshot(db), row(db, mini), "run_on_battery", campaign="c_1")["source"]["scope"] == "campaign"
-    monkeypatch.undo()
+    res = V.resolve(V.snapshot(db), row(db, mini), "run_on_battery", campaign="c_1")
+    assert res["value"] is True and res["source"]["scope"] == "node" and res["chain"][-1]["role"] == "looser"
+    store.put(db, "campaign", "c_1", "", "run_on_battery", False, "test", 100)      # stricter than mini's own: it binds
+    res = V.resolve(V.snapshot(db), row(db, mini), "run_on_battery", campaign="c_1")
+    assert res["value"] is False and res["source"]["scope"] == "campaign"
     assert A.campaign_refusals(db, "c_1", "job_mem_gb")[0]["code"] == "not_campaign_overridable"
     # lifting the lock: the node's own choice comes back (it was never deleted)
     settings_apply(db, {"scope": "group", "scope_id": "Laptops", "key": "run_on_battery", "reset": True})

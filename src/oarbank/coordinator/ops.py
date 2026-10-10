@@ -1465,6 +1465,46 @@ def _settings_apply(db, req):
     return _settings(lambda: settings.apply.commit(db, changes, req.actor, req.params.get("comment") or req.reason))
 
 
+def _import_text(req) -> str:
+    extra = set(req.params) - {"text", "comment"}
+    if extra:
+        raise OpError(400, "bad_params", f"settings.import takes text and comment, not {sorted(extra)}")
+    text = req.params.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise OpError(400, "bad_params", "text: the exported YAML file's content")
+    if len(text) > 4_000_000:
+        raise OpError(413, "too_large", "an import file is at most 4 MB")
+    return text
+
+
+def _import_impact(db, req) -> dict:
+    """The import's preview; the plan's tier follows what it changes (a new lock: T3), so the impact keeps it."""
+    from .settings import export
+    out = _settings(lambda: export.preview(db, _import_text(req)))
+    out = {k: v for k, v in out.items() if k != "_plan"}
+    req.plan_impact = out
+    return out
+
+
+def _import_tier(req) -> str:
+    t = (req.plan_impact or {}).get("_tier") or "T2"
+    return max(t, "T2", key=("T0", "T1", "T2", "T3").index)
+
+
+@handler("settings.import", target_type="setting", versions=lambda db, r: ["settings"], impact=_import_impact,
+         tier=_import_tier, name=lambda db, r: "import")
+def _settings_import(db, req):
+    """Settings as code (docs/design/settings.md, "Settings as code"): a file `oarbank settings export` wrote, applied
+    as one operation (groups, labels and tool definitions first, then the values as one change set). Only the
+    differences change; a key the file leaves out inherits."""
+    from .settings import export
+    _admin_only(req, "an import")
+    out = _settings(lambda: export.commit(db, _import_text(req), req.actor, req.params.get("comment") or req.reason))
+    if out.get("tools"):
+        _sync_releases(db)
+    return out
+
+
 # ------------------------------------------------------------------ groups, labels, bulk and canary (settings)
 
 def _groups(fn):
@@ -1824,7 +1864,7 @@ def _tools_delete(db, req):
 def _tools_detect(db, req):
     """Ask a node's agent to detect its host tools again (Re-detect): it reports them with its next heartbeat."""
     nid = _nid(db, req)
-    db.x("UPDATE nodes SET want_detect=1 WHERE node_id=?", (nid,))
+    db.x("UPDATE nodes SET want_detect=1, detect_requested_at=? WHERE node_id=?", (time.time(), nid))
     db.event("tools_detect_requested", actor=req.actor, node_id=nid)
     return {"want_detect": True}
 

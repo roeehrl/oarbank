@@ -22,7 +22,7 @@
 <table class="small explain-chain"><tr><th scope="col">Scope</th><th scope="col">Value</th><th scope="col">Role</th><th scope="col">Changed</th></tr>
 {% for x in r.chain %}<tr><td>{{ x.name }}{% if x.builtin %} <span class="mut">(built in)</span>{% endif %}</td>
   <td class="mono">{{ x.value_text }}{% if x.reason %} <span class="mut">({{ x.reason }})</span>{% endif %}{% if x.enforced %} <span class="chip warn">locked</span>{% endif %}</td>
-  <td>{% if x.role == 'winner' %}<span class="chip ok">in effect</span>{% elif x.role == 'shadowed' %}<span class="chip">overridden below</span>{% elif x.role == 'ignored' %}<span class="chip warn">ignored: locked above</span>{% elif x.role == 'merged' %}<span class="chip">also applies ({{ r.merge }})</span>{% else %}<span class="mut">–</span>{% endif %}</td>
+  <td>{% if x.role == 'winner' %}<span class="chip ok">in effect</span>{% elif x.role == 'shadowed' %}<span class="chip">overridden below</span>{% elif x.role == 'ignored' %}<span class="chip warn">ignored: locked above</span>{% elif x.role == 'merged' %}<span class="chip">also applies ({{ r.merge }})</span>{% elif x.role == 'looser' %}<span class="chip">not applied: looser</span>{% elif x.inactive %}<span class="chip warn">inactive</span>{% else %}<span class="mut">–</span>{% endif %}</td>
   <td class="mut">{% if x.rev %}rev {{ x.rev }} · {{ x.by }} · {{ x.at | ago }}{% if x.comment %} · “{{ x.comment }}”{% endif %}{% elif x.by == 'system' %}system{% endif %}</td></tr>
 {% endfor %}</table>
 {%- endmacro %}
@@ -37,6 +37,7 @@
     <span class="chip{{ ' acc' if r.overridden_here }}" id="src-{{ dom }}">{{ r.badge }}</span>
     {% if r.overridden_here %}<span class="chip acc">changed here</span>{% endif %}
     {% if r.locked_here %}<span class="chip warn" title="Lower scopes cannot override it while the lock holds">locked here</span>{% endif %}
+    {% if r.managed_here %}<span class="chip{{ ' warn' if r.managed_here.binds }}" title="This machine's managed policy (MDM) sets it; it can only tighten what the coordinator sends">Managed on this machine: {{ r.managed_here.text }}{{ ' (applies)' if r.managed_here.binds else ' (looser: not applied)' }}</span>{% endif %}
     {% if r.missing %}<span class="chip bad">required: not set</span>{% elif r.required %}<span class="chip">required</span>{% endif %}
     <span class="sp"></span><code class="mono small" id="key-{{ r.scope }}-{{ dom }}">{{ ('[' ~ r.module ~ '] ' if r.module and not k.startswith('module.') else '') ~ k }}</code><button type="button" class="small" data-copy="key-{{ r.scope }}-{{ dom }}" aria-label="Copy the key {{ k }}">Copy</button>
   </div>
@@ -105,7 +106,7 @@
     {% if sec.advanced %}<details class="advanced"{% if sec.advanced_changed or sec.form_errors or explain in (sec.advanced | map(attribute='key') | list) %} open{% endif %}><summary>Advanced{% if sec.advanced_changed %} · {{ sec.advanced_changed }} changed{% endif %}</summary>
       {% for r in sec.advanced %}{{ setting_row(r, explain) }}{% endfor %}</details>{% endif %}
     <div class="row section-save"><span class="small" role="status" aria-live="polite">{% if saved == sec.id and saved_flash %}<span class="chip {{ 'ok' if saved_kind == 'ok' else 'bad' }}">{{ saved_flash }}</span>{% endif %}</span><span class="sp"></span>
-      <button class="pri" title="settings.apply ({{ 'shows the nodes it reaches before it saves' if scope != 'node' else 'this node only' }})"{% if scope != 'node' %} data-busy-label="Preparing preview…"{% endif %}>{{ 'Review and save' if scope != 'node' else 'Save' }} {{ sec.title | lower }}{{ '…' if scope != 'node' }}</button></div>
+      <button class="pri" title="settings.apply ({{ 'shows the nodes it reaches before it saves' if scope != 'node' else 'this node only' }})"{% if scope != 'node' %} data-busy-label="Preparing preview…"{% endif %}>{{ 'Review and save' if scope != 'node' else 'Save' }} {{ 'overrides' if scope == 'campaign' else sec.title | lower }}{{ '…' if scope != 'node' }}</button></div>
   </fieldset>
 {% endcall %}
 </section>

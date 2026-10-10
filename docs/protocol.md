@@ -269,6 +269,11 @@ of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while th
 - **`timeout_s`** is the stage's timeout on this node's platform (or the job's own); `hard_deadline` follows it.
 - **`checkpoint`** and the spec's **`resume`** (`{"from_attempt", "digest", "data"}`) are present when the job resumes
   from a checkpoint an earlier attempt recorded (see Checkpoints).
+- **`settings`** (only for a job of a running campaign that overrides some of its module's own keys declared
+  `"x-oarbank": {"campaign": true}`): `{short name: value}`. The agent lays them over the module's node settings, key
+  by key, in that job's `OARBANK_SETTINGS_FILE` (never a bootstrap job's). A campaign's overrides of the keys a node
+  applies (`jobs`, `run_on_battery`, `user_present_slots`) are not sent: the coordinator holds the campaign's jobs to them
+  at claim (docs/design/settings.md, "Campaign overrides").
 - **`issued_at`**, `expires_at` and `hard_deadline` are oarbankd's clock. The agent stops the attempt
   `hard_deadline - issued_at` seconds after the grant arrived, on its monotonic clock (see Clocks).
 - **`secrets`** (only for a job whose stage lists secrets): `{name: value}`, resolved for this node. The agent writes
@@ -717,6 +722,20 @@ heartbeat:
 "settings": {"applied_rev": 42, "rejected": [{"key": "job_mem_gb", "reason": "expected a number, got \"abc\""}]}
 ```
 Owners change them with `settings.apply` at the fleet, a group or a node; there is no per-node copy to edit.
+
+**Managed on this machine.** The machine's managed policy may set keys of either section under `Settings` (macOS
+domain `dev.codonic.oarbank.agent`, the `Settings` subkey of `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent`,
+`/etc/oarbank/policy.json`; docs/install.md, "MDM"). The agent applies each only where it is stricter than what the
+coordinator sends (and over its defaults before the first heartbeat), so it can only tighten: the keys the table marks
+`managed`, in each key's `tighten` direction. When the policy sets any, the report adds them:
+```json
+"settings": {"applied_rev": 42, "rejected": [],
+             "managed": [{"key": "run_on_battery", "value": false, "binding": true}, {"key": "jobs", "value": 4, "binding": false}],
+             "managed_refused": [{"key": "job_mem_gb", "reason": "not a setting managed policy may set"}],
+             "managed_by": "Example Org"}
+```
+`binding` says the managed value is what applies (stricter than the coordinator's). The coordinator keeps the report,
+shows it ("Managed on this machine") and folds it into the node's resolution where it is stricter.
 
 **Limits** (user caps): every key is present; `null` means uncapped (the default). Every scope's cap applies and the
 lowest wins:

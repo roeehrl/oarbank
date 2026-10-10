@@ -28,6 +28,8 @@ AGENT_MAIN_RS = REPO / "rust" / "crates" / "oarbank-agent" / "src" / "main.rs"
 NS = {"w": "http://wixtoolset.org/schemas/v4/wxs", "util": "http://wixtoolset.org/schemas/v4/wxs/util"}
 GP = {"p": "http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"}
 POLICY_KEY = r"SOFTWARE\Policies\Codonic\Oarbank\Agent"
+SETTINGS_KEY = POLICY_KEY + r"\Settings"
+SETTINGS_TABLE_RS = REPO / "rust" / "crates" / "oarbank-protection" / "src" / "settings_table.rs"
 LAUNCHER = '"[INSTALLFOLDER]oarbank-launcher.exe"'
 # the dialogs the WixUI extension's library provides (WixUI_Common and the dialogs WixUI_Minimal references)
 WIXUI_DIALOGS = {"ErrorDlg", "FatalError", "FilesInUse", "MsiRMFilesInUse", "PrepareDlg", "ProgressDlg", "ResumeDlg",
@@ -380,12 +382,16 @@ def test_the_admx_template_is_well_formed_and_every_reference_resolves():
         assert ref in presentations, ref
     supported = {d.get("name") for d in admx.findall("p:supportedOn/p:definitions/p:definition", GP)}
     categories = {c.get("name"): c for c in admx.findall("p:categories/p:category", GP)}
-    # Codonic > Oarbank > Node
+    # Codonic > Oarbank > Node > Node settings (tighten-only)
     parent = lambda name: (categories[name].find("p:parentCategory", GP).get("ref") if categories[name].find("p:parentCategory", GP) is not None else None)  # noqa: E731
-    assert (parent("Node"), parent("Oarbank"), parent("Codonic")) == ("Oarbank", "Codonic", None)
+    assert (parent("NodeSettings"), parent("Node"), parent("Oarbank"), parent("Codonic")) == ("Node", "Oarbank", "Codonic", None)
+    assert "Managed on this machine" in strings["NodeSettings_Help"]
+    names = [p.get("name") for p in admx.findall("p:policies/p:policy", GP)]
+    assert len(names) == len(set(names))
     for policy in admx.findall("p:policies/p:policy", GP):
-        assert policy.get("class") == "Machine" and policy.get("key") == POLICY_KEY
-        assert policy.find("p:parentCategory", GP).get("ref") == "Node"
+        # the node's own keys under Node; settings keys in the Settings subkey under Node settings
+        assert policy.get("class") == "Machine" and policy.get("key") in (POLICY_KEY, SETTINGS_KEY)
+        assert policy.find("p:parentCategory", GP).get("ref") == ("Node" if policy.get("key") == POLICY_KEY else "NodeSettings")
         assert policy.find("p:supportedOn", GP).get("ref") in supported
         pres = policy.get("presentation")
         elements = policy.findall("p:elements/*", GP)
@@ -396,7 +402,8 @@ def test_the_admx_template_is_well_formed_and_every_reference_resolves():
 
 def test_the_admx_values_are_the_ones_the_agent_reads():
     admx = ET.parse(ADMX).getroot()
-    policies = {p.get("name"): p for p in admx.findall("p:policies/p:policy", GP)}
+    every = admx.findall("p:policies/p:policy", GP)
+    policies = {p.get("name"): p for p in every if p.get("key") == POLICY_KEY}
     texts, switches = {}, {}
     for name, p in policies.items():
         for t in p.findall("p:elements/p:text", GP):
@@ -412,6 +419,38 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
         assert f's("{value}")' in rust, value
     for value in switches:
         assert f'b("{value}")' in rust, value
+    # Node settings: exactly the settings table's managed keys, each the kind the agent converts it from
+    # (oarbank-protection settings.rs coerce_managed): a switch for a boolean (REG_DWORD 1 / 0), a decimal for an
+    # integer with the table's minimum, text for a number ("1.5"), the choices for a choice; and the agent reads them
+    assert 'v["Settings"]' in rust and r'{KEY}\Settings' in rust
+    table = SETTINGS_TABLE_RS.read_text(encoding="utf-8")
+    managed = {m["key"]: m for m in (re.search(r'key: "(?P<key>\w+)".*kind: Kind::(?P<kind>\w+).*min: (?P<min>None|Some\([\d.]+\))'
+                                               r'.*choices: &\[(?P<choices>[^\]]*)\]', line).groupdict()
+                                     for line in table.splitlines() if "managed: true" in line)}
+    assert len(managed) == 17
+    settings = {p.get("name"): p for p in every if p.get("key") == SETTINGS_KEY}
+    assert set(settings) == set(managed)
+    _, strings, _ = _strings()
+    for key, m in managed.items():
+        p = settings[key]
+        assert p.find("p:supportedOn", GP).get("ref") == "SUPPORTED_Oarbank_2_9"
+        assert "stricter" in strings[f"{key}_Help"] and "has no effect" in strings[f"{key}_Help"], key
+        elements = p.findall("p:elements/*", GP)
+        if m["kind"] == "Bool":
+            assert not elements and p.get("valueName") == key
+            assert (p.find("p:enabledValue/p:decimal", GP).get("value"), p.find("p:disabledValue/p:decimal", GP).get("value")) == ("1", "0")
+            continue
+        assert len(elements) == 1 and elements[0].get("valueName") == key and elements[0].get("required") == "true", key
+        tag = elements[0].tag.split("}")[1]
+        if m["kind"] == "Integer":
+            assert tag == "decimal" and float(elements[0].get("minValue")) == float(m["min"][5:-1]), key
+            assert int(elements[0].get("maxValue")) > int(elements[0].get("minValue"))
+        elif m["kind"] == "Number":
+            assert tag == "text", key
+        else:
+            assert m["kind"] == "Choice" and tag == "enum", key
+            values = [i.find("p:value/p:string", GP).text for i in elements[0].findall("p:item", GP)]
+            assert values == re.findall(r'"(\w+)"', m["choices"]) == ["soft", "hard"]
 
 
 # MARK: the tray app

@@ -5,6 +5,9 @@
   Computer Configuration, Administrative Templates, Codonic, Oarbank, Node. They write
   HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent, which the agent reads every 5 seconds while it has not joined
   (rust/crates/oarbank-agent/src/policy.rs); Intune can set the same values with this template imported.
+  Node, Node settings (tighten-only) writes the values of the Settings subkey: settings keys by their name, which can
+  only make the coordinator's settings stricter on this computer (docs/design/settings.md, "Managed on this machine").
+  A joined agent reads them at most once a minute.
 -->
 <policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
@@ -25,6 +28,9 @@
     </category>
     <category name="Node" displayName="$(string.Node)" explainText="$(string.Node_Help)">
       <parentCategory ref="Oarbank" />
+    </category>
+    <category name="NodeSettings" displayName="$(string.NodeSettings)" explainText="$(string.NodeSettings_Help)">
+      <parentCategory ref="Node" />
     </category>
   </categories>
   <policies>
@@ -92,6 +98,165 @@
       <supportedOn ref="SUPPORTED_Oarbank_2_8" />
       <elements>
         <text id="ManagedByOrganizationName" valueName="ManagedByOrganizationName" maxLength="128" required="true" />
+      </elements>
+    </policy>
+    <policy name="os_reserve_gb" class="Machine" displayName="$(string.os_reserve_gb)" explainText="$(string.os_reserve_gb_Help)"
+            presentation="$(presentation.os_reserve_gb)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="os_reserve_gb" valueName="os_reserve_gb" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="user_reserve_gb" class="Machine" displayName="$(string.user_reserve_gb)" explainText="$(string.user_reserve_gb_Help)"
+            presentation="$(presentation.user_reserve_gb)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="user_reserve_gb" valueName="user_reserve_gb" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="mem_in_use_bound" class="Machine" displayName="$(string.mem_in_use_bound)" explainText="$(string.mem_in_use_bound_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="mem_in_use_bound">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="user_present_slots" class="Machine" displayName="$(string.user_present_slots)" explainText="$(string.user_present_slots_Help)"
+            presentation="$(presentation.user_present_slots)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <decimal id="user_present_slots" valueName="user_present_slots" minValue="0" maxValue="1024" required="true" />
+      </elements>
+    </policy>
+    <policy name="user_idle_s" class="Machine" displayName="$(string.user_idle_s)" explainText="$(string.user_idle_s_Help)"
+            presentation="$(presentation.user_idle_s)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="user_idle_s" valueName="user_idle_s" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="screen_sharing_present" class="Machine" displayName="$(string.screen_sharing_present)" explainText="$(string.screen_sharing_present_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="screen_sharing_present">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="run_on_battery" class="Machine" displayName="$(string.run_on_battery)" explainText="$(string.run_on_battery_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="run_on_battery">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="max_slots" class="Machine" displayName="$(string.max_slots)" explainText="$(string.max_slots_Help)"
+            presentation="$(presentation.max_slots)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <decimal id="max_slots" valueName="max_slots" minValue="0" maxValue="1024" required="true" />
+      </elements>
+    </policy>
+    <policy name="hard_limits" class="Machine" displayName="$(string.hard_limits)" explainText="$(string.hard_limits_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="hard_limits">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="cpu_cores" class="Machine" displayName="$(string.cpu_cores)" explainText="$(string.cpu_cores_Help)"
+            presentation="$(presentation.cpu_cores)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="cpu_cores" valueName="cpu_cores" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="mem_gb" class="Machine" displayName="$(string.mem_gb)" explainText="$(string.mem_gb_Help)"
+            presentation="$(presentation.mem_gb)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="mem_gb" valueName="mem_gb" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="jobs" class="Machine" displayName="$(string.jobs)" explainText="$(string.jobs_Help)"
+            presentation="$(presentation.jobs)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <decimal id="jobs" valueName="jobs" minValue="1" maxValue="1024" required="true" />
+      </elements>
+    </policy>
+    <policy name="enforce" class="Machine" displayName="$(string.enforce)" explainText="$(string.enforce_Help)"
+            presentation="$(presentation.enforce)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <enum id="enforce" valueName="enforce" required="true">
+          <item displayName="$(string.enforce_soft)">
+            <value>
+              <string>soft</string>
+            </value>
+          </item>
+          <item displayName="$(string.enforce_hard)">
+            <value>
+              <string>hard</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="vm_mem_gb" class="Machine" displayName="$(string.vm_mem_gb)" explainText="$(string.vm_mem_gb_Help)"
+            presentation="$(presentation.vm_mem_gb)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="vm_mem_gb" valueName="vm_mem_gb" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="vm_cpus" class="Machine" displayName="$(string.vm_cpus)" explainText="$(string.vm_cpus_Help)"
+            presentation="$(presentation.vm_cpus)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <decimal id="vm_cpus" valueName="vm_cpus" minValue="1" maxValue="256" required="true" />
+      </elements>
+    </policy>
+    <policy name="disk_gb" class="Machine" displayName="$(string.disk_gb)" explainText="$(string.disk_gb_Help)"
+            presentation="$(presentation.disk_gb)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="disk_gb" valueName="disk_gb" maxLength="16" required="true" />
+      </elements>
+    </policy>
+    <policy name="staging_mbps" class="Machine" displayName="$(string.staging_mbps)" explainText="$(string.staging_mbps_Help)"
+            presentation="$(presentation.staging_mbps)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <elements>
+        <text id="staging_mbps" valueName="staging_mbps" maxLength="16" required="true" />
       </elements>
     </policy>
   </policies>

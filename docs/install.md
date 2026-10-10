@@ -207,6 +207,40 @@ approval on the Fleet page unless you made it approve automatically.
 |---|---|---|---|
 | Policy | a configuration profile for the domain `dev.codonic.oarbank.agent` (the console's **Add machine** offers one; it also pre-approves the background items) | `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent` (Group Policy with the release's ADMX template, or Intune) | `/etc/oarbank/policy.json` |
 | Keys | `JoinCode`, `Coordinator`, `Name`, `Containers` (Windows), `AllowUserJoin` (false hides Join and Leave in the app), `ManagedByOrganizationName`, `ShowStatusIcon` (false hides Oarbank Node's menu bar or tray icon on every account; true keeps it shown) | the same names (REG_SZ, REG_DWORD) | the same names (JSON; `ShowStatusIcon` has no effect: Linux has no node tray) |
+| Settings (tighten-only) | a `Settings` dictionary in the same domain, keyed by the setting's key | values under the `Settings` subkey (the ADMX template's **Node settings (tighten-only)**: one policy per key) | a `"Settings"` object |
+
+**Managed settings: stricter, never looser.** Managed policy may also tighten the coordinator's settings on a machine
+(docs/design/settings.md, "Managed on this machine"). The agent applies a managed value only where it is stricter than
+what the coordinator sends, so an organization can guarantee, say, that a laptop never runs jobs on battery, while the
+owner still lowers caps from the console. The keys and which way each tightens:
+
+| Key | Type | Stricter |
+|---|---|---|
+| `run_on_battery` | boolean | off |
+| `screen_sharing_present`, `mem_in_use_bound`, `hard_limits` | boolean | on |
+| `user_present_slots`, `max_slots`, `jobs`, `vm_cpus` | integer | lower |
+| `cpu_cores`, `mem_gb`, `vm_mem_gb`, `disk_gb`, `staging_mbps` | number | lower |
+| `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` | number | higher |
+| `enforce` | `soft` or `hard` | hard |
+
+A looser value has no effect, a key not in the table is refused, and both show on the node's Settings tab ("Managed on
+this machine: off (applies)") and on **Settings → Applied drift**; `oarbank-agent policy` prints what the machine's
+policy sets. A macOS profile payload:
+```xml
+<dict>
+  <key>PayloadType</key><string>dev.codonic.oarbank.agent</string>
+  <key>ManagedByOrganizationName</key><string>Example Org</string>
+  <key>Settings</key>
+  <dict>
+    <key>run_on_battery</key><false/>
+    <key>jobs</key><integer>2</integer>
+    <key>os_reserve_gb</key><real>8</real>
+  </dict>
+</dict>
+```
+Windows (Group Policy with the template, or directly): `reg add HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings /v
+run_on_battery /t REG_DWORD /d 0` (a decimal number as REG_SZ: `/v os_reserve_gb /t REG_SZ /d 8.5`). Linux:
+`{"Settings": {"run_on_battery": false, "jobs": 2}}` in `/etc/oarbank/policy.json`.
 
 Linux packages also read the installing command's environment, and Windows MSIs take properties:
 ```bash

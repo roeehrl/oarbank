@@ -5,14 +5,18 @@ fleet's value, each group the node belongs to by rank (lowest first), the node's
 or group value) is found first and wins outright, fleet before groups, higher rank before lower. Otherwise the key's
 merge rule decides: `replace` takes the most specific value set; `min` and `max` fold every value set (caps: the lowest
 wins, so a lower scope can only tighten); `union` joins lists. A key a module owns (`qualifier = "required"`) resolves
-for that module only. The result names its source, every layer with its role, the lock, the default and its reason,
-and the errors of the merged values on this node (cross_checks)."""
+for that module only. Two layers sit on top. A running campaign's value of a key it may override applies to that
+campaign's jobs: a safety key (one with a `tighten` direction) only where it is stricter, any other key outright; a
+lock ignores it. A machine's managed policy (MDM) may tighten a managed key on that machine, reported by its agent:
+it applies where it is stricter, under a lock too. The result names its source, every layer with its role, the lock,
+the default and its reason, and the errors of the merged values on this node (cross_checks)."""
 import json
 
 from . import registry as R
 from . import store
 
-SOURCE_NAMES = {"default": "Default", "fleet": "Fleet", "node": "This node"}
+SOURCE_NAMES = {"default": "Default", "fleet": "Fleet", "node": "This node", "managed": "On this machine (managed)"}
+CAMPAIGN_ACTIVE = ("running", "paused")          # a campaign's overrides apply while it runs (paused: until it resumes)
 
 
 class Snap:
@@ -28,6 +32,12 @@ class Snap:
             self.rows[(x["scope"], x["scope_id"], x["module"], x["key"])] = x
         self.defs: dict[str, R.Setting] = modkeys.load(r)          # module.<module>.<key>: each module's own keys
         self.modules: list[str] = modkeys.module_names(r)
+        # the running campaigns and those that set values: {campaign_id: {module, name, state}} (a campaign's layer
+        # applies while it runs)
+        ids = sorted({k[1] for k in self.rows if k[0] == "campaign"})
+        self.campaigns: dict[str, dict] = {x["campaign_id"]: x for x in r.q(
+            "SELECT campaign_id, module, name, state FROM campaigns WHERE state IN ('running','paused')"
+            + (" OR campaign_id IN (%s)" % ",".join("?" * len(ids)) if ids else ""), tuple(ids))}
 
     def get(self, scope, scope_id, module, key):
         return self.rows.get((scope, scope_id, module, key))
@@ -65,6 +75,20 @@ def memberships(snap: Snap, node: dict) -> list[dict]:
 def node_groups(snap: Snap, node: dict) -> list[dict]:
     """The groups a node belongs to, lowest rank first (membership is evaluated now, from its facts and labels)."""
     return [g for g in memberships(snap, node) if g["member"]]
+
+
+def managed_of(node: dict | None) -> dict:
+    """What a node's managed policy (MDM) sets, as its agent last reported: {"values": {key: value}, "by": organization,
+    "refused": [{key, reason}]} (empty when nothing is managed)."""
+    raw = (node or {}).get("settings_managed_json")
+    if not raw:
+        return {"values": {}, "by": None, "refused": []}
+    try:
+        doc = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {"values": {}, "by": None, "refused": []}
+    vals = {x["key"]: x.get("value") for x in doc.get("managed") or [] if isinstance(x, dict) and x.get("key")}
+    return {"values": vals, "by": doc.get("managed_by"), "refused": list(doc.get("managed_refused") or [])}
 
 
 def _layer(scope, sid, name, module, row=None, value=None, reason=None, builtin=False) -> dict:
@@ -108,7 +132,19 @@ def chain(snap: Snap, node: dict | None, d: R.Setting, module: str = "", campaig
         if "node" in d.scopes:
             out.append(_layer("node", node["node_id"], "This node" + tag, mm, snap.get("node", node["node_id"], mm, d.key)))
     if campaign and d.campaign:
-        out.append(_layer("campaign", campaign, f"Campaign {campaign}", m, snap.get("campaign", campaign, m, d.key)))
+        c = snap.campaigns.get(campaign) or {}
+        lay = _layer("campaign", campaign, f"Campaign {c.get('name') or campaign}", m, snap.get("campaign", campaign, m, d.key))
+        if lay["set"] and c.get("state") not in CAMPAIGN_ACTIVE:
+            lay["set"], lay["inactive"] = False, True        # kept, shown, but a finished campaign's overrides apply nowhere
+            lay["reason"] = f"the campaign is {c.get('state') or 'gone'}: its overrides apply while it runs"
+        out.append(lay)
+    if node is not None and d.managed:
+        mg = managed_of(node)
+        if d.key in mg["values"]:
+            lay = _layer("managed", node["node_id"], SOURCE_NAMES["managed"], m, value=mg["values"][d.key],
+                         reason="managed policy" + (f" of {mg['by']}" if mg["by"] else ""))
+            lay["set"], lay["by"] = True, mg["by"] or "managed policy"
+            out.append(lay)
     return out
 
 
@@ -127,9 +163,12 @@ def _fold(d: R.Setting, layers: list[dict]) -> dict:
 
 
 def resolve(snap: Snap, node: dict | None, key: str, module: str = "", campaign: str | None = None) -> dict:
-    """One key's effective value for a node (None: fleet-wide), with its provenance."""
+    """One key's effective value for a node (None: fleet-wide), with its provenance; with `campaign`, as that campaign's
+    jobs get it."""
     d = snap.defn(key)
     layers = chain(snap, node, d, module, campaign)
+    top = [x for x in layers if x["scope"] in ("campaign", "managed")]
+    layers_all, layers = layers, [x for x in layers if x["scope"] not in ("campaign", "managed")]
     set_ = [x for x in layers if x["set"]]
     lock = next((x for x in layers if x["scope"] == "fleet" and x["enforced"]), None) or next(
         (x for x in sorted((x for x in layers if x["scope"] == "group" and x["enforced"]), key=lambda x: -x.get("rank", 0))),
@@ -161,10 +200,27 @@ def resolve(snap: Snap, node: dict | None, key: str, module: str = "", campaign:
     if lock is None:
         for x in set_:
             x["role"] = "winner" if x is winner else ("shadowed" if d.merge == "replace" else "merged")
+    for x in top:                                 # the campaign's value, then the machine's managed policy
+        if not x["set"]:
+            continue
+        if x["scope"] == "campaign" and lock is not None:
+            x["role"] = "ignored"                     # a lock binds campaigns too
+            continue
+        if d.tighten_dir is None and x["scope"] == "campaign":
+            binds = True                              # a preference: the campaign's value is its jobs' value
+        else:
+            binds = R.loosens(d, value, x["value"])   # a safety key: only where it is stricter
+        if binds:
+            if winner.get("role") == "winner":
+                winner["role"] = "shadowed"
+            winner, value = x, x["value"]
+            x["role"] = "winner"
+        else:
+            x["role"] = "looser"
     dv, why = layers[0]["value"], layers[0]["reason"]
     return {"key": key, "module": layers[0]["module"], "value": value,
             "source": {k: winner[k] for k in ("scope", "id", "name", "module", "rev", "by", "at", "comment", "builtin", "reason")},
-            "chain": layers, "locked_by": {k: lock[k] for k in ("scope", "id", "name")} if lock else None,
+            "chain": layers_all, "locked_by": {k: lock[k] for k in ("scope", "id", "name")} if lock else None,
             "default": {"value": dv, "reason": why}, "merge": d.merge}
 
 
@@ -173,6 +229,8 @@ def badge(res: dict) -> str:
     s = res["source"]
     if s["scope"] == "default":
         return "Default" + (f" · {s['reason']}" if s.get("reason") else "")
+    if s["scope"] == "managed":
+        return s["name"] + (f" · {s['by']}" if s.get("by") and s["by"] != "managed policy" else "")
     if s.get("builtin") and s.get("reason"):
         return f"{s['name']} · {s['reason']}"
     return s["name"]
@@ -188,19 +246,57 @@ def effective(snap: Snap, node: dict) -> dict:
     return out
 
 
-def module_settings(snap: Snap, node: dict | None, module: str, scope: str | None = "node") -> dict:
+def module_settings(snap: Snap, node: dict | None, module: str, scope: str | None = "node",
+                    campaign: str | None = None) -> dict:
     """What one module's processes get: each of its own keys (of `scope`: `node` for its runners and services on `node`,
     None for every key, as its coordinator side gets them with `node` None) with its effective value, else its default;
-    a key with neither is absent. Only this module's keys: another module's never reach it."""
+    a key with neither is absent. Only this module's keys: another module's never reach it. With `campaign`: as that
+    campaign's jobs get them."""
     from . import modkeys
     out = {}
     for key, d in snap.defs.items():
         m, name = modkeys.split(key)
         if m != module or (scope == "node" and "node" not in d.scopes):
             continue
-        res = resolve(snap, node, key, module)
+        res = resolve(snap, node, key, module, campaign)
         if res["source"]["scope"] != "default" or modkeys.has_default(d):
             out[name] = res["value"]
+    return out
+
+
+# the keys a node applies that a campaign may override; the coordinator holds the campaign's jobs to them at claim
+NODE_CAMPAIGN_KEYS = ("jobs", "run_on_battery", "user_present_slots")
+
+
+def campaign_rules(snap: Snap, node: dict, campaign: str | None) -> dict:
+    """{key: value} of the node-applied keys a running campaign holds its jobs to on this node: only where the
+    campaign's own value is what applies (stricter than the node's; a lock above ignores it). Claim and explain check
+    them (predicates: CAMPAIGN_SETTING_HOLDS); the agent's capacity already applies the node's own values."""
+    if not campaign or (snap.campaigns.get(campaign) or {}).get("state") not in CAMPAIGN_ACTIVE:
+        return {}
+    keys = {k for (scope, sid, _m, k) in snap.rows if scope == "campaign" and sid == campaign and k in NODE_CAMPAIGN_KEYS}
+    out = {}
+    for k in sorted(keys):
+        res = resolve(snap, node, k, "", campaign)
+        if res["source"]["scope"] == "campaign":
+            out[k] = res["value"]
+    return out
+
+
+def campaign_values(snap: Snap, campaign: str, module: str) -> dict:
+    """A campaign's own values of its module's own keys, as they apply to its jobs: {short name: value} of the keys it
+    sets while it runs (none once it is done). What a grant adds over the node's settings for a job of the campaign."""
+    from . import modkeys
+    c = snap.campaigns.get(campaign) or {}
+    if c.get("state") not in CAMPAIGN_ACTIVE:
+        return {}
+    out = {}
+    for (scope, sid, m, key), x in snap.rows.items():
+        if scope == "campaign" and sid == campaign and m == module:
+            mm, name = modkeys.split(key)
+            d = snap.defs.get(key)
+            if mm == module and d is not None and d.campaign:
+                out[name] = x["value"]
     return out
 
 
@@ -257,15 +353,16 @@ def cross_checks(node: dict, values: dict, sources: dict | None = None) -> list[
     return out
 
 
-def explain(snap: Snap, node: dict | None, key: str, module: str = "", applied: dict | None = None) -> dict:
+def explain(snap: Snap, node: dict | None, key: str, module: str = "", applied: dict | None = None,
+            campaign: str | None = None) -> dict:
     """The whole chain for one key (GET /api/v1/settings/explain): each scope, its value or "not set", the winner, any
-    lock, when and by whom, and the node's applied state."""
-    res = resolve(snap, node, key, module)
+    lock, when and by whom, and the node's applied state; with `campaign`, as that campaign's jobs get it."""
+    res = resolve(snap, node, key, module, campaign)
     d = snap.defn(key)
     res["label"], res["unit"], res["help"] = d.label, d.unit, d.help
     res["value_text"] = R.show(key, res["value"], d)
     for x in res["chain"]:
-        x["value_text"] = R.show(key, x["value"], d) if x["set"] or x["scope"] == "default" else "not set"
+        x["value_text"] = R.show(key, x["value"], d) if x["set"] or x["scope"] == "default" or x.get("inactive") else "not set"
     res["badge"] = badge(res)
     if node is not None:
         res["node"] = {"node_id": node["node_id"], "hostname": node.get("hostname")}

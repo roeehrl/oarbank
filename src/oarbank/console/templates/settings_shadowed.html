@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Shadowed values · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/settings">← Settings</a></p>
+<h1>Shadowed values</h1>
+<div class="card small">
+  <p>Values set at the fleet, a group or a node that change no node's effective value: set under a lock (ignored while
+  it holds), the same as what that scope inherits, or with no effect (another scope's value applies). A value equal to
+  the inherited one is still a choice: nothing here is reset unless you reset it.</p>
+  <p>{% if r.total %}<b>{{ r.total }}</b> value{{ 's' if r.total != 1 }}: {{ r.counts.locked }} under a lock, {{ r.counts.same }} the same as inherited, {{ r.counts.no_effect }} with no effect.{% else %}No shadowed values: every value set changes something.{% endif %}</p>
+  {% if r.total > 1 %}{{ m.op_form("settings.apply", "shadowed", "Reset all " ~ r.total ~ "…", params={"changes": r.reset_all, "comment": "reset shadowed values"}, return_to="/settings/shadowed") }}{% endif %}
+</div>
+{% if r.rows %}
+<div class="table-wrap"><table class="small"><caption class="sr-only">Shadowed values</caption>
+<tr><th scope="col">where</th><th scope="col">setting</th><th scope="col">value</th><th scope="col">why</th><th scope="col">changed</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+{% for x in r.rows %}{% set dom = (x.module ~ '-' if x.module else '') ~ x.key | replace('.', '-') %}
+<tr><td>{{ x.scope }} {% if x.scope == 'node' %}<a href="/nodes/{{ x.scope_id }}/settings?explain={{ x.key }}#s-{{ dom }}">{{ x.name }}</a>{% elif x.scope == 'group' %}<a href="/groups/{{ x.scope_id }}?explain={{ x.key }}#s-{{ x.key }}">{{ x.name }}</a>{% else %}<a href="/settings?explain={{ x.key }}#s-{{ x.key }}">Fleet</a>{% endif %}</td>
+  <td>{{ x.label }} <code class="mono small">{{ ('[' ~ x.module ~ '] ' if x.module and not x.key.startswith('module.') else '') ~ x.key }}</code></td>
+  <td class="mono">{{ x.value_text }}</td>
+  <td><span class="chip{{ ' warn' if x.category == 'locked' }}">{{ {'locked': 'under a lock', 'same': 'same as inherited', 'no_effect': 'no effect'}[x.category] }}</span> {{ x.why }}{% if x.inherited_text %} <span class="mut">(inherits {{ x.inherited_text }})</span>{% endif %}</td>
+  <td class="mut">{% if x.rev %}rev {{ x.rev }} · {{ x.by }} · {{ x.at | ago }}{% endif %}</td>
+  <td class="actions">{{ m.op_form("settings.apply", x.scope_id or "fleet", "Reset", params={"changes": [x.change]}, confirm="Reset " ~ x.label ~ " at " ~ x.name ~ "? It inherits again.", tier="T1", return_to="/settings/shadowed") }}</td></tr>
+{% endfor %}</table></div>{% endif %}
+{% endblock %}

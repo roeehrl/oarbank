@@ -353,7 +353,9 @@ fn main() -> anyhow::Result<()> {
             let p = policy::read();
             println!("{}", serde_json::json!({"JoinCode": p.join_code, "Coordinator": p.coordinator, "Scope": p.scope,
                 "Containers": p.containers, "Name": p.name, "AllowUserJoin": p.allow_user_join,
-                "ManagedByOrganizationName": p.managed_by, "ShowStatusIcon": p.show_status_icon}));
+                "ManagedByOrganizationName": p.managed_by, "ShowStatusIcon": p.show_status_icon,
+                // settings, not secrets: shown to the machine's admin as set (the join code above is the one secret)
+                "Settings": p.settings}));
             Ok(())
         }
         Cmd::Status => rt.block_on(async {

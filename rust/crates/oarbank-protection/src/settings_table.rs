@@ -2,34 +2,34 @@
 //! default. GENERATED from the settings registry (src/oarbank/coordinator/settings/registry.py) by
 //! `uv run python -m oarbank.coordinator.settings.rustgen`; do not edit (tests/test_settings.py checks it).
 
-use crate::settings::{Def, Kind, Section};
+use crate::settings::{Def, Kind, Section, Tighten};
 
 /// Every key, in the registry's order (the policy's extra keys last).
 pub const DEFS: &[Def] = &[
-    Def { key: "os_reserve_gb", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "4" },
-    Def { key: "user_reserve_gb", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "8" },
-    Def { key: "job_mem_gb", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "1.5" },
-    Def { key: "mem_in_use_bound", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "true" },
-    Def { key: "user_present_slots", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "2" },
-    Def { key: "user_idle_s", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "300" },
-    Def { key: "screen_sharing_present", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "true" },
-    Def { key: "run_on_battery", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "false" },
-    Def { key: "threads_per_job", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "1" },
-    Def { key: "max_slots", section: Section::Policy, kind: Kind::Integer, nullable: true, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "null" },
-    Def { key: "nice", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(0.0), exclusive_min: false, max: Some(20.0), choices: &[], default: "10" },
-    Def { key: "hard_limits", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "false" },
-    Def { key: "cpu_cores", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
-    Def { key: "mem_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
-    Def { key: "jobs", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null" },
-    Def { key: "schedule", section: Section::Limits, kind: Kind::Schedule, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null" },
-    Def { key: "enforce", section: Section::Limits, kind: Kind::Choice, nullable: false, min: None, exclusive_min: false, max: None, choices: &["soft", "hard"], default: "\"soft\"" },
-    Def { key: "vm_mem_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
-    Def { key: "vm_cpus", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null" },
-    Def { key: "disk_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
-    Def { key: "staging_mbps", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
-    Def { key: "disabled_services", section: Section::Policy, kind: Kind::Strings, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "[]" },
-    Def { key: "module_settings", section: Section::Policy, kind: Kind::Object, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "{}" },
-    Def { key: "protection", section: Section::Policy, kind: Kind::Object, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null" },
+    Def { key: "os_reserve_gb", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "4", tighten: Tighten::Higher, managed: true },
+    Def { key: "user_reserve_gb", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "8", tighten: Tighten::Higher, managed: true },
+    Def { key: "job_mem_gb", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "1.5", tighten: Tighten::None, managed: false },
+    Def { key: "mem_in_use_bound", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "true", tighten: Tighten::Higher, managed: true },
+    Def { key: "user_present_slots", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "2", tighten: Tighten::Lower, managed: true },
+    Def { key: "user_idle_s", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "300", tighten: Tighten::Higher, managed: true },
+    Def { key: "screen_sharing_present", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "true", tighten: Tighten::Higher, managed: true },
+    Def { key: "run_on_battery", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "false", tighten: Tighten::Lower, managed: true },
+    Def { key: "threads_per_job", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "1", tighten: Tighten::None, managed: false },
+    Def { key: "max_slots", section: Section::Policy, kind: Kind::Integer, nullable: true, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "nice", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(0.0), exclusive_min: false, max: Some(20.0), choices: &[], default: "10", tighten: Tighten::None, managed: false },
+    Def { key: "hard_limits", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "false", tighten: Tighten::Higher, managed: true },
+    Def { key: "cpu_cores", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "mem_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "jobs", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "schedule", section: Section::Limits, kind: Kind::Schedule, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::None, managed: false },
+    Def { key: "enforce", section: Section::Limits, kind: Kind::Choice, nullable: false, min: None, exclusive_min: false, max: None, choices: &["soft", "hard"], default: "\"soft\"", tighten: Tighten::Higher, managed: true },
+    Def { key: "vm_mem_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "vm_cpus", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "disk_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "staging_mbps", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "disabled_services", section: Section::Policy, kind: Kind::Strings, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "[]", tighten: Tighten::None, managed: false },
+    Def { key: "module_settings", section: Section::Policy, kind: Kind::Object, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "{}", tighten: Tighten::None, managed: false },
+    Def { key: "protection", section: Section::Policy, kind: Kind::Object, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::None, managed: false },
 ];
 
 // The defaults the capacity engine's Policy starts from (pre-first-heartbeat only).

@@ -28,7 +28,8 @@ class ApplyError(Exception):
 
 def _nodes(r) -> list[dict]:
     return r.q("SELECT node_id, hostname, os, arch, platform, facts_json, last_heartbeat_at, settings_rev, "
-               "settings_applied_rev, settings_rejected_json, agent_version FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+               "settings_applied_rev, settings_rejected_json, settings_managed_json, agent_version FROM nodes "
+               "WHERE lifecycle!='retired' ORDER BY hostname")
 
 
 def _node_id(db, ident: str) -> str | None:
@@ -62,7 +63,18 @@ def normalize(db, changes) -> list[dict]:
         if extra:
             err(f"unknown fields {sorted(extra)}", "bad_params")
             continue
-        key, module = modkeys.resolve_key(snap, key, c.get("module") or "")
+        camp = None
+        if scope == "campaign":                        # a campaign's override: the key is read for the campaign's module
+            camp = db.one("SELECT campaign_id, module, name, state FROM campaigns WHERE campaign_id=?",
+                          (c.get("scope_id") or "",))
+            if camp is None:
+                err(f"no campaign {c.get('scope_id')!r}", "unknown_campaign")
+                continue
+            if module and module != camp["module"]:
+                err(f"campaign {camp['campaign_id']} belongs to {camp['module']}, not {module}", "not_settable_here")
+                continue
+            module = camp["module"]
+        key, module = modkeys.resolve_key(snap, key, module)
         d = R.lookup(key, snap.defs)
         if d is None and c.get("reset") and modkeys.split(key)[0]:
             d = _orphan(key)                           # a value its module no longer declares: it can be reset
@@ -72,10 +84,16 @@ def normalize(db, changes) -> list[dict]:
         if d.writer:
             err(f"{d.label} ({key}) is changed with {d.writer}, which checks it and applies its effects", "use_typed_operation")
             continue
-        if scope not in R.SCOPES:
-            err("scope: fleet, group or node", "bad_scope")
+        if scope not in (*R.SCOPES, "campaign"):
+            err("scope: fleet, group, node or campaign", "bad_scope")
             continue
-        if scope not in d.scopes:
+        if scope == "campaign":
+            if not d.campaign:
+                err(f"{d.label} is not a setting a campaign may override", "not_campaign_overridable")
+                continue
+            if d.qualifier != "required":
+                module = ""                            # a core key: the campaign's row is the campaign's alone
+        elif scope not in d.scopes:
             err(f"{d.label} can be set for: {', '.join(d.scopes)}", "not_settable_here")
             continue
         if d.qualifier == "required" and not module:
@@ -101,6 +119,8 @@ def normalize(db, changes) -> list[dict]:
             if not sid:
                 err(f"no group {c.get('scope_id')!r}", "unknown_group")
                 continue
+        elif scope == "campaign":
+            sid = camp["campaign_id"]
         reset, enforce = bool(c.get("reset")), bool(c.get("enforce"))
         if enforce and (not d.lockable or scope not in ("fleet", "group")):
             err(f"{d.label} cannot be locked at {scope} scope", "not_lockable")
@@ -129,12 +149,33 @@ def normalize(db, changes) -> list[dict]:
             if lock:
                 err(f"locked by {lock}: change it there", "locked")
                 continue
+        if scope == "campaign" and not reset:
+            why = campaign_refusals(db, sid, key, module, snap=snap)
+            if why:
+                err(why[0]["message"], why[0]["code"])
+                continue
+            base = V.resolve(snap, None, key, module)["value"]
+            if R.loosens(d, value, base):
+                err(f"a campaign may only tighten {d.label} ({R.tighten_text(d)} is stricter): the fleet's value is "
+                    f"{R.show(key, base, d)}, and {R.show(key, value, d)} would loosen it", "loosens")
+                continue
         out.append({"scope": scope, "scope_id": sid, "module": module, "key": key, "reset": reset,
                     "value": value, "enforce": enforce, **({"orphan": True} if d.section == "orphan" else {})})
     if errors:
         raise ApplyError(400, "invalid_settings", "; ".join(f"{e.get('key') or '#' + str(e['index'])}: {e['message']}"
                                                             for e in errors)[:800], errors)
     return out
+
+
+def campaign_write(db, campaign_id: str, values, actor: str, comment: str | None = None) -> dict:
+    """A campaign's overrides as one change set (inside the caller's transaction): {key: value}, `None` resets a key.
+    What a module's `campaigns.create` / `campaigns.update` `settings` use; the same checks as the owner's
+    (`settings.apply` with scope `campaign`): the key campaign-overridable, the value valid, no lock, tighten-only."""
+    if not isinstance(values, dict) or not values:
+        raise ApplyError(400, "bad_params", "settings: a non-empty object of {key: value}")
+    changes = [{"scope": "campaign", "scope_id": campaign_id, "key": str(k), **({"reset": True} if v is None else {"value": v})}
+               for k, v in values.items()]
+    return commit(db, changes, actor, comment)
 
 
 def _orphan(key: str) -> R.Setting:
@@ -167,11 +208,11 @@ def lock_on(snap, db, scope, sid, module, key) -> dict | None:
     return None
 
 
-def campaign_refusals(db, campaign_id: str, key: str, module: str = "", node_ids=None) -> list[dict]:
+def campaign_refusals(db, campaign_id: str, key: str, module: str = "", node_ids=None, snap: V.Snap | None = None) -> list[dict]:
     """The hook campaign overrides (docs/design/settings.md, "Locks") go through: a lock binds a campaign too, so a
     value a campaign would set is refused where a fleet lock, or a lock of a group any of its nodes is in, holds, naming
     the lock; then a key that is not campaign-overridable is refused. Empty: the override may be written."""
-    snap = V.snapshot(db)
+    snap = snap or V.snapshot(db)
     key, module = modkeys.resolve_key(snap, key, module)
     d = snap.defn(key)
     out = []
@@ -208,6 +249,8 @@ def _after(snap: V.Snap, changes: list[dict]) -> V.Snap:
 
 
 def _reaches(snap: V.Snap, node: dict, c: dict) -> bool:
+    if c["scope"] == "campaign":
+        return False                                    # a campaign's value is its jobs', never in a node's document
     if c["scope"] == "fleet":
         return True
     if c["scope"] == "group":
@@ -218,7 +261,7 @@ def _reaches(snap: V.Snap, node: dict, c: dict) -> bool:
 def _change_text(c: dict, names: dict, before: V.Snap) -> str:
     d = _defn(before, c)
     where = {"fleet": "Fleet", "group": f"group {names.get(c['scope_id'], c['scope_id'])}",
-             "node": names.get(c["scope_id"], c["scope_id"])}[c["scope"]]
+             "node": names.get(c["scope_id"], c["scope_id"]), "campaign": f"campaign {c['scope_id']}"}[c["scope"]]
     old = before.get(c["scope"], c["scope_id"], c["module"], c["key"])
     was = R.show(c["key"], old["value"], d) if old else "not set"
     now = "reset (inherits)" if c["reset"] else R.show(c["key"], c["value"], d) + (" (locked)" if c["enforce"] else "")
@@ -237,7 +280,8 @@ def plan(db, changes) -> dict:
     # per module whether it runs there, its services and its node-scoped settings (everything not applied by the
     # coordinator alone)
     defn = before.defn
-    wire_keys = sorted({c["key"] for c in norm if not c.get("orphan") and (
+    camp = [c for c in norm if c["scope"] == "campaign"]
+    wire_keys = sorted({c["key"] for c in norm if c["scope"] != "campaign" and not c.get("orphan") and (
         defn(c["key"]).wire or defn(c["key"]).applies != "coordinator" or "statement" in defn(c["key"]).effects
         or "protection" in defn(c["key"]).effects)})
     prot_notes = []
@@ -299,7 +343,10 @@ def plan(db, changes) -> dict:
         raise ApplyError(400, "invalid_settings", "; ".join(e["message"] for e in errors)[:800], errors)
     hosts = sorted({x["hostname"] for x in diff})
     keep = sorted({x["hostname"] for x in unaffected})
-    if wire_keys:
+    cimp = _campaign_impact(before, after, nodes, camp) if camp else None
+    if cimp and len(camp) == len(norm):
+        summary = cimp["summary"]
+    elif wire_keys:
         summary = (f"Changes the effective value on {len(hosts)} node{'s' if len(hosts) != 1 else ''}"
                    + (f" ({', '.join(hosts[:6])}{', …' if len(hosts) > 6 else ''})" if hosts else ""))
         if keep:
@@ -307,17 +354,57 @@ def plan(db, changes) -> dict:
                        f"({', '.join(keep[:6])}{', …' if len(keep) > 6 else ''})"
     else:
         summary = "Changes a fleet-wide setting the coordinator applies"
+    if cimp and len(camp) != len(norm):
+        summary += "; " + cimp["summary"]
     fleetish = any(c["scope"] in ("fleet", "group") for c in norm)
     return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm],
             "lock_notes": _lock_notes(before, nodes, norm, names), "protection_notes": sorted(set(prot_notes)),
-            "nodes_changed": [f"{x['hostname']}: {x['label']} {x['old_text']} → {x['new_text']}" for x in diff],
+            "nodes_changed": [f"{x['hostname']}: {x['label']} {x['old_text']} → {x['new_text']}" for x in diff]
+                             + (cimp["nodes_changed"] if cimp else []),
             "nodes_unaffected": [f"{x['hostname']}: keeps {x['value_text']} ({x['why']}" + ("" if x["why"].startswith("locked")
-                                 else f": {x['source']}") + ")" for x in unaffected],
+                                 else f": {x['source']}") + ")" for x in unaffected] + (cimp["nodes_unaffected"] if cimp else []),
+            **({"campaign": cimp["lines"]} if cimp else {}),
             "then": ("each node gets its new settings at its next heartbeat and reports the revision it applied"
-                     if wire_keys else "the coordinator applies it at once"),
+                     if wire_keys else "the campaign's jobs get it from their next claim on" if camp
+                     else "the coordinator applies it at once"),
             "_changes": norm, "_diff": diff, "_unaffected": unaffected, "_nodes": len(hosts),
             "_button_label": (f"Save for {len(hosts)} node{'s' if len(hosts) != 1 else ''}" if fleetish and wire_keys else "Save"),
             "_tier": R.change_tier(norm)}
+
+
+def _campaign_impact(before: V.Snap, after: V.Snap, nodes: list[dict], camp: list[dict]) -> dict:
+    """What campaign overrides change while their campaigns run: a key the coordinator applies (the replica rate, a
+    module's fleet key) once, fleet-wide; a key a node applies (a cap, presence, a module's node key) per node, for the
+    campaign's jobs there, with the nodes where it does not apply (a stricter value of their own, a lock)."""
+    lines, changed, kept = [], [], []
+    moved_hosts: set = set()
+    for c in camp:
+        d = _defn(before, c)
+        cid = c["scope_id"]
+        m = c["module"] or (before.campaigns.get(cid) or {}).get("module") or ""
+        name = (after.campaigns.get(cid) or before.campaigns.get(cid) or {}).get("name") or cid
+        mod = m if d.qualifier else ""
+        if d.applies == "coordinator" or "node" not in d.scopes:
+            b, a = V.resolve(before, None, c["key"], mod, cid), V.resolve(after, None, c["key"], mod, cid)
+            lines.append(f"Jobs of {name}: {d.label} {R.show(c['key'], b['value'], d)} → {R.show(c['key'], a['value'], d)} "
+                         f"({V.badge(a)})")
+            continue
+        for n in nodes:
+            b, a = V.resolve(before, n, c["key"], mod, cid), V.resolve(after, n, c["key"], mod, cid)
+            if not R.same(b["value"], a["value"]):
+                moved_hosts.add(n["hostname"])
+                changed.append(f"{n['hostname']}: {d.label} for the jobs of {name} {R.show(c['key'], b['value'], d)} → "
+                               f"{R.show(c['key'], a['value'], d)}")
+            elif not c["reset"]:
+                lay = next((x for x in a["chain"] if x["scope"] == "campaign"), {})
+                why = ("locked" if lay.get("role") == "ignored" else "its own value is stricter" if lay.get("role") == "looser"
+                       else "same value")
+                kept.append(f"{n['hostname']}: the jobs of {name} keep {R.show(c['key'], a['value'], d)} ({why}: {V.badge(a)})")
+    names = sorted({(after.campaigns.get(c["scope_id"]) or {}).get("name") or c["scope_id"] for c in camp})
+    summary = (f"While {', '.join(names)} runs: changes what its jobs get" +
+               (f" on {len(moved_hosts)} node{'s' if len(moved_hosts) != 1 else ''}" if moved_hosts else "")
+               + (f" ({'; '.join(lines)})" if lines else ""))
+    return {"summary": summary, "lines": lines, "nodes_changed": changed, "nodes_unaffected": kept}
 
 
 def _lock_notes(snap: V.Snap, nodes: list[dict], norm: list[dict], names: dict) -> list[str]:
@@ -362,6 +449,9 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
     live = len(touched) - len(pending)
     parts = ([f"{live} of {len(touched)} node{'s' if len(touched) != 1 else ''} get{'s' if len(touched) == 1 else ''} it at "
               f"the next heartbeat"] if live else []) + ([f"{len(pending)} pending (offline)"] if pending else [])
+    camps = sorted({c["scope_id"] for c in norm if c["scope"] == "campaign"})
+    if camps:
+        parts.append(f"{', '.join(camps)}: its jobs get it from their next claim while it runs")
     return {"rev": n, "summary": p["summary"], "nodes": touched, "offline": pending,
             "message": " · ".join([f"Saved · rev {n}", *parts])}
 
@@ -430,8 +520,8 @@ def sync_nodes(db, node_ids=None, rev_: int | None = None, snap: V.Snap | None =
             continue
         if rev_ is None:
             rev_ = store.next_rev(db)
-        db.x("UPDATE nodes SET settings_json=?, settings_digest=?, settings_rev=? WHERE node_id=?",
-             (json.dumps(doc), digest, rev_, n["node_id"]))
+        db.x("UPDATE nodes SET settings_json=?, settings_digest=?, settings_rev=?, settings_changed_at=? WHERE node_id=?",
+             (json.dumps(doc), digest, rev_, time.time(), n["node_id"]))
         protection.record_if_changed(db, n["node_id"], doc["policy"]["protection"], rev_, actor)
         out[n["node_id"]] = rev_
     return out
@@ -449,8 +539,34 @@ def directive(db, node: dict) -> dict:
             "modules_disabled": list(doc.get("modules_disabled") or [])}
 
 
+def _managed_report(report: dict) -> dict | None:
+    """The managed part of an agent's settings report, kept bounded and typed: {"managed": [{key, value, binding}],
+    "managed_refused": [{key, reason}], "managed_by"}, or None when the machine's managed policy sets no setting. A
+    value only ever tightens on the machine (the agent enforces it), so the coordinator shows it and folds it into what
+    it says applies there (resolve.py); a key the registry does not let managed policy set is ignored here too."""
+    if not isinstance(report.get("managed"), list):
+        return None
+    vals = []
+    for x in report["managed"][:64]:
+        if not isinstance(x, dict) or not isinstance(x.get("key"), str):
+            continue
+        d = R.REGISTRY.get(x["key"])
+        if d is None or not d.managed:
+            continue
+        try:
+            v = R.check(x["key"], x.get("value"), d)
+        except R.SettingError:
+            continue
+        vals.append({"key": x["key"], "value": v, "binding": bool(x.get("binding"))})
+    refused = [{"key": str(x.get("key"))[:80], "reason": str(x.get("reason") or "")[:200]}
+               for x in (report.get("managed_refused") or [])[:64] if isinstance(x, dict) and x.get("key")]
+    by = report.get("managed_by")
+    return {"managed": vals, "managed_refused": refused, "managed_by": str(by)[:120] if isinstance(by, str) and by else None}
+
+
 def observe(db, node: dict, report) -> None:
-    """The agent's `settings` report in a heartbeat: the revision it applied and the keys it refused."""
+    """The agent's `settings` report in a heartbeat: the revision it applied, the keys it refused, and what the
+    machine's managed policy tightens there (a change of the latter refreshes the node's effective settings)."""
     if not isinstance(report, dict):
         return
     rev_ = report.get("applied_rev")
@@ -458,11 +574,18 @@ def observe(db, node: dict, report) -> None:
     rej = [{"key": str(x.get("key"))[:80], "reason": str(x.get("reason") or "")[:200]}
            for x in (report.get("rejected") or [])[:64] if isinstance(x, dict) and x.get("key")]
     old = json.loads(node.get("settings_rejected_json") or "[]")
-    db.x("UPDATE nodes SET settings_applied_rev=?, settings_rejected_json=? WHERE node_id=?",
-         (rev_, json.dumps(rej), node["node_id"]))
+    mg = _managed_report(report)
+    mg_json = json.dumps(mg, sort_keys=True) if mg else None
+    db.x("UPDATE nodes SET settings_applied_rev=?, settings_rejected_json=?, settings_managed_json=? WHERE node_id=?",
+         (rev_, json.dumps(rej), mg_json, node["node_id"]))
     if rej and rej != old:
         db.event("settings_rejected", node_id=node["node_id"], actor=node.get("hostname") or "agent",
                  reason="; ".join(f"{x['key']}: {x['reason']}" for x in rej)[:400])
+    if mg_json != node.get("settings_managed_json"):
+        keys = ", ".join(f"{x['key']} {R.show(x['key'], x['value'])}" for x in (mg or {}).get("managed") or []) or "nothing"
+        db.event("settings_managed", node_id=node["node_id"], actor=node.get("hostname") or "agent",
+                 reason=f"managed on this machine: {keys}"[:400])
+        sync_nodes(db, [node["node_id"]])
 
 
 def node_values(node: dict) -> dict:

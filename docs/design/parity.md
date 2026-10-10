@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 93 operations, 2 explain kinds, 127 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 94 operations, 2 explain kinds, 128 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -76,6 +76,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
 | `settings.apply` | T0 | yes | `oarbank settings set <key> <value> [--node <node>] [--group <group>]`<br>`oarbank settings reset <key> [--node <node>] [--group <group>]` | yes |
+| `settings.import` | T2 | yes | `oarbank settings import <file> [--dry-run]` | yes |
 | `settings.secrets.set` | T1 | yes | `oarbank settings set-secret <name>` | yes |
 | `settings.secrets.clear` | T1 | yes | `oarbank settings clear-secret <name>` | yes |
 | `settings.promote` | T1 | yes | `oarbank settings promote <key> --group <group> [--to <group>]` | yes |
@@ -116,6 +117,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NO_ELIGIBLE_NODE` | `jobs.set_priority` |
 | `QUEUED_BEHIND` | `jobs.set_priority` |
 | `CAMPAIGN_PAUSED` | `campaigns.resume` |
+| `CAMPAIGN_SETTING_HOLDS` | `settings.apply` |
 | `OARBANK_PAUSED` | `fleet.resume` |
 | `USER_CAP_BINDING` | `settings.apply` |
 | `MODULE_NOT_READY` | `nodes.run_doctor` |

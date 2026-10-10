@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- English strings for oarbank.admx (Codonic, Oarbank, Node). -->
+<!-- English strings for oarbank.admx (Codonic, Oarbank, Node, Node settings). -->
 <policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                            revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
   <displayName>Oarbank</displayName>
-  <description>Settings for Oarbank nodes: joining a fleet and what the Oarbank Node app offers.</description>
+  <description>Settings for Oarbank nodes: joining a fleet, what the Oarbank Node app offers, and node settings made stricter on this computer.</description>
   <resources>
     <stringTable>
       <string id="SUPPORTED_Oarbank_2_8">Oarbank agent 2.8 or later</string>
@@ -40,6 +40,78 @@ Not configured: each person chooses in Oarbank Node (Show in the notification ar
 Either way the setting is greyed out in Oarbank Node with "Managed by" your organization.</string>
       <string id="ManagedByOrganizationName">Organization name</string>
       <string id="ManagedByOrganizationName_Help">The organization shown in Oarbank Node and in the node's status ("Managed by …").</string>
+      <string id="NodeSettings">Node settings (tighten-only)</string>
+      <string id="NodeSettings_Help">Settings the coordinator sends this computer, made stricter here. These values can only make the coordinator's settings stricter on this computer, never looser: a value looser than the coordinator's has no effect. The Oarbank console shows each one as Managed on this machine. The agent reads them at most once a minute.</string>
+      <string id="os_reserve_gb">Memory kept for the system (GB)</string>
+      <string id="os_reserve_gb_Help">Memory never offered to jobs, whoever is using the computer, in GB (for example 6 or 6.5). A value lower than the coordinator's has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="user_reserve_gb">Memory kept for the person using it (GB)</string>
+      <string id="user_reserve_gb_Help">Memory also kept free while someone is using the computer, in GB (for example 8 or 12.5). A value lower than the coordinator's has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="mem_in_use_bound">Fit jobs into the memory free now</string>
+      <string id="mem_in_use_bound_Help">Enabled: jobs get at most the memory the computer has available now, less the memory guard's floor and 1 GB. Disabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="user_present_slots">Jobs while someone is using this computer</string>
+      <string id="user_present_slots_Help">The most jobs at once while someone is at the computer; 0 holds every new job back. A value higher than the coordinator's has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="user_idle_s">Idle time before the computer counts as free (seconds)</string>
+      <string id="user_idle_s_Help">Seconds without keyboard or mouse input before the computer runs at full capacity (for example 600). A value lower than the coordinator's has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="screen_sharing_present">Screen sharing counts as someone using it</string>
+      <string id="screen_sharing_present_Help">Enabled: a remote screen sharing session holds jobs back like a person at the keyboard, even without input. Disabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="run_on_battery">Run jobs on battery</string>
+      <string id="run_on_battery_Help">Disabled: a laptop on battery power takes no new jobs. Enabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="max_slots">Most jobs at once (slots)</string>
+      <string id="max_slots_Help">An upper bound on job slots whatever the hardware allows. A value higher than the coordinator's has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="hard_limits">Hard limits</string>
+      <string id="hard_limits_Help">Enabled: jobs over their memory or CPU reservation are stopped (Windows Job Objects). Disabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="cpu_cores">CPU cores cap</string>
+      <string id="cpu_cores_Help">Caps concurrent jobs times their threads, in cores (for example 4 or 2.5). A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="mem_gb">Memory cap (GB)</string>
+      <string id="mem_gb_Help">Memory for jobs and module services, in GB (for example 16 or 12.5). A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="jobs">Concurrent jobs cap</string>
+      <string id="jobs_Help">The most jobs running at once. A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="enforce">Cap enforcement</string>
+      <string id="enforce_Help">Soft: stop admitting jobs over a cap and let running jobs finish. Hard: also hand back the youngest jobs to fit. Soft has no effect when the coordinator asks for hard.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="enforce_soft">Soft</string>
+      <string id="enforce_hard">Hard</string>
+      <string id="vm_mem_gb">VM memory cap for services (GB)</string>
+      <string id="vm_mem_gb_Help">Memory for a module's VM service, in GB, applied at its next start. A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="vm_cpus">VM CPUs cap for services</string>
+      <string id="vm_cpus_Help">CPUs for a module's VM service, applied at its next start. A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="disk_gb">Disk cache cap (GB)</string>
+      <string id="disk_gb_Help">The dataset and image cache on this computer, in GB. A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="staging_mbps">Download bandwidth cap (Mbps)</string>
+      <string id="staging_mbps_Help">Bandwidth for dataset downloads, in Mbps (for example 50 or 12.5). A value higher than the coordinator's cap has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
     </stringTable>
     <presentationTable>
       <presentation id="JoinCode">
@@ -60,6 +132,61 @@ Either way the setting is greyed out in Oarbank Node with "Managed by" your orga
       <presentation id="ManagedByOrganizationName">
         <textBox refId="ManagedByOrganizationName">
           <label>Organization name:</label>
+        </textBox>
+      </presentation>
+      <presentation id="os_reserve_gb">
+        <textBox refId="os_reserve_gb">
+          <label>GB:</label>
+        </textBox>
+      </presentation>
+      <presentation id="user_reserve_gb">
+        <textBox refId="user_reserve_gb">
+          <label>GB:</label>
+        </textBox>
+      </presentation>
+      <presentation id="user_present_slots">
+        <decimalTextBox refId="user_present_slots" defaultValue="1">Jobs:</decimalTextBox>
+      </presentation>
+      <presentation id="user_idle_s">
+        <textBox refId="user_idle_s">
+          <label>Seconds:</label>
+        </textBox>
+      </presentation>
+      <presentation id="max_slots">
+        <decimalTextBox refId="max_slots" defaultValue="1">Slots:</decimalTextBox>
+      </presentation>
+      <presentation id="cpu_cores">
+        <textBox refId="cpu_cores">
+          <label>Cores:</label>
+        </textBox>
+      </presentation>
+      <presentation id="mem_gb">
+        <textBox refId="mem_gb">
+          <label>GB:</label>
+        </textBox>
+      </presentation>
+      <presentation id="jobs">
+        <decimalTextBox refId="jobs" defaultValue="1">Jobs:</decimalTextBox>
+      </presentation>
+      <presentation id="enforce">
+        <dropdownList refId="enforce" noSort="true" defaultItem="1">Enforcement:</dropdownList>
+      </presentation>
+      <presentation id="vm_mem_gb">
+        <textBox refId="vm_mem_gb">
+          <label>GB:</label>
+        </textBox>
+      </presentation>
+      <presentation id="vm_cpus">
+        <decimalTextBox refId="vm_cpus" defaultValue="1">CPUs:</decimalTextBox>
+      </presentation>
+      <presentation id="disk_gb">
+        <textBox refId="disk_gb">
+          <label>GB:</label>
+        </textBox>
+      </presentation>
+      <presentation id="staging_mbps">
+        <textBox refId="staging_mbps">
+          <label>Mbps:</label>
         </textBox>
       </presentation>
     </presentationTable>

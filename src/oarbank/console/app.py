@@ -598,6 +598,51 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no setting {key!r}", "actor": actor}, 404)
         return render(request, "settings_overrides.html", {"o": d, "actor": actor})
 
+    @app.get("/settings/shadowed", response_class=HTMLResponse)
+    async def settings_shadowed(request: Request):
+        actor = who(request)
+        d = await drill(views.shadowed_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy", "actor": actor}, 503)
+        return render(request, "settings_shadowed.html", {"r": d, "actor": actor})
+
+    @app.get("/settings/export")
+    async def settings_export(request: Request, scope: str = "fleet", module: str = ""):
+        """The Export download: a scope's settings as YAML (settings/export.py; secrets as fingerprints only)."""
+        actor = who(request)
+        from ..coordinator.settings import SettingError
+        from ..coordinator.settings import export as X
+
+        def run(r):
+            try:
+                return X.export_yaml(r, scope or "fleet", module)
+            except SettingError as e:
+                return e
+        text = await drill(run)
+        if text is None or isinstance(text, Exception):
+            return render(request, "error.html", {"message": f"cannot export {scope}: {getattr(text, 'detail', 'the database is busy')}",
+                                                  "actor": actor}, 404 if text is not None else 503)
+        name = "oarbank-settings-" + (scope or "fleet").replace(":", "-") + (f"-{module}" if module else "") + ".yml"
+        return Response(text, media_type="application/yaml", headers={"content-disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/settings/import", response_class=HTMLResponse)
+    async def settings_import(request: Request):
+        """Export and import: download a scope's settings, or upload or paste a file; the preview lists every difference
+        and the nodes whose values change before anything is saved."""
+        actor = who(request)
+        d = await drill(views.import_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy", "actor": actor}, 503)
+        return render(request, "settings_import.html", {**d, "actor": actor})
+
+    @app.get("/settings/drift", response_class=HTMLResponse)
+    async def settings_drift(request: Request):
+        actor = who(request)
+        d = await drill(views.drift_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy", "actor": actor}, 503)
+        return render(request, "settings_drift.html", {"d": d, "actor": actor})
+
     @app.get("/nodes/{nid}/protection", response_class=HTMLResponse)
     async def node_protection(nid: str, request: Request):
         actor = who(request)
@@ -646,6 +691,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         d = await campaign_ctx(cid, request, actor)
         if d is None:
             return render(request, "error.html", {"message": f"campaign {cid} not found (or the database is busy)", "actor": actor}, 404)
+        d["explain"] = request.query_params.get("explain") or ""
+        _saved(d, request)
         return render(request, "campaign.html", {**d, "actor": actor})
 
     @app.get("/frag/campaign/{cid}", response_class=HTMLResponse)
@@ -1136,6 +1183,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                 if getattr(f, "read", None) and f.filename:
                     files[Path(f.filename).name] = (await f.read()).decode("utf-8", "replace")
             form = {**{k: form.get(k) for k in form.keys() if k != "metadata"}, "params": json.dumps({"files": files})}
+        if op == "settings.import" and getattr(form.get("file"), "read", None):
+            data = await form["file"].read()
+            if data:                                      # an uploaded file wins over the text box
+                form = {**{k: form.get(k) for k in form.keys() if k != "file"},
+                        "text": data.decode("utf-8", "replace")}
         if op == "modules.install" and getattr(form.get("bundle"), "read", None):
             data = await form["bundle"].read()
             up = await http.post("/api/v1/modules/bundles", content=data, headers=state.coordinator_headers(actor))
@@ -1159,7 +1211,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             from ..coordinator.settings import bulk
             cs = [c for c in (params.get("changes") if isinstance(params.get("changes"), list) else []) if isinstance(c, dict)]
             tier = bulk.tier(cs)
-            if any(c.get("scope") in ("fleet", "group") for c in cs) or len({c.get("scope_id") for c in cs
+            if any(c.get("scope") in ("fleet", "group", "campaign") for c in cs) or len({c.get("scope_id") for c in cs
                                                                              if c.get("scope") == "node"}) > 1:
                 tier = "T2" if tier in ("T0", "T1") else tier
         if op in ("settings.promote", "nodes.label", "groups.create") and tier in ("T0", "T1"):
@@ -1196,6 +1248,12 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             d = await settings_ctx(request, actor)
             _with_errors(d["fs"]["node_defaults"] + d["fs"]["fleet"], errors, form)
             return render(request, "settings.html", {**d, "actor": actor}, 400)
+        if page.startswith("campaign:"):
+            d = await campaign_ctx(page[9:], request, actor)
+            if d is not None and d.get("overrides"):
+                d["explain"], d["saved"] = "", ""
+                _with_errors([d["overrides"]["section"]], errors, form)
+                return render(request, "campaign.html", {**d, "actor": actor}, 400)
         if page.startswith("group:"):
             d = await drill(views.group_page, page[6:])
             if d is not None:

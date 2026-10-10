@@ -995,7 +995,7 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         try:
             out = fn()
         except SettingError as e:
-            raise core.ApiError(404 if e.code == "unknown_setting" else 400, e.code, e.detail)
+            raise core.ApiError(404 if e.code in ("unknown_setting", "unknown_campaign", "unknown_group", "unknown_node", "unknown_module") else 400, e.code, e.detail)
         if out is None:
             raise core.ApiError(404, "not_found", "no such node")
         return out
@@ -1012,15 +1012,35 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     @app.get("/api/v1/settings/effective")
     def api_settings_effective(node: str = "", module: str = "", campaign: str = "", actor=Depends(who)):
         from .settings import views
-        if campaign:
-            raise core.ApiError(400, "not_yet", "campaign overrides are not settings yet: placement, priority and weight are "
-                                                "the campaign's own (campaigns.set_*)")
-        return _settings_doc(lambda: views.effective_doc(db, node or None, module))
+        return _settings_doc(lambda: views.effective_doc(db, node or None, module, campaign))
 
     @app.get("/api/v1/settings/explain")
-    def api_settings_explain(key: str, node: str = "", module: str = "", actor=Depends(who)):
+    def api_settings_explain(key: str, node: str = "", module: str = "", campaign: str = "", actor=Depends(who)):
         from .settings import views
-        return _settings_doc(lambda: views.explain_doc(db, key, node or None, module))
+        return _settings_doc(lambda: views.explain_doc(db, key, node or None, module, campaign))
+
+    @app.get("/api/v1/settings/export")
+    def api_settings_export(scope: str = "fleet", module: str = "", actor=Depends(who)):
+        """A scope's settings as YAML (settings/export.py): values and locks, groups, labels, tool definitions;
+        secrets as fingerprints only."""
+        from fastapi.responses import PlainTextResponse
+        from .settings import export
+        text = _settings_doc(lambda: export.export_yaml(db, scope, module))
+        name = "oarbank-settings-" + (scope.replace(":", "-") or "fleet") + (f"-{module}" if module else "") + ".yml"
+        return PlainTextResponse(text, media_type="application/yaml",
+                                 headers={"content-disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/api/v1/settings/shadowed")
+    def api_settings_shadowed(actor=Depends(who)):
+        """Values that change nothing: under a lock, the same as inherited, or with no effect (settings/reports.py)."""
+        from .settings import reports
+        return reports.shadowed(db)
+
+    @app.get("/api/v1/settings/drift")
+    def api_settings_drift(actor=Depends(who)):
+        """Nodes whose agent does not run its latest settings, refused keys, or whose managed policy tightens them."""
+        from .settings import reports
+        return reports.drift(db)
 
     @app.get("/api/v1/settings/overrides")
     def api_settings_overrides(key: str, module: str = "", scope: str = "", actor=Depends(who)):

@@ -369,7 +369,8 @@ def campaign_page(r, cid: str, now: float) -> dict | None:
     stranded = r.q("SELECT rule, detail FROM alerts WHERE subject=? AND state='open' AND rule LIKE 'placement_%'", (f"campaign:{cid}",))
     platforms = sorted(set(PLATFORM_TOKENS) | {x["platform"] for x in r.q("SELECT DISTINCT platform FROM nodes WHERE platform IS NOT NULL")})
     return {"c": c, "jobs": jobs, "eta_s": eta(r, cid, now), "history": history, "events": events, "results": results,
-            "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms}
+            "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms,
+            "overrides": settings_views.campaign_section(r, cid)}
 
 
 def result_cell(v, fmt: str | None, unit: str | None) -> str:
@@ -617,6 +618,27 @@ def overrides_page(r, key: str, module: str = "") -> dict | None:
         return settings_views.overrides_doc(r, key, module)
     except SettingError:
         return None
+
+
+def shadowed_page(r) -> dict:
+    """Values that change nothing (settings/reports.shadowed)."""
+    from ..coordinator.settings import reports
+    return reports.shadowed(r)
+
+
+def import_page(r) -> dict:
+    """Export and import: the scopes an export can cover (the fleet, each group, each node) and the modules."""
+    from ..coordinator.settings import resolve as V
+    snap = V.snapshot(r)
+    return {"groups": [{"id": g["id"], "name": g["name"]} for g in sorted(snap.groups, key=lambda g: -g["rank"])],
+            "nodes": r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname"),
+            "modules": snap.modules}
+
+
+def drift_page(r) -> dict:
+    """Nodes that do not run their latest settings, and what managed policy tightens (settings/reports.drift)."""
+    from ..coordinator.settings import reports
+    return reports.drift(r)
 
 
 def module_settings_page(r, name: str) -> dict | None:

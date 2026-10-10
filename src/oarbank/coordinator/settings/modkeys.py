@@ -2,12 +2,12 @@
 
 A module declares its settings in the JSON Schema file `[settings].schema` names (oarbank-sdk spec/manifest.md,
 "Settings"): one property per key, with its type and constraints, default, title, description and an `x-oarbank`
-annotation (scope `fleet` or `node`, `required`, `unit`, `advanced`). When a version is installed, enabled, promoted or
-rolled back, the coordinator registers the keys of the module's registered version (its current one, else its newest
-installed one) as `module.<module>.<key>` definitions, kept in `module_setting_keys`. Values live in `setting_values`
-like every other setting, one row per key and scope with `module` naming the module, and change through
-`settings.apply` (or the module's own `module_settings.update` effect), checked against the property's whole JSON
-Schema.
+annotation (scope `fleet` or `node`, `required`, `unit`, `advanced`, `campaign`). When a version is installed, enabled,
+promoted or rolled back, the coordinator registers the keys of the module's registered version (its current one, else
+its newest installed one) as `module.<module>.<key>` definitions, kept in `module_setting_keys`. Values live in
+`setting_values` like every other setting, one row per key and scope with `module` naming the module, and change
+through `settings.apply` (or the module's own `module_settings.update` effect), checked against the property's whole
+JSON Schema. A key declared `campaign` may also be overridden by a campaign of the module while it runs.
 
 - A `fleet` key may be set for the fleet only; the module's coordinator side reads it. A `node` key may be set for the
   fleet, a node group or a node; each node's runners and services of that module get it in `OARBANK_SETTINGS_FILE`.
@@ -70,7 +70,8 @@ def definition(module: str, k) -> R.Setting:
     return R.Setting(key_of(module, k.name), k.label, k.help, k.schema, default=k.default if k.has_default else None,
                      unit=k.unit, scopes=R.SCOPES if node else ("fleet",), lockable=True, advanced=k.advanced,
                      danger="T1", applies="agent" if node else "coordinator", section="module_own",
-                     qualifier="required", required=k.required, validator=_validator(k.label, k))
+                     qualifier="required", required=k.required, validator=_validator(k.label, k),
+                     campaign=bool(getattr(k, "campaign", False)))
 
 
 def _keys(raw: str) -> list:

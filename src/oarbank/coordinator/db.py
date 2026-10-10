@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   platform TEXT, os TEXT, arch TEXT, os_version TEXT,   -- from the agent's facts (spec/platforms.md)
   settings_json TEXT, settings_digest TEXT, settings_rev INT,   -- the effective policy and caps the agent gets (settings/apply.py)
   settings_applied_rev INT, settings_rejected_json TEXT,         -- what the agent reports it applied, and refused
+  settings_changed_at REAL,       -- when settings_rev last moved (the drift report: how long a node lags)
+  settings_managed_json TEXT,     -- what the machine's managed policy (MDM) sets, as the agent reports it (settings/apply.py)
   last_heartbeat_at REAL, last_hello_at REAL, capacity_json TEXT, telemetry_json TEXT,
   ready_datasets_json TEXT DEFAULT '[]', doctor_json TEXT, doctor_at REAL,
   breaker_failures INT DEFAULT 0, quarantine_reason TEXT, created_at REAL,
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   folders_json TEXT,              -- the folders of the statement the agent applied: {id: {access, status}} (folders.py)
   tools_json TEXT,                -- the host tools the agent detected: {detected_at, native_arch, tools: {id: [...]}} (tools.py)
   want_detect INT DEFAULT 0,      -- tools.detect: ask the agent to detect its host tools again (the next directive)
+  detect_requested_at REAL,       -- when the last Re-detect was asked for (tools.py: "waiting for the node" until it reports)
   services_json TEXT, services_at REAL,   -- the agent's service report: {services: [...], probes: [...]} (protocol.md)
   clock_offset_s REAL);           -- the node's wall clock minus oarbankd's, at its last hello or heartbeat (protocol.md, "Clocks")
 
@@ -271,7 +274,8 @@ class _TimedLock:
 ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
                  "nodes": {"settings_json": "TEXT", "settings_digest": "TEXT",
                            "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
-                           "tools_json": "TEXT", "want_detect": "INT DEFAULT 0"}}
+                           "tools_json": "TEXT", "want_detect": "INT DEFAULT 0", "settings_changed_at": "REAL",
+                           "settings_managed_json": "TEXT", "detect_requested_at": "REAL"}}
 
 
 def _ensure_columns(conn, table: str, cols: dict) -> None:

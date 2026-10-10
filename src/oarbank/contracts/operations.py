@@ -348,6 +348,13 @@ OPS: list[Operation] = [
               routes=OPR("settings.apply"), gui=CON("settings.apply"),
               cli=["oarbank settings set <key> <value> [--node <node>] [--group <group>]",
                    "oarbank settings reset <key> [--node <node>] [--group <group>]"]),
+    Operation(id="settings.import", area="settings",
+              summary="Import a settings export (YAML): groups, labels, tool definitions and values, only where they differ, "
+                      "as one change; absent keys inherit, !reset deletes",
+              tier="T2", escalates="T3 when the file adds or changes a lock", preview=True, min_role="admin",
+              category="modify", idempotency="declarative", versioned=True,
+              routes=OPR("settings.import"), gui=CON("settings.import"),
+              cli=["oarbank settings import <file> [--dry-run]"]),
     Operation(id="settings.secrets.set", area="settings", summary="Set a core secret (the ntfy token): write-only, shown only as a fingerprint",
               tier="T1", min_role="admin", category="modify", reverses="settings.secrets.clear", idempotency="declarative",
               routes=OPR("settings.secrets.set"), gui=CON("settings.secrets.set"), cli=["oarbank settings set-secret <name>"]),

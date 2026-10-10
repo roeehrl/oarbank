@@ -43,6 +43,8 @@ CODES: list[ReasonCode] = [
     C("QUEUED_BEHIND", "job_pending", "Eligible, but behind {ahead} higher-priority jobs", remedies=["jobs.set_priority"]),
     C("DEPENDENCY_UNMET", "job_pending", "Waiting for stage {stage} (job {job_id})"),
     C("CAMPAIGN_PAUSED", "job_pending", "Campaign {campaign} is not running", remedies=["campaigns.resume"]),
+    C("CAMPAIGN_SETTING_HOLDS", "job_pending", "Its campaign's settings hold its jobs here: {setting} ({have})",
+      remedies=["settings.apply"]),
     C("OARBANK_PAUSED", "job_pending", "The fleet is paused", remedies=["fleet.resume"], wire=["fleet_halt"]),
     C("BACKOFF", "job_pending", "Retrying after {seconds} s (backoff)"),
     C("POOL_EXHAUSTED", "job_pending", "No free {pool} token ({free} free, {need} needed)"),

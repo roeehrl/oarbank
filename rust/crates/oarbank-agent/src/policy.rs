@@ -2,6 +2,9 @@
 //! a config-management tool set for this node. macOS: the managed-preferences domain `dev.codonic.oarbank.agent`;
 //! Windows: `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent`; Linux: `/etc/oarbank/policy.json`. `OARBANK_POLICY_FILE`
 //! names a JSON file instead (tests). Values are never logged: a join code is a secret.
+//!
+//! `Settings` (Windows: the `Settings` subkey's values) may set settings keys, which can only tighten what the
+//! coordinator sends (docs/design/settings.md, "Managed on this machine"); the agent enforces that.
 
 use serde_json::Value;
 
@@ -20,6 +23,8 @@ pub struct Policy {
     /// account, true keeps it shown; set either way, the app's own setting is greyed out ("Managed by …"). The agent
     /// only reports it (`oarbank-agent policy`): the apps read the policy themselves.
     pub show_status_icon: Option<bool>,
+    /// `Settings`: settings keys by their table name, raw as read (the agent converts and checks them).
+    pub settings: serde_json::Map<String, Value>,
 }
 
 impl Policy {
@@ -37,7 +42,8 @@ impl Policy {
         });
         Policy { join_code: s("JoinCode"), coordinator: s("Coordinator"), scope: s("Scope"), containers: b("Containers"),
                  name: s("Name"), allow_user_join: b("AllowUserJoin"), managed_by: s("ManagedByOrganizationName"),
-                 show_status_icon: b("ShowStatusIcon") }
+                 show_status_icon: b("ShowStatusIcon"),
+                 settings: v.get("Settings").and_then(Value::as_object).cloned().unwrap_or_default() }
     }
 
     #[cfg(test)]
@@ -72,11 +78,16 @@ fn read_os() -> Option<Value> {
 
 #[cfg(windows)]
 fn read_os() -> Option<Value> {
-    let out = std::process::Command::new("reg").args(["query", r"HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent"]).output().ok()?;
-    if !out.status.success() {
-        return None;
+    let query = |key: &str| {
+        let out = std::process::Command::new("reg").args(["query", key]).output().ok()?;
+        out.status.success().then(|| parse_reg(&String::from_utf8_lossy(&out.stdout)))
+    };
+    const KEY: &str = r"HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent";
+    let mut v = query(KEY)?;
+    if let Some(s) = query(&format!(r"{KEY}\Settings")) {
+        v["Settings"] = s;
     }
-    Some(parse_reg(&String::from_utf8_lossy(&out.stdout)))
+    Some(v)
 }
 
 /// `reg query` output: `    Name    REG_SZ    value` and `    Name    REG_DWORD    0x1`.
@@ -109,8 +120,19 @@ mod tests {
                                           "ShowStatusIcon": 0}));
         assert_eq!(p, Policy { join_code: Some("OB2-X".into()), coordinator: None, scope: Some("system".into()),
                                containers: Some(true), name: None, allow_user_join: Some(false),
-                               managed_by: Some("Example".into()), show_status_icon: Some(false) });
+                               managed_by: Some("Example".into()), show_status_icon: Some(false),
+                               settings: Default::default() });
         assert!(Policy::from_json(&json!({})).is_empty());
+    }
+
+    /// `Settings` is kept raw (the agent converts and checks each key); anything but an object is ignored.
+    #[test]
+    fn managed_settings_are_kept_as_read() {
+        let p = Policy::from_json(&json!({"Settings": {"run_on_battery": false, "jobs": 2, "os_reserve_gb": "8"}}));
+        assert_eq!(Value::Object(p.settings.clone()), json!({"run_on_battery": false, "jobs": 2, "os_reserve_gb": "8"}));
+        assert!(!p.is_empty());
+        assert!(Policy::from_json(&json!({"Settings": "jobs=2"})).is_empty());
+        assert!(Policy::from_json(&json!({"Settings": {}})).is_empty());
     }
 
     #[test]
@@ -118,5 +140,13 @@ mod tests {
         let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Codonic\\Oarbank\\Agent\r\n    JoinCode    REG_SZ    OB2-ABC\r\n    Containers    REG_DWORD    0x1\r\n    ShowStatusIcon    REG_DWORD    0x0\r\n\r\n";
         let p = Policy::from_json(&parse_reg(out));
         assert_eq!((p.join_code.as_deref(), p.containers, p.show_status_icon), (Some("OB2-ABC"), Some(true), Some(false)));
+        // the Settings subkey: its values, and the subkey line of the parent's listing is no value
+        let sub = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Codonic\\Oarbank\\Agent\\Settings\r\n    run_on_battery    REG_DWORD    0x0\r\n    jobs    REG_DWORD    0x2\r\n    os_reserve_gb    REG_SZ    1.5\r\n    enforce    REG_SZ    hard\r\n\r\n";
+        assert_eq!(parse_reg(sub), json!({"run_on_battery": 0, "jobs": 2, "os_reserve_gb": "1.5", "enforce": "hard"}));
+        let parent = format!("{out}HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Codonic\\Oarbank\\Agent\\Settings\r\n");
+        let mut v = parse_reg(&parent);
+        assert_eq!(v.as_object().unwrap().len(), 3);
+        v["Settings"] = parse_reg(sub);
+        assert_eq!(Policy::from_json(&v).settings.len(), 4);
     }
 }
