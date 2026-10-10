@@ -1,7 +1,6 @@
 """A coordinator move with the Rust agent: the standby pairs with the old coordinator over pinned TLS (both CAs
 pinned), seeds, and takes over after the time lock; the agent verifies the signed statement, follows it after the
 time lock, and keeps working with the new coordinator (same CA, its certificate carried in the moved database)."""
-import json
 import os
 import subprocess
 import sys
