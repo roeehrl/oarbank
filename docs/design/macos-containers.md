@@ -9,17 +9,17 @@ The macOS runtime is the agent's own Colima profiles ([architecture.md](architec
 containers of jobs that reserved the `gpu` pool ([gpu-placement.md](gpu-placement.md)). This note says when they come
 up, where their state lives, what the node reports, and what the owner must do.
 
-## What 2.8.0 did (the fleet that prompted this)
+## What 2.8.0 did
 
-Seen on the owner's fleet (four Macs on 2.8.0, system installs run by `_oarbank`, Colima 0.10.3, Lima 2.2.0, docker
+Seen on a test fleet of Macs on 2.8.0 (system installs run by `_oarbank`, Colima 0.10.3, Lima 2.2.0, docker
 29.8 in `/opt/homebrew/bin`):
 
 - **No Mac reported a runtime.** On Unix the facts' `containers` was only `{"gpu": ...}`, computed from the binaries;
-  `oarbank-agent containers doctor` printed the same. The Studio reported `"gpu": "virtio-gpu:venus"` because krunkit,
+  `oarbank-agent containers doctor` printed the same. A Mac with krunkit reported `"gpu": "virtio-gpu:venus"` because krunkit,
   Colima and docker are installed, with no VM and no way to start one.
-- **Every Mac with Colima offered the `containers` pool** (2 on each mini, 4 on the Studio, 12 on the MacBook) as soon
+- **Every Mac with Colima offered the `containers` pool** (2 to 12 tokens, by the machine) as soon
   as a release wanted containers: `ColimaRuntime::pool_tokens` was the VM's size, whether or not it could run. The
-  coordinator would place minos-gatk's container jobs there.
+  coordinator would place a module's container jobs there.
 - **The VM started only with the first container job**, inside `ensure_started`, and that start could not succeed under
   the system service: `ColimaRuntime.home` was `$HOME`. launchd gives a `UserName` job its account's home, and
   `_oarbank`'s is `/Library/Application Support/Oarbank` (`dscl . -read /Users/_oarbank NFSHomeDirectory`), owned by
@@ -28,11 +28,10 @@ Seen on the owner's fleet (four Macs on 2.8.0, system installs run by `_oarbank`
 - **Finding the tools was not the problem.** `find_bin` already looked in `/opt/homebrew/bin` and `/usr/local/bin`
   whatever PATH was, the agent's launchd plist sets PATH to include both (launchd's own default for a daemon is
   `/usr/bin:/bin:/usr/sbin:/sbin`), and Homebrew's prefix is world-readable on every Mac checked (`/opt/homebrew` 0755,
-  `Cellar` 0775). A Colima only in a person's home (the Studio's `~/.local/bin/colima` is a wrapper around the
+  `Cellar` 0775). A Colima only in a person's home (one Mac's `~/.local/bin/colima` is a wrapper around the
   Homebrew one) is invisible to `_oarbank`, as it should be.
-- **lurus-mini has no Rosetta** (`/Library/Apple/usr/libexec/oah/libRosettaRuntime` missing, `arch -x86_64` fails), so
-  `--vz-rosetta` would fail there and linux/amd64 images (hap.py, bcftools) cannot run until it is installed. The other
-  minis and the Studio have it.
+- **One Mac has no Rosetta** (`/Library/Apple/usr/libexec/oah/libRosettaRuntime` missing, `arch -x86_64` fails), so
+  `--vz-rosetta` would fail there and linux/amd64 images cannot run until it is installed. The others have it.
 
 ## Can a VM run under `_oarbank`, from a LaunchDaemon?
 
@@ -172,21 +171,21 @@ that person's; that is why it is the fallback, not the design.
 
 ## Verify on a real node after the release
 
-On a mini (system install, Colima and docker in `/opt/homebrew/bin`, Rosetta installed):
+On a Mac (system install, Colima and docker in `/opt/homebrew/bin`, Rosetta installed):
 
-1. Before a container release: `oarbank node show <mini>` shows `containers: colima absent`, no missing pieces;
-   lurus-mini shows `missing rosetta`.
-2. With minos-gatk's release: the facts go `starting` then `ready` within ~10 minutes (first image download);
+1. Before a container release: `oarbank node show <node>` shows `containers: colima absent`, no missing pieces;
+   a Mac without Rosetta shows `missing rosetta`.
+2. With a container module's release: the facts go `starting` then `ready` within ~10 minutes (first image download);
    `sudo -u _oarbank /Library/Oarbank/bin/oarbank-agent --home "/Library/Application Support/Oarbank/agent"
    containers doctor --probe` passes every check (run, mount, limits, no network, cleanup); `capacity_json.pools`
    shows `containers` only after `ready`.
 3. `sudo ls "/Library/Application Support/Oarbank/agent/colima"` holds `oarbank/docker.sock`, `_lima/colima-oarbank`,
    `Library/Caches`; nothing appeared in `/Library/Application Support/Oarbank` itself or in any person's home.
-4. An amd64 image runs (a minos-gatk grading job with hap.py; or the probe with `--platform linux/amd64`), so Rosetta
+4. An amd64 image runs (a job of a module with an amd64 image; or the probe with `--platform linux/amd64`), so Rosetta
    works in the daemon's VM.
 5. Restart the agent (`sudo launchctl kickstart -k system/dev.codonic.oarbank.agent`): the VM keeps running and the
    report is `ready` again within seconds.
-6. Studio (krunkit): `containers.gpu` is `undetected` while `starting`, `virtio-gpu:venus` once `ready`;
+6. A Mac with krunkit: `containers.gpu` is `undetected` while `starting`, `virtio-gpu:venus` once `ready`;
    `containers doctor --probe --gpu` starts `oarbank-gpu` and passes `gpu_run` (this is the reverse-sshfs mount with a
    space in its path, and krunkit's Metal from a daemon).
 7. If 2 or 6 fail with a VZ or Metal error, take the fallback above.

@@ -41,8 +41,8 @@ def test_why_on_the_owners_fleet():
     mbp = nodepolicy.why(cap(2, 12, 2, 63.74, in_use=47.9, present=True), {"presence": "screen sharing"},
                          facts(128.0, perf=6, eff=12, logical=18), defaults_for(facts(128.0)), "darwin")
     assert mbp["slots"] == "2 slots while someone is screen sharing this Mac (12 when idle)"
-    gurus = nodepolicy.why(cap(10, 10, 2, 4.12, in_use=16.0, limit="memory_in_use"), {}, facts(24.0), defaults_for(facts(24.0)))
-    assert gurus["line"] == ("10 slots (5 performance cores + 10 efficiency cores at half), memory for 2 jobs · "
+    mini = nodepolicy.why(cap(10, 10, 2, 4.12, in_use=16.0, limit="memory_in_use"), {}, facts(24.0), defaults_for(facts(24.0)))
+    assert mini["line"] == ("10 slots (5 performance cores + 10 efficiency cores at half), memory for 2 jobs · "
                              "4.1 GB free for jobs (apps and the system use 16 GB)")
     pc_facts = facts(15.8, "windows", perf=8, eff=0, logical=8)
     pc = nodepolicy.why(cap(8, 8, 3, 5.6, in_use=7.3), {}, pc_facts, defaults_for(pc_facts))

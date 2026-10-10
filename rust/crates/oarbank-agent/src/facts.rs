@@ -437,7 +437,7 @@ mod cores_tests {
 
     #[test]
     fn windows_cores_from_processor_records() {
-        // TNT-PC, recorded 2026-10-10: Core i7-9700, NumberOfCores 8, NumberOfLogicalProcessors 8 (no Hyper-Threading),
+        // a Windows desktop: NumberOfCores 8, NumberOfLogicalProcessors 8 (no Hyper-Threading),
         // one efficiency class; its old facts said perf_cores null, eff_cores null, logical 8
         let pc: Vec<u8> = (0..8).flat_map(|n| core_record(0, 1 << n, 0)).collect();
         assert_eq!(windows_cores(&pc), Some((8, 0)));

@@ -547,7 +547,7 @@ mod tests {
         assert!(m[3].detail.contains("/Library/Application Support/Oarbank/agent/colima") && m[3].fix.contains("chown -R _oarbank"));
         // run by another account (the owner at a terminal): that account's view says so instead of advising a chown
         let mut o = host();
-        (o.account, o.config_writable) = ("tnt".into(), false);
+        (o.account, o.config_writable) = ("alice".into(), false);
         let m = missing(&o);
         assert_eq!(m.iter().map(|m| m.what).collect::<Vec<_>>(), ["account"]);
         assert!(m[0].fix.contains("sudo -u _oarbank") && !m[0].fix.contains("chown"));
@@ -572,7 +572,7 @@ mod tests {
     }
 
     /// The report always names the runtime; the GPU is offered only from a ready runtime whose GPU profile can start
-    /// (the Studio reported `virtio-gpu:venus` with no runtime at all).
+    /// (a node with krunkit reported `virtio-gpu:venus` with no runtime at all).
     #[test]
     fn the_report_offers_the_gpu_only_from_a_ready_runtime() {
         let mut k = host();

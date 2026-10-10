@@ -9,11 +9,11 @@ instead of a `BundleError`, so the core's install crashed on it instead of refus
 
 ## The problem
 
-A module that provisions its own tools and reference data (minos-gatk: the GATK jar, fgkl, nine chromosome references)
+A module that provisions its own tools and reference data (a genomics module: a toolkit jar, a helper tool, nine chromosome references)
 does it with fetch jobs: a job downloads pinned files from public origins through its egress allowlist and uploads them
 as artifacts, and the module's `campaign.tick` registers each one with `datasets.create`. On a fresh fleet that never
 starts. Every non-golden job needs a node certified for the module (S8), certification needs the goldens to pass, and
-the goldens mount the datasets the fetch jobs would bring. The minos-gatk 3.2.0 canary got past it only because the
+the goldens mount the datasets the fetch jobs would bring. That module's canary got past it only because the
 operator registered the datasets by hand.
 
 ## The decision

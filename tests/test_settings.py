@@ -117,13 +117,13 @@ def test_a_lock_holds_against_a_lower_value(db):
 
 def test_the_coordinator_host_group_runs_every_service(db, monkeypatch):
     import socket
-    monkeypatch.setattr(socket, "gethostname", lambda: "studio.local")
+    monkeypatch.setattr(socket, "gethostname", lambda: "desk.local")
     set_fleet(db, "services.disabled", ["scorer"], "relay")
     worker = enrolled_node(db, "mini")[1]
-    studio = enrolled_node(db, "studio", facts={**FACTS, "hostname": "studio"})[1]
+    desk = enrolled_node(db, "desk", facts={**FACTS, "hostname": "desk"})[1]
     assert node_settings(db, worker)["disabled_services"] == ["relay/scorer"]
-    assert node_settings(db, studio)["disabled_services"] == []
-    res = V.resolve(V.snapshot(db), node_row(db, studio), "services.disabled", "relay")
+    assert node_settings(db, desk)["disabled_services"] == []
+    res = V.resolve(V.snapshot(db), node_row(db, desk), "services.disabled", "relay")
     assert V.badge(res) == "Group: Coordinator host · the coordinator's own machine runs every service"
 
 
