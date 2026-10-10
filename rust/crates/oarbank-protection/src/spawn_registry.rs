@@ -57,6 +57,14 @@ pub trait Actuator: Send + Sync {
     /// background QoS (low priority, efficiency cores), a CPU quota on Linux, the idle priority class and EcoQoS
     /// on Windows.
     fn set_background(&self, pgid: i32, on: bool) -> i32;
+    /// Signal one process (a workload's member that left its group, a delegated process of the owner's); 0 on success.
+    fn signal_pid(&self, _pid: i32, _sig: Signal) -> i32 {
+        -1
+    }
+    /// Move one process to background scheduling or back; 0 on success.
+    fn set_background_pid(&self, _pid: i32, _on: bool) -> i32 {
+        -1
+    }
 }
 
 /// For platforms without a backend yet: no start time is ever readable, so nothing registers or actuates.
@@ -79,6 +87,8 @@ impl Actuator for UnsupportedActuator {
 pub struct Member {
     pub attempt_id: Option<i64>,
     pub service: Option<String>,
+    /// A workload's container leader (`module/workload`, docs/design/workloads.md).
+    pub workload: Option<String>,
     /// Process-group leader.
     pub pid: i32,
     pub start_us: u64,
@@ -117,6 +127,7 @@ impl RegistryStore for FileRegistryStore {
                 Some(Member {
                     attempt_id: crate::json::int_of(e.get("attempt")),
                     service: e.get("service").and_then(Value::as_str).map(str::to_string),
+                    workload: e.get("workload").and_then(Value::as_str).map(str::to_string),
                     pid: i32::try_from(pid).ok()?,
                     start_us: start,
                 })
@@ -128,8 +139,12 @@ impl RegistryStore for FileRegistryStore {
         let arr: Vec<Value> = members
             .iter()
             .map(|m| {
-                serde_json::json!({"pid": m.pid, "start_us": m.start_us.to_string(), "attempt": opt_int(m.attempt_id),
-                                   "service": opt_str(m.service.as_deref())})
+                let mut o = serde_json::json!({"pid": m.pid, "start_us": m.start_us.to_string(), "attempt": opt_int(m.attempt_id),
+                                               "service": opt_str(m.service.as_deref())});
+                if let Some(w) = &m.workload {
+                    o["workload"] = Value::from(w.as_str());
+                }
+                o
             })
             .collect();
         let Ok(text) = serde_json::to_string(&arr) else {
@@ -238,10 +253,26 @@ impl SpawnRegistry {
             Member {
                 attempt_id,
                 service: None,
+                workload: None,
                 pid,
                 start_us,
             },
         );
+        g.save();
+        true
+    }
+
+    /// Record a workload's container leader (a fresh start), or adopt one an earlier agent recorded (`start_us`: the
+    /// recorded start time, which must still match). False when its start time cannot be read or does not match.
+    pub fn register_workload(&self, pid: i32, key: &str, start_us: Option<u64>) -> bool {
+        let Some(now) = self.actuator.start_time(pid) else {
+            return false;
+        };
+        if start_us.is_some_and(|s| s != now) {
+            return false;
+        }
+        let mut g = self.lock();
+        g.members.insert(pid, Member { attempt_id: None, service: None, workload: Some(key.to_string()), pid, start_us: now });
         g.save();
         true
     }
@@ -270,6 +301,7 @@ impl SpawnRegistry {
             Member {
                 attempt_id,
                 service: service.map(str::to_string),
+                workload: None,
                 pid,
                 start_us,
             },
@@ -345,6 +377,7 @@ impl SpawnRegistry {
                         ("signal", Value::from(sig.raw())),
                         ("attempt", opt_int(m.attempt_id)),
                         ("service", opt_str(m.service.as_deref())),
+                        ("workload", opt_str(m.workload.as_deref())),
                         ("ok", Value::from(ok)),
                     ]),
                 );
@@ -383,6 +416,8 @@ impl SpawnRegistry {
                         ("start_us", Value::from(m.start_us.to_string())),
                         ("policy", Value::from(policy)),
                         ("attempt", opt_int(m.attempt_id)),
+                        ("service", opt_str(m.service.as_deref())),
+                        ("workload", opt_str(m.workload.as_deref())),
                         ("ok", Value::from(ok)),
                     ]),
                 );
@@ -393,5 +428,103 @@ impl SpawnRegistry {
                 }
             }
         }
+    }
+
+    /// Signal one member of a registered workload container that left its process group (macOS: found by its sandbox
+    /// identity, docs/design/workloads.md). The container must be registered and live, and the member must still have
+    /// the start time the caller saw; journaled either way, with the member's pid and the workload.
+    pub fn signal_member(&self, container: i32, pid: i32, start_us: u64, sig: Signal, reason: &str) -> Result<(), Refusal> {
+        let checked = self.verify(container).and_then(|m| match self.actuator.start_time(pid) {
+            None => Err(Refusal::Gone(pid)),
+            Some(s) if s != start_us => Err(Refusal::IdentityChanged(pid)),
+            Some(_) if m.workload.is_none() => Err(Refusal::NotRegistered(container)),
+            Some(_) => Ok(m),
+        });
+        match checked {
+            Err(e) => {
+                self.journal_record("actuation_refused", "S16_GUARD", detail([
+                    ("pid", Value::from(pid)), ("container", Value::from(container)), ("signal", Value::from(sig.raw())),
+                    ("why", Value::from(e.to_string())), ("for", Value::from(reason))]));
+                Err(e)
+            }
+            Ok(m) => {
+                let ok = self.actuator.signal_pid(pid, sig) == 0;
+                self.journal_record("actuation", reason, detail([
+                    ("pid", Value::from(pid)), ("start_us", Value::from(start_us.to_string())), ("container", Value::from(container)),
+                    ("signal", Value::from(sig.raw())), ("workload", opt_str(m.workload.as_deref())), ("ok", Value::from(ok))]));
+                if ok { Ok(()) } else { Err(Refusal::Failed(pid)) }
+            }
+        }
+    }
+
+    /// Lower or restore one member of a registered workload container that left its group (as `signal_member`).
+    pub fn set_background_member(&self, container: i32, pid: i32, start_us: u64, on: bool, reason: &str) -> Result<(), Refusal> {
+        let policy = if on { "background" } else { "default" };
+        let checked = self.verify(container).and_then(|m| match self.actuator.start_time(pid) {
+            None => Err(Refusal::Gone(pid)),
+            Some(s) if s != start_us => Err(Refusal::IdentityChanged(pid)),
+            Some(_) if m.workload.is_none() => Err(Refusal::NotRegistered(container)),
+            Some(_) => Ok(m),
+        });
+        match checked {
+            Err(e) => {
+                self.journal_record("actuation_refused", "S16_GUARD", detail([
+                    ("pid", Value::from(pid)), ("container", Value::from(container)), ("policy", Value::from(policy)),
+                    ("why", Value::from(e.to_string()))]));
+                Err(e)
+            }
+            Ok(m) => {
+                let ok = self.actuator.set_background_pid(pid, on) == 0;
+                self.journal_record("actuation", reason, detail([
+                    ("pid", Value::from(pid)), ("start_us", Value::from(start_us.to_string())), ("container", Value::from(container)),
+                    ("policy", Value::from(policy)), ("workload", opt_str(m.workload.as_deref())), ("ok", Value::from(ok))]));
+                if ok { Ok(()) } else { Err(Refusal::Failed(pid)) }
+            }
+        }
+    }
+
+    /// Check that a delegated process of the owner's still has the start time the controller saw (journaled as a
+    /// refusal otherwise). The caller then acts on it itself or through the person's session helper.
+    pub fn verify_delegated(&self, pid: i32, start_us: u64, rule: &str, what: &str) -> Result<(), Refusal> {
+        let r = match self.actuator.start_time(pid) {
+            None => Err(Refusal::Gone(pid)),
+            Some(s) if s != start_us => Err(Refusal::IdentityChanged(pid)),
+            Some(_) => Ok(()),
+        };
+        if let Err(e) = &r {
+            self.journal_record("actuation_refused", "S16_GUARD", detail([
+                ("pid", Value::from(pid)), ("delegated", Value::from(rule)), ("action", Value::from(what)),
+                ("why", Value::from(e.to_string()))]));
+        }
+        r
+    }
+
+    /// Record an action on a delegated process (taken here or by the person's session helper).
+    pub fn journal_delegated(&self, pid: i32, start_us: u64, rule: &str, what: &str, reason: &str, ok: bool, via: &str) {
+        self.journal_record("actuation", reason, detail([
+            ("pid", Value::from(pid)), ("start_us", Value::from(start_us.to_string())), ("delegated", Value::from(rule)),
+            ("action", Value::from(what)), ("via", Value::from(via)), ("ok", Value::from(ok))]));
+    }
+
+    /// Signal one delegated process of the owner's (an owner rule's `delegate`, docs/design/workloads.md): its start
+    /// time is checked first, and the action journaled with the rule.
+    pub fn signal_delegated(&self, pid: i32, start_us: u64, rule: &str, sig: Signal, reason: &str) -> Result<(), Refusal> {
+        let what = match sig { Signal::Stop => "pause", Signal::Cont => "resume", Signal::Term | Signal::Kill => "stop" };
+        if matches!(sig, Signal::Term | Signal::Kill) {
+            return Err(Refusal::Failed(pid));                    // a delegation never stops a process
+        }
+        self.verify_delegated(pid, start_us, rule, what)?;
+        let ok = self.actuator.signal_pid(pid, sig) == 0;
+        self.journal_delegated(pid, start_us, rule, what, reason, ok, "agent");
+        if ok { Ok(()) } else { Err(Refusal::Failed(pid)) }
+    }
+
+    /// Lower or restore one delegated process of the owner's (as `signal_delegated`).
+    pub fn set_background_delegated(&self, pid: i32, start_us: u64, rule: &str, on: bool, reason: &str) -> Result<(), Refusal> {
+        let what = if on { "lower" } else { "restore" };
+        self.verify_delegated(pid, start_us, rule, what)?;
+        let ok = self.actuator.set_background_pid(pid, on) == 0;
+        self.journal_delegated(pid, start_us, rule, what, reason, ok, "agent");
+        if ok { Ok(()) } else { Err(Refusal::Failed(pid)) }
     }
 }

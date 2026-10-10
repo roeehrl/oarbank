@@ -338,3 +338,38 @@ fn max_pause_is_bounded_and_the_union_keeps_the_shorter() {
     assert!(c(serde_json::json!({"max_pause_s": 601})).is_err() && c(serde_json::json!({"max_pause_s": 5})).is_err());
     assert_eq!(ProtectionConfig::default().union(&short).max_pause_s, 30.0);
 }
+
+#[test]
+fn delegate_rules_are_kept_apart_and_need_an_unspoofable_matcher() {
+    let c = ProtectionConfig::from_json(
+        &json!({"rule": [
+            {"id": "app", "match": {"team_id": "ABCDE12345", "identifier": "com.example.app"}, "tree": "descendants",
+             "delegate": {"actions": ["pause", "lower"]}},
+            {"id": "tool", "match": {"path_prefix": "/usr/local/bin/tool"}, "delegate": {"actions": ["lower"]}},
+            {"id": "keep", "match": {"name": "x"}, "pause_fleet": {}}]}),
+        "central",
+    )
+    .unwrap();
+    assert_eq!(c.rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["keep"]);
+    let d: Vec<(&str, bool, bool)> = c.delegations.iter().map(|d| (d.id.as_str(), d.pause, d.lower)).collect();
+    assert_eq!(d, vec![("app", true, true), ("tool", false, true)]);
+    assert_eq!(c.summary()["delegations"], json!(["app", "tool"]));
+    let bad = |rule: serde_json::Value| ProtectionConfig::from_json(&json!({"rule": [rule]}), "central").unwrap_err().to_string();
+    assert!(bad(json!({"id": "a", "match": {"name": "miner"}, "delegate": {"actions": ["pause"]}})).contains("cannot spoof"));
+    assert!(bad(json!({"id": "a", "match": {"path_prefix": "/opt/"}, "delegate": {"actions": ["pause"]}})).contains("cannot spoof"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {"actions": ["stop"]}}))
+        .contains("not offered"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {"actions": []}})).contains("empty"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {"actions": ["pause"]},
+                       "pause_fleet": {}})).contains("no other action"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {}})).contains("lists what"));
+    // per OS: a signing identity on macOS, an exact path elsewhere
+    use oarbank_protection::support::{refusals, Os};
+    assert!(refusals(&c, Os::Darwin).iter().any(|r| r.contains("rule tool")));
+    assert!(refusals(&c, Os::Linux).iter().any(|r| r.contains("rule app")) && !refusals(&c, Os::Linux).iter().any(|r| r.contains("rule tool")));
+    // union keeps both sides' delegations
+    let local = ProtectionConfig::from_json(&json!({"rule": [{"id": "app", "match": {"requirement": "anchor apple"},
+                                                             "delegate": {"actions": ["pause"]}}]}), "local").unwrap();
+    let u = c.union(&local);
+    assert_eq!(u.delegations.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec!["app", "tool", "app@local"]);
+}
