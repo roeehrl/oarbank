@@ -30,7 +30,9 @@ one node; modules can never declare or loosen it.
 ## Authority: only the fleet's own processes
 
 The agent signals, lowers or pauses only processes in its spawn registry (a pid plus its start time, or a descendant of
-one). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
+one). Ending its own runners when it stops, or those an agent that was killed left behind, goes by the agent's
+runner records, which hold the same identity (a pid and its start time) for every process of a runner
+([architecture.md](architecture.md), "Stopping the agent"). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
 one (S16). Unknown processes are never signalled; their memory always counts.
 
 ## Whose processes
@@ -99,7 +101,10 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
   the processes it matched that way (`unreadable`). Such a process takes part from its second sighting on (the next
   tick): an owner's process whose facts fail to read is nearly always one exiting between the listing and the read,
-  and on a busy machine those would otherwise switch every such rule on every few ticks. The console's process picker
+  and on a busy machine those would otherwise switch every such rule on every few ticks. Identity is read once per
+  process and program: an exec keeps the pid and start time, so a new path or short name reads the process again, and
+  the arguments of a process seen for the first time are read once more on its next sighting (a child listed between
+  its fork and its exec still carries its parent's arguments, and an argv rule would miss the app it becomes). The console's process picker
   writes the matcher from the processes a node reports, and its preview uses a Python matcher held equal to the
   agent's by shared test vectors (`fixtures/protection-match-vectors.json`).
 - **Trees:** `self`, `descendants` (pid and parent tracking) or `same_team` (helpers signed by the same team).
@@ -133,7 +138,12 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   jobs to background scheduling: macOS background QoS, low priority on the efficiency cores; on Linux a CPU quota of a
   tenth of a core on the job's cgroup, since the agent's cgroup and the owner's are scheduled apart and no class an
   unprivileged agent can set yields to the owner; on Windows the Job Object's idle priority class with EcoQoS; where it
-  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`, `cpu`, `gpu` or `io`), `protect` (keep a metric of the
+  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`,
+  `cpu`, `gpu` or `io`; while the rule is active the node also takes none of the work it pauses: capacity's `paused`
+  names the scopes and the claim carries them, so the coordinator grants no job there that the rule would pause at
+  once and release after the longest pause, only to grant it to the same node again; explain shows such a job, or the
+  node, as `PROTECTION_ACTIVE`; `all` and `io` stop admission altogether, and `gpu`, `all` and `io` hold GPU jobs at 0
+  whatever `gpu_jobs` says), `protect` (keep a metric of the
   protected group within a target: `cpu_stall`, `ipc_ratio`, `gpu_share`, `pageins_rate`, or `progress_rate` read from
   an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on.
   `ignore` only removes processes from the heuristic triggers.
@@ -179,6 +189,7 @@ in_use      = available + fleet resident − margin          margin = soft_free_
 host_budget = min(reserve, in_use, cap.mem_gb − services)  (mem_binding: reserve | in_use | cap)
 mem_gb_free = host_budget − Σ running jobs' resources.mem_gb
 slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap.cpu_cores / threads, protection.slots)
+paused      = the pause_fleet scopes of the active rules (no work of theirs is granted; all or io: admit = false)
 ```
 
 - **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with

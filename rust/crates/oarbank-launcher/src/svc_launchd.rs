@@ -145,6 +145,8 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 keep_alive: true,
                 restart_on_failure: false,
                 associated_bundle: Some(NODE_APP_BUNDLE.into()),
+                // the agent stops its jobs on SIGTERM; launchd's default 20 s would kill it midway
+                stop_timeout_s: Some(oarbank_core::service::AGENT_STOP_TIMEOUT_S),
             };
             let plist = oarbank_core::service::launchd_plist(&spec);
             if dry {

@@ -200,6 +200,38 @@ Every coordinator time a node acts on is relative: a grant carries `issued_at` n
 the attempt on its monotonic clock, and move time locks are compared with the coordinator's clock as last seen. A node
 clock over 60 s off shows as `CLOCK_SKEW` (protocol.md, "Clocks").
 
+### Stopping the agent
+
+No runner outlives its agent. A stop request is the same graceful stop whatever sends it: SIGTERM (launchd's `bootout`
+and `kickstart -k`, systemd's `stop` and `restart`, the launcher, a test's `terminate()`), SIGINT or SIGHUP on POSIX; on
+Windows Ctrl-C, Ctrl-Break, the console closing, the system shutting down, or the launcher's stop event (the service
+manager's stop reaches the launcher, which has no SIGTERM to forward, so it sets `Local\oarbank-agent-stop-<launcher
+pid>` and ends the agent only if it has not stopped within the stop timeout). The agent stops claiming, asks every
+runner to stop as a release does (a checkpointing runner checkpoints first; a frozen one is resumed so it can), kills
+what has not stopped after at most 15 s, releases each attempt as `agent_stop` (`AGENT_STOPPED`: requeued, no charge to
+the job or the node), waits up to 10 s more for the releases and a last checkpoint's upload, lets dropped services finish
+stopping, and exits. The launcher's service definitions give it 60 s (launchd `ExitTimeOut`, systemd `TimeoutStopSec`,
+the Windows service's stop wait hint). A job a cancel or revoke already ends keeps that ending. Module services are not
+stopped: a lasting one is adopted by the next agent (service-endpoints.md).
+
+An agent that ends without stopping its runners (killed, crashed) leaves none either. On Windows a runner's Job Object is
+kill-on-close and only the agent holds it, so the runner ends with the agent. On POSIX a runner leads a process group of
+its own, which a service manager's kill of the agent's group does not reach, so:
+
+- the agent records each running runner in `state/runners/<attempt>.json` (the agent's pid and start time, the group's
+  leader and every process seen in the group, each with its start time) and removes the record once the runner is gone;
+- a **watchdog**, the agent's binary run as `reap-runners` in a session of its own, holds the read end of a pipe whose
+  write end only the agent holds (close-on-exec, so no child inherits it); when the agent has ended, however it ended,
+  the watchdog sees the end of the pipe and kills what that agent's records name;
+- a new agent kills what the records of an agent that no longer runs name before it takes work (the coordinator ends
+  those attempts at its hello: `agent_restart`);
+- on Linux a runner's leader also gets `PR_SET_PDEATHSIG` (SIGKILL when the agent ends), and a stop or restart of the
+  systemd unit kills whatever is left in its cgroup (`KillMode=mixed`).
+
+Only a recorded process that still has its recorded start time is signalled, and a whole group only while its leader or
+a recorded member is still in it (a group's id is its leader's pid, which is not reused while the group has members), so
+no unrelated process is ever touched.
+
 ## Network and access
 
 No network is required or assumed (D25): a fleet runs the same on one LAN, over Tailscale, ZeroTier or any VPN.
