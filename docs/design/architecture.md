@@ -95,8 +95,10 @@ actions on fleet jobs.
   for SYSTEM, Administrators and the coordinator's accounts), the secret store, interpreter paths, process containers
   (a process group; a kill-on-close Job Object on Windows), the local admin channel, the service host and the DNS-SD
   announcement ([windows-coordinator.md](windows-coordinator.md)).
-- **The secret store** keeps small secrets out of the database: the login Keychain on macOS, a DPAPI-wrapped file under
-  `<home>/keys/` on Windows, an owner-only file there elsewhere (and in tests, `OARBANK_SECRET_STORE=file`). The audit
+- **The secret store** keeps small secrets out of the database: an owner-only file under `<home>/keys/` on macOS and
+  Linux (in the system service's home, which only its account may enter: [coordinator-system-service.md](coordinator-system-service.md)),
+  a DPAPI-wrapped file there on Windows. The login Keychain is used only when `OARBANK_SECRET_STORE=keychain` names
+  it (a 2.8 per-user coordinator waiting for its migration). The audit
   signing key lives there, and so does the key that encrypts module secrets.
 - **Module secrets** ([secrets-and-signed-images.md](secrets-and-signed-images.md)) are write-only: `secrets.set` takes
   the value beside its params, the `secrets` table holds it AES-256-GCM encrypted, pages and reads show only a keyed
@@ -127,9 +129,13 @@ actions on fleet jobs.
 | Linux | `$XDG_DATA_HOME/oarbank` (`~/.local/share/oarbank`) | `/var/lib/oarbank` |
 | Windows | `%LOCALAPPDATA%\Oarbank` | `%ProgramData%\Oarbank` |
 
-The coordinator lives in `<root>/coordinator` (`OARBANKD_HOME` overrides it), on Windows always in the system scope's
-(`%ProgramData%\Oarbank\coordinator`: it is a service there), the agent in `<root>/agent`. Unix sockets go in
-`<home>/run`, or a short owner-only directory under `/tmp` when that path would exceed the socket path limit.
+The coordinator is a system service on every OS and lives in the system scope's `<root>/coordinator`
+(`OARBANKD_HOME` overrides it), owned by its account (`_oarbankd`, `oarbankd`, the virtual accounts on Windows:
+[coordinator-system-service.md](coordinator-system-service.md)); the agent lives in `<root>/agent`. A person keeps
+their owner signing keys and the setup wizard's journal in their own scope. The coordinator's local admin socket is
+`/Library/Application Support/Oarbank/coordinator-run/admin.sock` (macOS) or `/run/oarbank-coordinator/admin.sock`
+(Linux); other Unix sockets go in `<home>/run`, or a short owner-only directory under `/tmp` when that path would
+exceed the socket path limit.
 
 ## The module sandbox
 
@@ -209,14 +215,17 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
   waiting for the owner unless it was made to approve automatically. A node joined by address shows a device code the
   owner approves it by (`nodes.admit_code`).
 - **People.** Nothing is admin for being local, and identity headers are never trusted. The owner's admin token
-  (`<home>/admin.token`, 0600) serves the CLI on the coordinator's own account; console accounts sign in with a
+  (`<home>/admin.token`, 0600) serves the CLI of the coordinator's own account and root; console accounts sign in with a
   password plus TOTP, a passkey (WebAuthn) or a one-time link (`oarbank console login`); sessions are HttpOnly and
   SameSite=Strict with a per-session CSRF token; personal access tokens are hashed, expiring and role-capped; roles
   (viewer, operator, admin) are enforced on every operation. Both listeners answer only allowed Host names (DNS
   rebinding), and Tailscale Funnel traffic is refused.
-- **The local admin channel** is the admin API on `<home>/run/admin.sock`, whose owner-only directory is the
-  credential, and on Windows on the named pipe `\\.\pipe\oarbank-admin-<home id>`, whose owner-only security
-  descriptor is (an elevated prompt reaches it); the CLI on the coordinator's account uses it without a token.
+- **The local admin channel** is the admin API on a Unix socket whose directory is the credential: for the system
+  service on macOS and Linux a directory of its own, mode 0750, group `_oarbankadmin` / `oarbank-admin` (the
+  coordinator's owners: the person who set it up and whoever an administrator adds), elsewhere `<home>/run`, owner-only;
+  on Windows the named pipe `\\.\pipe\oarbank-admin-<home id>`, whose owner-only security descriptor is (an elevated
+  prompt reaches it). The owners' CLI uses it without a token, and the setup wizard proves a new account's
+  authenticator through it.
 - **Discovery is a hint, never trust.** The active coordinator advertises `_oarbank._tcp` (the system responder's API
   in its own process on macOS, Avahi on Linux, `DnsServiceRegister` on Windows), so the announcement ends with the
   coordinator however it ends; an agent finds it with `oarbank-agent discover` or `run --coordinator discover`
@@ -225,8 +234,8 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
 - **Local Network privacy (macOS 15 and later).** macOS asks the person before a program uses the local network:
   Bonjour (announcing, browsing, resolving) and connections to addresses on a Wi-Fi or Ethernet network, not listening
   and not VPN or tailnet addresses. It exempts launchd daemons, root and programs started from Terminal or SSH, but not
-  LaunchAgents (Apple's TN3179): the coordinator and the agent's personal scope run as LaunchAgents, the system scope
-  as a daemon (exempt), and the session helpers use only a local socket. What was measured: on macOS 27.0.1, a
+  LaunchAgents (Apple's TN3179): the coordinator and the agent's system scope run as daemons (exempt), the agent's
+  personal scope as a LaunchAgent, and the session helpers use only a local socket. What was measured: on macOS 27.0.1, a
   LaunchAgent whose program is a standalone executable (no app bundle) registered, browsed and connected on the LAN
   with no alert and no refusal, Oarbank's ad hoc signed binaries and fresh ones alike, with or without an embedded
   Info.plist. On macOS 26.6.2 (GitHub's runner, a session no one answers alerts in) the same registration from
@@ -302,8 +311,10 @@ is a named pipe only the agent's account and the module's AppContainer may open.
   `deploy/windows/oarbank-agent.wxs`; a join page, or `JOINCODEFILE`, `JOINCODE`, `COORDINATOR` silently). Coordinator builds from
   `scripts/build-coordinator.sh` / `.ps1` are wrapped in software-only native `.pkg`, `.deb`/`.rpm`, and `.msi`
   installers by `scripts/package-coordinator-*`. Their application launcher opens the local browser setup wizard;
-  submitting configures per-user LaunchAgents/systemd services or Windows services under virtual accounts, then
-  initializes the admin account, TOTP and primary/backup owner signing keys. Windows calls its Start shortcut
+  submitting creates the system services (launchd daemons run by `_oarbankd`, systemd system units run by
+  `oarbankd`, Windows services under virtual accounts; one administrator prompt), then initializes the admin account,
+  TOTP and primary/backup owner signing keys. Upgrading a package restarts the services on the new build, and moves a
+  2.8 per-user coordinator to the system service ([coordinator-system-service.md](coordinator-system-service.md)). Windows calls its Start shortcut
   **Oarbank coordinator setup** and requires Windows 11 on ARM64 for bundled x64 Python; see
   [installation requirements](../install.md#windows-coordinator). Bundled helpers accept an installed
   payload through `--installed` / `-Installed`. Advanced archives use `--build` / `-Build` and remain the signed move

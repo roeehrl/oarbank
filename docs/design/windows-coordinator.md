@@ -177,28 +177,33 @@ worse, pass while doing something else:
     layout (the deepest, a module environment's extension modules, is about 140), so long paths are not required.
 
 18. **The coordinator says where and how it runs** (`coordinator/hostinfo.py`): its platform, what its service
-    manager reports about the coordinator's two services (launchd's `launchctl print`, systemd's `systemctl --user
-    show`, the service control manager's status and configuration: installed, state, start type, account, process),
+    manager reports about the coordinator's two services (launchd's `launchctl print system/…`, systemd's `systemctl
+    show`; since 2.9 also the form, coordinator-system-service.md), the service control manager's status and configuration: installed, state, start type, account, process),
     whether this process is the one the manager runs, and its module sandbox; on Windows also the elevated helper's
     service and whether module CLIs' allowlists are enforced. oarbankd takes it at start and at every
     `GET /api/v1/coordinator` (no polling: nothing else changes it), keeps the last one in the setting
     `coordinator_host`, and `oarbank coordinator status` and the console's Coordinator page show it (the console, a
     read-only process, shows the time it was taken).
 
-## Per OS, after this change
+## Per OS
+
+Since 2.9 the macOS and Linux coordinator is a system service too ([coordinator-system-service.md](coordinator-system-service.md),
+D44); before, it ran as its owner's LaunchAgents or systemd user units with the login Keychain as its secret store.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Service | LaunchAgents (`install-oarbankd.sh`) | systemd user units | two services, virtual accounts (`install-oarbankd.ps1`) |
-| Home | `~/Library/Application Support/Oarbank/coordinator` | `~/.local/share/oarbank/coordinator` | `%ProgramData%\Oarbank\coordinator` |
-| Owner-only | modes 0600/0700 | modes 0600/0700 | protected DACL: SYSTEM, Administrators, the coordinator's accounts |
+| Service | two launchd daemons run by `_oarbankd` (`install-oarbankd.sh`) | two systemd system units run by `oarbankd` | two services, virtual accounts (`install-oarbankd.ps1`) |
+| Home | `/Library/Application Support/Oarbank/coordinator` | `/var/lib/oarbank/coordinator` | `%ProgramData%\Oarbank\coordinator` |
+| Owner-only | modes 0600/0700, owned by `_oarbankd` | modes 0600/0700, owned by `oarbankd` | protected DACL: SYSTEM, Administrators, the coordinator's accounts |
 | Module container | process group | process group | Job Object, kill-on-close, no breakaway |
 | Module sandbox | Seatbelt | Landlock and seccomp (agent launcher) | AppContainer (agent launcher) |
 | Confinement check | `sandbox_check` | `/proc/<pid>/status` no_new_privs and seccomp | job members' tokens |
-| Local admin channel | Unix socket, owner-only directory | same | named pipe, owner-only descriptor |
-| Secret store | Keychain | owner-only file | DPAPI (the service account) |
+| Local admin channel | Unix socket in `…/Oarbank/coordinator-run`, mode 0750, group `_oarbankadmin` | Unix socket in `/run/oarbank-coordinator`, mode 0750, group `oarbank-admin` | named pipe, owner-only descriptor |
+| Who reaches it | the owners' group | the owners' group | an elevated prompt |
+| Secret store | owner-only file | owner-only file | DPAPI (the service account) |
 | Discovery | dns-sd | Avahi | DnsServiceRegister |
 | Restart after exit 75 | launchd | systemd | recovery actions |
+| A move's standby | `install-oarbankd.sh --pair`, as root | same | `install-oarbankd.ps1 -Pair`, elevated |
 
 ## Threat model (Windows)
 
