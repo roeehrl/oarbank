@@ -577,7 +577,7 @@ mod tests {
                       version_args: vec![], version_regex: None };
         let hints = json!({"jdk": [t.join("extra/jdk-17").display().to_string(), "relative/jdk"]});
         let added = [json!({"id": "jdk", "module": "", "path": data.join("jdk-inside").display().to_string()}),
-                     json!({"id": "jdk", "module": "", "path": "/"})];
+                     json!({"id": "jdk", "module": "", "path": if cfg!(windows) { r"C:\" } else { "/" }})];
         let rep = detect(&[d], &hints, &added, &t.join("Oarbank"), &no_run);
         let insts = rep["tools"]["jdk"].as_array().unwrap();
         let mut ok: Vec<(&str, &str)> = insts.iter().filter(|i| i["status"] == "ok").map(|i| (i["version"].as_str().unwrap(), i["source"].as_str().unwrap())).collect();
