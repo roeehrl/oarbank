@@ -236,7 +236,9 @@ def plan(db, changes) -> dict:
             changed_nodes.append(n)
         else:
             k = pairs[0][0]
-            why = (f"locked by {a[k]['locked_by']['name']}" if a[k]["locked_by"] else
+            lk = a[k]["locked_by"]
+            why = (("locked by Fleet settings" if lk["scope"] == "fleet" else f"locked by the group {lk['name'].removeprefix('Group: ')}")
+                   if lk else
                    "overrides it" if a[k]["source"]["scope"] in ("group", "node") and not any(
                        c["scope"] == a[k]["source"]["scope"] and c["scope_id"] == a[k]["source"]["id"] for c in reach)
                    else "same value")
@@ -283,7 +285,8 @@ def plan(db, changes) -> dict:
     return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm],
             "lock_notes": _lock_notes(before, nodes, norm, names), "protection_notes": sorted(set(prot_notes)),
             "nodes_changed": [f"{x['hostname']}: {x['label']} {x['old_text']} → {x['new_text']}" for x in diff],
-            "nodes_unaffected": [f"{x['hostname']}: keeps {x['value_text']} ({x['why']}: {x['source']})" for x in unaffected],
+            "nodes_unaffected": [f"{x['hostname']}: keeps {x['value_text']} ({x['why']}" + ("" if x["why"].startswith("locked")
+                                 else f": {x['source']}") + ")" for x in unaffected],
             "then": ("each node gets its new settings at its next heartbeat and reports the revision it applied"
                      if wire_keys else "the coordinator applies it at once"),
             "_changes": norm, "_diff": diff, "_unaffected": unaffected, "_nodes": len(hosts),

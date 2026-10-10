@@ -15,7 +15,7 @@
   {% for x in I._diff %}<tr><td>{{ x.hostname }}</td><td>{{ x.label }}</td><td class="mono">{{ x.old_text }}</td><td class="mono"><b>{{ x.new_text }}</b></td><td>{{ x.source }}</td></tr>{% endfor %}</table>{% endif %}
   {% if I._unaffected %}<details class="small"><summary>{{ I._unaffected | length }} node{{ 's' if I._unaffected | length != 1 }} keep{{ 's' if I._unaffected | length == 1 }} their value</summary>
   <table class="small"><tr><th scope="col">node</th><th scope="col">keeps</th><th scope="col">why</th></tr>
-  {% for x in I._unaffected %}<tr><td>{{ x.hostname }}</td><td class="mono">{{ x.value_text }}</td><td>{{ x.why }} ({{ x.source }})</td></tr>{% endfor %}</table></details>{% endif %}
+  {% for x in I._unaffected %}<tr><td>{{ x.hostname }}</td><td class="mono">{{ x.value_text }}</td><td>{{ x.why }}{% if not x.why.startswith('locked') %} ({{ x.source }}){% endif %}</td></tr>{% endfor %}</table></details>{% endif %}
   <p class="small mut">{{ I.then }}.</p>
   {% endif %}
   <div class="kv small">

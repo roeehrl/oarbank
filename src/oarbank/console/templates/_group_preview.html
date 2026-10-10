@@ -1,9 +1,12 @@
 {# The live member preview of a group's rule (GET /frag/groups/preview, rendered per request: it depends on the typed rule). #}
 {% if error %}<p class="field-error small" role="alert"><span class="sr-only">Error:</span> {{ error }}</p>
+{% elif p.rule.startswith('no members') %}
+<p class="small mut">No rule yet: choose terms (a system, a label, a name pattern, a battery…) or tick listed members, and the
+nodes they take in show here with why.</p>
 {% else %}
 <p class="small"><b>{{ p.members }} of {{ p.nodes | length }} node{{ 's' if p.nodes | length != 1 }}</b> · <span class="mut">{{ p.rule }}</span></p>
 <ul class="group-preview-list small">
-{% for n in p.nodes %}<li class="{{ 'in' if n.member else 'out' }}"><span class="chip {{ 'ok' if n.member else '' }}">{{ 'member' if n.member else 'not a member' }}</span>
+{% for n in p.nodes | sort(attribute='member', reverse=True) %}<li class="{{ 'in' if n.member else 'out' }}"><span class="chip {{ 'ok' if n.member else '' }}">{{ 'member' if n.member else 'not a member' }}</span>
   <b>{{ n.hostname }}</b>{% if n.member %} <span class="mut">because {{ n.why | join(', ') }}</span>{% elif n.missing %} <span class="mut">not: {{ n.missing | join(', ') }}</span>{% endif %}</li>
 {% else %}<li class="mut">no nodes yet</li>{% endfor %}
 </ul>
