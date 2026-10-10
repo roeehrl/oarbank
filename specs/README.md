@@ -490,3 +490,270 @@ goldens began to fail.)
   lock) and durable commits (`synchronous=FULL`).
 * **The model tracks core.py at bb04f9d.** Re-run `./run_tlc.sh` after protocol changes and
   update the matching action (the table above names the lines).
+
+# OarbankPortmap: a TLA+ model of the agent's port-mapping lifecycle
+
+`OarbankPortmap.tla` models the port-mapping manager of `docs/design/inbound-listeners.md`
+("Port mapping", "Threat model"): one agent maps router ports for its listeners on one router,
+next to a foreign device that maps ports of its own, through a write-ahead journal. It checks the
+four properties the design names (`NoForeignDelete`, `AnnouncedImpliesMapped`, `EventuallyClean`,
+`AtMostOneExternalPortPerListener`) and `TypeOK`.
+
+* **The design as modelled** satisfies all four, with crashes, router reboots, network changes,
+  lost requests and responses, a foreign device and listeners turned on and off. `EventuallyClean`
+  fails only for a permanent-only router and an agent that never returns, the exception the
+  design documents (`PERMANENT_ONLY_ROUTER`).
+* **The three weakened variants the design lists fail**: no write-ahead journal (a), delete by
+  port without the read-back (b), no epoch check (c).
+* **Four findings** (d)–(g): orderings and cases the design leaves open, where the obvious
+  implementation breaks a property. The model's reference agent uses the safe choice; each
+  finding has a switch and a configuration that shows the counterexample. See **Findings** below.
+
+```sh
+./run_tlc.sh OarbankPortmap  # this model's 17 configurations (about 2 minutes, most of it the main one)
+```
+
+`run_tlc.sh` takes the spec from the configuration's name up to the first underscore, so every
+`OarbankPortmap*.cfg` checks `OarbankPortmap.tla`. The first line of each configuration says what
+it checks and what TLC should report.
+
+## Results
+
+| configuration | expected | TLC reported | result | generated | distinct | depth | time |
+|---|---|---|---|---:|---:|---:|---:|
+| `OarbankPortmap` | ok | ok | PASS | 50783793 | 10364240 | 41 | 72s |
+| `OarbankPortmap_refuse_permanent` | ok | ok | PASS | 263641 | 58060 | 26 | 1s |
+| `OarbankPortmap_liveness` | ok | ok | PASS | 675091 | 141636 | 33 | 11s |
+| `OarbankPortmap_permanent_liveness` | ok | ok | PASS | 105379 | 25668 | 27 | 4s |
+| `OarbankPortmap_permanent_dead_agent` | liveness | liveness | PASS | 470 | 134 | 6 | 2s |
+| `OarbankPortmap_witness_RebootRecovered` | inv:W_RebootRecovered | inv:W_RebootRecovered | PASS | 330 | 155 | 8 | 1s |
+| `OarbankPortmap_witness_ConflictNextFree` | inv:W_ConflictNextFree | inv:W_ConflictNextFree | PASS | 286 | 112 | 7 | 2s |
+| `OarbankPortmap_witness_NetChangeRemapped` | inv:W_NetChangeRemapped | inv:W_NetChangeRemapped | PASS | 2044 | 777 | 12 | 1s |
+| `OarbankPortmap_witness_RestartCleanup` | inv:W_RestartCleanup | inv:W_RestartCleanup | PASS | 231 | 103 | 7 | 1s |
+| `OarbankPortmap_a_nojournal` | inv:AtMostOneExternalPortPerListener | inv:AtMostOneExternalPortPerListener | PASS | 2933 | 1190 | 10 | 2s |
+| `OarbankPortmap_a_nojournal_liveness` | liveness | liveness | PASS | 5815 | 1658 | 9 | 1s |
+| `OarbankPortmap_b_delete_by_port` | inv:NoForeignDelete | inv:NoForeignDelete | PASS | 1791 | 697 | 9 | 2s |
+| `OarbankPortmap_c_no_epoch` | inv:AnnouncedImpliesMapped | inv:AnnouncedImpliesMapped | PASS | 392 | 186 | 8 | 1s |
+| `OarbankPortmap_d_remap_before_release` | inv:AtMostOneExternalPortPerListener | inv:AtMostOneExternalPortPerListener | PASS | 1310 | 571 | 13 | 1s |
+| `OarbankPortmap_e_readback_race` | inv:NoForeignDelete | inv:NoForeignDelete | PASS | 6322 | 2311 | 11 | 1s |
+| `OarbankPortmap_f_keyed_delete` | inv:AtMostOneExternalPortPerListener | inv:AtMostOneExternalPortPerListener | PASS | 2020 | 820 | 12 | 2s |
+| `OarbankPortmap_g_epoch_forgets_entry` | inv:AtMostOneExternalPortPerListener | inv:AtMostOneExternalPortPerListener | PASS | 74635 | 20214 | 18 | 3s |
+
+All 17 outcomes match their expectation. Times are wall-clock on a 16-core machine that was busy
+with other work, `WORKERS=4`, `HEAP=4g`. The columns are as in the OarbankLease table.
+
+## The model
+
+### State
+
+| TLA+ variable | design |
+|---------------|--------|
+| `maps` | the router's mappings `[ext, cl, ds, ttl]`: external port (the key), internal client, description (a listener, or `FDesc` = 0 for the foreign device), lease ticks left (0 = permanent) |
+| `repoch` | the router's epoch (PCP / NAT-PMP seconds since start; a reboot resets it, modelled as a boot count) |
+| `jr` | the journal (`portmaps.json`), persistent: entries `[l, ext, cl, st, ep, left]` with `st` = `intended` (journaled, request out, outcome unknown), `held` (the router answered), `releasing` (a delete is due); `ep` = the router epoch in the answer; `left` = lease ticks left by the journaled expiry |
+| `ann` | the announcement to the module (`listener` message): port, or 0 = not mapped. Volatile |
+| `clock` | ticks since the last verify, per listener. Volatile |
+| `req`, `resp` | the one request in flight, the answer the agent has not handled yet |
+| `up`, `dead`, `boot` | the agent runs; stopped forever; start-up cleanup in progress |
+| `addr` | the node's internal address on the default route (`a1`, `a2`: Wi-Fi, Ethernet) |
+| `wanted` | the owner's assignment of each listener (statement entry, module enabled) |
+| `stale`, `ghost` | history: ticks announced while the router lacks the mapping; foreign delete, reboot and network change noticed, start-up cleanup deleted something |
+| `faults`, `foreign` | fault budget, foreign adds |
+
+Listener `l` asks for port `2l-1`; with `next_free` its range is `2l-1..2l`.
+
+### Switches
+
+| constant | design | the other value |
+|----------|--------|-----------------|
+| `WriteAhead` | TRUE: the intended mapping is journaled before the request | variant (a) |
+| `ReadBackDelete` | TRUE: delete only when client and description read back as the journaled ones | variant (b) |
+| `EpochCheck` | TRUE: verify and renewal compare the router's epoch with the journaled one | variant (c) |
+| `ReleaseBeforeRemap` | TRUE: after a network change, release the old mapping, then map again | finding (d) |
+| `AtomicReadBack` | TRUE: read-back and delete are one router step | finding (e): two UPnP calls |
+| `EpochRemapKeepsEntry` | TRUE: an epoch reset maps the journaled port again under the same journal entry | finding (g) |
+| `DeleteNeedsSameClient` | environment: the router deletes a mapping only for a request from its internal client (PCP and NAT-PMP, UPnP secure mode) | finding (f) |
+| `PermanentOnly`, `RouterLists` | environment: permanent-only router; router lists mappings (`GetGenericPortMappingEntry`) | — |
+| `AgentMayDie`, `FaultKinds`, `MaxFaults`, `MaxForeign` | environment: the agent may stop forever; which faults, how many; foreign adds | — |
+| `Policy`, `Lease`, `VerifyInterval`, `NumListeners` | `refuse` or `next_free`; lease 3 ticks (renewed at 1 left); verify every tick; 1 or 2 listeners | — |
+
+### Abstractions
+
+* **One router that speaks a mix of the protocols.** Mappings are keyed by external port with a
+  description and an internal client (UPnP). An add for a port held by another client is a
+  conflict (718); an add by the same client replaces the mapping, which is how renewals work.
+  Every answer carries the router's epoch (PCP, NAT-PMP). The periodic verify is the address and
+  epoch check, the PCP / NAT-PMP verification. UPnP's `GetSpecificPortMappingEntry` verify sees
+  any loss directly, so it is at least as strong for the losses modelled here (reboot, expiry).
+* **Requests are not atomic.** The agent journals, then sends; the router applies the request
+  later (`ApplyAdd`, `ApplyDel`), or the request is lost (`DropReq`); the answer can be lost (a
+  timeout, after which the agent sends the same request again) or arrive after a crash (nobody
+  reads it). The agent has one request out at a time, and a request sent before a crash is
+  applied or lost before the agent is back. A late duplicate after a restart is not modelled.
+* **Time** is `Tick` (fair). It ages leases and the journaled expiries, and it waits while a
+  running agent owes a verify (every `VerifyInterval` ticks) or a lease decision at half life
+  (renew if wanted, release if not). A round trip is shorter than a tick. A lease nobody renews
+  runs out after `Lease` ticks: that is how a dead agent's mappings go away.
+* **`AnnouncedImpliesMapped`** is `stale[l] <= VerifyInterval`: `stale[l]` counts consecutive
+  ticks during which listener `l` is announced at port `p` while the router has no mapping of
+  `l` at `p` for the node's current address. Any other step that withdraws or renews the
+  announcement, or after which the mapping is there, resets it. That is the design's bound:
+  "never told reachable for longer than one verify interval while the router holds no mapping".
+* **`NoForeignDelete`** is a history variable set when a delete the agent sent removes a mapping
+  with the foreign description. The agent's own mappings always carry its description and one
+  of its addresses.
+* **The read-back and the delete are one step** in the reference model (`AtomicReadBack`).
+  Finding (e) shows what the gap between the two UPnP calls allows.
+* **Start-up.** A restart releases journaled entries no longer wanted or made from another
+  address, sends `intended` entries again (or releases them), re-verifies `held` entries before
+  announcing them, and renews a lease whose journaled expiry has passed. On a router that lists
+  mappings it also deletes, during start-up, every mapping with its own description and its
+  current address that the journal does not account for.
+* **The foreign device's** mappings are permanent; it adds at most `MaxForeign` of them, on any
+  free port, and deletes its own.
+* **Not modelled:** discovery and the fallback between PCP, NAT-PMP and UPnP; `router_choice`;
+  external address changes and the dial-back probe; IPv6 pinholes; a second gateway (after a
+  network change the old gateway is the same router and still answers); the old address handed
+  to another device by DHCP; a router that drops a mapping without a reboot; several requests in
+  flight at once.
+
+### Actions
+
+| TLA+ action | design |
+|-------------|--------|
+| `StartMap(l)` | Request: journal `intended` (external port, internal address, description), then add |
+| `OnAdd` | the answer: `held` with the epoch, announce (the answer is the verification); a conflict follows `fallback` (`next_free`: journal the next port, request it; `refuse`: `PORT_TAKEN`, retried); a renewal that conflicts means the mapping was lost |
+| `Renew(e)` | Renew at half life (the same add) |
+| `Verify(l)` | Verify / Recover: a changed address means the mapping is lost: withdraw, journal `releasing`, delete with read-back, then map again; an epoch reset: withdraw and map the journaled port again; otherwise announce |
+| `Unmap(l)`, `Release(e)` | Cleanup when the listener is no longer wanted: withdraw, journal `releasing`, delete with read-back; a journaled release is sent again after a crash |
+| `ResumeIntended(e)`, `ListCleanup(m)`, `EndBoot` | Cleanup at start: journaled `intended` entries; the listing |
+| `OnGet`, `OnDel`, `OnTimeout` | the answers to a read-back (finding e), a delete, a lost answer |
+| `ApplyAdd`, `ApplyGet`, `ApplyDel`, `DropReq` | the router: `AddPortMapping` / PCP or NAT-PMP map; `GetSpecificPortMappingEntry`; `DeletePortMapping` (with read-back: one step), PCP / NAT-PMP delete (`DeleteNeedsSameClient`); a lost request |
+| `Reboot`, `Tick` | the router reboots (mappings gone, epoch reset); time passes, leases run out |
+| `ForeignAdd(p)`, `ForeignDel(p)` | another device maps or unmaps a port |
+| `Toggle(l)`, `NetChange`, `Crash`, `Restart`, `Die` | the owner; Wi-Fi to Ethernet; the agent crashes, restarts, stops forever |
+
+### Properties
+
+| TLA+ name | statement |
+|-----------|-----------|
+| `NoForeignDelete` | the agent never deletes a mapping it did not create |
+| `AnnouncedImpliesMapped` | a listener is never announced for more than `VerifyInterval` ticks while the router holds no mapping of it at that port for the node's address |
+| `AtMostOneExternalPortPerListener` | the router holds at most one mapping per listener |
+| `EventuallyClean` | `\A l : <>[](~wanted[l]) => <>[](no mapping of l)` |
+| `TypeOK` | types; at most one mapping per external port |
+
+**Liveness assumptions:** weak fairness on the router answering, on `Tick`, on the agent's
+restart (unless it died) and on each agent step. Faults, the foreign device and the owner are
+unfair, and faults are bounded.
+
+The `OarbankPortmap_witness_*` configurations are vacuity checks: a router reboot noticed and
+recovered (mapped and announced again); a conflict with the foreign device resolved by
+`next_free`; a network change noticed, the old mapping released and the new one announced; the
+start-up cleanup deleting a journaled mapping left from before a crash.
+
+## Weakened variants
+
+Each variant removes one rule the design relies on, and TLC finds a counterexample. Traces are
+summarized from `out/<config>.log`; `p1`, `p2` are the listener's port and its `next_free`
+fallback, `a1`, `a2` the node's two addresses.
+
+**(a) No write-ahead journal** (`WriteAhead = FALSE`; `_a_nojournal`, `_a_nojournal_liveness`).
+The agent sends the add for `p1` from `a1` without journaling it; the router applies it; the
+network changes to `a2` and the agent crashes before the answer. After the restart the journal is
+empty, and the listing cleanup removes only mappings for the node's *current* address, so
+`p1 -> a1` stays. The agent requests `p1` from `a2`, gets a conflict with its own old mapping,
+and `next_free` maps `p2`: two mappings (`AtMostOneExternalPortPerListener`). On a
+permanent-only router the same unjournaled `p1 -> a1` is never removed even though the agent
+keeps running: once the listener is no longer wanted, `EventuallyClean` fails. The model shows
+both; the journal fixes both because the restart finds the `intended` entry and releases it with
+a read-back keyed by the journaled client `a1`.
+
+**(b) Delete by port only** (`ReadBackDelete = FALSE`; `_b_delete_by_port`). The agent holds
+`p1`; the router reboots and the foreign device maps `p1`; the listener is no longer wanted and
+the agent deletes `p1` by port: the foreign mapping is gone (`NoForeignDelete`).
+
+**(c) No epoch check** (`EpochCheck = FALSE`; `_c_no_epoch`). The agent holds and announces
+`p1`; the router reboots; the verify sees the same address and accepts the mapping, so the module
+is told "mapped" for two ticks while the router has nothing, until the renewal at half life
+re-creates it (`AnnouncedImpliesMapped`).
+
+## Findings
+
+Each finding is an ordering or a case the design leaves open. The obvious choice breaks a
+property; the reference model uses the safe one. The configuration with the obvious choice is the
+counterexample.
+
+**(d) Map again before the old mapping is released** (`ReleaseBeforeRemap = FALSE`;
+`_d_remap_before_release`). The design says that after a network change "the agent probes and
+maps again, and it releases the old mapping on the old gateway if that gateway is still the
+default", without an order. If the agent maps first, its request for `p1` from `a2` conflicts
+with its own `p1 -> a1`: `next_free` moves to `p2` and the router holds two mappings for the
+listener (`AtMostOneExternalPortPerListener`), and the listener's port changes for no
+reason. With `refuse` the listener reports `PORT_TAKEN` against itself. **Fix:** journal the old
+mapping as `releasing`, delete it (read-back keyed by the old client), then map again; or treat a
+conflict whose holder carries the agent's own description and an earlier address of the node as
+the agent's own (delete, then retry).
+
+**(e) The UPnP read-back and the delete are two calls** (`AtomicReadBack = FALSE`;
+`_e_readback_race`). The agent reads `p1` back (its own client and description) and sends
+`DeletePortMapping`; between the two calls the router reboots and the foreign device maps `p1`;
+the delete, keyed by port only, removes the foreign mapping (`NoForeignDelete`). A
+lease that runs out between the two calls does the same. The read-back narrows the window, it
+does not close it, so the threat model's "UPnP deletes only after reading the entry back" is
+weaker than `NoForeignDelete`. The window is short, but the case where it is widest is real: the
+start-up cleanup of an entry whose lease is about to run out. **Mitigation:** skip the delete
+(let the router expire it) when the journaled lease has run out or will within a margin; prefer
+PCP or NAT-PMP, whose deletes are keyed by the client (and PCP's by the nonce).
+
+**(f) A router that deletes only for the mapping's own client** (`DeleteNeedsSameClient`;
+`_f_keyed_delete`). PCP and NAT-PMP key deletes by the requesting host's address (the design says
+so), and miniupnpd in secure mode refuses to delete another client's mapping. After Wi-Fi to
+Ethernet the old mapping `p1 -> a1` cannot be deleted from `a2`, so "it releases the old mapping
+on the old gateway" is not possible. The mapping stays until its lease runs out; meanwhile
+`next_free` maps `p2` and the listener holds two mappings (`AtMostOneExternalPortPerListener`), and `refuse` reports `PORT_TAKEN` against itself. On a lease router `EventuallyClean`
+still holds (the old lease runs out). The reference agent fails here too: the model has no fix,
+the design has to choose one. Options: scope the property to mappings for the node's current
+address and say so; on a conflict with the agent's own description at an earlier address, wait
+for the old lease instead of moving to the next port; keep PCP and NAT-PMP lifetimes short.
+
+**(g) An epoch reset drops the journal entry** (`EpochRemapKeepsEntry = FALSE`;
+`_g_epoch_forgets_entry`). The listener holds its fallback `p2` (the foreign device has `p1`).
+The router reboots (`p1` and `p2` are gone); the agent's renewal re-creates `p2`, but the agent
+crashes before the answer, so the journal still has `p2` with the old epoch. After the restart
+the verify sees the epoch reset, concludes "the router lost my mapping", drops the entry and maps
+afresh from `p1`, which is free now: the router holds `p1` and `p2` for the listener
+(`AtMostOneExternalPortPerListener`), and `p2` is in no journal. The design says
+"re-map at once" without saying which port, and the rule "next_free walks the range in order"
+suggests starting from `p1`. **Fix:** on an epoch reset keep the entry and request the journaled
+port again (the entry goes back to `intended`); a journal entry is removed only by a delete's
+answer or by a conflict answer, never on an inference.
+
+### Other requirements the model needed
+
+These are built into the reference model; without each, a reference configuration fails.
+
+* **An answer is a verification only for the current address.** A renewal sent before a network
+  change and answered after it must not restart the verify timer or announce: the address check
+  would be put off by a renewal (`AnnouncedImpliesMapped`).
+* **A listener that is no longer wanted is released, not renewed.** An agent that keeps renewing
+  it never gets to the delete (`EventuallyClean`).
+* **The epoch is per journaled mapping.** Each entry records the epoch of its own last answer.
+  With one remembered epoch per gateway, a fresh answer for listener A (new epoch) would hide
+  that listener B's mapping was lost in the same reboot.
+* **A delete answer clears the journal entry** whether or not anything was removed: an entry that
+  is no longer the agent's is left alone, and leases are the backstop.
+* **With a working journal the listing cleanup never finds anything.** Checked separately with
+  up to 3 faults: no mapping with the agent's description and current address is ever missing
+  from the journal. The listing is a backstop for a lost journal (reinstall, deleted state
+  directory), and variant (a) shows it is not enough for a mapping made from an earlier address.
+
+## Limitations
+
+* **Small scopes.** 1 or 2 listeners, a fallback range of 2 ports, 2 addresses, at most 1 foreign
+  mapping, 0 to 3 faults. The main configuration uses 2 listeners and 2 faults of every kind; the
+  others use 1 listener. The liveness configurations use 1 listener.
+* **Abstract time.** Leases of 3 ticks renewed at 1 left, one verify per tick. The model says the
+  lag is bounded by one verify interval, not how long an interval is.
+* **The protocol details** (wire formats, nonces, lifetimes, SOAP errors) are below the model;
+  the fake-gateway and property tests cover them.
