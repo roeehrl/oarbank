@@ -693,7 +693,7 @@ def elevated(argv: list[str], prompt: str, terminal: bool | None = None) -> list
     """`argv` run as root: itself when root; with no terminal, through the system's administrator prompt on a Mac
     (AppleScript's `do shell script … with administrator privileges`, every argument through `quoted form of`, so
     nothing is interpreted by a shell) or pkexec on Linux; else sudo."""
-    if os.geteuid() == 0:
+    if getattr(os, "geteuid", lambda: -1)() == 0:                       # (tests run it on Windows, which has none)
         return list(argv)
     terminal = sys.stdin.isatty() if terminal is None else terminal
     if sys.platform == "darwin" and not terminal:
