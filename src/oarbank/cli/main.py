@@ -592,6 +592,8 @@ def cmd_fleet(a):
               f"protecting {','.join((tel.get('protection') or {}).get('active') or []) or '-'} "
               f"modules {mods} {gpu}{runtime} caps {caps}"
               + "".join(f" STOPPED {k} ({why})" for k, why in sorted((tel.get("services_held") or {}).items())))
+        if n.get("why"):
+            print(f"  {n['why']['line']}")
         for m in ct.get("missing") or []:
             print(f"  containers missing {m.get('what')}: {m.get('detail')}  -> {m.get('fix')}")
         if ct.get("detail"):
@@ -626,6 +628,8 @@ def node_show(target: str, as_json: bool = False):
     print(f"{n['hostname']} {n['node_id']} {n['platform'] or '-'} {n['lifecycle']} {n['desired_state']} "
           f"{'online' if n['online'] else 'OFFLINE'} agent {n['agent_version'] or '-'}"
           + (f" QUARANTINED: {n['quarantine_reason']}" if n["quarantine_reason"] else ""))
+    if d.get("why"):
+        print(f"  why: {d['why']['line']}")
     for m, st in d["modules"].items():
         print(f"  module {m}: {st['state']}" + (f" ({st['reason']})" if st["reason"] else ""))
     doc = d["doctor"]
@@ -665,6 +669,10 @@ def node_show(target: str, as_json: bool = False):
         who = f", keeps out {', '.join(c['blocks'])}" if c["blocks"] else \
             f", needed by {', '.join(c['needed_by'])}" if c["needed_by"] else ""
         print(f"    {c['capability']}: {c['state']}{who}")
+    from ..coordinator.nodepolicy import show
+    for p in d.get("policy") or []:
+        print(f"  policy {p['key']} ({p['label']}): {show(p['key'], p['value'])}, {p['default_text']}"
+              + ("  CHANGED: oarbank node policy " + n["node_id"] + " --reset " + p["key"] if p["changed"] else ""))
 
 
 def cmd_node(a):
@@ -700,13 +708,14 @@ def cmd_node(a):
             res = run_op("nodes.set_caps", a.target, {"patch": patch}, a.reason, a.yes)
     else:
         patch = {}
-        for kv in a.kv:
+        for kv in ([a.value] if a.value else []) + a.kv:
             k, _, v = kv.partition("=")
             try:
                 patch[k] = json.loads(v)
             except json.JSONDecodeError:
                 patch[k] = v
-        res = run_op("nodes.set_policy", a.target, {"patch": patch}, a.reason, a.yes)
+        reset = "all" if a.reset_all else (a.reset or None)
+        res = run_op("nodes.set_policy", a.target, {"patch": patch, **({"reset": reset} if reset else {})}, a.reason, a.yes)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
 
 
@@ -1023,6 +1032,9 @@ def parser() -> argparse.ArgumentParser:
         n.add_argument("--" + k.replace("_", "-"), dest=k, help="number, or 'off' to remove this cap")
     n.add_argument("--enforce", choices=["soft", "hard"])
     n.add_argument("--clear-all", action="store_true", help="remove every cap")
+    n.add_argument("--reset", action="append", metavar="KEY", help="policy: put this setting back to the node's default "
+                                                                  "(repeatable)")
+    n.add_argument("--reset-all", action="store_true", help="policy: put every setting back to the node's defaults")
     n.add_argument("--reason")
     n.add_argument("--yes", action="store_true")
     n.set_defaults(fn=cmd_node)

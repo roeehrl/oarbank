@@ -65,6 +65,7 @@
       {%- else %}jobs {{ n.live }} / {{ s.slots }} CPU slots{% if s.auto is not none %} <span class="mut">(auto {{ s.auto }})</span>{% endif %}{% endif %}
       {%- if n.cap.mem_gb_free is known %} · {{ n.cap.mem_gb_free | num(1) }} GB free for jobs{% endif %}
       {%- if pools %} · pools {% for p, k in pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %} · {{ n.done1h }} done/h</div>
+    {% if n.why %}<div class="small mut why">{{ n.why.line }}</div>{% endif %}
     <div class="bar"><i style="width:{{ (100 * n.live / s.slots) if s.reported and s.slots and not s.held else 0 }}%"></i></div>
     <div class="row small mut">
       {% if n.tel.mem_used_gb is known and n.hw.memory_gb is known %}<span>mem {{ n.tel.mem_used_gb | num(1) }} / {{ n.hw.memory_gb | num(1) }} GB</span>

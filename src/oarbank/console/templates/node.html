@@ -27,6 +27,7 @@
 <div class="card">
   <b>Now</b>
   <div class="kv small" style="margin-top:6px">
+    {% if n.why %}<span class="mut">why</span><span class="why">{{ n.why.line }}</span>{% endif %}
     <span class="mut">jobs</span><span>{% if not s.reported %}{{ n.live }} running · capacity not reported yet
       {%- elif s.held %}{{ n.live }} running · <b>no new jobs: {{ s.held }}</b>
       {%- elif s.zero_why %}{{ n.live }} running · <b>no CPU slots: {{ s.zero_why }}</b>
@@ -134,20 +135,20 @@ rules, the memory guard, heat, battery and a present user). A cap can only lower
 <tr>
   <td><input type="checkbox" name="on_{{ key }}" aria-label="cap {{ label }}" {% if L[key] is defined and L[key] is not none %}checked{% endif %}
  data-toggles-row></td>
-  <td>{{ label }}</td>
+  <td>{{ label }}{% if L[key] is defined and L[key] is not none %} <span class="chip acc">changed</span>{% endif %}</td>
   <td><input type="number" step="any" min="0" name="{{ key }}" aria-label="{{ label }} ({{ unit }})" style="width:90px"
        value="{{ L[key] if L[key] is defined and L[key] is not none else '' }}" {% if not (L[key] is defined and L[key] is not none) %}disabled{% endif %}> {{ unit }}</td>
-  <td class="small mut">{{ notes | select | join(' · ') }}</td>
+  <td class="small mut">{{ (['default off'] + notes) | select | join(' · ') }}</td>
 </tr>
 {% endfor %}
 <tr>
   <td><input type="checkbox" name="on_schedule" aria-label="work only inside a schedule" {% if L.schedule %}checked{% endif %}></td>
-  <td>Schedule</td>
+  <td>Schedule{% if L.schedule %} <span class="chip acc">changed</span>{% endif %}</td>
   <td colspan="2"><input type="time" name="sched_start" aria-label="schedule start" value="{{ L.schedule.start if L.schedule else '22:00' }}"> to
     <input type="time" name="sched_end" aria-label="schedule end" value="{{ L.schedule.end if L.schedule else '07:30' }}">
     {% for d in range(7) %}<label class="small"><input type="checkbox" name="sched_days" value="{{ d }}"
       {% if not L.schedule or d in L.schedule.days %}checked{% endif %}>{{ ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d] }}</label>{% endfor %}
-    <span class="small mut">work only inside this window</span></td>
+    <span class="small mut">work only inside this window · default off (any time)</span></td>
 </tr>
 </table>
 <div class="row" style="margin-top:8px">
@@ -162,12 +163,28 @@ rules, the memory guard, heat, battery and a present user). A cap can only lower
 
 <h2>Policy</h2>
 <div class="card">
-{% call m.op_form("nodes.set_policy", n.node_id, "Save policy", confirm="Save policy for " ~ n.hostname ~ "? Role changes re-doctor and re-certify the node.", inline=False) %}
-<div class="row small">{% for k, v in n.policy.items() if k not in ('protection', 'module_settings') %}
-  <label>{{ k }} <input name="p_{{ k }}" value="{{ '' if v is none else (v | join(',') if k == 'disabled_services' else v) }}" style="width:{{ '220px' if k == 'disabled_services' else '70px' }}"></label>
-{% endfor %}</div>
-<div class="small mut">module settings: <span class="mono">{{ (n.policy.module_settings or {}) | tojson }}</span></div>
+{# nodepolicy.rows: each setting with this node's default and why; Save is the form's first button, so Enter saves #}
+{% set changed = d.policy | selectattr('changed') | list %}
+{% call m.op_form("nodes.set_policy", n.node_id, "Save policy", confirm="Save policy for " ~ n.hostname ~ "? Role changes re-doctor and re-certify the node.", inline=False, button=False) %}
+<div class="row small"><span class="mut">Defaults come from this {{ {'darwin': 'Mac', 'windows': 'PC'}.get(n.os, 'computer') }}'s hardware; Reset puts a setting back to its default.</span>
+  <span class="sp"></span><button class="pri" title="{{ OPS['nodes.set_policy'].summary }} ({{ OPS['nodes.set_policy'].tier }})">Save policy</button></div>
+<table class="small policy">
+<tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Default</th><th scope="col"><span class="mut">reset</span></th></tr>
+{% for p in d.policy %}
+<tr>
+  <td><label for="p_{{ p.key }}"><b>{{ p.label }}</b></label>{% if p.changed %} <span class="chip acc">changed</span>{% endif %}
+    <div class="mut">{{ p.help }} <span class="mono">{{ p.key }}</span></div></td>
+  <td>{% if p.bool %}<input type="hidden" name="p_{{ p.key }}" value="0"><input type="checkbox" id="p_{{ p.key }}" name="p_{{ p.key }}" value="1"{% if p.value %} checked{% endif %}>
+    {%- elif p.key == 'disabled_services' %}<input id="p_{{ p.key }}" name="p_{{ p.key }}" value="{{ (p.value or []) | join(',') }}" style="width:220px">
+    {%- else %}<input id="p_{{ p.key }}" name="p_{{ p.key }}" value="{{ '' if p.value is none else p.value }}" style="width:80px"> {{ p.unit or '' }}{% endif %}</td>
+  <td class="mut">{{ p.default_text }}</td>
+  <td>{% if p.changed %}<button name="reset" value="{{ p.key }}" title="Put {{ p.label | lower }} back to {{ p.default_text }}">Reset</button>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% if n.policy.module_settings %}<div class="small mut">module settings: <span class="mono">{{ n.policy.module_settings | tojson }}</span></div>{% endif %}
 {% endcall %}
+{% if changed %}{% call m.op_form("nodes.set_policy", n.node_id, "Reset all to defaults", confirm="Put every setting of " ~ n.hostname ~ " back to its default (" ~ (changed | map(attribute='label') | join(', ')) ~ ")? Role changes re-doctor and re-certify the node.") %}<input type="hidden" name="reset" value="all">{% endcall %}{% endif %}
 {% if node_secrets %}<div class="small mut">module secrets with this node's own value: {% for s in node_secrets %}<a href="/modules/{{ s.module }}/secrets" class="mono">{{ s.module }}/{{ s.name }}</a> ({{ s.fingerprint }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 </div>
 

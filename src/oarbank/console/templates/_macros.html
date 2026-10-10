@@ -1,7 +1,7 @@
 {# One form per operation. T0 posts directly; T1 confirms in the browser (app.js, data-confirm);
    T2/T3 open a plan page (preview) before applying. `newtab` opens it in a new tab (a page that must stay on screen,
    such as a one-time join code). #}
-{% macro op_form(op, target, label, cls="", confirm=None, reason_prompt=False, params=None, return_to="", always=False, inline=True, multipart=False, newtab=False) -%}
+{% macro op_form(op, target, label, cls="", confirm=None, reason_prompt=False, params=None, return_to="", always=False, inline=True, multipart=False, newtab=False, button=True) -%}
 {% set e = OPS[op] %}
 <form class="{{ 'inline' if inline }}" method="post" action="/do/{{ op }}"{% if newtab %} target="_blank"{% endif %}{% if multipart %} enctype="multipart/form-data"{% endif %}{% if confirm and e.tier == 'T1' %} data-confirm="{{ confirm }}"{% endif %}{% if reason_prompt %} data-reason="prompt"{% endif %}>
 <input type="hidden" name="target" value="{{ target }}">
@@ -11,6 +11,7 @@
 <input type="hidden" name="reason" value="">
 {% if params is not none %}<input type="hidden" name="params" value="{{ params | tojson | forceescape }}">{% endif %}
 {% if caller is defined %}{{ caller() }}{% endif %}
-<button{% if cls %} class="{{ cls }}"{% endif %} title="{{ e.summary }} ({{ e.tier }})"{% if always %} data-always{% endif %}>{{ label }}</button>
+{# button=False: the caller renders the form's buttons itself (its default button must come first) #}
+{% if button %}<button{% if cls %} class="{{ cls }}"{% endif %} title="{{ e.summary }} ({{ e.tier }})"{% if always %} data-always{% endif %}>{{ label }}</button>{% endif %}
 </form>
 {%- endmacro %}

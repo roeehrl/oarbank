@@ -180,7 +180,16 @@ and `creates: /var/lib/oarbank/status/joined`.
 
 The node enrolls with its own key (it never leaves the node), gets a client certificate, installs its release,
 runs each module's doctor and golden jobs, and then takes work. Host protection starts in `moderate` with no
-rules; add rules on the node's Protection page. `oarbank-agent discover` lists coordinators announcing themselves
+rules; add rules on the node's Protection page.
+
+**How much work a node takes.** Each node card says why in one line, for example "2 slots while someone is using
+this Mac (14 when idle) · 9.2 GB free for jobs (apps and the system use 46 GB)". A slot is a performance core, or
+two efficiency cores (hardware threads never count). Jobs only get memory the machine has free now, less a margin
+that keeps the memory guard from stepping in, and never more than the memory kept for the system and for the
+person using it allows. The node page's Policy table shows each setting with this machine's default and why; a
+changed setting has a Reset button, and **Reset all to defaults** puts them all back (`oarbank node policy <node>
+--reset <key>`, `--reset-all`). On a Mac, a Screen Sharing session counts as someone using it unless you turn off
+"Screen sharing counts as someone using it". `oarbank-agent discover` lists coordinators announcing themselves
 on the local network, a hint for the URL only.
 
 **Local Network privacy (macOS 15 and later).** The personal scope's LaunchAgent is not exempt: a macOS that applies

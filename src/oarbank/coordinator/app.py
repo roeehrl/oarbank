@@ -17,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config as C
 from . import clock
 from . import modcalls
-from . import (agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, nodeservices,
+from . import (agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, nodepolicy, nodeservices,
                ops, releases)
 from ..contracts import operations as registry
 from .db import DB, DBBusy, jl
@@ -642,10 +642,12 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         done1h = db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='completed' AND ended_at>?",
                         (n["node_id"], t - 3600))["n"]
         mods = jl(n.get("modules_json"), {}) or {}
+        facts, policy = jl(n["facts_json"], {}), jl(n["policy_json"], {})
         return {**n, "mods": mods,
-                "facts": jl(n["facts_json"], {}), "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
-                "policy": jl(n["policy_json"], {}), "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
-                "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n)}
+                "facts": facts, "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
+                "policy": policy, "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
+                "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n),
+                "why": nodepolicy.why(cap, tel, facts, policy, n.get("os"))}
 
     def fleet_data():
         nodes = [node_view(n) for n in db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]

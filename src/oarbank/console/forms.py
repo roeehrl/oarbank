@@ -1,7 +1,7 @@
 """Form fields -> operation params, per operation (the console's only knowledge of form layouts)."""
 import json
 
-POLICY_BOOL = {"run_on_battery", "hard_limits"}
+POLICY_BOOL = {"run_on_battery", "hard_limits", "screen_sharing_present", "mem_in_use_bound"}
 POLICY_LIST = {"disabled_services"}
 
 
@@ -21,11 +21,16 @@ def limits(form) -> dict:
 
 
 def policy(form) -> dict:
+    """The Policy table: one `p_<key>` field per setting (a checkbox's hidden `p_<key>=0` comes first, so a ticked box
+    sends 0 then 1 and the last value wins). A row's Reset button submits `reset=<key>` with the table, Reset all
+    `reset=all` alone: the other rows' values are saved as shown, the reset ones go back to the node's defaults."""
     patch = {}
+    getlist = getattr(form, "getlist", None)
     for k in form.keys():
         if not k.startswith("p_"):
             continue
-        name, v = k[2:], form[k]
+        name = k[2:]
+        v = (getlist(k) or [""])[-1] if getlist else form[k]
         if name in POLICY_BOOL:
             patch[name] = v in ("1", "true", "on", "True")
         elif name in POLICY_LIST:
@@ -37,7 +42,8 @@ def policy(form) -> dict:
                 patch[name] = float(v) if "." in v else int(v)
             except ValueError:
                 patch[name] = v
-    return {"patch": patch}
+    reset = (form.get("reset") or "").strip()
+    return {"patch": patch, **({"reset": "all" if reset == "all" else [reset]} if reset else {})}
 
 
 def _coerce(v: str):

@@ -133,6 +133,34 @@ def test_node_mode_sets_the_protection_mode(fleet, capsys):
     assert code == 1 and "fleet_first|moderate|strict_yield" in out
 
 
+def test_node_policy_sets_resets_and_shows_settings_with_their_defaults(fleet, capsys):
+    """What the node page's Policy table does: set settings, reset one or all to the node's defaults, and `oarbank node
+    show` prints each setting with its default and the line explaining the node's slots and memory."""
+    db, nid = fleet["db"], fleet["nid"]
+    pol = lambda: json.loads(db.one("SELECT policy_json FROM nodes WHERE node_id=?", (nid,))["policy_json"])
+    code, out = oarbank(capsys, "node", "policy", nid, "os_reserve_gb=10", "user_idle_s=60", "--yes")
+    assert code == 0, out
+    assert (pol()["os_reserve_gb"], pol()["user_idle_s"]) == (10, 60)       # the first key=value counts too
+    code, out = oarbank(capsys, "node", "show", nid)
+    lines = [x.strip() for x in out.splitlines()]
+    assert ("policy os_reserve_gb (Memory kept for the system): 10 GB, default 4 GB (24 GB RAM)  CHANGED: "
+            f"oarbank node policy {nid} --reset os_reserve_gb") in lines
+    assert "policy user_reserve_gb (Memory kept for the person using it): 8 GB, default 8 GB" in lines
+    doc = json.loads(oarbank(capsys, "node", "show", nid, "--json")[1])
+    assert doc["policy"] == json.loads(json.dumps(detail.node(db, nid, time.time(), lambda m: None)["policy"]))
+    assert oarbank(capsys, "node", "policy", nid, "--reset", "os_reserve_gb", "--yes")[0] == 0
+    assert (pol()["os_reserve_gb"], pol()["user_idle_s"]) == (4, 60)
+    assert oarbank(capsys, "node", "policy", nid, "--reset-all", "--yes")[0] == 0
+    assert pol()["user_idle_s"] == 300
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(
+        {"cpu_slots": 10, "idle_cpu_slots": 10, "slots": 10, "mem_gb_free": 14.0, "mem_binding": "in_use", "mem_in_use_gb": 6.0,
+         "user_present": False, "admit": True, "binding_limit": "auto"}), nid))
+    lines = [x.strip() for x in oarbank(capsys, "node", "show", nid)[1].splitlines()]
+    assert ("why: 10 slots (5 performance cores + 10 efficiency cores at half) · 14 GB free for jobs "
+            "(apps and the system use 6.0 GB)") in lines
+    assert "(5 performance cores + 10 efficiency cores at half)" in oarbank(capsys, "fleet")[1]
+
+
 # ------------------------------------------------------------------ oarbank protection
 
 def test_protection_commands_do_what_the_protection_page_does(fleet, capsys):

@@ -207,6 +207,10 @@ pub struct Policy {
     pub user_idle_s: f64,
     pub run_on_battery: bool,
     pub nice: i64,
+    /// A remote screen-sharing session counts as someone using the machine, even without input (macOS).
+    pub screen_sharing_present: bool,
+    /// The host budget never exceeds what is available now (the in-use bound); off: the reserves alone decide.
+    pub mem_in_use_bound: bool,
     /// The central protection section (unioned with the local file).
     pub protection: Option<Value>,
 }
@@ -223,6 +227,8 @@ impl Default for Policy {
             user_idle_s: 300.0,
             run_on_battery: false,
             nice: 10,
+            screen_sharing_present: true,
+            mem_in_use_bound: true,
             protection: None,
         }
     }
@@ -268,6 +274,12 @@ impl Policy {
         if let Some(v) = i("nice") {
             p.nice = v.clamp(0, 20);
         }
+        if let Some(v) = bool_of(get(j, "screen_sharing_present")) {
+            p.screen_sharing_present = v;
+        }
+        if let Some(v) = bool_of(get(j, "mem_in_use_bound")) {
+            p.mem_in_use_bound = v;
+        }
         let prot = get(j, "protection");
         if !is_null(prot) && prot.is_some_and(Value::is_object) {
             p.protection = prot.cloned();
@@ -296,6 +308,16 @@ pub struct CapacityInputs {
     pub in_schedule: bool,
     /// Summed RSS of the agent's own job process groups.
     pub fleet_rss_gb: f64,
+    /// Memory the OS could hand to new work now, GB: RAM minus what the host signals count as used (macOS:
+    /// app + wired + compressed, so free, file cache, purgeable and speculative pages count as available; Linux:
+    /// MemAvailable; Windows: ullAvailPhys, free plus standby). None: not measured (no in-use bound).
+    pub available_gb: Option<f64>,
+    /// The part of the fleet jobs' reservations already resident: Σ min(footprint, resources.mem_gb), GB. It is in
+    /// use (so not in `available_gb`) but already charged to the budget through `used_mem_gb`.
+    pub fleet_resident_gb: f64,
+    /// Kept free under the in-use bound: the memory guard's soft floor plus 1 GB (`CapacityModel::mem_margin_gb`), so
+    /// admitting up to the budget never trips the guard.
+    pub mem_margin_gb: f64,
     pub live_attempts: i64,
     /// Σ spec.resources.cpu / mem_gb of live attempts.
     pub used_cpu: f64,
@@ -325,6 +347,9 @@ impl CapacityInputs {
             local_pause: false,
             in_schedule: true,
             fleet_rss_gb: 0.0,
+            available_gb: None,
+            fleet_resident_gb: 0.0,
+            mem_margin_gb: CapacityModel::mem_margin_gb(ram_gb, 12.0),
             live_attempts: 0,
             used_cpu: 0.0,
             used_mem_gb: 0.0,
@@ -358,6 +383,19 @@ pub struct CapacityResult {
     pub reserved_mem_gb: f64,
     /// GPU fleet jobs allowed now (None: no limit; 0 while a protected group is GPU-active).
     pub gpu_jobs: Option<i64>,
+    /// Which bound set the host budget: `reserve` (RAM minus the reserves), `in_use` (what is actually available
+    /// plus the fleet's own resident memory, minus the margin) or `cap` (the owner's `mem_gb` cap).
+    pub mem_binding: String,
+    /// The reserve bound: ram − os_reserve − services − protection reservations − (user present: user_reserve).
+    pub mem_budget_reserve_gb: f64,
+    /// The in-use bound: available + fleet resident − margin (None when available memory is not measured).
+    pub mem_budget_in_use_gb: Option<f64>,
+    /// Memory in use by everything but the fleet's jobs (the owner's apps, the system, services), GB.
+    pub mem_in_use_gb: Option<f64>,
+    pub mem_margin_gb: f64,
+    pub user_present: bool,
+    /// The automatic CPU slots with nobody present (thermal and max_slots applied).
+    pub idle_cpu_slots: i64,
 }
 
 impl CapacityResult {
@@ -369,7 +407,12 @@ impl CapacityResult {
             "auto_slots": self.auto_slots, "binding_limit": self.binding_limit, "admit": self.admit,
             "pool_jobs_only": self.pool_jobs_only, "reserved_cpu": rounded(self.reserved_cpu, 2),
             "reserved_mem_gb": rounded(self.reserved_mem_gb, 2), "why": opt_str(self.not_admitting_because.as_deref()),
-            "gpu_jobs": opt_int(self.gpu_jobs),
+            "gpu_jobs": opt_int(self.gpu_jobs), "host_budget_gb": rounded(self.host_budget_gb, 2),
+            "mem_binding": self.mem_binding, "mem_budget_reserve_gb": rounded(self.mem_budget_reserve_gb, 2),
+            "mem_budget_in_use_gb": self.mem_budget_in_use_gb.map_or(Value::Null, |v| rounded(v, 2)),
+            "mem_in_use_gb": self.mem_in_use_gb.map_or(Value::Null, |v| rounded(v, 2)),
+            "mem_margin_gb": rounded(self.mem_margin_gb, 2), "user_present": self.user_present,
+            "idle_cpu_slots": self.idle_cpu_slots,
         })
     }
 }
@@ -390,9 +433,16 @@ fn floor_int(x: f64) -> i64 {
 }
 
 impl CapacityModel {
+    /// The margin the in-use bound keeps free: the memory guard's soft floor (`soft_free_pct` of RAM) plus 1 GB.
+    pub fn mem_margin_gb(ram_gb: f64, soft_free_pct: f64) -> f64 {
+        ram_gb.max(0.0) * soft_free_pct.max(0.0) / 100.0 + 1.0
+    }
+
     /// ```text
-    /// host_budget = ram − os_reserve − services_reserved − protection.reserved_mem − (user ? user_reserve : 0)
-    /// host_budget = min(host_budget, cap.mem_gb − services_reserved)
+    /// reserve     = ram − os_reserve − services_reserved − protection.reserved_mem − (user ? user_reserve : 0)
+    /// in_use      = available + fleet_resident − margin          (available measured, policy mem_in_use_bound;
+    ///                                                             margin = the guard's soft floor + 1 GB)
+    /// host_budget = min(reserve, in_use, cap.mem_gb − services_reserved)        (mem_binding names the smallest)
     /// cpu         = perf + eff/2 − protection.reserved_cpu; ×0.75 at thermal fair, 0 at serious+;
     ///               ≤ user_present_slots while a user is present
     /// auto_cpu    = min(max_slots, cpu)
@@ -407,7 +457,7 @@ impl CapacityModel {
         let l = &i.limits;
         let c = &i.constraint;
         let svc = i.service_reserved_mem_gb.max(0.0);
-        let uncapped_budget = i.ram_gb
+        let reserve_budget = i.ram_gb
             - p.os_reserve_gb
             - svc
             - c.reserved_mem_gb
@@ -416,12 +466,24 @@ impl CapacityModel {
             } else {
                 0.0
             };
+        // never more than the machine has free now, plus what the fleet's own jobs already hold of their reservations
+        let in_use_budget = i
+            .available_gb
+            .filter(|a| a.is_finite() && p.mem_in_use_bound)
+            .map(|a| a.max(0.0) + i.fleet_resident_gb.max(0.0) - i.mem_margin_gb.max(0.0));
+        let mut uncapped_budget = reserve_budget;
+        let mut mem_binding = "reserve";
+        if let Some(u) = in_use_budget.filter(|u| *u < reserve_budget) {
+            uncapped_budget = u;
+            mem_binding = "in_use";
+        }
         let mut host_budget = uncapped_budget;
         let mut mem_capped = false;
         if let Some(cap_mem) = l.mem_gb {
             if cap_mem - svc < host_budget {
                 host_budget = cap_mem - svc;
                 mem_capped = true;
+                mem_binding = "cap";
             }
         }
 
@@ -436,6 +498,7 @@ impl CapacityModel {
             thermal_reduced = true;
         }
         let mut cpu_whole = floor_int(cpu);
+        let idle_cpu_whole = cpu_whole;
         if i.user_present {
             cpu_whole = cpu_whole.min(p.user_present_slots.max(0));
         }
@@ -490,6 +553,8 @@ impl CapacityModel {
             binding = "cap.mem_gb".into();
         } else if c.reserved_mem_gb > 0.0 && mem_slots < capped_cpu {
             binding = bind("reserve_mem");
+        } else if mem_binding == "in_use" && mem_slots < capped_cpu {
+            binding = "memory_in_use".into();
         } else if c.reserved_cpu > 0.0
             && floor_int(base_cpu) > auto_cpu_slots
             && !thermal_reduced
@@ -566,6 +631,16 @@ impl CapacityModel {
             reserved_cpu: c.reserved_cpu,
             reserved_mem_gb: c.reserved_mem_gb,
             gpu_jobs: c.gpu_jobs,
+            mem_binding: mem_binding.into(),
+            mem_budget_reserve_gb: reserve_budget,
+            mem_budget_in_use_gb: in_use_budget,
+            mem_in_use_gb: i
+                .available_gb
+                .filter(|a| a.is_finite())
+                .map(|a| (i.ram_gb - a - i.fleet_rss_gb).max(0.0)),
+            mem_margin_gb: i.mem_margin_gb,
+            user_present: i.user_present,
+            idle_cpu_slots: max_slots.min(idle_cpu_whole).max(0),
         }
     }
 }

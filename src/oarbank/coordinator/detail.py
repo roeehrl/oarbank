@@ -9,7 +9,7 @@ has the catalogue it fetched.
 """
 from collections.abc import Callable
 
-from . import checkpoints, folders, nodeservices, platforms
+from . import checkpoints, folders, nodepolicy, nodeservices, platforms
 from . import config as C
 from .db import jl
 
@@ -72,11 +72,13 @@ def doctor(doc: dict | None) -> dict | None:
 def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict | None:
     """The node's detail document, by node id or hostname: `oarbank node show` prints it (GET /api/v1/nodes/{id}) and the
     console's node page renders its GPU API, enforcement and folder sections. `services` are the agent's per-service
-    report (nodeservices.rows), the rows of the node page's Services table."""
+    report (nodeservices.rows), the rows of the node page's Services table; `why` explains its slots and memory and
+    `policy` is its Policy table (nodepolicy.py)."""
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         return None
     facts, mods = jl(n["facts_json"], {}) or {}, jl(n.get("modules_json"), {}) or {}
+    policy = jl(n["policy_json"], {}) or {}
     hb, doc = n["last_heartbeat_at"] or 0, jl(n["doctor_json"])
     return {
         "node": {"node_id": n["node_id"], "hostname": n["hostname"], "platform": platforms.node_platform(n),
@@ -85,7 +87,10 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "modules": {m: {"state": st.get("state"), "reason": st.get("reason")} for m, st in sorted(mods.items())},
         "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),
         "services": nodeservices.rows(n), "services_at": n.get("services_at"), "folders": folder_grants(r, n),
-        "sandbox": enforcement(facts, sorted(mods), manifest_for)}
+        "sandbox": enforcement(facts, sorted(mods), manifest_for),
+        # why it has the slots and memory it has, and its settings with this node's defaults (nodepolicy.py)
+        "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os")),
+        "policy": nodepolicy.rows(policy, facts, r.get_setting("default_worker_disabled_services"))}
 
 
 def job(r, jid: int) -> dict | None:

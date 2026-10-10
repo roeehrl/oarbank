@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import time
 
-from ..coordinator import detail, nodeservices
+from ..coordinator import detail, nodepolicy, nodeservices
 
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
 CLOCK_SKEW_S = 60.0           # oarbankd core.CLOCK_SKEW_S
@@ -32,6 +32,7 @@ OS_NAMES = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
 PRESSURE = {0: "normal", 1: "warning", 3: "critical"}                 # the heartbeat's mem_pressure scale
 THERMAL = {0: "nominal", 1: "fair", 2: "serious", 3: "critical"}
 HELD = {"guard:memory": "memory guard", "guard:thermal": "heat", "guard:battery": "on battery",
+        "memory_in_use": "memory in use on the machine",
         "local:pause": "paused on the machine", "local_pause": "paused on the machine", "thermal": "heat",
         "outside_schedule": "outside its schedule", "cap.mem_gb exceeded": "memory cap reached",
         "protection": "host protection", "user": "the owner"}
@@ -42,10 +43,12 @@ def hardware(facts: dict) -> dict:
     facts = facts or {}
     cpu, plat = facts.get("cpu") or {}, facts.get("platform") or {}
     perf, eff, logical = cpu.get("perf_cores"), cpu.get("eff_cores"), cpu.get("logical")
-    total = logical or ((perf or 0) + (eff or 0)) or None
+    # physical cores (perf + eff) where the agent reports them; older agents reported only logical processors
+    total = ((perf or 0) + (eff or 0)) or logical or None
+    threads = f" ({logical} threads)" if logical and total and logical > total else ""
     os_name = OS_NAMES.get(plat.get("os"), plat.get("os"))
     return {"cpu": cpu.get("model") or None, "cores_total": total,
-            "cores": f"{perf}P + {eff}E" if perf and eff else (f"{total} cores" if total else None),
+            "cores": f"{perf}P + {eff}E{threads}" if perf and eff else (f"{total} cores{threads}" if total else None),
             "memory_gb": facts.get("memory_gb"), "os": " ".join(x for x in (os_name, plat.get("os_version")) if x) or None,
             "arch": plat.get("arch") or None,
             "gpus": [g.get("model") or g.get("vendor") for g in facts.get("gpus") or [] if g.get("model") or g.get("vendor")]}
@@ -104,6 +107,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
          "hb_age": now - hb if hb else None, "live": live, "done1h": done1h,
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
+    v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"))
     v["gpu"] = detail.gpu(facts, v["doctor"])
     v["services"] = nodeservices.rows(n)
     return v
