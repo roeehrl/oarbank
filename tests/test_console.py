@@ -643,3 +643,79 @@ def test_oarbank_node_show_prints_the_services_report(monkeypatch, capsys):
     assert "service relay/vm: ready, healthy, 2 jobs using it" in out and "module relay: certified" in out
     with pytest.raises(SystemExit):
         cli.node_show("nope")
+
+
+def policy_html(env) -> str:
+    page = env["c"].get(f"/nodes/{env['node']['node_id']}").text
+    return page[page.index("<h2>Policy</h2>"):page.index("<h2>Last 6 hours</h2>")]
+
+
+def test_policy_settings_have_labels_this_nodes_defaults_and_resets(env):
+    """Each setting with a label, a line of help and this node's default with its reason (the 24 GB fixture: 4 GB for the
+    system); changed values are marked and go back to the default one at a time or all at once, through nodes.set_policy."""
+    c, db, n = env["c"], env["db"], env["node"]
+    nid = n["node_id"]
+    html = policy_html(env)
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    assert_clean(text)
+    for label in ("Memory kept for the system", "Memory kept for the person using it", "Jobs while someone is using this computer",
+                  "Idle time before the computer counts as free", "Screen sharing counts as someone using it", "Run jobs on battery",
+                  "Fit jobs into the memory free now",
+                  "Memory per job slot", "Threads per job", "Most jobs at once", "Job priority (nice)", "Hard limits",
+                  "Services this computer does not run"):
+        assert label in text, label
+    assert "default 4 GB (24 GB RAM)" in text and "default 8 GB" in text and "default 300 s" in text and "default on" in text
+    assert "changed" not in text and 'name="reset"' not in html and "Reset all to defaults" not in html
+    # Save is the form's first button, so Enter in a field saves rather than resetting a row
+    form_html = html[html.index("<form"):html.index("</form>")]
+    assert form_html.index("Save policy") < form_html.index("<table")
+    r = form(c, "nodes.set_policy", target=nid, p_os_reserve_gb="10", p_user_idle_s="300", p_run_on_battery=["0", "1"],
+             p_screen_sharing_present="0")
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"], r.headers["location"]
+    pol = json.loads(fresh(db, n)["policy_json"])
+    assert (pol["os_reserve_gb"], pol["run_on_battery"], pol["screen_sharing_present"]) == (10, True, False)
+    html = policy_html(env)
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    assert text.count("changed") == 3
+    assert 'name="reset" value="os_reserve_gb"' in html and 'name="reset" value="run_on_battery"' in html
+    assert 'name="reset" value="user_idle_s"' not in html and "Reset all to defaults" in html
+    # one row back to its default; the rest of the table is saved as shown
+    r = form(c, "nodes.set_policy", target=nid, p_os_reserve_gb="10", p_user_idle_s="600", reset="os_reserve_gb")
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"]
+    pol = json.loads(fresh(db, n)["policy_json"])
+    assert (pol["os_reserve_gb"], pol["user_idle_s"], pol["run_on_battery"]) == (4, 600, True)
+    a = last_audit(db)
+    assert (a["operation"], a["source"], a["outcome"]) == ("nodes.set_policy", "gui", "ok")
+    # everything back
+    r = form(c, "nodes.set_policy", target=nid, reset="all")
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"]
+    pol = json.loads(fresh(db, n)["policy_json"])
+    assert (pol["os_reserve_gb"], pol["user_idle_s"], pol["run_on_battery"], pol["screen_sharing_present"]) == (4, 300, False, True)
+    assert "changed" not in re.sub(r"<[^>]+>", " ", policy_html(env))
+
+
+def test_the_why_line_explains_slots_and_memory(env):
+    """The agent's capacity says which bound set the memory and whether someone is present: the card and the page say
+    it in a line."""
+    db, n = env["db"], env["node"]
+    cap = {"cpu_slots": 2, "auto_cpu_slots": 2, "idle_cpu_slots": 10, "slots": 2, "mem_gb_free": 4.12, "mem_binding": "in_use",
+           "mem_in_use_gb": 16.0, "user_present": True, "admit": True, "binding_limit": "auto", "pools": {}}
+    db.x("UPDATE nodes SET capacity_json=?, telemetry_json=? WHERE node_id=?",
+         (json.dumps(cap), json.dumps({"user_idle_s": 3.0, "presence": "hid"}), n["node_id"]))
+    card, page = node_html(env)
+    assert_clean(card, page)
+    line = "2 slots while someone is using this Mac (10 when idle) · 4.1 GB free for jobs (apps and the system use 16 GB)"
+    assert line in card and line in page
+    cap.update(admit=False, why="guard:battery", binding_limit="guard:battery", cpu_slots=0, slots=0, mem_gb_free=0.0)
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(cap), n["node_id"]))
+    card, page = node_html(env)
+    assert "no new jobs: on battery (allow it in settings: Run jobs on battery)" in card
+    assert "no new jobs: on battery (allow it in settings: Run jobs on battery)" in page
+
+
+def test_caps_show_their_default_and_what_changed(env):
+    db, n = env["db"], env["node"]
+    db.x("UPDATE nodes SET limits_json=? WHERE node_id=?", (json.dumps({"jobs": 3}), n["node_id"]))
+    page = env["c"].get(f"/nodes/{n['node_id']}").text
+    limits = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page[page.index('<h2 id="limits">'):page.index("<h2>Policy</h2>")]))
+    assert "Concurrent jobs changed" in limits and limits.count("changed") == 1 and "default off" in limits

@@ -1898,9 +1898,20 @@ def set_limits(db: DB, node_id: str, patch: dict, actor: str, clear_all=False) -
     return new
 
 
-def set_policy(db: DB, node_id: str, patch: dict, actor: str, reason: str | None = None, source: str = "set_policy") -> dict:
+def set_policy(db: DB, node_id: str, patch: dict, actor: str, reason: str | None = None, source: str = "set_policy",
+               reset: list | str | None = None) -> dict:
+    """Patch the node's policy. `reset` puts settings back to this node's defaults (`config.policy_defaults`, the values
+    it joined with): a list of keys, or "all" for every setting the node page lists (nodepolicy.KEYS; protection and
+    module settings have their own pages). A reset key wins over the same key in `patch`."""
     node = db.one("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     pol = jl(node["policy_json"], {})
+    if reset:
+        from . import nodepolicy
+        keys = list(nodepolicy.KEYS) if reset == "all" else reset
+        if not isinstance(keys, list) or any(k not in nodepolicy.KEYS for k in keys):
+            raise ApiError(400, "unknown_policy", f"reset: {reset}")
+        dflt = C.policy_for(jl(node["facts_json"], {}) or {}, db.get_setting("default_worker_disabled_services"))
+        patch = {**patch, **{k: dflt[k] for k in keys}}
     for k, v in patch.items():
         if k not in C.DEFAULT_POLICY:
             raise ApiError(400, "unknown_policy", k)
@@ -1919,7 +1930,7 @@ def set_policy(db: DB, node_id: str, patch: dict, actor: str, reason: str | None
         protection.record_version(db, node_id, patch["protection"], actor, reason, source)
     old_disabled = set(node_disabled_services(node))
     db.x("UPDATE nodes SET policy_json=? WHERE node_id=?", (json.dumps(pol), node_id))
-    db.event("policy_changed", actor=actor, node_id=node_id, patch=patch)
+    db.event("policy_changed", actor=actor, node_id=node_id, patch=patch, **({"reset": reset} if reset else {}))
     if "disabled_services" in patch and set(pol.get("disabled_services") or []) != old_disabled:
         # the node's role changed (a service on or off): doctor checks and golden proof may differ, so every
         # module is re-doctored and re-certified under the new role

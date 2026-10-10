@@ -149,14 +149,67 @@ have no instruction or cycle counters (`PROTECTION_NO_IPC_COUNTERS`: a virtual m
 budget does not grow on it), and a node that cannot lower its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused
 instead).
 
+## Capacity
+
+Every tick the agent turns the node's hardware, its policy, the owner's caps and protection's combined constraint into
+what the node may still take (`CapacityModel::compute`; the heartbeat's `capacity`, docs/protocol.md):
+
+```text
+cores       = perf + eff/2                       (physical cores; SMT threads never count)
+cpu         = cores − protection.reserved_cpu; ×0.75 at thermal fair, 0 at serious+; ≤ user_present_slots while present
+reserve     = ram − os_reserve − services − protection reservations − (someone present: user_reserve)
+in_use      = available + fleet resident − margin          margin = soft_free_pct × ram + 1 GB
+host_budget = min(reserve, in_use, cap.mem_gb − services)  (mem_binding: reserve | in_use | cap)
+mem_gb_free = host_budget − Σ running jobs' resources.mem_gb
+slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap.cpu_cores / threads, protection.slots)
+```
+
+- **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with
+  46 GB in use offered 50 GB to jobs. The in-use bound starts from the memory available now, RAM minus what the host
+  signals count as used: on macOS app memory (internal minus purgeable pages), wired and compressed, so free, file
+  cache (inactive and speculative pages) and purgeable pages count as available (Activity Monitor's Memory Used); on
+  Linux `MemAvailable`; on Windows `ullAvailPhys` (free, zeroed and standby pages). It adds back the part of the
+  fleet jobs' reservations they already hold (Σ min(footprint, `resources.mem_gb`): in use, yet charged to the budget
+  through their reservations, so never counted twice and never credited past a reservation), and keeps the memory
+  guard's soft floor plus 1 GB free, since the guard stops admission below its floor anyway (8.7 GB on 64 GB). The
+  node policy's `mem_in_use_bound` (on by default) switches the bound off, leaving the reserves and the guard.
+  `capacity` names the bound that set the budget (`mem_binding`) beside both bounds (`mem_budget_reserve_gb`,
+  `mem_budget_in_use_gb`) and `mem_in_use_gb`, the memory everything but the fleet's jobs uses. Placement reads only
+  `mem_gb_free`, the same figure the console shows. When memory on the in-use bound holds the slots under the cores,
+  `binding_limit` is `memory_in_use`.
+- **Cores mean the same on every OS.** Facts report physical cores by class (`perf_cores`, `eff_cores`) beside the
+  logical processors: macOS `hw.perflevel0.physicalcpu` and `hw.perflevel1.physicalcpu` (an Intel Mac's
+  `hw.physicalcpu`); Linux the distinct `topology/core_cpus_list` sets of the online CPUs, classed by Intel hybrid's
+  `cpu_core` and `cpu_atom` thread lists or by Arm's `cpu_capacity` (under 60 % of the largest is an efficiency core),
+  while AMD's compact cores (Zen 4c, 5c) run the same instructions at lower clocks and count as performance cores;
+  Windows one `RelationProcessorCore` record per core from GetLogicalProcessorInformationEx, the highest
+  `EfficiencyClass` being the performance cores. A CPU without classes has only performance cores (`eff_cores` 0);
+  only facts without core counts fall back to logical processors.
+- **Someone present** means input within `user_idle_s` (300 s), or presence that cannot be read. On macOS a Screen
+  Sharing session counts too, even without input, unless the node policy's `screen_sharing_present` is off; Windows'
+  Remote Desktop sessions and Linux's remote logins are sessions with their own input time.
+- **Why.** The console's node cards and node page, `oarbank node show` and `oarbank fleet` print one line from the
+  reported capacity: "2 slots while someone is using this Mac (14 when idle) · 9.2 GB free for jobs (apps and the
+  system use 46 GB)", or what holds the node back and how to allow it ("no new jobs: on battery (allow it in
+  settings: Run jobs on battery)"); `coordinator/nodepolicy.py`.
+- **Settings.** The node page's Policy table labels each setting, says this node's default and why ("default 6 GB
+  (64 GB RAM)", from `config.policy_defaults`, the function that set the node's policy when it joined), marks the ones
+  that differ, and resets one or all through `nodes.set_policy` (`reset: [keys] | "all"`; `oarbank node policy <nid>
+  --reset <key>`, `--reset-all`).
+
 ## The controller
 
 One pure decision function over signals, configuration and its own state, on the agent's two-second loop:
 
 - **L0, the guard**, needs no rule. Memory is budgeted before admission; the soft floor stops admitting, the hard floor
   evicts the largest-footprint job in the lowest band, one at a time, until free memory has recovered by the reclaim
-  margin. Swap growth counts, because the kernel's pressure level can read normal with swap nearly full. Thermal and
-  battery gates pause or stop admission.
+  margin. Swap growth counts, because the kernel's pressure level can read normal with swap nearly full, but only
+  while free memory is under 2.5 times the soft floor (30 %): with more free, growing swap is the kernel's
+  housekeeping (Linux swaps idle pages out to keep file cache; Windows writes modified pages to its paging file ahead
+  of need). Windows' swap is what its paging files hold (`SystemPageFileInformation`, Win32_PageFileUsage's figure),
+  never the commit charge beyond physical use, which grows whenever programs commit memory they have not touched; the
+  commit charge counts as pressure against its limit instead (90 % warning, 97 % critical), where allocations start
+  failing. Thermal and battery gates pause or stop admission.
 - **L2, the fast throttle**, activates a rule after `enter_for_s` and releases it after `exit_after_s`; a protected
   metric over twice its target for two samples lowers fleet jobs at once, restored after 30 s clean.
 - **L1, the resize loop**, runs AIMD on the fleet CPU budget each interval: one core up while every metric is in its
@@ -207,7 +260,8 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | Longest pause before eviction | 10 min; `[node] max_pause_s` sets less (10 to 600 s) |
 | Pause probe | 6 s every 10 min, only while a `protect` rule is active |
 | `strict_yield` admission | after 15 min idle, one slot a minute |
-| Memory floors | soft 12 % free or swap +256 MB/min; hard 8 % free or swap +1 GB/min; reclaim 2 GB |
+| Memory floors | soft 12 % free or swap +256 MB/min; hard 8 % free or swap +1 GB/min (swap growth only under 30 % free); reclaim 2 GB |
+| Capacity's in-use margin | the soft floor plus 1 GB |
 | Implicit owner stall (`moderate`, `strict_yield`) | `cpu_stall` at most 0.15 above the owner's own level |
 | Implicit signal smoothing | weight 0.1 a sample (about 20 s) |
 | `protect` window | 20 s |

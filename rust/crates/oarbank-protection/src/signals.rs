@@ -223,6 +223,11 @@ impl PresenceReading {
 /// The host's user-presence interface.
 pub trait Presence: Send {
     fn read(&mut self) -> PresenceReading;
+
+    /// The node policy's `screen_sharing_present`: whether a remote screen-sharing session alone counts as someone
+    /// present. Only macOS tells such a session apart (Windows' Remote Desktop and Linux's remote logins are
+    /// sessions with their own input time).
+    fn set_screen_sharing_present(&mut self, _on: bool) {}
 }
 
 /// Parsing for the macOS frontmost-app lookup through `lsappinfo`. `lsappinfo info -only pid front` no longer

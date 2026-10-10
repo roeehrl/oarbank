@@ -20,7 +20,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `nodes.resume` | T0 | yes | `oarbank node state <nid> active` | yes |
 | `nodes.drain` | T1 | yes | `oarbank node state <nid> draining` | yes |
 | `nodes.set_caps` | T0 | yes | `oarbank node limits <nid> ...`<br>`oarbank node limits <nid> --clear-all` | yes |
-| `nodes.set_policy` | T1 | yes | `oarbank node policy <nid> ...` | yes |
+| `nodes.set_policy` | T1 | yes | `oarbank node policy <nid> ...`<br>`oarbank node policy <nid> --reset <key>`<br>`oarbank node policy <nid> --reset-all` | yes |
 | `nodes.quarantine` | T1 | yes | `oarbank op nodes.quarantine` | yes |
 | `nodes.clear_quarantine` | T1 | yes | `oarbank op nodes.clear_quarantine` | yes |
 | `nodes.run_doctor` | T0 | yes | `oarbank op nodes.run_doctor` | yes |

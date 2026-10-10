@@ -69,12 +69,14 @@ class Coordinator:
 
     def admit(self, eid):
         """nodes.admit as the owner does it: previewed (T2), then the plan applied with a reason. The node then reserves
-        no memory for the OS or a person (nodes.set_policy): these tests drive the agent's work, not host protection, so
-        the test machine's memory (an 8 GB VM) and whether someone seems to be using it never decide whether work runs."""
+        no memory for the OS or a person and does not fit jobs into the memory free now (nodes.set_policy): these tests
+        drive the agent's work, not host protection, so the test machine's memory (an 8 GB VM, or a busy workstation)
+        and whether someone seems to be using it never decide whether work runs."""
         plan = self.api("POST", "/api/v1/ops/nodes.admit", json={"target": eid, "dry_run": True})["plan"]
         out = self.api("POST", "/api/v1/ops/nodes.admit", json={"plan_id": plan["plan_id"], "reason": "e2e"})
         self.api("POST", "/api/v1/ops/nodes.set_policy", json={"target": out["result"]["node_id"], "reason": "e2e",
-                                                               "params": {"patch": {"os_reserve_gb": 0, "user_reserve_gb": 0}}})
+                                                               "params": {"patch": {"os_reserve_gb": 0, "user_reserve_gb": 0,
+                                                                                    "mem_in_use_bound": False}}})
         return out
 
     def __exit__(self, *a):

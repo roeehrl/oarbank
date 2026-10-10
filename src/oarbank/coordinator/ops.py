@@ -381,7 +381,7 @@ def _caps(db, req):
 @handler("nodes.set_policy", target_type="node", snapshot=_node_snap,
          versions=lambda db, r: [f"node:{_nid(db, r)}:policy"])
 def _policy(db, req):
-    return core.set_policy(db, _nid(db, req), req.params.get("patch") or {}, req.actor)
+    return core.set_policy(db, _nid(db, req), req.params.get("patch") or {}, req.actor, reset=req.params.get("reset"))
 
 
 @handler("nodes.quarantine", target_type="node", snapshot=_node_snap,

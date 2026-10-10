@@ -92,6 +92,9 @@ spec/platforms.md):
  "containers": {"gpu": "undetected"},
  "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
+- **CPU.** `perf_cores` and `eff_cores` are physical cores (a core running two hardware threads counts once), the
+  same on every OS; a CPU without core classes reports all its cores as `perf_cores` and `eff_cores` 0; `logical` is
+  the logical processors the agent may use. docs/design/protection.md, "Capacity", says how each OS is read.
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
   re-certifies every module when the platform or OS version changes. A node of a platform the fleet has no
   release for gets one built when it enrolls.
@@ -641,10 +644,18 @@ timeout, retry and platforms; its envelope names the stage, except the default s
 
 **Policy** (the owner's per-node settings):
 ```json
-{"run_on_battery": false, "user_idle_s": 300, "nice": 10, "threads_per_job": 1, "job_mem_gb": 1.5,
- "disabled_services": ["example/vm"], "module_settings": {"example": {…}},
+{"os_reserve_gb": 6, "user_reserve_gb": 8, "user_present_slots": 2, "user_idle_s": 300, "screen_sharing_present": true,
+ "run_on_battery": false, "mem_in_use_bound": true, "job_mem_gb": 1.5, "threads_per_job": 1, "max_slots": null,
+ "nice": 10, "hard_limits": false, "disabled_services": ["example/vm"], "module_settings": {"example": {…}},
  "protection": {"schema": 1, "node": {"mode": "moderate"}, "rule": [ … ]}}
 ```
+- **Defaults** come from the node's hardware when it joins (`config.policy_defaults`: `os_reserve_gb` is 4 up to
+  32 GB of RAM, 8 from 96 GB, else 6). `nodes.set_policy` takes `{"patch": {…}}` and, to put settings back to those
+  defaults, `"reset": ["<key>", …]` or `"reset": "all"` (every setting but `protection` and `module_settings`).
+- **`screen_sharing_present`** (default `true`): a macOS Screen Sharing session counts as someone using the machine
+  even without input.
+- **`mem_in_use_bound`** (default `true`): the memory for jobs never exceeds what the machine has available now (see
+  Capacity and host protection); `false` leaves the reserves alone.
 - **`disabled_services`** sets a node's role. Changing it re-doctors and re-certifies the node.
 - **`module_settings.<module>`** holds what a module's services read.
 - **`protection`** is owner-set host protection (schema 1). The console edits it with versions, restore and
@@ -657,10 +668,18 @@ timeout, retry and platforms; its envelope names the stage, except the default s
 
 The agent computes `capacity` every tick and sends it in the heartbeat:
 ```json
-{"cpu_slots": 10, "mem_gb_free": 14.5, "pools": {"containers": 3}, "auto_cpu_slots": 12,
- "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|user",
- "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_mem_gb": 6.1}
+{"cpu_slots": 10, "mem_gb_free": 14.5, "pools": {"containers": 3}, "auto_cpu_slots": 12, "idle_cpu_slots": 12,
+ "slots": 9, "auto_slots": 9, "user_present": false,
+ "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|memory_in_use|user",
+ "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_cpu": 0, "reserved_mem_gb": 6.1,
+ "host_budget_gb": 14.5, "mem_binding": "reserve|in_use|cap", "mem_budget_reserve_gb": 44.0,
+ "mem_budget_in_use_gb": 14.5, "mem_in_use_gb": 40.9, "mem_margin_gb": 8.68}
 ```
+`host_budget_gb` is the smaller of the reserve bound (RAM minus the OS and user reserves, the services' and protection's
+reservations) and the in-use bound (memory available now plus the fleet jobs' resident share of their reservations,
+minus the memory guard's soft floor and 1 GB), and of the owner's `mem_gb` cap; `mem_binding` names which.
+`mem_in_use_gb` is what everything but the fleet's jobs uses; `idle_cpu_slots` is the CPU slots with nobody present.
+Cores are physical (`perf + eff/2`); the formulas and the per-OS readings are in docs/design/protection.md, "Capacity".
 `cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide, plus the
 agent's own `containers` pool (its container runtime, while it can run containers: a Windows node whose session is not
 ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI; never on macOS) (a
