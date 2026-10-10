@@ -79,6 +79,10 @@ def zip_response(files, filename: str):
 
 
 SSE_PING_S, SSE_HEARTBEAT_S, SSE_MAX_CLIENTS = 15, 5, 16
+# Uploads staged before their operation form posts: op -> (the form's file field, oarbankd's staging route). app.js sends
+# the file to POST /stage/<op> by XHR (so the page can show upload progress), then posts the form with the SHA-256 only.
+STAGE = {"modules.install": ("bundle", "/api/v1/modules/bundles"), "agent.upload": ("binary", "/api/v1/agent/builds"),
+         "coordinator.builds.upload": ("archive", "/api/v1/coordinator/builds")}
 
 
 def _secs(s):
@@ -113,6 +117,7 @@ def templates() -> Jinja2Templates:
     )
     t.env.tests["known"] = lambda v: v is not None and not isinstance(v, jinja2.Undefined)   # reported, not missing or null
     t.env.globals.update(new_key=lambda: uuid.uuid4().hex, OPS=registry.REGISTRY, CAMPAIGN_OPS=registry.CAMPAIGN_OPS,
+                         STAGE_OPS={op: field for op, (field, _) in STAGE.items()},
                          impact_rows=lambda i: impact.rows(i, skip=(impact.MATCHES, "why")))   # plan.html draws these two itself
     return t
 
@@ -986,6 +991,24 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             body["secret"] = form.get("secret") or ""        # beside params: never in a plan, the audit or a log
         r = await http.post(f"/api/v1/ops/{op}", json=body, headers=headers)
         return await _result(op, r, return_to, request)
+
+    @app.post("/stage/{op}")
+    async def stage(op: str, request: Request):
+        """Stage an upload's bytes with oarbankd ahead of its operation (the console streams them through; staging is not
+        the audited step, the operation is). The CSRF header is checked by the middleware; oarbankd checks the role."""
+        actor = who(request)
+        if op not in STAGE:
+            return JSONResponse({"error": "not_found", "detail": f"{op} stages no upload"}, status_code=404)
+        try:
+            r = await http.post(STAGE[op][1], content=request.stream(),
+                                headers={**state.coordinator_headers(actor), "content-type": "application/octet-stream"})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": "coordinator_unreachable", "detail": type(e).__name__}, status_code=503)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {"error": "upload_failed", "detail": r.text[:200]}
+        return JSONResponse(body, status_code=r.status_code)
 
     SECRET_RESULTS = {"access.accounts.create": ("totp_secret", "otpauth"), "access.accounts.reset_totp": ("totp_secret", "otpauth"),
                       "access.tokens.create": ("token",), "access.login_link": ("url",), "modules.cli_token": ("token",)}

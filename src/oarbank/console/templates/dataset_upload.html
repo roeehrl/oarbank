@@ -14,7 +14,9 @@ interrupted upload continues where it stopped, also after a reload), then regist
   <label class="small">kind <input id="up-kind" class="mono" required pattern="[a-z][a-z0-9_-]{0,40}" placeholder="inputs" value="{{ pre.kind or '' }}"></label>
   <label class="small">dataset id (optional) <input id="up-id" class="mono" pattern="[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}" placeholder="inputs:batch-1"></label>
   <button type="button" id="up-start">Hash and upload</button>
-  <div class="small" id="up-status" role="status" aria-live="polite"></div>
+  <progress id="up-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
+  <div class="small" id="up-status"></div>{# per-chunk detail: not a live region (upload.js announces start, end, failure) #}
+  <div class="req-error" id="up-error" role="alert" hidden><span></span><button type="button" data-always>Retry</button></div>
   {% call m.op_form("datasets.register", "", "Register the dataset", inline=False, return_to="/datasets") %}
     <textarea name="params" id="up-params" rows="4" class="mono" style="width:100%" readonly aria-label="dataset to register"></textarea>
   {% endcall %}

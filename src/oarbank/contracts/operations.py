@@ -88,6 +88,16 @@ def CON(op_id):
     return [R("POST", CONSOLE_ROUTE_PATH, op=op_id)]
 
 
+# oarbank-console's staging of an operation's upload (module bundle, agent binary, coordinator build): the browser sends
+# the file first so the page can show progress, the console forwards the bytes to the operation's staging route on
+# oarbankd with the account's identity, and the form then posts the operation with the SHA-256; nothing changes until then
+CONSOLE_STAGE_PATH = "/stage/{op}"
+
+
+def STAGED(op_id):
+    return [R("POST", CONSOLE_STAGE_PATH, op=op_id)]
+
+
 OPS: list[Operation] = [
     # ------------------------------------------------------------------ fleet
     Operation(id="fleet.pause", area="fleet", summary="Stop granting new leases fleet-wide; running attempts continue",
@@ -210,7 +220,7 @@ OPS: list[Operation] = [
     Operation(id="modules.install", area="modules", summary="Install a module bundle: verify every file hash and the digest, check compatibility, self-test (enables nothing)",
               tier="T2", preview=True, min_role="admin", category="create", reverses="modules.uninstall", idempotency="natural",
               routes=[*OPR("modules.install"), R("POST", "/api/v1/modules/bundles")], cli=["oarbank module install <bundle.mfb>"],
-              gui=CON("modules.install")),
+              gui=[*CON("modules.install"), *STAGED("modules.install")]),
     Operation(id="modules.uninstall", area="modules", summary="Remove an installed module version that no channel or pin uses",
               tier="T2", preview=True, min_role="admin", category="remove", idempotency="natural",
               routes=OPR("modules.uninstall"), cli=["oarbank module uninstall <name>@<version>"], gui=CON("modules.uninstall")),
@@ -283,7 +293,7 @@ OPS: list[Operation] = [
     Operation(id="agent.upload", area="agent", summary="Register an oarbank-agent binary: its platform read from its headers and its version from its marker, never run (deploys nothing)",
               tier="T2", preview=True, min_role="admin", category="create", idempotency="natural",
               routes=[*OPR("agent.upload"), R("POST", "/api/v1/agent/builds")], cli=["oarbank agent upload <oarbank-agent>"],
-              gui=CON("agent.upload")),
+              gui=[*CON("agent.upload"), *STAGED("agent.upload")]),
     Operation(id="vendor.metadata.upload", area="agent", summary="Mirror the vendor's TUF metadata for agents (they verify agent builds against the vendor root compiled into them)",
               tier="T1", min_role="admin", category="modify", idempotency="natural",
               routes=OPR("vendor.metadata.upload"), cli=["oarbank vendor-metadata upload <dir>"], gui=CON("vendor.metadata.upload")),
@@ -302,7 +312,7 @@ OPS: list[Operation] = [
     Operation(id="coordinator.builds.upload", area="coordinator", summary="Register a coordinator build for a platform (read from its manifest, never run)",
               tier="T2", preview=True, min_role="admin", category="create", idempotency="natural",
               routes=[*OPR("coordinator.builds.upload"), R("POST", "/api/v1/coordinator/builds")],
-              cli=["oarbank coordinator-build upload <archive>"], gui=CON("coordinator.builds.upload")),
+              cli=["oarbank coordinator-build upload <archive>"], gui=[*CON("coordinator.builds.upload"), *STAGED("coordinator.builds.upload")]),
     Operation(id="coordinator.builds.sign", area="coordinator", summary="Attach an owner signature to a coordinator build (moves install only signed builds)",
               tier="T1", min_role="admin", category="modify", idempotency="natural",
               routes=OPR("coordinator.builds.sign"), cli=["oarbank coordinator-build sign <build>"], gui=CON("coordinator.builds.sign")),

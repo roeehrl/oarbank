@@ -53,12 +53,12 @@ pause, evict); nothing here can signal a protected process. The node unions this
   {% call m.op_form("protection.rules.update", n.node_id, "Review and apply…", cls="pri", inline=False) %}
   <textarea id="prot-config" name="pj.config" aria-label="protection rules (JSON)" rows="26" class="mono" spellcheck="false" style="width:100%"
     hx-get="/frag/nodes/{{ n.node_id }}/protection/preview" hx-trigger="input changed delay:400ms, load" hx-target="#prot-preview"
-    hx-swap="innerHTML">{{ config_text }}</textarea>
-  <div class="row" style="margin-top:6px"><button formaction="/do/protection.rules.canary" title="Apply to this node only, then promote after a clean soak">Canary on this node…</button>
+    hx-swap="innerHTML" hx-sync="this:replace">{{ config_text }}</textarea>
+  <div class="row" style="margin-top:6px"><button formaction="/do/protection.rules.canary" data-busy-label="Preparing review…" title="Apply to this node only, then promote after a clean soak">Canary on this node…</button>
     <span class="sp"></span><span class="small mut">T2: you review the diff and live matches, and give a reason, before anything changes.</span></div>
   {% endcall %}
 </div>
-<div class="card"><b>Live preview</b><div id="prot-preview" class="small" aria-live="polite"><span class="mut">computing…</span></div></div>
+<div class="card"><b>Live preview</b><div id="prot-preview" class="small" aria-live="polite"><p class="placeholder"><span class="spin" aria-hidden="true"></span>Computing the preview…</p></div></div>
 </div>
 
 <h2>Process picker <span class="small mut">(reported by the agent {{ processes_at | ago if processes_at else 'never' }}; refreshed when you preview)</span></h2>

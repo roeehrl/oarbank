@@ -44,6 +44,14 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 .failure{border-top:1px solid var(--line);padding-top:12px}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 #diag-text{min-height:160px;margin-top:8px}
+/* work in progress (docs/design/console-loading-states.md): a spinner after 300 ms beside the words; static under reduced motion */
+.working::before{content:"";display:inline-block;width:.9em;height:.9em;margin-right:10px;vertical-align:-.12em;border:2px solid currentColor;
+border-right-color:transparent;border-radius:50%;animation:spin .75s linear infinite,reveal 0s linear .3s both}.working:empty::before{display:none}
+.elapsed{color:var(--muted);font-size:15px;font-variant-numeric:tabular-nums;margin:4px 0 0}
+.checking{color:var(--muted);font-size:15px}.checking::before{content:"";display:inline-block;width:8px;height:8px;margin-right:8px;
+border-radius:50%;background:var(--accent);vertical-align:.1em;animation:pulse 1.6s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}@keyframes reveal{from{opacity:0}to{opacity:1}}@keyframes pulse{50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.working::before{animation:reveal 0s linear .3s both}.checking::before{animation:none}}
 [hidden]{display:none!important}
 @media (max-width:520px){main{padding:20px 16px}dl{grid-template-columns:1fr}dd{margin-bottom:6px}}
 </style></head><body><main>
@@ -51,7 +59,7 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 <p id="notice" class="notice" role="status" hidden></p>
 <p id="error" class="problem" role="alert"></p>
 
-<section id="loading"><p id="loading-text" role="status">Loading…</p></section>
+<section id="loading"><p id="loading-text" class="working" role="status">Loading…</p></section>
 
 <section id="join-screen" hidden aria-labelledby="join-screen-title">
 <h2 id="join-screen-title" tabindex="-1">Join this machine to your fleet</h2>
@@ -94,6 +102,7 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 <section id="progress-screen" hidden aria-labelledby="progress-screen-title">
 <h2 id="progress-screen-title" tabindex="-1">Checking the connection</h2>
 <p id="progress-text" role="status"></p>
+<p id="progress-elapsed" class="elapsed" aria-hidden="true" hidden></p>
 <ul id="rows" class="rows" aria-live="polite" aria-label="Checks"></ul>
 <div id="failure" class="failure" hidden>
 <p id="failure-message" class="problem" role="alert"></p>
@@ -110,6 +119,7 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 <p>Ask an admin to approve this machine on the Fleet page of <span id="wait-coordinator"></span>.</p>
 <dl><dt>Key fingerprint</dt><dd id="wait-key" class="mono"></dd><div id="wait-code-row"><dt>Machine code</dt><dd id="wait-code" class="mono"></dd></div></dl>
 <p>You can close this window. The machine joins as soon as it is approved.</p>
+<p class="checking">This window checks for the approval every few seconds.</p>
 <p id="wait-problem" class="problem"></p>
 <div class="actions"><button type="button" id="wait-close" class="secondary">Close</button></div>
 </section>
@@ -222,7 +232,7 @@ const HINTS = {
   E_ALREADY_JOINED: 'Leave the current fleet first.', E_PRIVILEGE: 'An administrator has to approve this.',
   E_CANCELLED: 'Retry when you are ready to approve the administrator prompt.'};
 const view = {state: null, current: 'loading', source: 'typed', confirmed: false, prefillUsed: false, scopeTouched: false,
-              containersTouched: false, busy: false, timer: null, run: null};
+              containersTouched: false, busy: false, timer: null, run: null, clock: null};
 globalThis.JoinWindow = view;
 const now = () => Date.now() / 1000;
 
@@ -235,6 +245,7 @@ async function call(path, body) {
 }
 
 function show(id) {
+  if (id !== 'progress-screen') working(false);
   for (const s of SCREENS) $(s).hidden = s !== id;
   view.current = id;
   const heading = $(id + '-title');
@@ -242,6 +253,26 @@ function show(id) {
 }
 
 function stopTimer() { if (view.timer) clearTimeout(view.timer); view.timer = null; }
+
+// While checks, a join or a leave run: a spinner beside the progress line, the rows list aria-busy, and past 10 s how long
+// it has been running (container installs and administrator prompts take minutes). Every outcome turns it off.
+function elapsedText(s) {
+  if (s < 10) return '';
+  return s < 60 ? `Running for ${s} seconds` : `Running for ${Math.floor(s / 60)} min ${s % 60} s`;
+}
+function working(on) {
+  $('progress-text').className = on ? 'working' : '';
+  $('rows').setAttribute('aria-busy', on ? 'true' : 'false');
+  if (view.clock) clearInterval(view.clock);
+  view.clock = null;
+  $('progress-elapsed').hidden = true; $('progress-elapsed').textContent = '';
+  if (!on) return;
+  const began = Date.now();
+  view.clock = setInterval(() => {
+    const text = elapsedText(Math.round((Date.now() - began) / 1000));
+    $('progress-elapsed').textContent = text; $('progress-elapsed').hidden = !text;
+  }, 1000);
+}
 function later(fn, ms) { stopTimer(); view.timer = setTimeout(fn, ms); }
 
 function pickStatus() {
@@ -363,11 +394,13 @@ function resetProgress(title, text) {
   $('rows').replaceChildren();
   $('failure').hidden = true; $('diag-text').hidden = true; $('copy-result').textContent = '';
   show('progress-screen');
+  working(true);
 }
 
 function failure(result) {
   stopTimer();
   view.busy = false;
+  working(false);
   if (view.run) view.run.result = {code: result.code, message: result.message};
   if (view.current !== 'progress-screen') resetProgress('Joining did not finish', '');
   $('progress-screen-title').textContent = view.run && view.run.kind === 'leave' ? 'Leaving did not finish' : 'Joining did not finish';
@@ -583,6 +616,7 @@ if (!token) {
     if (view.current === 'closed-screen') return;
     stopTimer();
     for (const s of SCREENS) $(s).hidden = true;
+    working(false);
     $('error').textContent = 'This window has disconnected. Open Oarbank Node again; nothing was lost.';
   }), 30000);
 }
