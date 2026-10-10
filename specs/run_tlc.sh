@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Model-check OarbankLease.tla under every config and compare each outcome with the expected one.
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla; a config's spec is its name up to the first _)
+# under every config and compare each outcome with the expected one.
 #
 #   ./run_tlc.sh            run every config
 #   ./run_tlc.sh a_nofence  run only the configs whose name contains "a_nofence"
@@ -77,6 +78,9 @@ CONFIGS=(
   "OarbankLease_module_faults                        ok"
   "OarbankLease_module_faults_liveness               ok"
   "OarbankLease_o_no_await_lease                     inv:ModuleFaultsNotCharged"
+  "OarbankFastPause                                  ok"
+  "OarbankFastPause_a_nofresh                        inv:FastPauseHolds"
+  "OarbankFastPause_b_unshared                       liveness"
 )
 
 if [ ! -f "$JAR" ]; then
@@ -97,7 +101,7 @@ for row in "${CONFIGS[@]}"; do
   start=$(date +%s)
   "$JAVA" -XX:+UseParallelGC -Xmx"$HEAP" -cp "$JAR" tlc2.TLC \
       -workers "$WORKERS" -deadlock -cleanup -metadir "$meta" \
-      -config "$cfg.cfg" OarbankLease.tla >"$log" 2>&1
+      -config "$cfg.cfg" "${cfg%%_*}.tla" >"$log" 2>&1
   secs=$(( $(date +%s) - start ))
   rm -rf "$meta"
 
