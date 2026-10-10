@@ -232,10 +232,30 @@ The core runs no work of its own: a module brings it. From the console's **Modul
    (`release_awaiting_owner`) opens after five minutes, and the nodes stay "release needs your signature".
    [release-signing.md](release-signing.md) has the details.
 5. **Finish what the module's checklist asks.** The module's page opens with **Getting this module running**
-   (`oarbank module ready <name>` prints the same): every step with its status, why and the fix, among them host
-   tools to map in Settings → Tools (and install on the nodes), the nodes each stage can run on and why the others
-   cannot (a capability not reported, no container runtime, a platform the module does not support), certification,
-   and the module's first operations.
+   (`oarbank module ready <name>` prints the same): every step with its status, why and the fix, among them the host
+   tools it asks for (how many nodes have a version it accepts, and the install command for the others), the nodes
+   each stage can run on and why the others cannot (a capability not reported, no container runtime, a platform the
+   module does not support), certification, and the module's first operations.
+
+### Host tools
+
+A module that needs a program installed on the node (a JDK, a Python, a tool such as samtools) asks for it by tool id
+and version (`jdk >=17`); each node finds its own installations and reports them, and the module's **Nodes** tab and
+each node's **Host tools** section show what was found, what each module gets and the fix for the rest
+([design/host-tools.md](design/host-tools.md)):
+
+- **Install it on the node** with the command shown (`brew install openjdk@17`, `sudo apt install
+  openjdk-17-jdk-headless`, `winget install EclipseAdoptium.Temurin.17.JDK`), then **Re-detect** (`oarbank tools detect
+  <node>`; nodes also look again every hour and after every release).
+- **Somewhere unusual?** Add a search path for the OS in Settings → Tools (`oarbank tools define jdk --search
+  darwin=/opt/java/*/Contents/Home`), or set the path on one node (`oarbank tools set-path <node> jdk <path>`). A path
+  the node did not find itself goes into its signed statement (`oarbank node sign <node>` in signing mode), and the node
+  checks it before granting it.
+- **As the node's owner**, list extra candidates in `tool-hints.json` in the agent's home (`{"jdk":
+  ["/Users/me/jdks/zulu-17"]}`); the agent verifies them like anything it finds. Set `OARBANK_TOOLS_BUILTIN_SEARCH=0`
+  in the agent's environment to search only the fleet's paths, your hints and paths set for the node.
+- `oarbank tools` lists the definitions and what every node found; `oarbank tools --module <name>` prints a module's
+  node-by-node matrix with the fixes.
 
 ## Updating
 

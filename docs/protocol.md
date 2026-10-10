@@ -105,10 +105,12 @@ spec/platforms.md):
   (`SANDBOX_BACKEND_MISSING`); a gap is `CAPABILITY_NOT_ENFORCED`. `grants.bootstrap` says the agent runs a bootstrap
   stage's jobs with the bootstrap grants (spec/sandbox.md, "Bootstrap jobs"); only such a node gets them.
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
-  `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
-  (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`). An unmapped tool keeps off
-  only the jobs of stages that need certification (and the goldens): a stage that needs none runs without it
-  (docs/design/stage-gating.md), and explain names the tools.
+  `requires.os`, and where every `[sandbox].tools` request resolves to an installation the node reported (`tools`,
+  below; docs/design/host-tools.md): `PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_NOT_FOUND`,
+  `TOOL_VERSION_UNMET` ("found 11.0.2 at …; needs >=17"), `TOOL_REFUSED` (a path set for the node that it refused),
+  `AGENT_TOO_OLD`. A tool that does not resolve keeps off only the jobs of stages that need certification (and the
+  goldens): a stage that needs none runs without it (docs/design/stage-gating.md), and explain names the tool, what
+  the node found and what the module needs.
 - **Containers.** `runtime` and `state` say whether the node has a container runtime: on macOS `colima` (the agent's
   Colima profiles; `installed`: their VMs start when a job needs one), on Linux `podman` or `docker` (`installed`),
   else `runtime` null and `state` `absent`. `gpu` is how containers get the node's GPUs (`cdi:<kind>`,
@@ -132,7 +134,7 @@ changes it.
 `POST /v1/agent/hello` is sent on start, on wake, after a clock jump over 30 s, and on `recertify`.
 ```json
 {"agent_version": "…", "boot_id": "…", "facts": {…}, "live_attempts": [123, 124], "release_id": "r_…",
- "ready_datasets": ["scene:atrium", …], "clock": 1790000000.2}
+ "ready_datasets": ["scene:atrium", …], "clock": 1790000000.2, "tools": {…Tools…}}
 ```
 → directives (below), plus `"kill": [124]`: live attempts oarbankd no longer considers live. The agent kills
 their process groups, deletes their workspaces, and does not report them.
@@ -152,6 +154,12 @@ their process groups, deletes their workspaces, and does not report them.
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
+ "tools": {"detected_at": 1790000005.0, "native_arch": "arm64", "tools": {
+   "jdk": [{"path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home", "version": "17.0.12",
+            "arch": "aarch64", "vendor": "Homebrew", "source": "detected", "status": "ok", "detected_at": 1790000005.0},
+           {"path": "/srv/jdk", "given": "/srv/jdk", "version": null, "arch": null, "vendor": null, "source": "override",
+            "status": "refused: /srv/jdk does not exist here", "detected_at": 1790000005.0}],
+   "python": []}},
  "services": [{"service": "example/model", "health": "healthy", "running": false, "ready": false, "held": "preempt_memory",
                "disabled": false, "withdrawn": false, "failures": 0, "error": null, "gpu_api_missing": null, "users": 0,
                "pools": {"model": 1}, "reserve_mem_gb": 0.0, "busy": false, "endpoint": true, "accepting": false,
@@ -167,7 +175,9 @@ their process groups, deletes their workspaces, and does not report them.
 - **`clock`** (hello and heartbeat) is the agent's wall clock when it sent the request. oarbankd records the node's clock
   offset from it (see Clocks).
 - **`doctor`**, when present, is the latest doctor report (see Doctor).
-- **`folders`** is the outcome, per folder id, of the folder statement the agent applied (see Folders).
+- **`folders`** is the outcome, per folder id, of the node statement the agent applied (see Node statement).
+- **`tools`** (hello and every heartbeat) is the agent's latest host tool detection (see Host tools); oarbankd keeps
+  it as `nodes.tools_json` and places jobs by it.
 - **`services`** and **`probes`** are the agent's service report, sent on every heartbeat: each module service
   (`<module>/<name>`) with its health, whether it runs and has answered `ready`, why it is down (`held` by host protection
   with the release reason, `disabled` by the kill switch, `withdrawn` after failures, `gpu_api_missing`), its last
@@ -195,7 +205,9 @@ their process groups, deletes their workspaces, and does not report them.
  "release_pubkey": null, "prefetch": ["tool:example-1.0", "scene:atrium"], "run_doctor": false, "recertify": false,
  "cancel": [125], "revoke": [126], "run_probe": false, "send_processes": false, "journal_ack": 41,
  "modules_disabled": ["example"],
- "folders": {"statement": "{…oarbank.folders/v1…}", "signature": null}}
+ "statement": {"statement": "{…oarbank.node/v1…}", "signature": null},
+ "tool_pins": {"": {"jdk": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"}, "example": {"jdk": "/opt/jdk-21"}},
+ "detect_tools": false}
 ```
 | Directive | Meaning |
 |---|---|
@@ -207,7 +219,9 @@ their process groups, deletes their workspaces, and does not report them.
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
 | `modules_disabled` | Modules the owner disabled (the kill switch, `modules.disable`): every service of theirs is disabled on the node (stopped, never offered) until they are enabled again. |
-| `folders` | This node's latest folder statement and the owner's signature (`null` in developer mode, or until the owner signs); `null` when no folder is mapped here (see Folders). |
+| `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
+| `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
+| `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
 
 ## Work
 
@@ -386,19 +400,54 @@ nondeterminism takes the results resumed from its checkpoints with it.
 - **Ready.** A dataset is ready when every file is present and verified. `prefetch` names registered datasets to
   stage ahead of need.
 
+## Node statement
+
+Every node-scope value that grants access on one node travels in that node's **statement**: canonical JSON
+`{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}}, "tools":
+[{"id", "module", "path"}], "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
+release signing the agent applies a statement only with a valid signature by the pinned release key (`oarbank node sign
+<node>`, operation `nodes.sign_statement`) and a seq above the last one it applied; in developer mode statements are
+unsigned. The agent keeps the applied statement in `state/folders.json`.
+
 ## Folders
 
 An operator maps the folder ids modules ask for (`[sandbox].folders`, approved per version) to a path per node in the
-folder registry (`settings.folders.update`). Each node gets a **folder statement** in its directives: canonical JSON
-`{"type": "oarbank.folders/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}},
-"signed_at"}` and a signature. With release signing the agent applies a statement only with a valid signature by the
-pinned release key (`oarbank folders sign <node>`) and a seq above the last one it applied; in developer mode statements
-are unsigned. The agent checks each folder (an absolute, existing directory, granted by its canonical path; not a root,
-a home directory, Oarbank's data, a system directory or a path the sandbox already grants; no two folders overlapping),
-keeps the outcome in `state/folders.json` and reports it in every heartbeat. A job of a module that asks for folders is
-placed only where every one of them reports `ok` with the access asked for (else `FOLDER_UNAVAILABLE`). The runner gets
-the granted folders in `OARBANK_FOLDERS_FILE`, read folders read-only and write folders as outboxes it can create and
-write files in but never read, list or delete (the SDK's spec/sandbox.md, "Folders").
+folder registry (`settings.folders.update`); the mapping reaches each node in its statement (`folders`). The agent
+checks each folder (an absolute, existing directory, granted by its canonical path; not a root, a home directory,
+Oarbank's data, a system directory or a path the sandbox already grants; no two folders overlapping) and reports the
+outcome in every heartbeat. A job of a module that asks for folders is placed only where every one of them reports `ok`
+with the access asked for (else `FOLDER_UNAVAILABLE`). The runner gets the granted folders in `OARBANK_FOLDERS_FILE`,
+read folders read-only and write folders as outboxes it can create and write files in but never read, list or delete
+(the SDK's spec/sandbox.md, "Folders").
+
+## Host tools
+
+The node is the source of truth for what is installed (docs/design/host-tools.md). The agent detects every tool the
+fleet defines (the built-in `jdk` and `python`, plus the release's `tools` table) at startup, after a release install,
+on `detect_tools`, when its statement's tool paths change and hourly, and reports **Tools** in hello and every
+heartbeat:
+
+- `detected_at`, `native_arch` (`arm64`, `amd64`);
+- `tools`: per tool id, every installation it found: `path` (canonical: a JDK's home, an executable's file), `given`
+  (the path as set or hinted, when it differs), `version` (a JDK 8's `1.8.0_392` is `8.0.392`), `arch` (as the
+  installation names it: `aarch64`, `x86_64`), `vendor` (a JDK's `IMPLEMENTOR`), `source` (`detected`: a built-in
+  search pattern; `search`: the fleet's; `override`: a path the node's statement adds; `local-hint`: the hints file
+  `<agent home>/tool-hints.json`), `status` (`ok` or `refused: <reason>`) and `detected_at`.
+
+A JDK is read without running anything: its home's `release` file (`JAVA_VERSION`, `OS_ARCH`, `IMPLEMENTOR`) beside
+`bin/java`. Any other tool runs its version command inside the sandbox (read and execute on that installation only,
+no network, 10 s at most) and the definition's regex reads the version from its output. A path the statement adds first
+passes the folder rules (no roots, homes, data roots or system directories themselves) and then the detector.
+`OARBANK_TOOLS_BUILTIN_SEARCH=0` in the agent's environment skips the built-in patterns.
+
+For each module the agent resolves each approved request (`sandbox.tools` of the module entry: `{id, version, arch,
+trust}`) to one installation, as the coordinator does (`oarbank_core::tools::resolve`, `tools.resolve`; vectors in
+`src/oarbank/contracts/vectors/tool-resolution.json`): the module's pin in `tool_pins` when it names an installation
+found here, else the node's native arch first, then the highest version that satisfies the request. Its runners,
+doctor, services and probes get exactly that installation in **`OARBANK_TOOLS_FILE`**, a UTF-8 JSON file
+`{"<tool id>": [{"path": "<canonical path>", "version": "17.0.12", "arch": "aarch64"}]}`, and read and execute on its
+path (an interpreter's prefix for `python`); a request that does not resolve is left out. A bootstrap job's file lists
+no tools.
 
 ## Releases
 
@@ -407,7 +456,7 @@ enable, canary, promote; see the SDK's spec/bundles.md). For each module with a 
 platform, it holds the bundle of the version the node runs:
 ```
 <release>/MANIFEST.json            every file: path, sha256, mode
-<release>/modules.json             {"format": 2, "platform": "darwin-arm64", "modules": [Module, ...]}
+<release>/modules.json             {"format": 2, "platform": "darwin-arm64", "modules": [Module, ...], "tools": {…}}
 <release>/modules/<name>/...       the module's bundle files a node of the platform receives
 ```
 A bundle's `[bundle.platform_files]` decides which files each platform's release carries (unmatched files go
@@ -427,7 +476,7 @@ interpreter and `{bundle}` with the module's bundle directory (`modules/<name>` 
                "freeze_ok": false, "endpoint": true, "gpu": {"use": "shared", "apis_any": ["metal"]}, …}],
  "probes": [{"name": "java17", "exec": ["{bundle}/node/probes/java17"], "period_s": 3600}],
  "sandbox": {"contract": 1, "net": {"mode": "egress-allowlist", "allow": ["api.example.org"]},
-             "tools": [{"id": "java17", "trust": "code-exec", "paths": ["/opt/homebrew/opt/openjdk@17"]}],
+             "tools": [{"id": "jdk", "trust": "code-exec", "version": ">=17, <22", "arch": "native"}],
              "devices": {"gpu": "none"}, "exec_writable": false, "containers": []}}
 ```
 A stage's `platforms` limits where its jobs are granted (empty: every platform of the module). A service's `endpoint`
@@ -436,8 +485,9 @@ and `gpu` are present only when the manifest sets them (docs/design/service-endp
 `runner.bandwidth_class` (`low`, `medium` or `high`) is present only when the manifest declares it. Host
 protection uses it to pick rungs when the harm is to a GPU-bound protected group (docs/design/protection.md).
 `sandbox.tools`
-carries the host paths the operator's tool registry (`settings.tools.update`) maps each approved tool id to on the
-release's OS. `sandbox.container_sets` (present only when the manifest declares sets) carries each approved set with its
+carries each approved tool request, never a path; the release's top-level `tools` table carries the fleet's tool
+definitions for the release's OS: `{"<id>": {"kind": "jdk"|"python"|"executable", "search": [extra patterns],
+"version": {"args", "regex"}}}` (`version` for executables only; see Host tools). `sandbox.container_sets` (present only when the manifest declares sets) carries each approved set with its
 public key: `[{"name", "registry", "repository", "platform", "key": "<PEM>", "index"?}]`; the agent verifies a set
 image's cosign signature (or its index membership) with it before the runtime pulls the image.
 - **Fetch.** `GET /v1/releases/{release_id}.tar.gz` serves the tarball; its sha256 comes with the

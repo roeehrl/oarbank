@@ -25,8 +25,9 @@ This page describes how the pieces fit and how each works on each operating syst
   os_version, os_build, kernel, distro, libc}`, `cpu`, `memory_gb`, `gpus`, `addresses` and `sandbox.enforcement` per
   capability. Nodes have indexed `platform`, `os` and `arch` columns.
 - **Placement.** A module version runs on a node only when its manifest lists the platform (`requires.platforms`), the
-  node's OS version is in `requires.os`, every host tool it was approved for is in the operator's tool registry for
-  that OS, the node's sandbox enforces every capability it needs, and the agent is recent enough. Each refusal has a
+  node's OS version is in `requires.os`, every host tool it asks for resolves to an installation the node detected in a
+  version it accepts ([host-tools.md](host-tools.md)), the node's sandbox enforces every capability it needs, and the
+  agent is recent enough. Each refusal has a
   reason code that `explain` shows, with the module's own reason when it gives one (`requires.unsupported.runner`). A
   stage limited to some platforms runs only there, and so does a job limited to some platforms (jobs.enqueue `platforms`)
   or reading a platform-bound dataset (datasets.create `platform`). A job whose stage needs GPU APIs (the runner's
@@ -133,10 +134,14 @@ confinement and fails closed. Grants are whole directories or files, approved pe
 - **Network** has three modes: `none`, `egress-allowlist` (`host[:port]` entries through the agent's local proxy, which
   refuses IP literals and names resolving to non-public addresses; every other route is blocked) and a separately
   approved full-trust `egress-any`. Loopback and link-local are never reachable.
-- **Tools** are ids in the operator's tool registry, mapped to absolute paths per OS (`settings.tools.update`).
+- **Tools** ([host-tools.md](host-tools.md)) are requests, never paths: a fleet tool definition id (`jdk`, `python`,
+  or one an admin defines) with a version constraint and an arch. Each node detects its installations (a JDK from its
+  `release` file, other tools by a sandboxed version command), reports them, and grants each module the one
+  installation its request resolves to; a path an operator adds that the node did not find travels in the node's signed
+  statement and is verified on the node before it is granted.
 - **Folders** ([datasets-media-checkpoints.md](datasets-media-checkpoints.md)) are ids too: read-only input folders and
   write-only outboxes, for runners only, mapped to a path per node in the folder registry and delivered to each node in
-  a folder statement the owner signs in signing mode; the agent checks each path on the node and grants its canonical
+  its statement (`oarbank.node/v1`), which the owner signs in signing mode; the agent checks each path on the node and grants its canonical
   path (Seatbelt rules, Landlock rules, or entries for a capability SID only the module's runner tokens carry).
 - **GPU** is one coarse `compute` device class per backend.
 - **Every node reports enforcement per capability** (enforced, cooperative, unavailable) with its backend and ABI; work
