@@ -1,7 +1,6 @@
 """The coordinator as a system service on macOS and Linux (docs/design/coordinator-system-service.md): the local admin
 channel outside the home with the owners' group, the setup journal in the person's own directory, the paths. Scratch
 directories only: the system paths are pointed into pytest's temporary directory."""
-import grp
 import os
 import socket
 import sys
@@ -12,6 +11,9 @@ import pytest
 
 from oarbank import paths, setup
 from oarbank.platform import localchannel
+
+if sys.platform != "win32":
+    import grp
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the macOS and Linux system service")
 

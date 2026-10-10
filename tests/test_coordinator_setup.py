@@ -525,7 +525,7 @@ def test_helper_fixed_argv_no_password(wizard, monkeypatch, platform):
         import getpass
         tail = ["/bin/bash", str(wizard.root / "install-oarbankd.sh"), "--installed", str(wizard.root), "--agent-bind", "127.0.0.1",
                 "--owner", getpass.getuser()]
-        if os.geteuid() == 0:
+        if getattr(os, "geteuid", lambda: -1)() == 0:                    # (no geteuid on a Windows runner)
             assert argv == tail
         elif platform == "darwin":
             assert argv[0] == "/usr/bin/osascript" and argv[-len(tail):] == tail
