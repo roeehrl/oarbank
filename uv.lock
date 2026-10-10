@@ -520,7 +520,7 @@ wheels = [
 
 [[package]]
 name = "oarbank"
-version = "2.8.0"
+version = "2.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -564,7 +564,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "oarbank-sdk"
-version = "1.5.0"
+version = "1.6.0"
 source = { editable = "vendor/oarbank-sdk" }
 dependencies = [
     { name = "jinja2" },

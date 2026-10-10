@@ -647,7 +647,7 @@ def test_elevate_refuses_before_it_asks_for_anything(tmp_path, node_app):
 def _info_plist() -> dict:
     text = PACKAGE.read_text(encoding="utf-8")
     body = re.search(r'cat > "\$APP/Contents/Info.plist" <<PLIST\n(.*?)\nPLIST\n', text, re.S).group(1)
-    return plistlib.loads(body.replace("$VERSION", "2.8.0").encode())
+    return plistlib.loads(body.replace("$VERSION", "2.9.0").encode())
 
 
 def test_the_app_bundle_registers_oarbank_links_and_hides_from_the_dock():

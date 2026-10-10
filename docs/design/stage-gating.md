@@ -1,6 +1,6 @@
 # Stage gating: doctor checks and certification gate only the stages that need them
 
-Status: built (PLAN D43), unreleased: core after 2.8.0, oarbank-sdk after 1.5.0. Amends
+Status: built (PLAN D43), ships in core 2.9.0 and oarbank-sdk 1.6.0. Amends
 [bootstrap-stages.md](bootstrap-stages.md) (which nodes run a bootstrap job) and the claim, doctor and certification
 sections of [docs/protocol.md](../protocol.md).
 

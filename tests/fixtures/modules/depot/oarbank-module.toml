@@ -14,7 +14,7 @@ stability = "experimental"
 description = "Core test fixture: goldens that mount a tool a bootstrap stage provisions"
 
 [requires]
-core = ">=2.4,<3"
+core = ">=2.9,<3"
 module_protocol = [1]
 runner_protocol = [1]
 platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]

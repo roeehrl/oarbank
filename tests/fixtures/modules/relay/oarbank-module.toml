@@ -17,7 +17,7 @@ stability = "experimental"
 description = "Core test fixture: eval, or render then score on a scorer pool"
 
 [requires]
-core = ">=2.3,<3"
+core = ">=2.9,<3"
 module_protocol = [1]
 runner_protocol = [1]
 service_protocol = [1]

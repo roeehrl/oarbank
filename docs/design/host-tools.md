@@ -1,8 +1,9 @@
 # Host tools
 
-Status: built (settings scope redesign, phase 2), unreleased: core after 2.8.0, oarbank-sdk after 1.5.0. Replaces the
+Status: built (settings scope redesign, phase 2), ships in core 2.9.0 and oarbank-sdk 1.6.0. Replaces the
 per-OS tool registry (`tool_registry`, `settings.tools.update`) and its `TOOL_UNAVAILABLE` outright; no compatibility
-shim.
+shim. oarbank-sdk 1.6.0 refuses a `version`, or an `arch` other than `any`, unless the module's `requires.core`
+admits only 2.9 and later (older cores ignore both).
 
 A module that needs a program installed on the node (a JDK, an interpreter, a tool such as samtools) used to name an
 operator-defined registry id (`java17`) that the coordinator mapped to absolute paths **per OS** and baked into the
@@ -262,6 +263,4 @@ One shot, at upgrade (`DB.__init__`):
 - Owner groups with ranks (phase 4): `tool.<id>.path` already resolves through every group a node is in, but search
   paths are per platform group only.
 - A managed install: deferred, see [Installing a tool](#installing-a-tool) for what a safe version needs decided.
-- An SDK core-version gate for `version` and `arch` (`requires.core >= 2.9`): the SDK's rule for keys older cores
-  ignore, deferred until the integration branch reports core 2.9.0 (today it still reports 2.8.0, so every module using
-  them would be refused at install).
+

@@ -40,7 +40,7 @@ x86_64 package builds on Apple silicon with the `x86_64-apple-darwin` Rust targe
 ## 1. The coordinator
 
 Download the native coordinator installer for your computer from the
-[2.8.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0) and verify it against its `SHA256SUMS` file.
+[2.9.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.9.0) and verify it against its `SHA256SUMS` file.
 On macOS, double-click the `.pkg` and follow Installer, then open **Oarbank Coordinator** in Applications.
 On Linux, install the `.deb` or `.rpm` with your package manager, then launch **Oarbank Coordinator** from the
 application menu or run `oarbank-coordinator`. On Windows, run the `.msi`, then open **Oarbank Coordinator** from Start.
@@ -410,7 +410,7 @@ krunkit is installed; their VM starts with the first GPU job.
 ## Linux nodes
 
 Built for x86-64 and arm64; the sandbox needs Linux 6.2 or later (6.12 for every capability: see the SDK's
-spec/sandbox/backends/linux.md), and `systemd`. The published 2.8.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
+spec/sandbox/backends/linux.md), and `systemd`. The published 2.9.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
 
 ```bash
 scripts/package-linux.sh                     # on a Linux machine with nFPM: dist/*.deb, *.rpm and a tarball

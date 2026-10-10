@@ -1,6 +1,6 @@
 # Containers on macOS: how the runtime comes up
 
-Status: built (agent 2.8.x, this change), to be verified on a real system-install node (checklist at the end). It
+Status: built (agent 2.9.0), to be verified on a real system-install node (checklist at the end). It
 changes no protocol: the facts' `containers` gains on macOS the keys Windows already reports
 ([windows-containers.md](windows-containers.md), "The node's report"), and facts are format 2 and open.
 

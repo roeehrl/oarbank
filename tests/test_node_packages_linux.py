@@ -29,7 +29,7 @@ INSTALL_PS1 = REPO / "scripts" / "install" / "oarbank-install.ps1"
 PACKAGE_INSTALL = REPO / "scripts" / "package-install-scripts.sh"
 SECRET = "OB2-0SECRETCODE0DONOTPRINT0"
 URL = "https://coord.example:7443"
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 
 SHELLS = ["sh"] + (["dash"] if shutil.which("dash") else [])
 
