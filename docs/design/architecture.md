@@ -144,8 +144,12 @@ confinement and fails closed. Grants are whole directories or files, approved pe
   a member of the right Job Object on Windows), so no backend rule names a socket or pipe and nothing listens.
 - **Bootstrap jobs** ([bootstrap-stages.md](bootstrap-stages.md)) run with less: the module's egress allowlist and their
   work directory, no tools, GPU, containers, module data or settings. The agent narrows them from the signed release's
-  module entry and reports `grants.bootstrap`; they run before the module is certified on the node, and the
-  coordinator registers their output only when it is exactly the module's pinned datasets.
+  module entry and reports `grants.bootstrap`; they run before the module is certified on the node, wherever its runner
+  starts, and the coordinator registers their output only when it is exactly the module's pinned datasets.
+- **Stage gating** ([stage-gating.md](stage-gating.md)): certification gates only the stages whose results it vouches
+  for. A stage that compares nothing (`determinism = "none"`) and needs no capability or pool runs, like a bootstrap
+  stage, on any node where the module's runner starts; a failed doctor check named after a capability keeps off only
+  the stages requiring that capability; an unmapped host tool keeps off only the stages that need certification.
 
 | Backend | Enforcement | Floor |
 |---|---|---|

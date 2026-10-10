@@ -186,11 +186,13 @@ pub fn collect(home: &std::path::Path) -> Value {
     })
 }
 
-/// The node's container report: `gpu` is how containers get the node's GPUs (container_runtime::gpu_passthrough):
-/// `cdi:<kind>` on Linux with a container engine and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with
-/// krunkit, `cdi:microsoft.com/wslc` on Windows from a ready WSL containers session whose VM has a GPU, else
-/// `undetected`. Windows adds its session's state (wslc.rs writes it on every change; docs/design/windows-containers.md,
-/// "The node's report"). The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs).
+/// The node's container report: `runtime` and `state` say whether the node has a container runtime at all, and `gpu`
+/// is how containers get the node's GPUs (container_runtime::gpu_passthrough): `cdi:<kind>` on Linux with a container
+/// engine and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with krunkit, `cdi:microsoft.com/wslc` on
+/// Windows from a ready WSL containers session whose VM has a GPU, else `undetected` (always without a runtime).
+/// Windows reports its session's state (wslc.rs writes it on every change; docs/design/windows-containers.md, "The
+/// node's report"); macOS and Linux report `installed` (the agent's Colima VMs start when a job needs one; the host's
+/// engine) or `absent`. The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs).
 fn containers(home: &std::path::Path) -> Value {
     #[cfg(windows)]
     {
@@ -199,6 +201,36 @@ fn containers(home: &std::path::Path) -> Value {
     #[cfg(unix)]
     {
         let _ = home;
-        json!({"gpu": crate::container_runtime::gpu_passthrough().map(|p| p.kind).unwrap_or_else(|| "undetected".into())})
+        unix_containers(crate::container_runtime::runtime_name(),
+                        crate::container_runtime::gpu_passthrough().map(|p| p.kind))
+    }
+}
+
+/// The macOS and Linux container report from the runtime found (if any) and the GPU passthrough found (if any).
+#[cfg(unix)]
+fn unix_containers(runtime: Option<String>, gpu: Option<String>) -> Value {
+    match runtime {
+        Some(rt) => {
+            let detail = if rt == "colima" { "the agent's Colima VMs start when a job needs one" } else { "the host's engine" };
+            json!({"runtime": rt, "state": "installed", "detail": detail, "gpu": gpu.unwrap_or_else(|| "undetected".into())})
+        }
+        None => json!({"runtime": null, "state": "absent", "detail": "no container runtime installed", "gpu": "undetected"}),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// GPU in containers is reported only with a container runtime, and the report says which runtime there is, so the
+    /// node page never lists container GPU APIs on a node that shows no runtime (docs/design/gpu-placement.md).
+    #[test]
+    fn the_container_report_names_the_runtime_and_no_gpu_without_one() {
+        assert_eq!(unix_containers(Some("colima".into()), Some("virtio-gpu:venus".into())),
+                   json!({"runtime": "colima", "state": "installed", "detail": "the agent's Colima VMs start when a job needs one",
+                          "gpu": "virtio-gpu:venus"}));
+        assert_eq!(unix_containers(Some("podman".into()), None)["gpu"], "undetected");
+        assert_eq!(unix_containers(None, Some("virtio-gpu:venus".into())),
+                   json!({"runtime": null, "state": "absent", "detail": "no container runtime installed", "gpu": "undetected"}));
     }
 }

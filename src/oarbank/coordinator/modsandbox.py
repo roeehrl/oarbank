@@ -142,7 +142,8 @@ def bootstrap_enforced(node: dict) -> bool:
 
 def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
     """{module: words for the exclusion}: the module's own reason for PLATFORM_UNSUPPORTED (requires.unsupported.runner,
-    by the node's platform, then its OS), and for GPU_API_MISSING what its runner needs and what the node provides."""
+    by the node's platform, then its OS), for GPU_API_MISSING what its runner needs and what the node provides, and for
+    TOOL_UNAVAILABLE the tools the registry has no path for on the node's OS."""
     from oarbank_sdk import gpu, platform as pf
     from . import modcalls, modstore, platforms, predicates
     plat, out = platforms.node_platform(node), {}
@@ -152,6 +153,8 @@ def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
         except KeyError:
             continue
         why = pf.resolve(man.requires.unsupported.runner, plat) if code == "PLATFORM_UNSUPPORTED" and plat else None
+        if code == "TOOL_UNAVAILABLE" and plat:
+            why = ", ".join(platforms.tool_paths(db, [t.id for t in man.sandbox.tools], plat.split("-")[0])[1]) or None
         need = runner_gpu_unmet(man, node) if code == "GPU_API_MISSING" else None
         if need:
             have = predicates.node_gpu_apis(node)["host"]
@@ -162,7 +165,10 @@ def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
 
 
 def node_excluded(db: DB, node: dict, offered: set) -> set:
-    return set(node_exclusions(db, node, offered))
+    """The modules no job of which may run on this node: node_exclusions without those that spare some stages
+    (predicates.SPARED: an unmapped host tool or folder), which claim's predicates decide per job."""
+    from .predicates import SPARED
+    return {m for m, code in node_exclusions(db, node, offered).items() if code not in SPARED}
 
 
 # ------------------------------------------------------------------ approvals of node-side grants

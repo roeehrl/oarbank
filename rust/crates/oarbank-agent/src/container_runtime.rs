@@ -970,6 +970,20 @@ pub fn gpu_passthrough() -> Option<Passthrough> {
                        kind: format!("cdi:{}", spec.kind), apis: spec.apis })
 }
 
+/// The container runtime this node runs containers with, when it has one (the facts' `containers.runtime`): the agent's
+/// Colima profiles on macOS (`for_node`'s test: Colima and docker installed), the host's Podman or Docker Engine on
+/// Linux (`NativeRuntime::detect`'s). The node's `containers` pool and its GPU APIs in containers exist only with one.
+#[cfg(target_os = "macos")]
+pub fn runtime_name() -> Option<String> {
+    (executable(&find_bin("colima")) && executable(&find_bin("docker"))).then(|| "colima".to_string())
+}
+
+#[cfg(target_os = "linux")]
+pub fn runtime_name() -> Option<String> {
+    ["podman", "docker"].iter().find(|n| ["/usr/bin", "/usr/local/bin", "/bin"].iter().any(|d| executable(&Path::new(d).join(n))))
+        .map(|n| n.to_string())
+}
+
 /// This node's container runtimes, if it has any: the agent's Colima profiles on macOS (the GPU one where krunkit is
 /// installed), the host's engine on Linux (also the GPU runtime where a CDI spec exists), the agent's WSL containers
 /// session on Windows (one runtime for both; it reports what is missing itself, so it always exists there).

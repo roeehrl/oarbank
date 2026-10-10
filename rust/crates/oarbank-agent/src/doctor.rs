@@ -69,10 +69,27 @@ pub fn base_env(module: &str, home: &Path, tmp: &Path) -> Vec<(String, String)> 
     env
 }
 
+/// How much of a doctor's output the agent keeps when it is not a DoctorOutput: the end, where the error is.
+pub const OUTPUT_TAIL: usize = 4000;
+
+/// The last `n` characters of `s` (all of it when shorter).
+pub fn tail(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    s.chars().skip(count.saturating_sub(n)).collect()
+}
+
+/// The modules a doctor report offers in claims: those whose runner started (`ran`: their doctor printed a DoctorOutput),
+/// whatever their health. The coordinator places each stage by the report's checks and the module's certification.
+pub fn offered(rep: &Value) -> Vec<String> {
+    rep["modules"].as_object().map(|m| m.iter().filter(|(_, v)| v["ran"] == json!(true)).map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default()
+}
+
 pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings: &Value) -> Value {
     let name = entry["name"].as_str().unwrap_or("?");
     let started = Instant::now();
-    let fail = |detail: String| json!({"health": "unhealthy", "checks": [{"name": "doctor", "ok": false, "detail": detail}]});
+    // the runner did not start (or printed no DoctorOutput): `ran` false, the module is offered nowhere on this node
+    let fail = |detail: String| json!({"health": "unhealthy", "ran": false, "checks": [{"name": "doctor", "ok": false, "detail": detail}]});
     let bundle = rel.bundle(entry);
     let python = rt.module_python(&rel.dir, name);
     let data = l.module_data().join(name);
@@ -138,13 +155,14 @@ pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings:
         .unwrap_or_default();
     let last = out.0.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
     let Ok(d) = serde_json::from_str::<Value>(last) else {
-        return fail(format!("not a DoctorOutput: {}", out.1.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()));
+        let said = if out.1.trim().is_empty() { &out.0 } else { &out.1 };      // stderr, else stdout
+        return fail(format!("not a DoctorOutput: {}", tail(said.trim_end(), OUTPUT_TAIL)));
     };
     let health = match d["health"].as_str() {
         Some(h @ ("healthy" | "unhealthy" | "undetected")) => h.to_string(),
         _ => return fail(format!("DoctorOutput health is {}, not healthy, unhealthy or undetected", d["health"])),
     };
-    json!({"health": health, "checks": d["checks"].clone(), "capabilities": d["capabilities"].clone(),
+    json!({"health": health, "ran": true, "checks": d["checks"].clone(), "capabilities": d["capabilities"].clone(),
            "attrs": d["attrs"].clone(), "seconds": started.elapsed().as_secs_f64()})
 }
 
@@ -178,6 +196,34 @@ mod tests {
         let line_end = src[start..].find('\n').unwrap() + start;
         let end = if src[start..line_end].contains('(') { src[start..].find(')').unwrap() + start } else { line_end };
         src[start..end].split('"').skip(1).step_by(2).map(str::to_string).collect()
+    }
+
+    /// docs/design/stage-gating.md: a module is offered when its runner started (its doctor printed a DoctorOutput), healthy
+    /// or not; one whose doctor failed to run is offered nowhere.
+    #[test]
+    fn a_module_is_offered_when_its_runner_starts_whatever_its_health() {
+        let rep = json!({"modules": {
+            "ok": {"health": "healthy", "ran": true, "checks": []},
+            "sick": {"health": "unhealthy", "ran": true, "checks": [{"name": "pysam_import", "ok": false}]},
+            "away": {"health": "undetected", "ran": true, "checks": [{"name": "java17", "ok": false}]},
+            "broken": {"health": "unhealthy", "ran": false, "checks": [{"name": "doctor", "ok": false}]},
+            "old": {"health": "healthy", "checks": []}}});
+        let mut got = offered(&rep);
+        got.sort();
+        assert_eq!(got, ["away", "ok", "sick"]);
+        assert_eq!(offered(&json!({})), Vec::<String>::new());
+    }
+
+    /// The output of a doctor that printed no DoctorOutput is kept from its end, up to OUTPUT_TAIL characters.
+    #[test]
+    fn a_failed_doctors_output_keeps_its_end() {
+        assert_eq!(tail("abcdef", 3), "def");
+        assert_eq!(tail("ab", 3), "ab");
+        assert_eq!(tail("ééé", 2), "éé");
+        let long = format!("{}ImportError: dlopen failed (incompatible architecture)", "x".repeat(10_000));
+        let t = tail(&long, OUTPUT_TAIL);
+        assert_eq!(t.chars().count(), OUTPUT_TAIL);
+        assert!(t.ends_with("(incompatible architecture)"));
     }
 
     #[test]

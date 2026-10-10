@@ -29,7 +29,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `SECRETS_NOT_SET` | Its stage receives secrets {missing}, which have no value for this node | P1 | – | `secrets.set` | – |
 | `DATASET_PLATFORM_MISMATCH` | Its dataset is bound to {platforms}; this node is {platform} | P1 | – | `jobs.cancel` | – |
 | `OS_VERSION_UNSUPPORTED` | Module {module} needs another OS version than {os_version} (requires.os) | P1 | – | – | – |
-| `TOOL_UNAVAILABLE` | Module {module} needs host tools the tool registry has no {os} paths for | P1 | – | `settings.tools.update` | – |
+| `TOOL_UNAVAILABLE` | Module {module} needs host tools the tool registry has no {os} paths for: {tools} | P1 | – | `settings.tools.update` | – |
 | `FOLDER_UNAVAILABLE` | Module {module} needs folders this node does not provide (unmapped, another access, refused by the node, or awaiting the owner's signature) | P1 | – | `settings.folders.update` | – |
 | `SANDBOX_BACKEND_MISSING` | The agent on this node cannot sandbox module processes | P1 | – | – | – |
 | `CAPABILITY_NOT_ENFORCED` | The node's sandbox cannot enforce {capability}, which module {module} needs | P1 | – | – | – |

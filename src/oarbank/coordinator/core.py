@@ -816,8 +816,8 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
     f = _job_facts(db, j)
     disputed = set(f["dispute"].get("nodes", []))
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json, facts_json FROM nodes "
-                  "WHERE lifecycle='ready' AND node_id!=?", (nid,)):
+    for n in db.q("SELECT node_id, platform, release_id, modules_json, capacity_json, policy_json, doctor_json, facts_json "
+                  "FROM nodes WHERE lifecycle='ready' AND node_id!=?", (nid,)):
         if n["node_id"] in failed or n["node_id"] in disputed or not predicates.platform_fits(f, n["platform"]) \
                 or predicates.retry_max(f, n["platform"]) <= j["exec_failures"]:
             continue
@@ -830,11 +830,19 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
 
 
 def _module_serves(node: dict, f: dict) -> bool:
-    """Does the node's state for the job's module let it run the job (predicates.module_serves): certified, or, for a
-    bootstrap job, certifying on a node whose agent applies the bootstrap grants."""
+    """Does the node's state for the job's module let it run the job (predicates.module_serves): certified, or, for a job
+    of a stage that needs no certification, a node where the module's runner started (and, for a bootstrap job, whose
+    agent applies the bootstrap grants). `node` carries modules_json, doctor_json, release_id and facts_json."""
     from . import modsandbox
     state = (jl(node["modules_json"], {}) or {}).get(f["module"], {}).get("state")
-    return predicates.module_serves(f, state, modsandbox.bootstrap_enforced(node))
+    return predicates.module_serves(f, state, modsandbox.bootstrap_enforced(node),
+                                    bool(f.get("exempt")) and predicates.doctor_ran(node, f["module"]))
+
+
+def runner_ready(node: dict, module: str) -> bool:
+    """Whether the node runs the module's certification-exempt stages (docs/design/stage-gating.md): its runner started
+    there (a doctor report for the current release) and the module is in one of predicates.RUNNER_STATES."""
+    return node_modules(node).get(module, {}).get("state") in predicates.RUNNER_STATES and predicates.doctor_ran(node, module)
 
 
 def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: float, free_mem: float,
@@ -843,18 +851,21 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
     from . import modsandbox, modsecrets
     nid = node["node_id"]
     excluded = modsandbox.node_exclusions(db, node, set(offered))
+    # a module excluded only for some of its stages (predicates.SPARED) stays offered: the module check decides per job
+    runs = set(offered) - {m for m, code in excluded.items() if code not in predicates.SPARED}
     unset = {}
-    for m in set(offered) - set(excluded):
+    for m in runs:
         names = list(modsecrets.declared(m))
         if names:
             unset[m] = set(modsecrets.missing_for(db, m, names, nid))
     return predicates.NodeView(
         secrets_unset=unset,
-        node=node, states=node_modules(node), offered=set(offered) - set(excluded), excluded=excluded,
+        node=node, states=node_modules(node), offered=runs, excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
-        capabilities={m: predicates.node_capabilities(node, m) for m in set(offered) - set(excluded)},
+        capabilities={m: predicates.node_capabilities(node, m) for m in runs},
         gpu_apis=predicates.node_gpu_apis(node),
         bootstrap_grants=modsandbox.bootstrap_enforced(node),
+        runner_ready={m for m in runs if runner_ready(node, m)},
         disabled=modstore.disabled_names(db),
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
         live=db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"],
@@ -875,7 +886,10 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
             "stage_capabilities": modcalls.stage_capabilities(j["module"], j["stage"]),
             "gpu_apis": modcalls.stage_gpu_apis(j["module"], j["stage"]),
             "secrets": modcalls.stage_secrets(j["module"], j["stage"]),
-            "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]), "placement": placement.facts(db, j, cache)}
+            "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]),
+            # golden jobs are certification itself: never exempt from it, whatever their stage
+            "exempt": j["kind"] != "golden" and modcalls.stage_exempt(j["module"], j["stage"]),
+            "placement": placement.facts(db, j, cache)}
 
 
 def sent_stage(mi, stage: str | None) -> str | None:
@@ -936,10 +950,11 @@ def claim(db: DB, node: dict, body: dict) -> dict:
         return {"grants": []}
     if node["release_id"] != releases.assigned(db, node):
         return {"grants": []}
-    states = node_modules(node)
-    certified = {m for m, st in states.items() if st.get("state") == "certified"} & offered
-    certifying = {m for m, st in states.items() if st.get("state") == "certifying"} & offered
-    if not certified and not certifying:
+    def serving(node) -> set:
+        """Modules some job may run on this node: certified, certifying or runner-ready (predicates.NodeView.serving)."""
+        states = node_modules(node)
+        return {m for m in offered if states.get(m, {}).get("state") in ("certified", "certifying") or runner_ready(node, m)}
+    if not serving(node):
         return {"grants": []}
     with db.tx():
         # every node-level decision comes from a row read inside the transaction: the row auth read
@@ -947,10 +962,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         if node["desired_state"] != "active" or node["lifecycle"] != "ready":
             return {"grants": []}
-        states = node_modules(node)
-        certified = {m for m, st in states.items() if st.get("state") == "certified"} & offered
-        certifying = {m for m, st in states.items() if st.get("state") == "certifying"} & offered
-        if not certified and not certifying:
+        if not serving(node):
             return {"grants": []}
         nv = node_view_for_claim(db, node, offered, ready, free_cpu, free_mem, body)
         if not predicates.eligible(predicates.admission(nv, first_fail=True)):
@@ -1085,7 +1097,8 @@ def _retry_possible(db: DB, j: dict) -> bool:
     retry (stages[].retry.max_attempts, for that node's platform) above the job's failures."""
     f = _job_facts(db, j)
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, facts_json FROM nodes WHERE lifecycle='ready'"
+    for n in db.q("SELECT node_id, platform, release_id, modules_json, capacity_json, policy_json, doctor_json, facts_json "
+                  "FROM nodes WHERE lifecycle='ready'"
                   + (" AND node_id=?" if j["target_node"] else ""), (j["target_node"],) if j["target_node"] else ()):
         if (predicates.retry_max(f, n["platform"]) > j["exec_failures"] and predicates.platform_fits(f, n["platform"])
                 and _module_serves(n, f) and _pools_fit(n, res)):
@@ -1360,6 +1373,7 @@ class _Evaluation:
     problem: str | None = None      # why the payload is unfit for campaign.tick (result_invalid), or the pin check failed
     bootstrap: bool = False         # judged by the host's pin check (a bootstrap stage's job), not by the module
     pinned: tuple = ()              # a bootstrap job's datasets (oarbank-sdk PinnedDataset), registered when it is accepted
+    exempt: bool = False            # its stage needs no certification (Manifest.certification_exempt): no certification fence
 
 
 def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
@@ -1398,7 +1412,8 @@ def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
         problem = modcalls.payload_problem(j["module"], ver, (merged or {}).get("payload"))
         if problem:
             ok, reason = False, "result_invalid"
-    return _Evaluation(j["job_id"], dep_id, merged, ok, reason, v.value, v.digest, v.digest_version, v.fields, gok, problem)
+    return _Evaluation(j["job_id"], dep_id, merged, ok, reason, v.value, v.digest, v.digest_version, v.fields, gok, problem,
+                       exempt=j["kind"] != "golden" and man is not None and man.certification_exempt(j["stage"]))
 
 
 def _bootstrap_verdict(db: DB, job_id: int, man, res: dict) -> _Evaluation:
@@ -1544,8 +1559,9 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             reason, accepted = {"quarantined": "node_quarantined", "retired": "node_retired"}[node["lifecycle"]], 0
         elif a["generation"] != j["generation"]:
             reason, accepted = "stale_generation", 0
-        elif j["kind"] != "golden" and not boot and a["cert_generation"] != mstate.get("generation"):
-            # a bootstrap result never depended on certification: its pins decide (a revocation ends its attempt)
+        elif j["kind"] != "golden" and not (boot or ev.exempt) and a["cert_generation"] != mstate.get("generation"):
+            # a result of a stage that needs no certification never depended on it: a bootstrap result's pins decide,
+            # another's the module's verdict (a revocation ends its attempt)
             reason, accepted = "release_invalid", 0
         elif not ok:
             reason, accepted = why, 0

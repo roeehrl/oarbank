@@ -163,7 +163,8 @@ are often amd64-only) and never share a kernel with a VM that has a GPU device.
   one the start fails, the broker refuses the run with `runtime_unavailable`, and the reason names the start's log.
   It runs arm64 images only (krunkit has no Rosetta); an amd64 image is refused with `platform_unavailable`.
 - `remove_attempt` and the start-of-day `reap` cover both profiles (only containers carrying the attempt label).
-- The node reports `containers.gpu = "virtio-gpu:venus"`, `gpu_apis.containers = ["vulkan"]` and the `gpu` pool. The
+- The node reports `containers.gpu = "virtio-gpu:venus"` (beside `containers.runtime = "colima"`, `state = "installed"`:
+  [stage-gating.md](stage-gating.md), decision 7), `gpu_apis.containers = ["vulkan"]` and the `gpu` pool. The
   broker's `status` answers `gpus: "all"` to a job that reserved the pool on a node that passes GPUs through, else
   `"none"`.
 
