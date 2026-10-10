@@ -788,7 +788,7 @@ impl ServiceManager {
         if settings.is_null() {
             settings = json!({});
         }
-        let (tools_file, settings_file, tool_paths) = grant_files(&grants, entry, &settings)?;
+        let (tools_file, settings_file, tool_paths) = grant_files(&grants, entry, &settings, &policy["tool_grants"][&name])?;
         let limits_file = grants.join("limits.json");
         std::fs::write(&limits_file, self.limits.to_string())?;
         let net = entry["sandbox"]["net"]["mode"].as_str().unwrap_or("none").to_string();
@@ -1575,7 +1575,7 @@ mod tests {
             let entry = json!({"name": "mod", "module_id": "dev.test.mod", "bundle": "modules/mod", "services": services,
                                "probes": probes, "sandbox": {"contract": 1, "net": {"mode": "none"}, "tools": [],
                                                             "devices": {"gpu": "none"}, "exec_writable": false}});
-            let release = Release { id: "r_test".into(), dir, modules: vec![entry] };
+            let release = Release { id: "r_test".into(), dir, modules: vec![entry], tools: Value::Null };
             Fx { root, release, _tmp: tmp }
         }
 

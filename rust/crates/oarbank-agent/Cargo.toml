@@ -18,6 +18,8 @@ oarbank-core = { path = "../oarbank-core" }
 oarbank-protection = { path = "../oarbank-protection" }
 rand = "0.10.3"
 rcgen = "0.14.10"
+# host tools: an executable definition's version regex (tools.rs); the coordinator refuses look-around and back-references
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "http2"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"

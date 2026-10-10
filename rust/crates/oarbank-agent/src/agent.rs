@@ -66,7 +66,7 @@ pub struct Agent {
     pub containers: Option<crate::container_runtime::Containers>,
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
     images: Option<Arc<crate::imageset::Verifier>>,
-    /// The folder statement this node applies, and what it found for each folder (folders.rs).
+    /// The node statement this node applies (folders and added tool paths), and what it found for each folder (folders.rs).
     pub folders: crate::folders::Folders,
     /// Module services and probes (service protocol 1), created with the first release.
     pub services: Option<Arc<std::sync::Mutex<crate::services::ServiceManager>>>,
@@ -82,6 +82,13 @@ pub struct Agent {
     services_halted: bool,
     /// The status document (status.rs): joining, pending, connected, and errors with their codes.
     pub status: crate::status::Status,
+    /// The host tools this node detected (tools.rs), reported in hello and every heartbeat; Null before the first run.
+    pub tools: Value,
+    /// The `tool_pins` directive: paths chosen among what this node found, per module (tools.rs `granted`).
+    tool_pins: Value,
+    /// Detect again at the next chance: asked by the coordinator, a new statement, or never yet.
+    detect_due: bool,
+    detected: Option<std::time::Instant>,
 }
 
 /// What the session asks of the rest of the agent each round (releases, jobs, protection), so the session logic can
@@ -119,7 +126,8 @@ impl Agent {
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
-            services_halted: false, coord_install: Default::default(), status: Default::default(), layout };
+            services_halted: false, coord_install: Default::default(), status: Default::default(),
+            tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, layout };
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
         #[cfg(target_os = "macos")]
@@ -302,7 +310,7 @@ impl Agent {
 
     pub async fn hello(&mut self) -> Result<Value, ApiError> {
         let mut body = json!({"agent_version": VERSION, "boot_id": self.boot_id, "facts": facts::collect(&self.layout.home),
-                              "ready_datasets": staging::ready(&self.layout),
+                              "ready_datasets": staging::ready(&self.layout), "tools": self.tools,
                               "live_attempts": self.table.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         merge(&mut body, self.hooks.hello_extra());
@@ -322,7 +330,7 @@ impl Agent {
         };
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
-                              "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(),
+                              "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(), "tools": self.tools,
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         if let Some(svc) = &self.services {
             merge(&mut body, svc.lock().unwrap().report());              // `services` and `probes`
@@ -355,11 +363,18 @@ impl Agent {
             self.cfg.release_pubkey = self.signing.pinned_key.clone();
             let _ = self.cfg.save(&self.layout.config());
         }
+        if !d["tool_pins"].is_null() && d["tool_pins"] != self.tool_pins {
+            self.tool_pins = d["tool_pins"].clone();
+            self.rerun_doctors = true;                          // the tools files change with the pins
+        }
+        if d["detect_tools"].as_bool() == Some(true) {
+            self.detect_due = true;
+        }
+        if d["statement"].is_object() {
+            self.observe_statement(&d["statement"].clone());
+        }
         if d["release"].is_object() {
             self.install_release(&d["release"].clone()).await;
-        }
-        if d["folders"].is_object() {
-            self.observe_folders(&d["folders"].clone());
         }
         for (key, stop) in [("cancel", Stop::Cancel), ("revoke", Stop::Revoke), ("kill", Stop::Revoke)] {
             for aid in d[key].as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_i64) {
@@ -381,7 +396,8 @@ impl Agent {
             }
         }
         if d["run_doctor"].as_bool() == Some(true) && self.doctor.is_none() {
-            self.run_doctors(&d["policy"].clone()).await;
+            let policy = self.with_grants(&d["policy"]);
+            self.run_doctors(&policy).await;
         }
         if d["agent_update"].is_object() {
             if let Some(api) = self.api.clone() {
@@ -426,7 +442,7 @@ impl Agent {
         s.set_gpu_apis(crate::gpuapi::host(&self.gpu_apis));
         let limits = &self.directives["limits"];
         // a module the coordinator disabled (its kill switch) has every service disabled here: stopped, never offered
-        let mut policy = self.directives["policy"].clone();
+        let mut policy = self.with_grants(&self.directives["policy"]);
         let off: Vec<&str> = self.directives["modules_disabled"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).collect();
         if !off.is_empty() {
             let mut disabled: Vec<Value> = policy["disabled_services"].as_array().cloned().unwrap_or_default();
@@ -477,8 +493,9 @@ impl Agent {
                 self.need_hello = true;
                 #[cfg(windows)]
                 crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
+                self.detect_tools().await;                      // the release carries the fleet's tool definitions
                 self.sync_services();
-                let policy = self.directives["policy"].clone();
+                let policy = self.with_grants(&self.directives["policy"]);
                 self.run_doctors(&policy).await;
             }
             Err(e) => {
@@ -581,29 +598,68 @@ impl Agent {
         json!({"cik_pinned": fp, "coordinator_move_state": self.move_state})
     }
 
-    /// A folder statement in a directive (folders.rs): verified against the pinned release key, checked folder by folder
-    /// and applied; on Windows the folder entries no applied statement or current release grants any more are removed.
-    fn observe_folders(&mut self, d: &Value) {
-        // Oarbank's data: the agent's home, and the Oarbank directory it sits in by default (beside a coordinator's)
-        let home = &self.layout.home;
-        let data_root = match home.parent() {
-            Some(p) if p.file_name().is_some_and(|n| n == "Oarbank") => p.to_path_buf(),
-            _ => home.clone(),
-        };
+    /// The node's statement in a directive (folders.rs): verified against the pinned release key, its folders checked one
+    /// by one and applied; on Windows the folder entries no applied statement or current release grants any more are
+    /// removed. Tool paths it adds are detected again (tools.rs checks and verifies them).
+    fn observe_statement(&mut self, d: &Value) {
         match crate::folders::apply(&self.folders, d, self.node_id.as_deref().unwrap_or(""),
-                                    self.cfg.coordinator_trust.fleet_id.as_deref(), self.signing.pinned_key.as_deref(), &data_root) {
+                                    self.cfg.coordinator_trust.fleet_id.as_deref(), self.signing.pinned_key.as_deref(),
+                                    &data_root(&self.layout.home)) {
             Ok(Some(f)) => {
-                info!(seq = f.seq, folders = %f.report(), "folder statement applied");
+                info!(seq = f.seq, folders = %f.report(), tools = f.tools.len(), "statement applied");
                 if let Err(e) = f.save(&self.layout.state().join("folders.json")) {
-                    warn!(error = %e, "cannot keep the folder statement");
+                    warn!(error = %e, "cannot keep the statement");
+                }
+                if f.tools != self.folders.tools {
+                    self.detect_due = true;
                 }
                 self.folders = f;
                 #[cfg(windows)]
                 crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
             }
             Ok(None) => {}
-            Err(e) => warn!(error = %e, "folder statement refused (the last applied one stays)"),
+            Err(e) => warn!(error = %e, "statement refused (the last applied one stays)"),
         }
+    }
+
+    /// Detect the host tools now (tools.rs): the built-in ones, the release's definitions, the hints file and the
+    /// statement's added paths. A change re-runs the doctors (their tools files change) and reconfigures the services.
+    pub async fn detect_tools(&mut self) {
+        let defs = crate::tools::defs(self.release.as_ref().map(|r| &r.tools).unwrap_or(&Value::Null));
+        let (home, added) = (self.layout.home.clone(), self.folders.tools.clone());
+        let found = tokio::task::spawn_blocking(move || {
+            let run = crate::tools::sandboxed_runner(&home);
+            crate::tools::detect(&defs, &crate::tools::hints(&home), &added, &data_root(&home), &run)
+        }).await;
+        self.detect_due = false;
+        self.detected = Some(std::time::Instant::now());
+        match found {
+            Ok(rep) => {
+                if !crate::tools::same(&rep, &self.tools) {
+                    info!(tools = %rep["tools"], "host tools detected");
+                    if !self.tools.is_null() && self.release.is_some() {
+                        self.rerun_doctors = true;
+                    }
+                }
+                self.tools = rep;
+            }
+            Err(e) => warn!(error = %e, "tool detection task failed"),
+        }
+    }
+
+    /// Whether detection is due: asked for, never run, or the slow timer ran out.
+    fn detection_due(&self) -> bool {
+        self.detect_due || self.detected.is_none_or(|t| t.elapsed() >= crate::tools::REDETECT_EVERY)
+    }
+
+    /// The policy the agent hands doctors, services and runners: the coordinator's, with this node's resolution of each
+    /// module's tool requests (`tool_grants`, tools.rs `grants`), which grant_files reads.
+    fn with_grants(&self, policy: &Value) -> Value {
+        let mut p = if policy.is_object() { policy.clone() } else { json!({}) };
+        let defs = crate::tools::defs(self.release.as_ref().map(|r| &r.tools).unwrap_or(&Value::Null));
+        p["tool_grants"] = crate::tools::grants(&self.tools, self.release.as_ref().map(|r| r.modules.as_slice()).unwrap_or(&[]),
+                                                &self.tool_pins, &defs);
+        p
     }
 
     /// Owner key sets and move statements in a directive (or a 410's body): verify, then pin or record.
@@ -918,7 +974,7 @@ impl Agent {
         }
         let rt = self.runtime().map_err(io_err)?;
         let ctx = Arc::new(jobs::Ctx { api: self.api.clone().expect("connected"), layout: Layout::new(self.layout.home.clone()),
-                                       runtime: rt, release: rel.clone(), policy: self.directives["policy"].clone(),
+                                       runtime: rt, release: rel.clone(), policy: self.with_grants(&self.directives["policy"]),
                                        table: self.table.clone(), registry: self.prot.as_ref().map(|p| p.registry.clone()),
                                        containers: self.container_runtime(),
                                        images: self.image_verifier().map_err(io_err)?,
@@ -979,6 +1035,7 @@ impl Agent {
         jobs::clear_workdirs(&self.layout);
         self.reap_containers().await;
         self.probe_gpu_apis().await;                // before any service is offered: a GPU service waits for it
+        self.detect_tools().await;                  // hello reports them
         let mut backoff = Duration::from_secs(2);
         loop {
             if *stop.borrow() {
@@ -1045,12 +1102,16 @@ impl Agent {
                         return Ok(crate::selfupdate::SWAP_EXIT);
                     }
                     self.drain_services().await;
+                    if self.detection_due() {
+                        self.detect_tools().await;
+                        self.sync_services();
+                    }
                     if std::mem::take(&mut self.rerun_doctors) && self.release.is_some() {
                         // the container runtime checks again too (Windows: what it missed may be installed by now)
                         if let Some(rts) = self.container_runtime() {
                             rts.all().iter().for_each(|rt| rt.recheck());
                         }
-                        let policy = self.directives["policy"].clone();
+                        let policy = self.with_grants(&self.directives["policy"]);
                         self.run_doctors(&policy).await;
                     }
                     self.claim().await?;
@@ -1096,6 +1157,15 @@ impl Agent {
                 }
             }
         }
+    }
+}
+
+/// Oarbank's data: the agent's home, and the Oarbank directory it sits in by default (beside a coordinator's). No folder
+/// or tool path may lie in or around it.
+pub fn data_root(home: &std::path::Path) -> std::path::PathBuf {
+    match home.parent() {
+        Some(p) if p.file_name().is_some_and(|n| n == "Oarbank") => p.to_path_buf(),
+        _ => home.to_path_buf(),
     }
 }
 
@@ -1225,7 +1295,7 @@ pub mod tests {
             entry("cuda", json!({"use": "shared", "apis_any": ["cuda"]})),
             entry("metal", json!({"use": "exclusive", "apis_any": ["metal", "cuda"]})),
             entry("boxed", json!({"use": "exclusive", "apis_any": ["cuda"], "in_container": true})),
-            entry("cpu", json!({"use": "none", "apis_any": []}))] });
+            entry("cpu", json!({"use": "none", "apis_any": []}))], tools: Value::Null });
         let ok = json!({"health": "healthy", "checks": []});
         let mut rep = json!({"modules": {"cuda": ok, "metal": ok, "boxed": ok, "cpu": ok}});
         agent.fold_gpu_apis(&mut rep);

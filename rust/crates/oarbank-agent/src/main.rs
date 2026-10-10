@@ -50,6 +50,7 @@ mod staging;
 mod status;
 mod sys;
 mod tls;
+mod tools;
 mod tuf;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod wslc;
@@ -186,6 +187,12 @@ enum Cmd {
         #[command(subcommand)]
         action: ContainersCmd,
     },
+    /// Detect this node's host tools and print what was found, as the agent reports it (docs/design/host-tools.md):
+    /// the built-in tools, the definitions of the installed release, the hints file and the statement's added paths.
+    Tools {
+        #[command(subcommand)]
+        action: ToolsCmd,
+    },
     /// The managed policy in force, as JSON (`oarbank-node policy-apply`; node-enrollment.md, "Managed policy keys").
     #[command(hide = true)]
     Policy,
@@ -198,6 +205,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ToolsCmd {
+    /// Detect every defined tool now and print the report (version commands run sandboxed, as the agent runs them).
+    Detect,
 }
 
 #[derive(Subcommand)]
@@ -327,6 +340,15 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Containers { action } => containers(&layout, action),
+        Cmd::Tools { action: ToolsCmd::Detect } => {
+            let rel = release::current(&layout);
+            let defs = tools::defs(rel.as_ref().map(|r| &r.tools).unwrap_or(&serde_json::Value::Null));
+            let stmt = folders::Folders::load(&layout.state().join("folders.json"));
+            let run = tools::sandboxed_runner(&layout.home);
+            let rep = tools::detect(&defs, &tools::hints(&layout.home), &stmt.tools, &agent::data_root(&layout.home), &run);
+            println!("{}", serde_json::to_string_pretty(&rep)?);
+            Ok(())
+        }
         Cmd::Policy => {
             let p = policy::read();
             println!("{}", serde_json::json!({"JoinCode": p.join_code, "Coordinator": p.coordinator, "Scope": p.scope,

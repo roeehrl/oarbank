@@ -16,17 +16,19 @@ pub fn resolve_exec(argv: &[Value], bundle: &Path, python: &Path) -> Vec<String>
     }).collect()
 }
 
-/// The per-module files the protocol passes by path: tools (resolved, as the sandbox grants them) and settings.
-pub fn grant_files(dir: &Path, entry: &Value, settings: &Value) -> std::io::Result<(PathBuf, PathBuf, Vec<String>)> {
+/// The per-module files the protocol passes by path: tools and settings. `granted` is the module's resolution on this
+/// node (tools.rs `granted`: `{tools, paths}`); only the tools the entry asks for are listed and granted, so a bootstrap
+/// entry (which asks for none) gets none.
+pub fn grant_files(dir: &Path, entry: &Value, settings: &Value, granted: &Value) -> std::io::Result<(PathBuf, PathBuf, Vec<String>)> {
     crate::fsutil::private_dir(dir)?;
     let mut tools = serde_json::Map::new();
     let mut paths = Vec::new();
     for t in entry["sandbox"]["tools"].as_array().cloned().unwrap_or_default() {
-        let id = t["id"].as_str().unwrap_or("").to_string();
-        let resolved: Vec<String> = t["paths"].as_array().cloned().unwrap_or_default().iter()
-            .filter_map(|p| p.as_str()).filter_map(|p| std::fs::canonicalize(p).ok()).map(|p| p.display().to_string()).collect();
-        paths.extend(resolved.iter().cloned());
-        tools.insert(id, json!(resolved));
+        let id = t["id"].as_str().unwrap_or("");
+        if let Some(inst) = granted["tools"].get(id) {
+            tools.insert(id.to_string(), inst.clone());
+            paths.extend(granted["paths"][id].as_str().map(str::to_string));
+        }
     }
     let tf = dir.join("tools.json");
     let sf = dir.join("settings.json");
@@ -85,7 +87,7 @@ pub fn offered(rep: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings: &Value) -> Value {
+pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings: &Value, tool_grants: &Value) -> Value {
     let name = entry["name"].as_str().unwrap_or("?");
     let started = Instant::now();
     // the runner did not start (or printed no DoctorOutput): `ran` false, the module is offered nowhere on this node
@@ -98,7 +100,7 @@ pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings:
         return fail("cannot create the module's data directory".into());
     }
     let grants = l.run().join(format!("doctor-{name}"));
-    let (tools_file, settings_file, tool_paths) = match grant_files(&grants, entry, settings) {
+    let (tools_file, settings_file, tool_paths) = match grant_files(&grants, entry, settings, tool_grants) {
         Ok(x) => x,
         Err(e) => return fail(format!("grant files: {e}")),
     };
@@ -166,7 +168,8 @@ pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings:
            "attrs": d["attrs"].clone(), "seconds": started.elapsed().as_secs_f64()})
 }
 
-/// Every module's doctor for the current release.
+/// Every module's doctor for the current release (`policy` as the agent hands it on: the coordinator's policy with the
+/// agent's own `tool_grants`).
 pub fn run_all(l: &Layout, rt: &Runtime, rel: &Release, policy: &Value) -> Value {
     let mut modules = serde_json::Map::new();
     for m in &rel.modules {
@@ -175,7 +178,7 @@ pub fn run_all(l: &Layout, rt: &Runtime, rel: &Release, policy: &Value) -> Value
         if settings.is_null() {
             settings = json!({});
         }
-        modules.insert(name.clone(), run_one(l, rt, rel, m, &settings));
+        modules.insert(name.clone(), run_one(l, rt, rel, m, &settings, &policy["tool_grants"][&name]));
     }
     json!({"at": now(), "release_id": rel.id, "modules": modules})
 }

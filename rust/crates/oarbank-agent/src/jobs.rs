@@ -107,7 +107,7 @@ pub struct Ctx {
     pub images: Arc<crate::imageset::Verifier>,
     /// The module services, for the readiness gate before a runner that needs their pools starts.
     pub services: Option<Arc<Mutex<crate::services::ServiceManager>>>,
-    /// The folder statement this node applies (folders.rs): which folders runners may get, and where.
+    /// The node statement this node applies (folders.rs): which folders runners may get, and where.
     pub folders: crate::folders::Folders,
 }
 
@@ -343,7 +343,8 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     // folders: runners only, never a bootstrap job; exactly what this node's applied statement provides for the
     // module's approved requests
     let folders = if bootstrap { serde_json::Map::new() } else { ctx.folders.granted(&entry["sandbox"]["folders"]) };
-    let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings)?;
+    // tools: the module's resolution on this node (tools.rs); a bootstrap entry asks for none and gets none
+    let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings, &ctx.policy["tool_grants"][module])?;
     // the secrets this job's stage lists (only such a grant carries any): an owner-only file inside the work directory,
     // deleted with it; never in spec.json, the environment or a log
     let secrets = secrets_of(grant);
