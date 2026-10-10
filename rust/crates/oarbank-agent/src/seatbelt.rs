@@ -60,6 +60,22 @@ pub fn exec(args: &[String]) -> ! {
     die(71, &format!("exec {}: {}", args[sep + 1], std::io::Error::last_os_error()))
 }
 
+/// `sandbox_check`'s path filter, and its flag not to log a denial (libsandbox).
+const SANDBOX_FILTER_PATH: libc::c_int = 1;
+const SANDBOX_CHECK_NO_REPORT: libc::c_int = 0x4000_0000;
+
+/// Whether the sandbox of process `pid` lets it read `path` (None: the check could not be made). Works for any
+/// process the caller may see, another account's included (docs/design/workloads.md, upfront check b).
+pub fn allows_read(pid: u32, path: &CStr) -> Option<bool> {
+    let op = c"file-read-data";
+    let r = unsafe { sandbox_check(pid as libc::pid_t, op.as_ptr(), SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, path.as_ptr()) };
+    match r {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
 /// Whether a process runs under a sandbox (`sandbox_check(pid, NULL, 0) == 1`).
 pub fn is_sandboxed(pid: u32) -> bool {
     unsafe { sandbox_check(pid as libc::pid_t, std::ptr::null(), 0) == 1 }

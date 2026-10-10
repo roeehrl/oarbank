@@ -191,6 +191,38 @@ mod imp {
         pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
     }
 
+    /// Signal one process (a delegated process of the owner's, a workload member outside its group).
+    pub fn signal_process(pid: i32, sig: Sig) -> bool {
+        let s = match sig {
+            Sig::Term => libc::SIGTERM,
+            Sig::Kill => libc::SIGKILL,
+            #[cfg(not(target_os = "macos"))]
+            Sig::Stop => libc::SIGSTOP,
+            #[cfg(not(target_os = "macos"))]
+            Sig::Cont => libc::SIGCONT,
+        };
+        pid > 1 && unsafe { libc::kill(pid, s) == 0 }
+    }
+
+    /// A hard CPU cap on the container (Linux `cpu.max` of its cgroup), or none; macOS has no such cap.
+    pub fn cpu_cap(pgid: i32, cores: Option<f64>) -> bool {
+        #[cfg(target_os = "linux")]
+        return crate::cgroup::cpu_cap(pgid, cores);
+        #[allow(unreachable_code)]
+        {
+            let _ = (pgid, cores);
+            false
+        }
+    }
+
+    /// Whether this OS can cap a container's CPU (Linux: with a delegated cgroup).
+    pub fn can_cap_cpu() -> bool {
+        #[cfg(target_os = "linux")]
+        return crate::cgroup::root().is_some();
+        #[allow(unreachable_code)]
+        false
+    }
+
     /// Whether any member of the group is alive (a group we may not signal still counts).
     pub fn group_alive(pgid: i32) -> bool {
         #[cfg(target_os = "linux")]
@@ -332,11 +364,75 @@ mod imp {
         Ok(())
     }
 
+    /// A workload's container (docs/design/workloads.md): a lasting Job Object with a name, so the next agent can open
+    /// it again (`adopt_named`); breakaway is refused as for every container.
+    pub(super) fn contain_named(pid: u32, name: &str) -> io::Result<()> {
+        adopt_job_named(pid, false, Some(name))?;
+        resume(pid)
+    }
+
+    /// Open a workload's job by name again (a new agent adopting it) and keep its handle for the leader `pid`.
+    pub fn adopt_named(pid: i32, name: &str) -> bool {
+        use windows_sys::Win32::System::JobObjects::{OpenJobObjectW, JOB_OBJECT_ALL_ACCESS};
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let job = unsafe { OpenJobObjectW(JOB_OBJECT_ALL_ACCESS, 0, wide.as_ptr()) };
+        if job.is_null() {
+            return false;
+        }
+        JOBS.lock().unwrap().get_or_insert_with(HashMap::new).insert(pid, job as usize);
+        true
+    }
+
+    /// Suspend, resume or end one process (a delegated process of the owner's; a container's members go through
+    /// `signal_group`).
+    pub fn signal_process(pid: i32, sig: Sig) -> bool {
+        if pid <= 0 {
+            return false;
+        }
+        let access = match sig { Sig::Stop | Sig::Cont => PROCESS_SUSPEND_RESUME, Sig::Term | Sig::Kill => PROCESS_TERMINATE };
+        unsafe {
+            let h = OpenProcess(access, 0, pid as u32);
+            if h.is_null() {
+                return false;
+            }
+            let ok = match sig {
+                Sig::Stop => NtSuspendProcess(h) >= 0,
+                Sig::Cont => NtResumeProcess(h) >= 0,
+                Sig::Term | Sig::Kill => TerminateProcess(h, 1) != 0,
+            };
+            CloseHandle(h);
+            ok
+        }
+    }
+
+    /// A hard CPU cap on the container (`cores` of the machine's), or none.
+    pub fn cpu_cap(pgid: i32, cores: Option<f64>) -> bool {
+        use windows_sys::Win32::System::JobObjects::{JobObjectCpuRateControlInformation, SetInformationJobObject,
+                                                     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+                                                     JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP};
+        let Some(job) = job_of(pgid) else { return false };
+        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+        let mut cr: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
+        if let Some(c) = cores.filter(|c| *c > 0.0) {
+            cr.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+            cr.Anonymous.CpuRate = ((c / n).min(1.0) * 10_000.0).max(1.0) as u32;
+        }
+        unsafe {
+            SetInformationJobObject(job, JobObjectCpuRateControlInformation, &cr as *const _ as *const _,
+                                    std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32) != 0
+        }
+    }
+
     fn adopt_job(pid: u32, kill_on_close: bool) -> io::Result<()> {
+        adopt_job_named(pid, kill_on_close, None)
+    }
+
+    fn adopt_job_named(pid: u32, kill_on_close: bool, name: Option<&str>) -> io::Result<()> {
         use windows_sys::Win32::System::JobObjects::{JobObjectExtendedLimitInformation, SetInformationJobObject,
                                                      JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+        let wide: Option<Vec<u16>> = name.map(|n| n.encode_utf16().chain([0]).collect());
         unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            let job = CreateJobObjectW(std::ptr::null(), wide.as_ref().map_or(std::ptr::null(), |w| w.as_ptr()));
             if job.is_null() {
                 return Err(io::Error::last_os_error());
             }
@@ -633,6 +729,11 @@ mod imp {
         true
     }
 
+    /// Job Objects can always cap their members' CPU.
+    pub fn can_cap_cpu() -> bool {
+        true
+    }
+
     /// The job hit its memory limit (the Job Object refuses the allocation; the process usually fails then).
     pub fn oom(pgid: i32) -> bool {
         use windows_sys::Win32::System::JobObjects::{JobObjectLimitViolationInformation, JOBOBJECT_LIMIT_VIOLATION_INFORMATION,
@@ -697,6 +798,36 @@ pub fn spawn_contained(cmd: &mut std::process::Command, lasting: bool) -> std::i
     #[cfg(unix)]
     let _ = lasting;
     Ok(child)
+}
+
+/// Start a workload's container leader (docs/design/workloads.md): a lasting container, outliving the agent so the
+/// next one can adopt it. `name` names it where the OS keeps containers by name (Windows: a named Job Object, opened
+/// again with `adopt_workload`).
+pub fn spawn_workload(cmd: &mut std::process::Command, name: &str) -> std::io::Result<std::process::Child> {
+    imp::new_group(cmd, true);
+    #[allow(unused_mut)]
+    let mut child = cmd.spawn()?;
+    #[cfg(windows)]
+    if let Err(e) = imp::contain_named(child.id(), name) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other(format!("process container: {e}")));
+    }
+    #[cfg(unix)]
+    let _ = name;
+    Ok(child)
+}
+
+/// Take over a workload's container an earlier agent started (its leader `pid`): Windows opens its job by name; a
+/// Unix container needs nothing (the process group, or the cgroup leaf named after the leader, is found by pid).
+pub fn adopt_workload(pid: i32, name: &str) -> bool {
+    #[cfg(windows)]
+    return imp::adopt_named(pid, name);
+    #[cfg(unix)]
+    {
+        let _ = name;
+        group_alive(pid)
+    }
 }
 
 /// `spawn_contained` for a tokio command.
