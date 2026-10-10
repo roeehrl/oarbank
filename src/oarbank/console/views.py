@@ -1,4 +1,4 @@
-"""View models for the console pages: pure functions over a read-only reader (q/one/get_setting).
+"""View models for the console pages: pure functions over a read-only reader (q/one/get_state).
 
 Hot pages (the fleet home) render from the snapshot built by state.ConsoleState; drill-down pages call
 these with a pooled read connection. Nothing here writes; module views are materialized by oarbankd, so the
@@ -9,10 +9,11 @@ from pathlib import Path
 import time
 
 from ..coordinator import detail, nodepolicy, nodeservices
+from ..coordinator.settings import views as settings_views
+from ..coordinator.settings.apply import flat_values, node_values
 
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
 CLOCK_SKEW_S = 60.0           # oarbankd core.CLOCK_SKEW_S
-LIMIT_KEYS = ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps", "schedule")
 
 
 def jl(s, default=None):
@@ -88,7 +89,7 @@ def capacity_summary(n: dict) -> dict:
         idle = tel.get("user_idle_s")
         out["zero_why"] = out["binding"] or (
             "heat" if (tel.get("thermal") or 0) >= 2 else
-            "user present" if idle is not None and idle < (policy.get("user_idle_s") or 300) else
+            "user present" if idle is not None and policy.get("user_idle_s") is not None and idle < policy["user_idle_s"] else
             "automatic capacity is 0")
     return out
 
@@ -102,12 +103,14 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
     online = bool(hb and now - hb < OFFLINE_AFTER)
     facts = jl(n["facts_json"], {}) or {}
     v = {**n, "mods": jl(n.get("modules_json"), {}) or {},
-         "facts": facts, "hw": hardware(facts), "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
-         "policy": jl(n["policy_json"], {}) or {}, "doctor": jl(n["doctor_json"]), "online": online,
+         "facts": facts, "hw": hardware(facts), "tel": tel, "cap": cap,
+         "limits": {k: v for k, v in (node_values(n).get("limits") or {}).items() if v is not None},
+         "policy": flat_values(n), "protection": jl(n.get("protection_json"), {}) or {}, "doctor": jl(n["doctor_json"]),
+         "online": online,
          "hb_age": now - hb if hb else None, "live": live, "done1h": done1h,
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
-    v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"))
+    v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"), n["node_id"])
     v["gpu"] = detail.gpu(facts, v["doctor"])
     v["services"] = nodeservices.rows(n)
     return v
@@ -146,7 +149,7 @@ def fleet_data(r, now: float | None = None) -> dict:
               for a in r.q("SELECT * FROM alerts WHERE state='open' ORDER BY opened_at DESC")]
     pending = r.one("SELECT COUNT(*) n FROM alerts WHERE state='pending'")["n"]
     known = {n["ts_node_id"] for n in nodes if n["ts_node_id"]}
-    discovered = [d for d in (r.get_setting("discovered", []) or []) if d["ts_node_id"] not in known]
+    discovered = [d for d in (r.get_state("discovered", []) or []) if d["ts_node_id"] not in known]
     events = r.q("SELECT * FROM events ORDER BY event_id DESC LIMIT 25")
     from ..coordinator import joincodes
     codes = [c for c in joincodes.listing(r) if c["state"] == "active"]
@@ -154,15 +157,15 @@ def fleet_data(r, now: float | None = None) -> dict:
     for n in nodes:
         n["release_wait"] = release_wait(n, rel)
     return {"nodes": nodes, "enrollments": enr, "campaigns": camps, "alerts": alerts, "alerts_pending": pending, "discovered": discovered,
-            "events": events, "now": now, "fleet_state": r.get_setting("fleet_state", "active"),
-            "modules_disabled": r.get_setting("modules_disabled", []) or [], "join_codes": codes,
+            "events": events, "now": now, "fleet_state": r.get_state("fleet_state", "active"),
+            "modules_disabled": r.get_state("modules_disabled", []) or [], "join_codes": codes,
             "ca_fingerprint": ca_fingerprint(getattr(r, "home", None)), "releases_awaiting": rel["awaiting"]}
 
 
 def release_state(r) -> dict:
     """What the release banners and the node cards need: the releases waiting for the owner's signature (oarbankd keeps
     them in the `releases_awaiting` setting: releases.note_awaiting) and whether any module is enabled."""
-    return {"awaiting": r.get_setting("releases_awaiting", []) or [],
+    return {"awaiting": r.get_state("releases_awaiting", []) or [],
             "modules_enabled": bool(r.one("SELECT COUNT(*) n FROM module_channels WHERE current IS NOT NULL")["n"])}
 
 
@@ -242,7 +245,7 @@ def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
     secrets = r.q("SELECT module, name, fingerprint, set_at FROM secrets WHERE node_id=? AND module!='' ORDER BY module, name",
                   (nid,))
     return {"n": nv, "d": detail.node(r, nid, now, manifest_for), "attempts": atts, "fails": fails, "events": events,
-            "history": history, "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions,
+            "history": history, "series": json.dumps(series), "decisions": decisions,
             "conditions": node_conditions(nv), "node_secrets": secrets}
 
 
@@ -281,9 +284,9 @@ def node_conditions(n: dict) -> list[dict]:
 # explain remedies whose operation needs more than its target: the page whose form collects the rest, formatted with
 # the explain document's subject ids, and where to go when the subject does not name them; `jobs.set_priority` takes its
 # one value inline
-REMEDY_FORMS = {"nodes.set_caps": ("/nodes/{node}#limits", "/"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
+REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#node-defaults"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
                 "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
-                "tools.set_path": ("/nodes/{node}#tools", "/"), "tools.detect": ("/nodes/{node}#tools", "/"),
+                "tools.detect": ("/nodes/{node}#tools", "/"),
                 "tools.define": ("/settings#tools", "/settings"),
                 "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
@@ -495,15 +498,20 @@ def audit_page(r, op: str, target: str, before: int | None) -> dict:
 
 
 def settings_page(r) -> dict:
+    """Fleet Settings: node defaults and the fleet-wide sections (settings/views.py), the ntfy token's state (never its
+    value), the tool and folder registries, dataset origins, releases."""
+    from ..coordinator.modsecrets import core_state
+    from ..coordinator.settings import fleet_value
     from ..coordinator import tools
-    s = {k: r.get_setting(k) for k in ("ntfy", "console_hosts", "dataset_groups", "folder_registry", "node_statements",
-                                       "dataset_origins")}
+    s = {k: fleet_value(r, k) for k in ("folder_registry", "dataset_origins")}
+    s["node_statements"] = r.get_state("node_statements")
     # host tools: the definitions (built-in patterns and extras) and who asks for each (Settings → Tools)
     s["tool_defs"] = tools.definitions(r)
     s["tool_users"] = {}
     for m in r.q("SELECT name, version, requests_json FROM module_grants"):
         for t in (jl(m["requests_json"], {}) or {}).get("tools") or []:
             s["tool_users"].setdefault(t.get("id"), []).append(f"{m['name']} {m['version']}")
+    s["ntfy_token"] = core_state(r, "ntfy_token")
     s["nodes"] = {n["node_id"]: n for n in r.q("SELECT node_id, hostname, platform, folders_json FROM nodes WHERE lifecycle!='retired' "
                                                 "ORDER BY hostname")}
     for n in s["nodes"].values():
@@ -515,7 +523,29 @@ def settings_page(r) -> dict:
         "SELECT release_id, platform, created_at, status, sha256, signature IS NOT NULL AS signed, composition_json FROM releases "
         "ORDER BY created_at DESC LIMIT 10")]
     return {"s": s, "releases": releases, "releases_awaiting": rel["awaiting"], "modules_enabled": rel["modules_enabled"],
-            "dscount": r.q("SELECT kind, COUNT(*) n FROM datasets GROUP BY kind")}
+            "dscount": r.q("SELECT kind, COUNT(*) n FROM datasets GROUP BY kind"), "fs": settings_views.fleet_page(r)}
+
+
+def node_settings_page(r, nid: str) -> dict | None:
+    """The node's Settings tab (settings/views.node_page) and the node's header facts."""
+    d = settings_views.node_page(r, nid)
+    if d is None:
+        return None
+    n = d["node"]
+    hb = n.get("last_heartbeat_at") or 0
+    d["n"] = {"node_id": n["node_id"], "hostname": n["hostname"], "online": bool(hb and time.time() - hb < OFFLINE_AFTER),
+              "lifecycle": n["lifecycle"], "desired_state": n["desired_state"], "os": n.get("os"),
+              "agent_version": n.get("agent_version"), "release_id": n.get("release_id"),
+              "quarantine_reason": n.get("quarantine_reason"), "hw": hardware(jl(n.get("facts_json"), {}) or {})}
+    return d
+
+
+def overrides_page(r, key: str, module: str = "") -> dict | None:
+    """The reverse view: who overrides a fleet default, with what."""
+    from ..coordinator.settings import REGISTRY
+    if key not in REGISTRY:
+        return None
+    return settings_views.overrides_doc(r, key, module)
 
 
 # ------------------------------------------------------------------ protection editor
@@ -533,7 +563,7 @@ def protection_page(r, nid: str, now: float) -> dict | None:
                "WHERE node_id=? ORDER BY version DESC LIMIT 50", (nid,))
     for h in hist:
         h["config"] = jl(h.pop("config_json"), {})
-    cfg = hist[0]["config"] if hist else ((jl(n["policy_json"], {}) or {}).get("protection") or {"schema": 1, "rule": []})
+    cfg = hist[0]["config"] if hist else (jl(n.get("protection_json"), {}) or {"schema": 1, "rule": []})
     procs = jl(n.get("processes_json"), []) or []
     ids = {x.get("id") for x in cfg.get("rule") or []}
     matched = {p["pid"]: [m["rule"] for m in PM.preview(cfg, procs) if any(q["pid"] == p["pid"] for q in m["processes"])]
@@ -541,7 +571,7 @@ def protection_page(r, nid: str, now: float) -> dict | None:
     picker = [{**p, "name": PM.display_name(p), "rules": matched.get(p["pid"], []), "suggest": json.dumps(PM.suggest_rule(p, ids))}
               for p in procs]
     tel = jl(n["telemetry_json"], {}) or {}
-    canary = r.get_setting("protection_canary")
+    canary = r.get_state("protection_canary")
     if canary:
         refused = r.one("SELECT COUNT(*) n FROM protection_decisions WHERE node_id=? AND t>=? AND kind='actuation_refused'",
                         (canary["node_id"], canary["started_at"]))["n"]
@@ -612,14 +642,14 @@ def protection_preview(r, nid: str, config) -> dict:
     is reviewed as a plan)."""
     from ..contracts import protection as P, protection_match as PM
     P.ProtectionConfig.model_validate(config)
-    n = r.one("SELECT node_id, os, policy_json, processes_json, processes_at FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+    n = r.one("SELECT node_id, os, protection_json, processes_json, processes_at FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         raise ValueError(f"node {nid} not found")
     refused = P.refusals(config, n["os"]) if n["os"] else []
     if refused:
         raise ValueError(f"on {n['os']}: " + "; ".join(refused))
     top = r.one("SELECT version, config_json FROM protection_versions WHERE node_id=? ORDER BY version DESC LIMIT 1", (n["node_id"],))
-    cur = jl(top["config_json"], {}) if top else ((jl(n["policy_json"], {}) or {}).get("protection") or {})
+    cur = jl(top["config_json"], {}) if top else (jl(n.get("protection_json"), {}) or {})
     procs = jl(n["processes_json"], []) or []
     return {"base_version": top["version"] if top else 0, "diff": PM.diff(cur, config), "matches": PM.preview(config, procs),
             "processes_reported": len(procs),
@@ -703,7 +733,7 @@ def coordinator(r) -> dict:
     import base64
     import hashlib
     st = {row["key"]: jl(row["value_json"]) for row in r.q(
-        "SELECT key, value_json FROM settings WHERE key IN ('coordinator_cik','coordinator_epoch','coordinator_role',"
+        "SELECT key, value_json FROM system_state WHERE key IN ('coordinator_cik','coordinator_epoch','coordinator_role',"
         "'move_phase','fleet_id','coordinator_host')")}
     cik = st.get("coordinator_cik") or ""
     fp = hashlib.sha256(base64.b64decode(cik)).hexdigest() if cik else ""
@@ -730,7 +760,7 @@ def coordinator_banner(r) -> dict | None:
     """The fleet-wide banner: a coordinator move waiting, pending or cutting over, or this console reading a
     coordinator that handed off (or is a standby)."""
     st = {row["key"]: jl(row["value_json"]) for row in r.q(
-        "SELECT key, value_json FROM settings WHERE key IN ('coordinator_role','move_phase')")}
+        "SELECT key, value_json FROM system_state WHERE key IN ('coordinator_role','move_phase')")}
     mv = (r.q("SELECT move_id, statement, state, not_before FROM coordinator_moves WHERE state IN ('awaiting_owner','pending','cutover') "
               "ORDER BY created_at DESC LIMIT 1") or [None])[0]
     role = st.get("coordinator_role") or "active"

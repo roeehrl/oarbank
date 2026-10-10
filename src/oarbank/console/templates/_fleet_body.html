@@ -76,7 +76,7 @@
       {% if n.pressure %}<span>pressure {{ n.pressure }}</span>{% endif %}
       {% if n.heat %}<span>thermal {{ n.heat }}</span>{% endif %}
       {% if n.tel.on_battery %}<span class="chip warn">battery</span>{% endif %}
-      {% if n.tel.user_idle_s is known and n.tel.user_idle_s < (n.policy.user_idle_s or 300) %}<span class="chip">user present</span>{% endif %}
+      {% if n.tel.user_idle_s is known and n.policy.user_idle_s is known and n.tel.user_idle_s < n.policy.user_idle_s %}<span class="chip">user present</span>{% endif %}
       {% if n.tel.services_running %}<span>services {{ n.tel.services_running | join(', ') }}</span>{% endif %}
       {% if n.tel.services_held %}<span class="chip warn">service stopped: {{ n.tel.services_held | list | join(', ') }}</span>{% endif %}
       <span>heartbeat {{ n.hb_age | secs if n.hb_age is not none else 'never' }}</span>
@@ -88,7 +88,7 @@
       {% else %}
       {{ m.op_form("nodes.resume", n.node_id, "Resume", cls="pri") }}
       {% endif %}
-      <a class="btn" href="/nodes/{{ n.node_id }}">Details & caps</a>
+      <a class="btn" href="/nodes/{{ n.node_id }}">Details</a><a class="btn" href="/nodes/{{ n.node_id }}/settings">Settings</a>
     </div>
   </div>
 {% else %}

@@ -170,3 +170,23 @@ header .main-nav { display:flex; gap:16px; min-width:0 }
   header .main-nav { order:2; flex:1 0 100%; overflow-x:auto; gap:14px; padding-bottom:2px; scrollbar-width:thin }
   header .main-nav a { white-space:nowrap }
 }
+/* Settings (templates/_settings.html, docs/design/settings.md): one row per setting, a left bar marks a value set at this
+   scope (always with its "changed here" badge text), "Override" reveals the field by CSS alone. */
+.settings-sections { display:grid; gap:var(--s3); grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr)); margin-bottom:var(--s4) }
+.settings-sections > * { min-width:0 }
+.settings-fieldset { border:0; margin:0; padding:0; min-width:0 }
+.settings-fieldset legend { padding:0 } .settings-fieldset legend h2 { margin:0 0 var(--s1) }
+.setting { border-left:3px solid transparent; padding:var(--s2) 0 var(--s2) 10px; border-top:1px solid var(--line) }
+.setting.changed { border-left-color:var(--acc) } .setting.invalid { border-left-color:var(--bad) }
+.setting-head, .setting-value { gap:6px } .setting-value { margin-top:var(--s1) }
+.setting .ovr-input { display:none }
+.setting:has(input[data-override]:checked) .ovr-input { display:inline-flex; align-items:center; gap:var(--s1); flex-wrap:wrap }
+.setting:has(input[data-override]:checked) .inh-text { display:none }
+.setting textarea, .setting input.wide-input { width:min(100%, 28rem) }
+.setting input:not([type]) { width:7rem } .setting details.explain { margin-top:var(--s1) }
+.field-error { color:var(--bad); font-weight:600; margin-top:2px }
+.error-summary { border:3px solid var(--bad); padding:var(--s2) var(--s3); margin:var(--s2) 0; border-radius:6px }
+.error-summary:focus { outline:3px solid var(--acc); outline-offset:2px }
+.error-summary h3 { margin:0 0 var(--s1); font-size:14px } .error-summary a { color:var(--bad); font-weight:600 }
+.explain-chain th, .explain-chain td { padding:3px 6px }
+.section-save { margin-top:var(--s2) } details.advanced { margin-top:var(--s2) } details.advanced > summary { font-weight:600 }

@@ -35,7 +35,7 @@ def content(db: DB, node_id: str) -> dict:
 
 
 def statements(db) -> dict:
-    return db.get_setting(KEY, {}) or {}
+    return db.get_state(KEY, {}) or {}
 
 
 def statement(db, node_id: str) -> dict | None:
@@ -62,7 +62,7 @@ def refresh(db: DB, node_ids=None) -> list[str]:
         sts[nid] = {"seq": seq, "statement": stmt, "signature": None}
         changed.append(nid)
     if changed:
-        db.set_setting(KEY, sts)
+        db.set_state(KEY, sts)
     return changed
 
 
@@ -72,7 +72,7 @@ def sign(db: DB, node_id: str, stmt: str, signature: str) -> dict:
     cur = statement(db, node_id)
     if not cur or cur["statement"] != stmt:
         raise StatementError(f"that is not {node_id}'s current statement (it changed: sign it again)")
-    key = db.get_setting("release_pubkey")
+    key = db.get_state("release_pubkey")
     if not key:
         raise StatementError("no release key is pinned (oarbank owner set): nothing can verify the signature")
     try:
@@ -81,7 +81,7 @@ def sign(db: DB, node_id: str, stmt: str, signature: str) -> dict:
         raise StatementError(str(e)) from None
     sts = statements(db)
     sts[node_id] = {**cur, "signature": signature}
-    db.set_setting(KEY, sts)
+    db.set_state(KEY, sts)
     return {"node_id": node_id, "seq": cur["seq"]}
 
 
@@ -91,12 +91,12 @@ def directive(db, node_id: str) -> dict | None:
     return {"statement": cur["statement"], "signature": cur["signature"]} if cur else None
 
 
-def migrate(conn) -> None:
+def migrate(db) -> None:
     """One-shot at upgrade: the folder statements become node statements (rebuilt as `oarbank.node/v1` with the next
     seq at startup, `refresh`)."""
-    row = conn.execute("SELECT value_json FROM settings WHERE key='folder_statements'").fetchone()
-    if row is None:
+    old = db.get_state("folder_statements")
+    if old is None:
         return
-    if not conn.execute("SELECT 1 FROM settings WHERE key=?", (KEY,)).fetchone():
-        conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?)", (KEY, row[0]))
-    conn.execute("DELETE FROM settings WHERE key='folder_statements'")
+    if db.get_state(KEY) is None:
+        db.set_state(KEY, old)
+    db.x("DELETE FROM system_state WHERE key='folder_statements'")

@@ -52,12 +52,12 @@ def node_os(db: DB, nid: str) -> str | None:
 
 
 def current(db: DB, nid: str) -> tuple[int, dict]:
-    """(version number, config). Version 0 is the policy's section before any versioned edit."""
+    """(version number, config). Version 0 is the node's section before any versioned edit."""
     r = db.one("SELECT version, config_json FROM protection_versions WHERE node_id=? ORDER BY version DESC LIMIT 1", (nid,))
     if r:
         return r["version"], json.loads(r["config_json"])
-    n = db.one("SELECT policy_json FROM nodes WHERE node_id=?", (nid,))
-    return 0, (jl(n["policy_json"], {}) or {}).get("protection") or {} if n else {}
+    n = db.one("SELECT protection_json FROM nodes WHERE node_id=?", (nid,))
+    return 0, (jl(n["protection_json"], {}) or {}) if n else {}
 
 
 def history(db: DB, nid: str, limit: int = 50) -> list[dict]:
@@ -69,18 +69,27 @@ def history(db: DB, nid: str, limit: int = 50) -> list[dict]:
 
 
 def record_version(db: DB, nid: str, config: dict, actor: str, reason: str | None, source: str) -> int:
-    """Append a version row (inside the caller's transaction). Called by core.set_policy for every change
-    to the protection section, whatever route made it."""
+    """Append a version row (inside the caller's transaction). Called by `store` for every change to the protection
+    section, whatever route made it."""
     top = db.one("SELECT MAX(version) v FROM protection_versions WHERE node_id=?", (nid,))["v"] or 0
     db.x("INSERT INTO protection_versions(node_id,version,config_json,config_hash,actor,reason,source,created_at) "
          "VALUES(?,?,?,?,?,?,?,?)", (nid, top + 1, json.dumps(config), config_hash(config), actor, reason, source, time.time()))
     return top + 1
 
 
+def store(db: DB, nid: str, config: dict, actor: str, reason: str | None, source: str) -> None:
+    """Set the node's protection section (validated by the caller), version it, and refresh the node's effective
+    settings: the agent gets it in its policy, under a new settings revision."""
+    from .settings.apply import sync_nodes
+    record_version(db, nid, config, actor, reason, source)
+    db.x("UPDATE nodes SET protection_json=? WHERE node_id=?", (json.dumps(config), nid))
+    db.event("protection_changed", actor=actor, node_id=nid, reason=source)
+    sync_nodes(db, [nid])
+
+
 def write_version(db: DB, nid: str, config: dict, actor: str, reason: str | None, source: str = "rules.update") -> int:
-    from . import core
     config = validate(config, node_os(db, nid))
-    core.set_policy(db, nid, {"protection": config}, actor, reason=reason, source=source)
+    store(db, nid, config, actor, reason, source)
     return current(db, nid)[0]
 
 
@@ -162,7 +171,7 @@ def start_canary(db: DB, nid: str, config: dict, actor: str, reason: str | None)
     v = write_version(db, nid, cfg, actor, reason, source="rules.canary")
     c = {"node_id": nid, "config_hash": config_hash(cfg), "config": cfg, "version": v, "started_at": time.time(),
          "actor": actor}
-    db.set_setting(CANARY_KEY, c)
+    db.set_state(CANARY_KEY, c)
     db.event("protection_canary", actor=actor, node_id=nid, version=v, config_hash=c["config_hash"])
     return c
 
@@ -171,7 +180,7 @@ def canary_health(db: DB) -> dict:
     """Is the running canary fit to promote? Soaked long enough, node heartbeating, no S16/S18 findings or
     refused actuations on it since it started."""
     from . import invariants
-    c = db.get_setting(CANARY_KEY)
+    c = db.get_state(CANARY_KEY)
     if not c:
         return {"canary": None, "promotable": False, "why": ["no canary running"]}
     why, t0 = [], c["started_at"]
@@ -209,10 +218,10 @@ def promote(db: DB, actor: str, reason: str | None, force: bool = False) -> dict
     h = canary_health(db)
     if not h["promotable"] and not force:
         raise ProtectionError("canary not promotable: " + "; ".join(h["why"]))
-    c = db.get_setting(CANARY_KEY)
+    c = db.get_state(CANARY_KEY)
     targets, skipped = promote_targets(db, c)
     done = {nid: write_version(db, nid, c["config"], actor, reason, source="rules.promote") for nid in targets}
-    db.set_setting(CANARY_KEY, None)
+    db.set_state(CANARY_KEY, None)
     db.event("protection_promoted", actor=actor, node_id=c["node_id"], config_hash=c["config_hash"], nodes=sorted(done),
              skipped=sorted(skipped))
     return {"promoted": done, "skipped": skipped, "config_hash": c["config_hash"]}

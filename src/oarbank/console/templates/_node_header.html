@@ -1,0 +1,13 @@
+{# The node's header and its tabs (Overview, Settings), shared by node.html and node_settings.html. #}
+<p class="small"><a href="/explain/node/{{ n.node_id }}">Why is this node (not) taking work?</a></p>
+<div class="row"><h1>{{ n.hostname }}</h1>
+  <span class="chip {{ 'ok' if n.online else 'bad' }}">{{ 'online' if n.online else 'offline' }}</span>
+  <span class="chip">{{ n.lifecycle }}</span><span class="chip">{{ n.desired_state }}</span>
+  {% if n.quarantine_reason %}<span class="chip bad">{{ n.quarantine_reason }}</span>{% endif %}
+  <span class="sp"></span><span class="mut small">{{ [n.node_id, 'agent ' ~ n.agent_version if n.agent_version, 'release ' ~ n.release_id if n.release_id] | select | join(' · ') }}</span>
+</div>
+<nav class="row small mod-tabs-nav" aria-label="node sections">
+  <a href="/nodes/{{ n.node_id }}"{% if tab != 'settings' %} aria-current="page"{% endif %}>Overview</a>
+  <a href="/nodes/{{ n.node_id }}/settings"{% if tab == 'settings' %} aria-current="page"{% endif %}>Settings</a>
+  <a href="/nodes/{{ n.node_id }}/protection">Protection rules</a>
+</nav>

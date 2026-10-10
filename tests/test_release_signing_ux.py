@@ -30,8 +30,8 @@ def db(tmp_path, signing_on):
     d = make_db(tmp_path / "oarbank.sqlite3", modules=())
     d.x("DELETE FROM releases")                                # make_db's empty release: a fresh install has none
     d.x("DELETE FROM events WHERE kind LIKE 'release_%'")
-    d.set_setting(releases.DEFAULTS, {})
-    d.set_setting("release_pubkey", signing.keygen(tmp_path / "keys" / "release.key"))
+    d.set_state(releases.DEFAULTS, {})
+    d.set_state("release_pubkey", signing.keygen(tmp_path / "keys" / "release.key"))
     d.key = tmp_path / "keys" / "release.key"
     yield d
     d.conn.close()
@@ -116,7 +116,7 @@ def test_awaiting_releases_raise_one_alert_each_that_clears_when_signed_or_super
     releases.sync(db)
     wait = {a["platform"]: a for a in releases.awaiting(db)}
     assert set(wait) == {"darwin-arm64", "windows-amd64"} and wait["darwin-arm64"]["nodes"] == ["mac"]
-    assert db.get_setting(releases.AWAITING) == releases.awaiting(db)        # what the console reads
+    assert db.get_state(releases.AWAITING) == releases.awaiting(db)        # what the console reads
     alerts = {a["rule"]: a for a in db.q("SELECT * FROM alerts WHERE state IN ('open','pending')")}
     mac_rule = f"release_awaiting_owner:{wait['darwin-arm64']['release_id']}"
     assert set(alerts) == {f"release_awaiting_owner:{a['release_id']}" for a in wait.values()}
@@ -151,8 +151,8 @@ def test_an_upgraded_fleet_learns_its_waiting_releases_without_a_rebuild(db):
     enrolled_node(db, "mac")
     install(db, TOY_DIR)
     releases.sync(db)
-    db.set_setting(releases.DEFAULTS, {})
-    db.set_setting(releases.AWAITING, [])
+    db.set_state(releases.DEFAULTS, {})
+    db.set_state(releases.AWAITING, [])
     releases.ensure_fleet(db)
     assert len(built(db)) == 1 and [a["platform"] for a in releases.awaiting(db)] == ["darwin-arm64"]
 

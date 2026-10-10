@@ -20,10 +20,9 @@ module.
   TOOL_NOT_FOUND, TOOL_VERSION_UNMET or TOOL_REFUSED (predicates.SPARED: stages that need no certification get no
   tools and are spared).
 
-The override store here is TEMPORARY: the `tool_path_values` setting holds the rows phase 1 of the settings redesign
-keeps in `setting_values` (scope fleet|group|node, scope id, module qualifier, key `tool.<id>.path`). At the phase-1
-merge, `node_override` reads `setting_values` through the resolver instead and `set_override` becomes
-`settings.apply`; nothing else here changes.
+The paths set for a tool are ordinary settings (docs/design/settings.md): the key family `tool.<id>.path`, at fleet,
+group or node scope, optionally qualified by a module, written with `settings.apply` and resolved by the settings
+resolver (`node_override`).
 """
 import functools
 import json
@@ -38,7 +37,6 @@ KINDS = ("jdk", "python", "executable")
 OSES = ("darwin", "linux", "windows")
 OS_NAMES = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
 TOOL_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
-STORE = "tool_path_values"            # TEMPORARY (phase-1 merge: setting_values rows, key tool.<id>.path)
 CODES = {"not_found": "TOOL_NOT_FOUND", "version_unmet": "TOOL_VERSION_UNMET", "refused": "TOOL_REFUSED"}
 REDETECT_EVERY_S = 3600               # the agent's slow timer (docs/design/host-tools.md)
 
@@ -232,75 +230,82 @@ def need_text(req: dict) -> str:
         (f" ({req['arch']})" if req.get("arch") not in (None, "any") else "")
 
 
-# ------------------------------------------------------------------------------------------------ overrides (TEMPORARY)
+# ------------------------------------------------------------------------------------------------ overrides (settings)
 
-def _values(r) -> list[dict]:
-    return list(r.get_setting(STORE, []) or [])
-
-
-def node_override(r, node: dict, tool: str, module: str = "") -> dict | None:
-    """The path set for `tool` (and `module`) where this node inherits it, or None: the module-qualified value on the
-    node, then the node's own, then the module-qualified and plain values of its platform group, then the fleet's.
-    {path, scope, scope_id, module, kind}; kind `choose` (an installation the node found) or `add` (a path it did not
-    find, which travels in its signed statement). Phase-1 merge: read from setting_values through the resolver."""
-    os_ = (node.get("platform") or "").split("-")[0]
-    rows = [v for v in _values(r) if v.get("tool") == tool]
-    for scope, sid in (("node", node.get("node_id")), ("group", os_), ("fleet", "")):
-        for mod in ((module, "") if module else ("",)):
-            hit = next((v for v in rows if v["scope"] == scope and v["scope_id"] == sid and v["module"] == mod), None)
-            if hit:
-                return dict(hit)
-    return None
+def path_key(tool: str) -> str:
+    return f"tool.{tool}.path"
 
 
-def set_override(db, scope: str, scope_id: str, module: str, tool: str, path: str | None, node: dict | None = None) -> dict:
-    """Set (or, path None, remove) the path of one tool at one scope. At node scope a path among the installations the
-    node found is a choice (`choose`); any other path is added (`add`) and goes into the node's signed statement. At
-    group and fleet scope a path is a choice each node makes among its own installations."""
-    if scope not in ("node", "group", "fleet"):
-        raise ToolError("scope: node, group or fleet")
-    if not TOOL_ID.fullmatch(tool or ""):
-        raise ToolError(f"tool id {tool!r}")
-    if module and not re.fullmatch(r"^[a-z0-9][a-z0-9_-]{0,63}$", module):
-        raise ToolError(f"module {module!r}")
-    if scope == "group" and scope_id not in OSES:
-        raise ToolError(f"group: one of {', '.join(OSES)}")
-    if scope == "fleet":
-        scope_id = ""
-    rows = [v for v in _values(db) if not (v["scope"] == scope and v["scope_id"] == scope_id and v["module"] == module
-                                           and v["tool"] == tool)]
-    row = None
-    if path:
-        p = path.strip()
-        win = ((node or {}).get("platform") or "").startswith("windows") or scope_id == "windows" or bool(_WIN_ABS.match(p))
-        if not (_WIN_ABS.match(p) if win else p.startswith("/")) or any(c in p for c in "*?[") or "\x00" in p or "\n" in p:
-            raise ToolError(f"{p!r} is not an absolute path (no globs: a path set for a tool is one installation)")
-        if re.search(r"(^|[/\\])\.\.([/\\]|$)", p):
-            raise ToolError(f"{p!r} contains '..'")
-        kind = "choose"
-        if scope == "node":
-            found = {i.get("path") for i in installations(node or {}, tool) if is_ok(i)} | \
-                    {i.get("given") for i in installations(node or {}, tool) if is_ok(i) and i.get("source") == "override"}
-            kind = "choose" if p in found else "add"
-        row = {"scope": scope, "scope_id": scope_id, "module": module, "tool": tool, "path": p, "kind": kind}
-        rows.append(row)
-    db.set_setting(STORE, sorted(rows, key=lambda v: (v["scope"], v["scope_id"], v["module"], v["tool"])))
-    return {"scope": scope, "scope_id": scope_id, "module": module, "tool": tool, "value": row}
+def _snap(r, snap=None):
+    from .settings import resolve as V
+    return snap if snap is not None else V.snapshot(r)
 
 
-def statement_tools(r, node_id: str) -> list[dict]:
-    """The paths added for one node (kind `add`), as its signed statement carries them: [{id, module, path}]."""
-    return [{"id": v["tool"], "module": v["module"], "path": v["path"]} for v in _values(r)
-            if v["scope"] == "node" and v["scope_id"] == node_id and v.get("kind") == "add"]
+def _path_rows(snap) -> list[dict]:
+    from .settings import registry as R
+    return [x for (scope, sid, m, k), x in snap.rows.items() if R.TOOL_PATH.fullmatch(k)]
 
 
-def pins(r, node: dict, modules) -> dict:
+def node_override(r, node: dict, tool: str, module: str = "", snap=None) -> dict | None:
+    """The path set for `tool` (and `module`) where this node inherits it, or None: the settings resolver over
+    `tool.<id>.path` (the module's chain above the plain one; within each the node, its groups, the fleet).
+    {path, scope, scope_id, module, source}."""
+    from .settings import resolve as V
+    snap = _snap(r, snap)
+    res = V.resolve(snap, node, path_key(tool), module)
+    if not res["value"]:
+        return None
+    src = res["source"]
+    return {"path": res["value"], "scope": src["scope"], "scope_id": src["id"], "module": src["module"],
+            "source": V.badge(res)}
+
+
+def found_paths(node: dict, tool: str) -> set:
+    """The installations the node found itself (not the paths its statement adds): a path among them needs no
+    signature."""
+    return {i.get("path") for i in installations(node, tool) if is_ok(i) and i.get("source") != "override"}
+
+
+def statement_tools(r, node_id: str, snap=None) -> list[dict]:
+    """The tool paths set at node scope for one node that it did not find itself, as its signed statement carries them:
+    [{id, module, path}]."""
+    from .settings import registry as R
+    snap = _snap(r, snap)
+    node = r.one("SELECT node_id, tools_json FROM nodes WHERE node_id=?", (node_id,)) or {"node_id": node_id}
+    out = []
+    for x in _path_rows(snap):
+        if x["scope"] != "node" or x["scope_id"] != node_id:
+            continue
+        tool = R.TOOL_PATH.fullmatch(x["key"]).group(1)
+        if x["value"] and x["value"] not in found_paths(node, tool):
+            out.append({"id": tool, "module": x["module"], "path": x["value"]})
+    return sorted(out, key=lambda t: (t["id"], t["module"], t["path"]))
+
+
+def node_values(r, node_id: str, snap=None) -> list[dict]:
+    """The tool paths set on one node: [{tool, module, path, kind}] (kind: `choose`, an installation it found; `add`,
+    in its signed statement)."""
+    from .settings import registry as R
+    snap = _snap(r, snap)
+    node = r.one("SELECT node_id, tools_json FROM nodes WHERE node_id=?", (node_id,)) or {"node_id": node_id}
+    out = []
+    for x in _path_rows(snap):
+        if x["scope"] == "node" and x["scope_id"] == node_id:
+            tool = R.TOOL_PATH.fullmatch(x["key"]).group(1)
+            out.append({"tool": tool, "module": x["module"], "path": x["value"], "key": x["key"],
+                        "kind": "choose" if x["value"] in found_paths(node, tool) else "add"})
+    return sorted(out, key=lambda v: (v["tool"], v["module"]))
+
+
+def pins(r, node: dict, modules, snap=None) -> dict:
     """The `tool_pins` directive: {module: {tool: path}} with "" for a module without values of its own; the agent
     grants a pinned path only when it is an installation its detector verified."""
-    tools = sorted({v["tool"] for v in _values(r)})
+    from .settings import registry as R
+    snap = _snap(r, snap)
+    tools = sorted({R.TOOL_PATH.fullmatch(x["key"]).group(1) for x in _path_rows(snap)})
     out = {}
     for m in ["", *sorted(set(modules))]:
-        got = {t: o["path"] for t in tools for o in [node_override(r, node, t, m)] if o}
+        got = {t: o["path"] for t in tools for o in [node_override(r, node, t, m, snap)] if o}
         if got and (m == "" or got != out.get("")):
             out[m] = got
     return out
@@ -458,7 +463,7 @@ def fixes(r, node: dict, module: str, req: dict, res: dict, defs: dict | None = 
     out.append({"label": "Re-detect", "op": "tools.detect", "target": node.get("node_id"),
                 "command": f"oarbank tools detect {node.get('hostname') or node.get('node_id')}"})
     out.append({"label": "Set path on this node", "href": f"/nodes/{node.get('node_id')}#tools",
-                "command": f"oarbank tools set-path {node.get('hostname') or node.get('node_id')} {req['id']} <path>"
+                "command": f"oarbank settings set {path_key(req['id'])} <path> --node {node.get('hostname') or node.get('node_id')}"
                            + (f" --module {module}" if module else "")})
     if os_:
         out.append({"label": f"Add a search path for {OS_NAMES.get(os_, os_)}", "href": f"/settings?tool={req['id']}#tools",
@@ -498,7 +503,7 @@ def node_view(r, node: dict, defs: dict | None = None) -> dict:
                          "fixes": [] if res["status"] == "ok" else fixes(r, node, name, req, res, defs)})
         if rows:
             mods[name] = rows
-    overrides = [v for v in _values(r) if v["scope"] == "node" and v["scope_id"] == node.get("node_id")]
+    overrides = node_values(r, node.get("node_id"))
     return {"reported": bool(rep), "detected_at": rep.get("detected_at"), "native_arch": native_arch(node),
             "tools": {tid: installations(node, tid) for tid in defs}, "extra": sorted(set(rep.get("tools") or {}) - set(defs)),
             "modules": mods, "overrides": overrides, "definitions": defs}
@@ -559,7 +564,10 @@ def api(r, node_id: str | None = None, module: str | None = None) -> dict:
     defs = definitions(r)
     nodes = r.q("SELECT * FROM nodes WHERE lifecycle!='retired'" + (" AND (node_id=? OR hostname=?)" if node_id else "")
                 + " ORDER BY hostname", (node_id, node_id) if node_id else ())
-    doc = {"definitions": list(defs.values()), "overrides": _values(r)}
+    from .settings import registry as R
+    doc = {"definitions": list(defs.values()),
+           "overrides": [{"scope": x["scope"], "scope_id": x["scope_id"], "module": x["module"],
+                          "tool": R.TOOL_PATH.fullmatch(x["key"]).group(1), "path": x["value"]} for x in _path_rows(_snap(r))]}
     if module:
         doc["module"] = module_matrix(r, module, nodes, defs)
     else:
@@ -572,16 +580,12 @@ def api(r, node_id: str | None = None, module: str | None = None) -> dict:
 
 # ------------------------------------------------------------------------------------------------ migration
 
-def migrate_registry(conn) -> list[str]:
-    """One-shot conversion at upgrade: the old per-OS `tool_registry` setting becomes tool definitions with fleet
-    search paths per OS (an id named like a JDK becomes kind jdk; any other an executable read with `--version`), and
-    the setting and its `trust` (now the module request's) are deleted. Returns the converted ids."""
-    row = conn.execute("SELECT value_json FROM settings WHERE key='tool_registry'").fetchone()
-    if not row:
-        return []
-    reg = json.loads(row[0] or "{}") or {}
+def convert_registry(db, reg: dict) -> list[str]:
+    """The old per-OS tool registry ({id: {trust?, paths: {os: [abs paths]}}}) as tool definitions with fleet search
+    paths per OS: an id named like a JDK becomes kind jdk, any other an executable read with `--version`; its `trust`
+    (now the module request's) is dropped. Returns the converted ids."""
     done = []
-    for tid, e in sorted(reg.items()):
+    for tid, e in sorted((reg or {}).items()):
         if not TOOL_ID.fullmatch(tid or "") or tid in BUILTIN:
             continue
         search = {os_: sorted(set(ps)) for os_, ps in ((e or {}).get("paths") or {}).items() if os_ in OSES and ps}
@@ -589,8 +593,17 @@ def migrate_registry(conn) -> list[str]:
         det = {"search": search}
         if kind == "executable":
             det["version"] = {"args": ["--version"], "regex": "(\\d+(?:\\.\\d+)+)"}
-        conn.execute("INSERT OR IGNORE INTO tool_defs(id, kind, detector_json, updated_by, updated_at) VALUES(?,?,?,?,?)",
-                     (tid, kind, json.dumps(det, sort_keys=True), "migration", time.time()))
+        db.x("INSERT OR IGNORE INTO tool_defs(id, kind, detector_json, updated_by, updated_at) VALUES(?,?,?,?,?)",
+             (tid, kind, json.dumps(det, sort_keys=True), "migration", time.time()))
         done.append(tid)
-    conn.execute("DELETE FROM settings WHERE key='tool_registry'")
+    return done
+
+
+def migrate_registry(db) -> list[str]:
+    """One-shot at upgrade (inside the caller's transaction): a fleet `tool_registry` value the settings model kept
+    becomes tool definitions (convert_registry), and the value is deleted."""
+    done = []
+    for x in db.q("SELECT module, value_json FROM setting_values WHERE key='tool_registry'"):
+        done += convert_registry(db, json.loads(x["value_json"] or "{}"))
+    db.x("DELETE FROM setting_values WHERE key='tool_registry'")
     return done

@@ -91,7 +91,7 @@ def test_signing_attaches_an_owner_signature_verified_against_the_release_key(db
     run_op(db, "settings.folders.update", "inputs", params={"access": "read", "nodes": {a["node_id"]: "/data/in"}})
     stmt = statements.statement(db, a["node_id"])["statement"]
     owner = Ed25519PrivateKey.generate()
-    db.set_setting("release_pubkey", base64.b64encode(owner.public_key().public_bytes_raw()).decode())
+    db.set_state("release_pubkey", base64.b64encode(owner.public_key().public_bytes_raw()).decode())
     forged = base64.b64encode(Ed25519PrivateKey.generate().sign(stmt.encode())).decode()
     with pytest.raises(core.ApiError, match="signature"):
         run_op(db, "nodes.sign_statement", a["node_id"], params={"statement": stmt, "signature": forged})

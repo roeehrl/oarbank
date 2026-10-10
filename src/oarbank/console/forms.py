@@ -1,49 +1,87 @@
 """Form fields -> operation params, per operation (the console's only knowledge of form layouts)."""
 import json
 
-POLICY_BOOL = {"run_on_battery", "hard_limits", "screen_sharing_present", "mem_in_use_bound"}
-POLICY_LIST = {"disabled_services"}
+
+class FieldErrors(ValueError):
+    """A settings form whose fields could not be read: [{key, message}], shown like the coordinator's own refusals."""
+
+    def __init__(self, errors: list[dict]):
+        super().__init__("; ".join(f"{e['key']}: {e['message']}" for e in errors))
+        self.errors = errors
 
 
-def limits(form) -> dict:
-    if form.get("clear_all"):
-        return {"clear_all": True}
-    patch = {}
-    for k in ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps"):
-        patch[k] = form.get(k) if form.get(f"on_{k}") else None
-    if form.get("on_schedule") and form.get("sched_start") and form.get("sched_end"):
-        patch["schedule"] = {"start": form["sched_start"], "end": form["sched_end"],
-                             "days": [int(d) for d in form.getlist("sched_days")] or list(range(7))}
-    else:
-        patch["schedule"] = None
-    patch["enforce"] = form.get("enforce") or "soft"
-    return {"patch": patch}
-
-
-def policy(form) -> dict:
-    """The Policy table: one `p_<key>` field per setting (a checkbox's hidden `p_<key>=0` comes first, so a ticked box
-    sends 0 then 1 and the last value wins). A row's Reset button submits `reset=<key>` with the table, Reset all
-    `reset=all` alone: the other rows' values are saved as shown, the reset ones go back to the node's defaults."""
-    patch = {}
+def _setting_value(form, key: str, kind: str):
+    """A field's text as the setting's value, by the input kind the page rendered (settings/views.input_of)."""
+    from ..coordinator.settings import REGISTRY
     getlist = getattr(form, "getlist", None)
-    for k in form.keys():
-        if not k.startswith("p_"):
-            continue
-        name = k[2:]
-        v = (getlist(k) or [""])[-1] if getlist else form[k]
-        if name in POLICY_BOOL:
-            patch[name] = v in ("1", "true", "on", "True")
-        elif name in POLICY_LIST:
-            patch[name] = [x.strip() for x in v.split(",") if x.strip()]
-        elif v == "":
-            patch[name] = None
-        else:
-            try:
-                patch[name] = float(v) if "." in v else int(v)
-            except ValueError:
-                patch[name] = v
+    last = lambda k: ((getlist(k) or [""])[-1] if getlist else form.get(k, "")) or ""
+    raw = last(f"v.{key}").strip()
+    if kind == "checkbox":
+        return raw in ("1", "true", "on")
+    if kind == "schedule":
+        days = [int(d) for d in (getlist(f"v.{key}.days") if getlist else []) if str(d).isdigit()]
+        return {"start": last(f"v.{key}.start").strip(), "end": last(f"v.{key}.end").strip(), "days": days or list(range(7))}
+    if kind == "list":
+        return [x.strip() for x in raw.replace(",", "\n").splitlines() if x.strip()]
+    if kind == "json":
+        try:
+            return json.loads(raw or "{}")
+        except ValueError:
+            raise FieldErrors([{"key": key, "message": "not valid JSON"}])
+    if kind == "number":
+        if raw == "":
+            d = REGISTRY.get(key)
+            if d is not None and d.nullable:
+                return None
+            raise FieldErrors([{"key": key, "message": "enter a number"}])
+        try:
+            return float(raw) if any(c in raw for c in ".eE") else int(raw)
+        except ValueError:
+            raise FieldErrors([{"key": key, "message": f"{raw!r} is not a number"}])
+    return raw or None
+
+
+def settings_changes(form) -> dict:
+    """A Settings section (templates/_settings.html): `scope`, `scope_id`, one `keys` entry per row with its input kind
+    (`t.<key>`), whether this scope set it when the page was drawn (`had.<key>`) and its value then (`cur.<key>`). A ticked
+    "Override" (`o.<key>`) sets the field's value here when it is new or changed; an override unticked resets it; a row's
+    "Reset to inherited" button (`reset=<key>`) resets that row alone. A `params` field (the reverse view's Reset) is the
+    change set itself."""
+    if form.get("params"):
+        return json.loads(form["params"])
+    if form.get("tool"):                     # a host tool's path on a node (`tool`, `module`, `path`; empty: reset)
+        c = {"scope": form.get("scope") or "node", "scope_id": form.get("scope_id") or "",
+             "module": (form.get("module") or "").strip(), "key": f"tool.{form.get('tool').strip()}.path"}
+        path = (form.get("path") or "").strip()
+        return {"changes": [{**c, "value": path} if path else {**c, "reset": True}]}
+    scope, sid = form.get("scope") or "node", form.get("scope_id") or ""
+    base = {"scope": scope, "scope_id": sid}
+    getlist = getattr(form, "getlist", None)
+    keys = getlist("keys") if getlist else [form.get("keys")] if form.get("keys") else []
     reset = (form.get("reset") or "").strip()
-    return {"patch": patch, **({"reset": "all" if reset == "all" else [reset]} if reset else {})}
+    if reset:
+        return {"changes": [{**base, "key": reset, "reset": True}]}
+    changes, errors = [], []
+    for key in keys:
+        had = form.get(f"had.{key}") == "1"
+        if form.get(f"o.{key}"):
+            try:
+                v = _setting_value(form, key, form.get(f"t.{key}") or "text")
+            except FieldErrors as e:
+                errors += e.errors
+                continue
+            cur = form.get(f"cur.{key}")
+            if had and cur is not None and json.dumps(v, sort_keys=True) == cur:
+                continue
+            changes.append({**base, "key": key, "value": v})
+        elif had:
+            changes.append({**base, "key": key, "reset": True})
+    if errors:
+        raise FieldErrors(errors)
+    if not changes:
+        raise FieldErrors([{"key": keys[0] if keys else "", "message": "nothing changed: tick Override to set a value here, "
+                                                                     "or untick it to go back to the inherited one"}])
+    return {"changes": changes}
 
 
 def _coerce(v: str):
@@ -121,14 +159,11 @@ MAPPERS = {
     "nodes.join_code": lambda f, ctx: join_code(f),
     # a device code stays a string (WDJB-MJHT); the coordinator folds case and dashes
     "nodes.admit_code": lambda f, ctx: {"user_code": (f.get("user_code") or "").strip()},
-    "nodes.set_caps": lambda f, ctx: limits(f),
-    "nodes.set_policy": lambda f, ctx: policy(f),
-    "settings.notifications.update": lambda f, ctx: {"url": f.get("ntfy_url"), "token": f.get("ntfy_token"),
-                                                      "click_base": f.get("click_base")},
+    "settings.apply": lambda f, ctx: settings_changes(f),
+    # a core secret's value is the form's `secret` field, sent beside params
+    "settings.secrets.set": lambda f, ctx: {},
+    "settings.secrets.clear": lambda f, ctx: {},
     "tools.define": lambda f, ctx: tool_definition(f),
-    # a tool's path on one node (optionally for one module); an empty path resets it to inherited
-    "tools.set_path": lambda f, ctx: {"tool": (f.get("tool") or "").strip(), "path": (f.get("path") or "").strip() or None,
-                                      **({"module": f.get("module").strip()} if (f.get("module") or "").strip() else {})},
     # a folder's path per node, one "<node>=<path>" per line; a node with an empty path is removed
     "settings.folders.update": lambda f, ctx: {"access": f.get("access") or "read", "nodes": {
         k.strip(): v.strip() or None for k, _, v in (x.partition("=") for x in (f.get("nodes") or "").splitlines()) if k.strip()}},

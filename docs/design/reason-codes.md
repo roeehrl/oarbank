@@ -16,7 +16,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `POOL_ABSENT` | The node offers no {pool} pool | P1 | – | – | – |
 | `INSUFFICIENT_CPU` | Needs {need} cores, {free} allocatable | P1 | – | – | – |
 | `INSUFFICIENT_MEM` | Needs {need} GB, {free} GB allocatable | P1 | – | – | – |
-| `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `nodes.set_caps` | – |
+| `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `settings.apply` | – |
 | `MODULE_NOT_READY` | Module {module} is not ready on this node (doctor: {health}) | P1 | – | `nodes.run_doctor` | – |
 | `MODULE_NOT_CERTIFIED` | Module {module} is not certified on this node yet | P1 | – | `nodes.recertify` | – |
 | `MODULE_DISABLED` | Module {module} is disabled | P1 | – | `modules.enable_canary` | `module_disabled` |
@@ -29,9 +29,9 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `SECRETS_NOT_SET` | Its stage receives secrets {missing}, which have no value for this node | P1 | – | `secrets.set` | – |
 | `DATASET_PLATFORM_MISMATCH` | Its dataset is bound to {platforms}; this node is {platform} | P1 | – | `jobs.cancel` | – |
 | `OS_VERSION_UNSUPPORTED` | Module {module} needs another OS version than {os_version} (requires.os) | P1 | – | – | – |
-| `TOOL_NOT_FOUND` | Module {module} needs a host tool this node does not have: {tools} | P1 | – | `tools.detect`, `tools.set_path`, `tools.define` | – |
-| `TOOL_VERSION_UNMET` | Module {module} needs another version of a host tool: {tools} | P1 | – | `tools.detect`, `tools.set_path` | – |
-| `TOOL_REFUSED` | Module {module} needs a host tool whose path this node refused: {tools} | P1 | – | `tools.set_path`, `tools.detect` | – |
+| `TOOL_NOT_FOUND` | Module {module} needs a host tool this node does not have: {tools} | P1 | – | `tools.detect`, `tools.define` | – |
+| `TOOL_VERSION_UNMET` | Module {module} needs another version of a host tool: {tools} | P1 | – | `tools.detect` | – |
+| `TOOL_REFUSED` | Module {module} needs a host tool whose path this node refused: {tools} | P1 | – | `tools.detect` | – |
 | `FOLDER_UNAVAILABLE` | Module {module} needs folders this node does not provide (unmapped, another access, refused by the node, or awaiting the owner's signature) | P1 | – | `settings.folders.update` | – |
 | `SANDBOX_BACKEND_MISSING` | The agent on this node cannot sandbox module processes | P1 | – | – | – |
 | `CAPABILITY_NOT_ENFORCED` | The node's sandbox cannot enforce {capability}, which module {module} needs | P1 | – | – | – |

@@ -26,7 +26,8 @@ class FolderError(ValueError):
 
 
 def registry(db: DB) -> dict:
-    return db.get_setting(REGISTRY, {}) or {}
+    from .settings import fleet_value
+    return fleet_value(db, REGISTRY) or {}
 
 
 def check_path(path: str, os_: str | None) -> str:

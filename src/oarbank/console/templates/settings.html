@@ -1,24 +1,34 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m with context %}
+{% import "_settings.html" as S with context %}
 {% block title %}Settings · Oarbank{% endblock %}
 {% block body %}
 <h1>Settings</h1>
-<div class="grid dense stack">
-<div class="card">
-  <b>Notifications (ntfy)</b>
-  {% call m.op_form("settings.notifications.update", "ntfy", "Save…", inline=False) %}
-    <div class="kv small">
-      <span>topic URL</span><input name="ntfy_url" aria-label="ntfy topic URL" value="{{ (s.ntfy.url if s.ntfy else '') or '' }}" placeholder="https://ntfy.sh/your-secret-topic" style="width:100%">
-      <span>token</span><input name="ntfy_token" aria-label="ntfy token" value="{{ s.ntfy.token if s.ntfy and s.ntfy.token else '' }}" style="width:100%">
-      <span>click link</span><input name="click_base" aria-label="click link base URL" value="{{ s.ntfy.click_base if s.ntfy and s.ntfy.click_base else '' }}" placeholder="https://oarbank.<tailnet>.ts.net" style="width:100%">
-    </div>
+<nav class="row small mod-tabs-nav" aria-label="settings sections"><a href="#node-defaults">Node defaults</a><a href="#notifications">Notifications</a><a href="#access">Access</a><a href="#verification">Data and verification</a><a href="#tools">Host tools</a><a href="#folders">Folders</a><a href="#origins">Dataset origins</a><a href="#releases">Releases</a><a href="#job-modules">Job modules</a></nav>
+
+<h2 id="node-defaults">Node defaults</h2>
+<p class="small mut">Every node ({{ fs.nodes }}) inherits these unless its group or the node itself sets its own; built-in groups
+({{ fs.groups | map(attribute='name') | join(', ') }}) apply by system and coordinator machine. Saving shows which nodes the
+change reaches and which keep their own value, before anything is written.</p>
+<div class="settings-sections">
+{% for sec in fs.node_defaults %}{{ S.section_form(sec, "fleet", "", "fleet", "/settings", "the fleet", explain) }}{% endfor %}
+</div>
+
+<div class="settings-sections">
+{% for sec in fs.fleet %}{{ S.section_form(sec, "fleet", "", "fleet", "/settings", "the fleet", explain) }}
+{% if sec.id == 'notifications' %}<section class="card small" aria-labelledby="h-token"><h2 id="h-token">ntfy access token</h2>
+  <p class="mut">Write-only: it is stored encrypted and never shown again, only its fingerprint. Leave it unset for a public topic.</p>
+  <p>{% if s.ntfy_token.set %}<span class="chip ok">set</span> <span class="mono">{{ s.ntfy_token.fingerprint }}</span> <span class="mut">by {{ s.ntfy_token.set_by }} {{ s.ntfy_token.set_at | ago }}</span>{% else %}<span class="chip">not set</span>{% endif %}</p>
+  {% call m.op_form("settings.secrets.set", "ntfy_token", "Set token", inline=False, confirm="Set the ntfy token?") %}
+    <label for="ntfy-token">New token</label> <input id="ntfy-token" name="secret" type="password" autocomplete="off" required>
   {% endcall %}
+  {% if s.ntfy_token.set %}{{ m.op_form("settings.secrets.clear", "ntfy_token", "Clear token", cls="danger", confirm="Clear the ntfy token? Notifications go without it.") }}{% endif %}
+</section>{% endif %}
+{% if sec.id == 'access' %}<p class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page.</p>{% endif %}
+{% endfor %}
 </div>
-<div class="card">
-  <b>Access</b>
-  <div class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page. Host names the console and the
-  admin API answer to besides localhost (the remote mode): setting <span class="mono">console_hosts</span>, a JSON list.</div>
-</div>
+
+<div class="grid dense stack">
 <div class="card wide" id="tools">
   <b>Host tools</b>
   <div class="small mut">Modules ask for a host tool by id with the versions they accept (<span class="mono">[sandbox].tools =
@@ -57,7 +67,7 @@
     <span class="mut">Saving replaces the tool's extra patterns; releases are rebuilt with the definitions.</span>
   {% endcall %}</details>
 </div>
-<div class="card">
+<div class="card" id="folders">
   <b>Folders</b>
   <div class="small mut">Modules ask for folders by id (<span class="mono">[sandbox].folders</span>): an input folder their runners
   may read, or an outbox they may only write new files into. This registry says where each folder is on each node; the node checks
@@ -83,16 +93,16 @@
       <textarea name="nodes" rows="3" class="mono" style="width:100%" placeholder="{% for nid, n in s.nodes.items() %}{{ nid }}=/path/on/{{ n.hostname }}&#10;{% endfor %}"></textarea></label>
   {% endcall %}</details>
 </div>
-<div class="card">
+<div class="card" id="origins">
   <b>Dataset origins</b>
   <div class="small mut">Datasets may name public https origins for their files (model weights, reference data): nodes download
   from them and check each file's sha256, and the coordinator fetches a file only when every origin fails for a node. Restrict the
   hosts here (<span class="mono">example.org</span>, <span class="mono">*.example.org</span>, an optional <span class="mono">:port</span>);
   none admits any public host.</div>
-  <div class="small">{% for h in (s.dataset_origins or {}).get('hosts') or [] %}<span class="chip mono">{{ h }}</span> {% else %}<span class="mut">any public https host</span>{% endfor %}</div>
+  <div class="small">{% for h in s.dataset_origins or [] %}<span class="chip mono">{{ h }}</span> {% else %}<span class="mut">any public https host</span>{% endfor %}</div>
   <details class="small"><summary>Change…</summary>
   {% call m.op_form("settings.origins.update", "dataset_origins", "Review…", inline=False) %}
-    <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ ((s.dataset_origins or {}).get('hosts') or []) | join('\n') }}</textarea></label>
+    <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ (s.dataset_origins or []) | join('\n') }}</textarea></label>
   {% endcall %}</details>
 </div>
 <div class="card wide" id="releases">
@@ -127,15 +137,7 @@
       placeholder='{"dataset_id": "...", "kind": "...", "module": "...", "meta": {...}, "files": [{"path": "...", "digest": "...", "size": 0}]}'></textarea>
   {% endcall %}</details>
 </div>
-<div class="card">
-  <b>Other settings</b>
-  {% call m.op_form("settings.update", "", "Set…", inline=False) %}
-    <div class="small mut">A setting without its own control (e.g. <span class="mono">replica_rate</span>). The value is JSON.</div>
-    <label class="small">key <input name="target_input" class="mono" required></label>
-    <label class="small">value <input name="pj.value" class="mono" required></label>
-  {% endcall %}
-</div>
-<div class="card wide">
+<div class="card wide" id="job-modules">
   <b>Job modules</b>
   <table class="small"><tr><th>module</th><th>v</th><th>stages</th><th>requires</th><th>host</th><th class="actions"><span class="sr-only">actions</span></th></tr>
   {% for x in modules %}<tr><td class="nowrap"><a href="/modules/{{ x.name }}">{{ x.name }}</a></td><td class="nowrap">{{ x.version }}</td><td>{{ x.stages | join(', ') }}</td><td>{{ x.requires | join(', ') }}</td>

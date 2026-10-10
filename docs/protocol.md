@@ -200,7 +200,7 @@ their process groups, deletes their workspaces, and does not report them.
 **Directives** (the answer to hello and to every heartbeat):
 ```json
 {"node_id": "n_…", "now": 1790000010.4, "desired_state": "active|paused|draining", "lifecycle": "enrolled|ready|quarantined|retired",
- "limits": {…Limits…}, "policy": {…Policy…}, "heartbeat_s": 10,
+ "limits": {…Limits…}, "policy": {…Policy…}, "settings_rev": 42, "heartbeat_s": 10,
  "release": {"release_id": "r_…", "url": "/v1/releases/r_….tar.gz", "sha256": "…", "statement": "…", "signature": "…"},
  "release_pubkey": null, "prefetch": ["tool:example-1.0", "scene:atrium"], "run_doctor": false, "recertify": false,
  "cancel": [125], "revoke": [126], "run_probe": false, "send_processes": false, "journal_ack": 41,
@@ -704,7 +704,19 @@ timeout, retry and platforms; its envelope names the stage, except the default s
 
 ## Limits and node policy
 
-**Limits** (user caps): every key is optional, and a missing key or `null` means uncapped (the default):
+Both are the node's complete effective settings (docs/design/settings.md): the coordinator resolves every key (its
+default, the fleet's value, the node's groups', the node's own) and sends every key in every hello and heartbeat reply,
+with `settings_rev`, the revision at which they last changed. The agent checks each key against its table (generated
+from the coordinator's registry): a value of the wrong type or out of range, a missing key or one this agent does not
+know is refused, keeps its previous value (before the first heartbeat: the table's default) and is reported in the next
+heartbeat:
+```json
+"settings": {"applied_rev": 42, "rejected": [{"key": "job_mem_gb", "reason": "expected a number, got \"abc\""}]}
+```
+Owners change them with `settings.apply` at the fleet, a group or a node; there is no per-node copy to edit.
+
+**Limits** (user caps): every key is present; `null` means uncapped (the default). Every scope's cap applies and the
+lowest wins:
 ```json
 {"cpu_cores": null, "mem_gb": null, "jobs": null, "vm_mem_gb": null, "vm_cpus": null, "disk_gb": null,
  "staging_mbps": null, "schedule": null, "enforce": "soft"}
@@ -721,17 +733,17 @@ timeout, retry and platforms; its envelope names the stage, except the default s
  "nice": 10, "hard_limits": false, "disabled_services": ["example/vm"], "module_settings": {"example": {…}},
  "protection": {"schema": 1, "node": {"mode": "moderate"}, "rule": [ … ]}}
 ```
-- **Defaults** come from the node's hardware when it joins (`config.policy_defaults`: `os_reserve_gb` is 4 up to
-  32 GB of RAM, 8 from 96 GB, else 6). `nodes.set_policy` takes `{"patch": {…}}` and, to put settings back to those
-  defaults, `"reset": ["<key>", …]` or `"reset": "all"` (every setting but `protection` and `module_settings`).
+- **Defaults** come from the settings registry; `os_reserve_gb`'s is computed from the node's RAM (4 GB up to 32 GB,
+  8 GB from 96 GB, else 6), so it follows the hardware the node reports. Nothing is copied at enrolment.
 - **`screen_sharing_present`** (default `true`): a macOS Screen Sharing session counts as someone using the machine
   even without input.
 - **`mem_in_use_bound`** (default `true`): the memory for jobs never exceeds what the machine has available now (see
   Capacity and host protection); `false` leaves the reserves alone.
 - **`disabled_services`** sets a node's role. Changing it re-doctors and re-certifies the node.
-- **`module_settings.<module>`** holds what a module's services read.
-- **`protection`** is owner-set host protection (schema 1). The console edits it with versions, restore and
-  canary; see docs/design/protection.md.
+- **`module_settings.<module>`** holds what a module's runners and services read on this node (the setting
+  `module.node_settings`, set per module).
+- **`protection`** is owner-set host protection (schema 1), the node's own section (`nodes.protection_json`). The
+  console edits it with versions, restore and canary; see docs/design/protection.md.
 - **`hard_limits`** (default `false`) turns each job's reservation (`resources.cpu`, `resources.mem_gb`) into hard
   limits where the OS has them: a cgroup v2 leaf on Linux (when systemd delegated the agent's cgroup), the Job
   Object on Windows; macOS has none. A job over its memory limit fails with `oom`, the job's fault.

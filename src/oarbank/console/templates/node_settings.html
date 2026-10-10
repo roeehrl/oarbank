@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% import "_settings.html" as S with context %}
+{% block title %}{{ n.hostname }} settings · Oarbank{% endblock %}
+{% block body %}
+{% include "_node_header.html" %}
+<div class="card small settings-intro">
+  <div class="row"><span class="chip {{ applied.tone }}">{{ applied.text }}</span>
+    <span class="mut">Groups: {{ groups | join(', ') or 'none' }}</span></div>
+  <p class="mut" style="margin:6px 0 0">Each setting shows the value in effect and where it comes from. This node inherits the
+  default, the fleet's value and its groups' unless you override a setting here; Reset to inherited deletes this node's
+  value, so later fleet changes reach it again. <a href="/settings#node-defaults">Fleet node defaults</a></p>
+</div>
+<div class="settings-sections">
+{% for sec in sections %}{{ S.section_form(sec, "node", n.node_id, "node:" ~ n.node_id, "/nodes/" ~ n.node_id ~ "/settings", n.hostname, explain) }}{% endfor %}
+</div>
+{% if module_settings %}<section class="card small" aria-labelledby="h-modset"><h2 id="h-modset">Module settings on this node</h2>
+<p class="mut">Handed to each module's runners and services here (<span class="mono">OARBANK_SETTINGS_FILE</span>); set with
+<code>oarbank settings set module.node_settings '{…}' --module &lt;module&gt; --node {{ n.hostname }}</code>.</p>
+<table class="small"><tr><th scope="col">module</th><th scope="col">settings</th></tr>
+{% for mod, v in module_settings | dictsort %}<tr><td>{{ mod }}</td><td class="mono">{{ v | tojson }}</td></tr>{% endfor %}</table></section>{% endif %}
+{% endblock %}

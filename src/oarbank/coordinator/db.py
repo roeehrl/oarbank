@@ -10,8 +10,6 @@ from . import clock
 from pathlib import Path
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT);
-
 CREATE TABLE IF NOT EXISTS enrollments (
   enrollment_id TEXT PRIMARY KEY, hostname TEXT, facts_json TEXT, peer_ip TEXT,
   ts_node_id TEXT, status TEXT NOT NULL,            -- pending|approved|claimed|rejected
@@ -29,7 +27,9 @@ CREATE TABLE IF NOT EXISTS nodes (
   agent_version TEXT, release_id TEXT, boot_id TEXT,
   cert_generation INT DEFAULT 0, cert_release TEXT, cert_os_version TEXT, cert_at REAL,
   platform TEXT, os TEXT, arch TEXT, os_version TEXT,   -- from the agent's facts (spec/platforms.md)
-  limits_json TEXT DEFAULT '{}', policy_json TEXT DEFAULT '{}',
+  protection_json TEXT,            -- the owner's protection section (protection.py; its versions: protection_versions)
+  settings_json TEXT, settings_digest TEXT, settings_rev INT,   -- the effective policy and caps the agent gets (settings/apply.py)
+  settings_applied_rev INT, settings_rejected_json TEXT,         -- what the agent reports it applied, and refused
   last_heartbeat_at REAL, last_hello_at REAL, capacity_json TEXT, telemetry_json TEXT,
   ready_datasets_json TEXT DEFAULT '[]', doctor_json TEXT, doctor_at REAL,
   breaker_failures INT DEFAULT 0, quarantine_reason TEXT, created_at REAL,
@@ -270,7 +270,9 @@ class _TimedLock:
 
 # Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
 ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
-                 "nodes": {"tools_json": "TEXT", "want_detect": "INT DEFAULT 0"}}
+                 "nodes": {"protection_json": "TEXT", "settings_json": "TEXT", "settings_digest": "TEXT",
+                           "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
+                           "tools_json": "TEXT", "want_detect": "INT DEFAULT 0"}}
 
 
 def _ensure_columns(conn, table: str, cols: dict) -> None:
@@ -302,19 +304,24 @@ class DB:
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
+            from .settings import store as settings_store
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
-            self.conn.executescript("BEGIN;" + SCHEMA + ACCESS_SCHEMA + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
+            self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + ACCESS_SCHEMA + COORD_BUILDS_SCHEMA
+                                    + JOIN_SCHEMA + "COMMIT;")
             for table, cols in ADDED_COLUMNS.items():
                 _ensure_columns(self.conn, table, cols)
-            # one-shot conversions at upgrade (docs/design/host-tools.md, "Migration")
-            from .statements import migrate as statements_migrate
-            from .tools import migrate_registry
-            self.conn.execute("BEGIN")
-            migrate_registry(self.conn)
-            statements_migrate(self.conn)
-            self.conn.execute("COMMIT")
+            settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
+        from .settings import migrate as settings_migrate
+        settings_migrate.run(self)              # a home made before the settings model: converted once
+        # host tools (docs/design/host-tools.md, "Migration"): the old tool registry becomes tool definitions, and the
+        # folder statements node statements
+        from .statements import migrate as statements_migrate
+        from .tools import migrate_registry
+        with self.tx():
+            migrate_registry(self)
+            statements_migrate(self)
 
     # -- low level ---------------------------------------------------------
     # Stored file paths are relative to the coordinator's home (the database's directory) whenever the file is inside
@@ -390,13 +397,13 @@ class DB:
         tmp.replace(dest)
         return dest
 
-    # -- settings ----------------------------------------------------------
-    def get_setting(self, key, default=None):
-        r = self.one("SELECT value_json FROM settings WHERE key=?", (key,))
+    # -- system state (machine state, never owner settings: those are settings/) ------------------------------------
+    def get_state(self, key, default=None):
+        r = self.one("SELECT value_json FROM system_state WHERE key=?", (key,))
         return json.loads(r["value_json"]) if r else default
 
-    def set_setting(self, key, value):
-        self.x("INSERT INTO settings(key,value_json) VALUES(?,?) "
+    def set_state(self, key, value):
+        self.x("INSERT INTO system_state(key,value_json) VALUES(?,?) "
                "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (key, json.dumps(value)))
 
     # -- events ------------------------------------------------------------

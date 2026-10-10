@@ -68,25 +68,30 @@ def test_preview_then_apply_bound_to_a_plan(db, api):
 
 
 def test_plan_drift_returns_409_with_a_fresh_plan(db, api):
-    p1 = op(api, "settings.notifications.update", {"target": "ntfy", "params": {"url": "https://a"}, "dry_run": True}).json()["plan"]
-    p2 = op(api, "settings.notifications.update", {"target": "ntfy", "params": {"url": "https://b"}, "dry_run": True}).json()["plan"]
-    assert op(api, "settings.notifications.update", {"plan_id": p2["plan_id"], "reason": "b first"}).status_code == 200
-    r = op(api, "settings.notifications.update", {"plan_id": p1["plan_id"], "reason": "stale"})
+    url = lambda u: {"params": {"changes": [{"scope": "fleet", "key": "ntfy.url", "value": u}]}}
+    p1 = op(api, "settings.apply", {**url("https://a"), "dry_run": True}).json()["plan"]
+    p2 = op(api, "settings.apply", {**url("https://b"), "dry_run": True}).json()["plan"]
+    assert p1["tier"] == "T2"                                         # a fleet change of a T1 key
+    assert op(api, "settings.apply", {"plan_id": p2["plan_id"], "reason": "b first"}).status_code == 200
+    r = op(api, "settings.apply", {"plan_id": p1["plan_id"], "reason": "stale"})
     assert r.status_code == 409 and r.json()["error"] == "plan_drift"
     fresh_plan = r.json()["plan"]
-    assert fresh_plan["versions"]["setting:ntfy"] == 1 and fresh_plan["params"]["url"] == "https://a"
-    assert op(api, "settings.notifications.update", {"plan_id": fresh_plan["plan_id"], "reason": "reviewed"}).status_code == 200
-    assert db.get_setting("ntfy")["url"] == "https://a"
+    assert fresh_plan["versions"]["settings"] == 1 and fresh_plan["params"]["changes"][0]["value"] == "https://a"
+    assert op(api, "settings.apply", {"plan_id": fresh_plan["plan_id"], "reason": "reviewed"}).status_code == 200
+    from oarbank.coordinator.settings import fleet_value
+    assert fleet_value(db, "ntfy.url") == "https://a"
 
 
 def test_if_match_on_versioned_resources(db, api):
     node = certify(db, enrolled_node(db)[1])
-    r = op(api, "nodes.set_caps", {"target": node["node_id"], "params": {"patch": {"jobs": 2}}}, if_match="7")
+    cap = lambda n: {"target": node["node_id"], "params": {"changes": [{"scope": "node", "scope_id": node["node_id"],
+                                                                       "key": "jobs", "value": n}]}}
+    r = op(api, "settings.apply", cap(2), if_match="7")
     assert r.status_code == 412 and r.json()["error"] == "version_mismatch"
-    r = op(api, "nodes.set_caps", {"target": node["node_id"], "params": {"patch": {"jobs": 2}}}, if_match="0")
-    assert r.status_code == 200 and r.json()["versions"] == {f"node:{node['node_id']}:limits": 1}
-    r = op(api, "nodes.set_caps", {"target": node["node_id"], "params": {"patch": {"jobs": 3}}})   # T0: If-Match optional
-    assert r.status_code == 200 and r.json()["versions"][f"node:{node['node_id']}:limits"] == 2
+    r = op(api, "settings.apply", cap(2), if_match="0")
+    assert r.status_code == 200 and r.json()["versions"] == {"settings": 1}
+    r = op(api, "settings.apply", cap(3))                             # a node's cap is T0: If-Match optional
+    assert r.status_code == 200 and r.json()["versions"]["settings"] == 2
 
 
 def test_idempotency_keys_for_creations(db, api):
@@ -148,7 +153,7 @@ def test_off_host_digest_copy_detects_a_rewritten_and_resigned_chain(db, api, tm
     signer = Signer(base64.b64encode(os.urandom(32)).decode())
     dest = tmp_path / "offhost"
     dest.mkdir()
-    db.set_setting("audit_digest_copy", [sys.executable, "-c", "import shutil, sys; shutil.copy(*sys.argv[1:])", "{file}",
+    db.set_state("audit_digest_copy", [sys.executable, "-c", "import shutil, sys; shutil.copy(*sys.argv[1:])", "{file}",
                                          str(dest / "digests.jsonl")])
     d = audit.write_digest(db, signer)
     audit.export_digest(db, d)

@@ -37,7 +37,7 @@ BLOB_MAX_BYTES = int(os.environ.get("OARBANKD_BLOB_MAX_BYTES", str(256 * 1024 **
 UPLOAD_PARTIAL_MAX_BYTES = int(os.environ.get("OARBANKD_UPLOAD_PARTIAL_MAX_BYTES", str(1024 ** 4)))
 DISK_RESERVE_BYTES = 2 * 1024 ** 3          # an upload never takes the coordinator's disk below this
 PARTIAL_MAX_AGE_S = 7 * 86400
-ORIGIN_SETTING = "dataset_origins"          # {"hosts": [host patterns]}: the operator's origin host policy
+ORIGIN_SETTING = "dataset_origins"          # [host patterns]: the operator's origin host policy (a fleet setting)
 
 
 class BlobError(Exception):
@@ -223,7 +223,8 @@ def release(db: DB, digests) -> int:
 # ---------------------------------------------------------------------------- origins
 
 def origin_policy(db: DB) -> list[str]:
-    return list((db.get_setting(ORIGIN_SETTING) or {}).get("hosts") or [])
+    from .settings import fleet_value
+    return list(fleet_value(db, ORIGIN_SETTING) or [])
 
 
 def check_origins(db: DB, files: list) -> str | None:

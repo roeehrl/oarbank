@@ -1,0 +1,91 @@
+{# Settings rows and sections (docs/design/settings.md, "The console"). Every setting renders through setting_row: its
+   label and unit, one line of help, the raw key (copyable, never the label), the source badge, Override or Reset to
+   inherited, a changed bar with its text, the merged values' errors, the node's applied state and an Explain
+   disclosure with the whole chain. A section is one explicit-save form (settings.apply); a fleet or group change opens
+   the preview of the nodes it reaches before it saves. The "Override" box shows the field by CSS alone (app.css). #}
+
+{% import "_macros.html" as m with context %}
+
+{% macro value_input(r, described) -%}
+{% set i = r.input %}{% set k = r.key %}
+{% if i.kind == 'checkbox' %}<input type="hidden" name="v.{{ k }}" value="0"><label class="small"><input type="checkbox" id="v-{{ k }}" name="v.{{ k }}" value="1"{% if r.form_value %} checked{% endif %} aria-describedby="{{ described }}"> on</label>
+{%- elif i.kind == 'select' %}<select id="v-{{ k }}" name="v.{{ k }}" aria-describedby="{{ described }}">{% for c in i.choices %}<option{% if c == r.form_value %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+{%- elif i.kind == 'list' %}<textarea id="v-{{ k }}" name="v.{{ k }}" rows="2" class="mono" aria-describedby="{{ described }}" placeholder="one per line">{{ r.form_value }}</textarea>
+{%- elif i.kind == 'schedule' %}{% set sv = (r.own.value if r.own else r.inherited.value) or {} %}<span class="row"><input type="time" id="v-{{ k }}" name="v.{{ k }}.start" value="{{ sv.start or '22:00' }}" aria-label="{{ r.label }} start" aria-describedby="{{ described }}"> to <input type="time" name="v.{{ k }}.end" value="{{ sv.end or '07:30' }}" aria-label="{{ r.label }} end">
+  {% for d in range(7) %}<label class="small"><input type="checkbox" name="v.{{ k }}.days" value="{{ d }}"{% if not sv.days or d in sv.days %} checked{% endif %}>{{ ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d] }}</label>{% endfor %}</span>
+{%- else %}<input id="v-{{ k }}" name="v.{{ k }}" value="{{ r.form_value }}"{% if i.kind == 'number' %} type="text" inputmode="decimal"{% elif i.kind == 'url' %} type="url" class="wide-input"{% endif %}{% if i.nullable %} placeholder="none"{% endif %} aria-describedby="{{ described }}"{% if r.form_errors %} aria-invalid="true"{% endif %}>{% if r.unit %} <span class="mut">{{ r.unit }}</span>{% endif %}
+{%- endif %}
+{%- endmacro %}
+
+{% macro explain_table(r) -%}
+<table class="small explain-chain"><tr><th scope="col">Scope</th><th scope="col">Value</th><th scope="col">Role</th><th scope="col">Changed</th></tr>
+{% for x in r.chain %}<tr><td>{{ x.name }}{% if x.builtin %} <span class="mut">(built in)</span>{% endif %}</td>
+  <td class="mono">{{ x.value_text }}{% if x.reason %} <span class="mut">({{ x.reason }})</span>{% endif %}{% if x.enforced %} <span class="chip warn">locked</span>{% endif %}</td>
+  <td>{% if x.role == 'winner' %}<span class="chip ok">in effect</span>{% elif x.role == 'shadowed' %}<span class="chip">overridden below</span>{% elif x.role == 'ignored' %}<span class="chip warn">ignored: locked above</span>{% elif x.role == 'merged' %}<span class="chip">also applies ({{ r.merge }})</span>{% else %}<span class="mut">–</span>{% endif %}</td>
+  <td class="mut">{% if x.rev %}rev {{ x.rev }} · {{ x.by }} · {{ x.at | ago }}{% if x.comment %} · “{{ x.comment }}”{% endif %}{% elif x.by == 'system' %}system{% endif %}</td></tr>
+{% endfor %}</table>
+{%- endmacro %}
+
+{% macro setting_row(r, explain="") -%}
+{% set k = r.key %}{% set described = 'h-' ~ k ~ ' src-' ~ k ~ (' e-' ~ k if r.form_errors or r.errors else '') %}
+<div class="setting{{ ' changed' if r.overridden_here }}{{ ' invalid' if r.form_errors }}" id="s-{{ k }}">
+  <input type="hidden" name="keys" value="{{ k }}"><input type="hidden" name="t.{{ k }}" value="{{ r.input.kind }}">
+  {% if r.overridden_here %}<input type="hidden" name="had.{{ k }}" value="1"><input type="hidden" name="cur.{{ k }}" value="{{ r.own.value | tojson | forceescape }}">{% endif %}
+  <div class="setting-head row">
+    <label for="v-{{ k }}" class="setting-label"><b>{{ r.label }}</b>{% if r.unit %} <span class="mut">({{ r.unit }})</span>{% endif %}</label>
+    <span class="chip{{ ' acc' if r.overridden_here }}" id="src-{{ k }}">{{ r.badge }}</span>
+    {% if r.overridden_here %}<span class="chip acc">changed here</span>{% endif %}
+    <span class="sp"></span><code class="mono small" id="key-{{ r.scope }}-{{ k }}">{{ k }}</code><button type="button" class="small" data-copy="key-{{ r.scope }}-{{ k }}" aria-label="Copy the key {{ k }}">Copy</button>
+  </div>
+  <div class="small mut" id="h-{{ k }}">{{ r.help }}{% if r.note %} <b>{{ r.note }}</b>{% endif %}{% if r.merge_note %} ({{ r.merge_note }}){% endif %}{% if r.hw_note %} · {{ r.hw_note }}{% endif %}</div>
+  {% if r.form_errors %}<div class="field-error small" id="e-{{ k }}"><span class="sr-only">Error:</span> {{ r.form_errors | join('; ') }}</div>
+  {% elif r.errors %}<div class="field-error small" id="e-{{ k }}"><span class="sr-only">Error:</span> on this node: {{ r.errors | join('; ') }}</div>{% endif %}
+  <div class="setting-value row">
+    {% if r.locked_by %}
+    <span class="mono">{{ r.value_text }}</span>
+    <button type="button" class="small" aria-label="Locked by {{ r.locked_by.name }} settings. Change it there." title="Locked by {{ r.locked_by.name }} settings. Change it there.">Locked</button>
+    {% else %}
+    <span class="inh-text mono">{{ r.value_text if r.overridden_here else r.inherited.text }}</span>
+    <label class="small ovr-toggle"><input type="checkbox" name="o.{{ k }}" value="1" data-override{% if r.overridden_here or r.typed %} checked{% endif %}> {{ 'Set here' if r.overridden_here else 'Override' }}</label>
+    <span class="ovr-input">{{ value_input(r, described) }}</span>
+    {% if r.overridden_here %}<button name="reset" value="{{ k }}" class="small" title="Delete this value: {{ r.label | lower }} goes back to {{ r.inherited.text }} ({{ r.inherited.badge }})">Reset to inherited</button>
+    <span class="small mut">inherits {{ r.inherited.text }} · {{ r.inherited.badge }}</span>{% endif %}
+    {% endif %}
+  </div>
+  <div class="row small">
+    {% if r.applied %}<span class="chip {{ r.applied.tone }}">{{ r.applied.text }}</span>{% endif %}
+    {% if r.override_count is not none %}{% if r.override_count %}<a href="/settings/overrides?key={{ k }}">Overridden on {{ r.override_count }} node{{ 's' if r.override_count != 1 }}</a>{% else %}<span class="mut">no node overrides it</span>{% endif %}{% endif %}
+    {% if r.scope == 'node' and not r.overridden_here and not r.locked_by %}<a href="/settings?explain={{ k }}#s-{{ k }}">Configure fleet default</a>{% endif %}
+  </div>
+  <details class="small explain"{% if explain == k %} open{% endif %}><summary>Explain</summary>
+    <p class="small">In effect: <b class="mono">{{ r.value_text }}</b> from <b>{{ r.badge }}</b>{% if r.locked_by %}, locked by {{ r.locked_by.name }}{% endif %}.
+      {% if r.merge == 'min' %}Every scope's value applies and the lowest wins.{% elif r.merge == 'max' %}Every scope's value applies and the highest wins.{% else %}The most specific value set wins.{% endif %}
+      Default: {{ r.default.text }}{% if r.default.reason %} ({{ r.default.reason }}){% endif %}.</p>
+    {{ explain_table(r) }}
+  </details>
+</div>
+{%- endmacro %}
+
+{# One section: an explicit-save form. `page` lets a refused save come back here with its error summary. #}
+{% macro section_form(sec, scope, scope_id, page, return_to, subject, explain="") -%}
+<section class="card settings-section" id="{{ sec.id }}" aria-labelledby="h-{{ scope }}-{{ sec.id }}">
+{% call m.op_form("settings.apply", scope_id or scope, "Save", inline=False, button=False, return_to=return_to ~ '?saved=' ~ sec.id ~ '#' ~ sec.id, novalidate=True,
+                  tier=('T1' if scope == 'node' and (sec.rows + sec.advanced) | selectattr('danger', 'equalto', 'T1') | list else none),
+                  confirm=('Save ' ~ sec.title | lower ~ ' for ' ~ subject ~ '? A change to its services re-checks and re-certifies it.' if scope == 'node' else none)) %}
+  <input type="hidden" name="scope" value="{{ scope }}"><input type="hidden" name="scope_id" value="{{ scope_id }}">
+  <input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="section" value="{{ sec.id }}">
+  <fieldset class="settings-fieldset">
+    <legend id="h-{{ scope }}-{{ sec.id }}"><h2>{{ sec.title }}{% if sec.changed %} <span class="chip acc">{{ sec.changed }} changed here</span>{% endif %}</h2></legend>
+    {% if sec.form_errors %}<div class="error-summary" role="alert" tabindex="-1" data-focus-on-load aria-labelledby="es-{{ scope }}-{{ sec.id }}">
+      <h3 id="es-{{ scope }}-{{ sec.id }}">There is a problem</h3>
+      <ul>{% for e in sec.form_errors %}<li><a href="#v-{{ e.key }}">{{ e.label }}: {{ e.message }}</a></li>{% endfor %}</ul></div>{% endif %}
+    <p class="small mut">{{ sec.blurb }}</p>
+    {% for r in sec.rows %}{{ setting_row(r, explain) }}{% endfor %}
+    {% if sec.advanced %}<details class="advanced"{% if sec.advanced_changed or sec.form_errors or explain in (sec.advanced | map(attribute='key') | list) %} open{% endif %}><summary>Advanced{% if sec.advanced_changed %} · {{ sec.advanced_changed }} changed{% endif %}</summary>
+      {% for r in sec.advanced %}{{ setting_row(r, explain) }}{% endfor %}</details>{% endif %}
+    <div class="row section-save"><span class="small" role="status" aria-live="polite">{% if saved == sec.id and saved_flash %}<span class="chip {{ 'ok' if saved_kind == 'ok' else 'bad' }}">{{ saved_flash }}</span>{% endif %}</span><span class="sp"></span>
+      <button class="pri" title="settings.apply ({{ 'shows the nodes it reaches before it saves' if scope != 'node' else 'this node only' }})"{% if scope != 'node' %} data-busy-label="Preparing preview…"{% endif %}>{{ 'Review and save' if scope != 'node' else 'Save' }} {{ sec.title | lower }}{{ '…' if scope != 'node' }}</button></div>
+  </fieldset>
+{% endcall %}
+</section>
+{%- endmacro %}

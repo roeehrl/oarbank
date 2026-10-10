@@ -15,11 +15,11 @@ machine, and only the machine can see them. So the job is split four ways:
 | Built-in detector | Oarbank | agent code (`builtin_tools.json`) and the coordinator's mirror (`tools.BUILTIN`) | How to find and version-check `jdk` and `python` on each OS |
 | Fleet / group search paths | Admin | `tool_defs` → the release (per OS) | "Also look in `/opt/java/*` on Macs" |
 | Node detection | Agent | `tools` in hello and heartbeats → `nodes.tools_json` | What is installed here, verified, with versions |
-| Node override (choose) | Operator | node-scope value `tool.<id>.path` (interim store, below) → `tool_pins` directive | "Use the JDK 17 it found, not the 21" |
+| Node override (choose) | Operator | the setting `tool.<id>.path` at node scope → `tool_pins` directive | "Use the JDK 17 it found, not the 21" |
 | Node override (add) | Operator, owner-signed | the node statement `oarbank.node/v1` | "Use this path here" (verified before it is granted) |
 | Local hint | Node owner | `<agent home>/tool-hints.json` | Extra candidates only |
 | Module request | Module author; owner approves | manifest `[sandbox].tools`, `module_grants` | Id, version range, arch, trust |
-| Module-on-node pin | Operator | node-scope value `tool.<id>.path` qualified by the module | "minos-gatk uses JDK 17 here even though 21 exists" |
+| Module-on-node pin | Operator | the setting `tool.<id>.path` at node scope, qualified by the module | "minos-gatk uses JDK 17 here even though 21 exists" |
 
 Code: `src/oarbank/coordinator/tools.py` (definitions, overrides, resolution, views, migration), `statements.py` (the
 node statement), `rust/crates/oarbank-agent/src/tools.rs` (detection and grants), `rust/crates/oarbank-core/src/tools.rs`
@@ -113,11 +113,11 @@ when set, so a new range is a new approval). Bootstrap jobs still get no tools.
 
 For each node and module, one installation per request:
 
-1. a path set for **this module on this node** (`tool.<id>.path`, module-qualified, node scope),
-2. a path set for **this node**,
-3. a path set for the node's **platform group**, module-qualified first,
-4. a path set for the **fleet**, module-qualified first,
-5. else the **best detected match**: the node's native arch first, then the highest version that satisfies the
+1. the path set for the tool where the node inherits it: the setting `tool.<id>.path`, resolved by the settings
+   resolver (docs/design/settings.md): the module-qualified chain (fleet, the node's groups by rank, the node) above
+   the plain chain, the most specific value of each winning; so a path set for this module on this node wins first,
+   then one set for the module at a group or the fleet, then one set for the node, then a group's or the fleet's;
+2. else the **best detected match**: the node's native arch first, then the highest version that satisfies the
    request, then the path (ascending).
 
 A pinned path counts only when it names an installation the node reported (by its canonical path, or the path as set)
@@ -140,14 +140,12 @@ request that does not resolve is left out of the file.
   containing one; `/usr/lib/jvm/...` is fine, `/usr` is not), then the detector, and only then is it an installation
   (source `override`). Without the signature a compromised coordinator could point an override at a user's documents.
 
-`tools.set_path` decides the kind at write time: a path among the node's `ok` installations is a choice, any other is
-added.
-
-**Interim store.** Until the phase-1 settings registry merges, the values live in the `tool_path_values` setting
-(rows `{scope: fleet|group|node, scope_id, module, tool, path, kind}`), read only through `tools.node_override(db, node,
-tool, module)` and written only through `tools.set_override` (operation `tools.set_path`). At the merge they become
-`setting_values` rows of key `tool.<id>.path` (module-qualified where set), `node_override` reads them through the
-resolver and `tools.set_path` becomes `settings.apply`; nothing else changes.
+Both are the same setting, written with `settings.apply` (`{"scope": "node", "scope_id": "<node>", "module":
+"<module or empty>", "key": "tool.jdk.path", "value": "/path"}`, or `reset`; `oarbank settings set tool.jdk.path <path>
+--node <node> [--module <module>]`). A node value whose path the node did not report as an installation it found (any
+source but `override`) goes into its statement; the key's effect hook rebuilds the statements on every save. At fleet
+and group scope a path is always a choice each node makes among its own installations: a path to add everywhere is a
+search path.
 
 ## The node statement
 
@@ -186,14 +184,14 @@ node** and **Add a search path for <OS>**.
 | op `tools.define {target: id, params: {kind?, search: {fleet\|darwin\|linux\|windows: [patterns]}, version?: {args, regex}}}` (T2) | Define a tool or replace a built-in's extra patterns; rebuilds releases |
 | op `tools.delete {target: id}` (T2) | Delete a definition (a built-in loses only its extras) |
 | op `tools.detect {target: node}` (T0) | Ask the node to detect again |
-| op `tools.set_path {target: node, params: {tool, module?, path\|null}}` (T1) | Set or reset a tool's path on a node (interim; `settings.apply` after phase 1) |
+| op `settings.apply` with key `tool.<id>.path` (T1 at a node, T2 at a group or the fleet) | Set or reset a tool's path |
 | op `nodes.sign_statement {target: node, params: {statement, signature}}` (T1) | Attach the owner's signature to the node statement |
 | `GET /api/v1/tools?node=&module=` | Definitions, overrides, and the detection and resolution matrix (per node, or a module's Nodes matrix) |
 | `GET /api/v1/statements` | Each node's statement and whether it is signed |
 
 CLI: `oarbank tools [--node N] [--module M] [--json]`, `oarbank tools detect <node>`, `oarbank tools define <id>
 --search <scope>=<pattern> [--kind executable --version-args ... --version-regex ...]`, `oarbank tools delete <id>`,
-`oarbank tools set-path <node> <tool> <path>|--reset [--module M]`, `oarbank node sign <node>`; `oarbank node show`
+`oarbank settings set|reset tool.<id>.path ... --node <node> [--module M]`, `oarbank node sign <node>`; `oarbank node show`
 lists the node's tools and each module's resolution.
 
 ## Console
@@ -236,8 +234,8 @@ One shot, at upgrade (`DB.__init__`):
 
 ## Not built here
 
-- The settings store itself (phase 1): the interim `tool_path_values` store above is replaced at the merge.
-- Owner groups with ranks and their group-scope pinned paths and search paths beyond the platform groups (phase 4).
+- Owner groups with ranks (phase 4): `tool.<id>.path` already resolves through every group a node is in, but search
+  paths are per platform group only.
 - A managed install (a T2 operation with the node owner's consent that downloads a pinned, digest-checked JDK into an
   Oarbank-managed tools directory, Jenkins' auto-installer pattern) (phase 5).
 - An SDK core-version gate for `version` and `arch` (`requires.core >= 2.9`): the SDK's rule for keys older cores

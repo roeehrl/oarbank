@@ -182,55 +182,60 @@ def test_choosing_among_what_was_found_is_a_pin_and_adding_a_path_goes_into_the_
     req = {"id": "jdk", "version": ">=17", "arch": "any"}
     assert tools.resolve_for(db, fresh(db, mac), name, req)["installation"]["path"] == "/opt/jdk-21"
     nid = mac["node_id"]
-    out = run_op(db, "tools.set_path", nid, params={"tool": "jdk", "path": "/opt/jdk-17", "module": name})
-    assert out["result"]["value"]["kind"] == "choose" and not out["result"]["statement"]
+    path = lambda p, module="": {"changes": [{"scope": "node", "scope_id": nid, "module": module, "key": "tool.jdk.path",
+                                              **({"value": p} if p else {"reset": True})}]}
+    # the module's own pin on this node, through settings.apply (a node change of a T1 key)
+    out = run_op(db, "settings.apply", nid, path("/opt/jdk-17", name))
+    assert "Changes the effective value on 1 node (mac)" in out["result"]["summary"]
     res = tools.resolve_for(db, fresh(db, mac), name, req)
     assert (res["installation"]["path"], res["source"], res["override"]["module"]) == ("/opt/jdk-17", "pinned", name)
+    assert res["override"]["source"] == f"This node · {name}"
     d = core.heartbeat(db, fresh(db, mac), {"attempts": []})
     assert d["tool_pins"] == {name: {"jdk": "/opt/jdk-17"}}
-    assert d["statement"] is None                                      # a choice needs no signature
-    # a path the node did not find: added, so it goes into the node's statement for the owner to sign
-    out = run_op(db, "tools.set_path", nid, params={"tool": "jdk", "path": "/srv/jdks/zulu-17"})
-    assert out["result"]["value"]["kind"] == "add" and out["result"]["statement"]
+    assert d["statement"] is None                                      # a choice among what it found needs no signature
+    assert tools.node_values(db, nid)[0]["kind"] == "choose"
+    # a path the node did not find: it goes into the node's statement for the owner to sign
+    run_op(db, "settings.apply", nid, path("/srv/jdks/zulu-17"))
     st = json.loads(statements.statement(db, nid)["statement"])
     assert st["type"] == "oarbank.node/v1" and st["tools"] == [{"id": "jdk", "module": "", "path": "/srv/jdks/zulu-17"}]
     owner = Ed25519PrivateKey.generate()
-    db.set_setting("release_pubkey", base64.b64encode(owner.public_key().public_bytes_raw()).decode())
+    db.set_state("release_pubkey", base64.b64encode(owner.public_key().public_bytes_raw()).decode())
     stmt = statements.statement(db, nid)["statement"]
     run_op(db, "nodes.sign_statement", nid, params={"statement": stmt, "signature": base64.b64encode(owner.sign(stmt.encode())).decode()})
     assert core.heartbeat(db, fresh(db, mac), {"attempts": []})["statement"]["signature"]
-    # until the node verifies it, the module-qualified pin still wins for the module; other modules get the added path
+    # until the node verifies it, the module's pin still wins for the module; other modules get the added path, refused
     other = tools.resolve_for(db, fresh(db, mac), "", req)
     assert other["status"] == "refused" and "not an installation this node found" in other["detail"]
     report(db, mac, {"jdk": [jdk("/opt/jdk-17", "17.0.12"), jdk("/srv/jdks/zulu-17.0.9", "17.0.9", source="override",
                                                                    given="/srv/jdks/zulu-17")]})
     assert tools.resolve_for(db, fresh(db, mac), "", req)["installation"]["version"] == "17.0.9"
+    statements.refresh(db)                                             # a verified added path stays in the statement
+    assert json.loads(statements.statement(db, nid)["statement"])["tools"][0]["path"] == "/srv/jdks/zulu-17"
     # reset: inherited again (the added path leaves the statement)
-    run_op(db, "tools.set_path", nid, params={"tool": "jdk", "path": None})
+    run_op(db, "settings.apply", nid, path(None))
     assert json.loads(statements.statement(db, nid)["statement"])["tools"] == []
-    for bad in ["relative/jdk", "/opt/jdk-*", "/opt/../etc"]:
-        with pytest.raises(core.ApiError):
-            run_op(db, "tools.set_path", nid, params={"tool": "jdk", "path": bad})
+    for bad in ["relative/jdk", "/opt/jdk-*", "/opt/../etc", "/"]:
+        with pytest.raises(core.ApiError, match="invalid_settings|expected form"):
+            run_op(db, "settings.apply", nid, path(bad))
+    with pytest.raises(core.ApiError, match="no module"):
+        run_op(db, "settings.apply", nid, path("/opt/jdk-17", "nosuchmodule"))
 
 
-def test_group_and_fleet_values_are_inherited_after_the_nodes_own():
-    class R:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def get_setting(self, k, default=None):
-            return self.rows if k == tools.STORE else default
-    rows = [{"scope": "fleet", "scope_id": "", "module": "", "tool": "jdk", "path": "/fleet", "kind": "choose"},
-            {"scope": "group", "scope_id": "darwin", "module": "m", "tool": "jdk", "path": "/group-m", "kind": "choose"},
-            {"scope": "node", "scope_id": "n1", "module": "", "tool": "jdk", "path": "/node", "kind": "add"}]
-    node = {"node_id": "n1", "platform": "darwin-arm64"}
-    pick = lambda rs, n, m: (tools.node_override(R(rs), n, "jdk", m) or {}).get("path")
-    assert pick(rows, node, "m") == "/node"                          # the node's own before a group's module value
-    assert pick(rows, {"node_id": "n2", "platform": "darwin-arm64"}, "m") == "/group-m"
-    assert pick(rows, {"node_id": "n2", "platform": "darwin-arm64"}, "x") == "/fleet"
-    assert pick(rows, {"node_id": "n2", "platform": "linux-amd64"}, "m") == "/fleet"
-    assert pick(rows[2:], {"node_id": "n2"}, "") is None
-    assert tools.statement_tools(R(rows), "n1") == [{"id": "jdk", "module": "", "path": "/node"}]
+def test_a_module_value_beats_a_plain_one_at_any_scope_and_groups_count(db, tmp_path):
+    from helpers import settings_apply
+    r = installed(db, javatoy(tmp_path))
+    name = r["name"]
+    _, mac = enrolled_node(db, "mac")
+    _, box = enrolled_node(db, "box", facts=facts_for("linux-amd64", os_version="6.8"))
+    settings_apply(db, {"scope": "fleet", "key": "tool.jdk.path", "value": "/fleet"},
+                   {"scope": "group", "scope_id": "macOS", "module": name, "key": "tool.jdk.path", "value": "/group-m"},
+                   {"scope": "node", "scope_id": mac["node_id"], "key": "tool.jdk.path", "value": "/node"})
+    pick = lambda n, m: (tools.node_override(db, fresh(db, n), "jdk", m) or {}).get("path")
+    assert pick(mac, name) == "/group-m"                 # the module's chain above the plain one
+    assert pick(mac, "") == "/node" and pick(box, name) == "/fleet" and pick(box, "") == "/fleet"
+    assert tools.pins(db, fresh(db, mac), [name]) == {"": {"jdk": "/node"}, name: {"jdk": "/group-m"}}
+    assert tools.statement_tools(db, mac["node_id"]) == [{"id": "jdk", "module": "", "path": "/node"}]
+    assert tools.statement_tools(db, box["node_id"]) == []      # fleet and group values are choices on each node
 
 
 def test_a_detect_request_reaches_the_agent_once(db):
@@ -265,7 +270,7 @@ def test_the_api_cli_and_console_show_the_matrix(db, tmp_path, capsys):
     sign_in(c, db)
     html = c.get(f"/nodes/{old['node_id']}").text
     assert 'id="tools"' in html and "/usr/lib/jvm/java-11" in html and "TOOL_VERSION_UNMET" in html
-    assert "brew install openjdk@17" in html and 'action="/do/tools.detect"' in html and 'action="/do/tools.set_path"' in html
+    assert "brew install openjdk@17" in html and 'action="/do/tools.detect"' in html and 'value="tool.jdk.path"' not in html and 'action="/do/settings.apply"' in html
     settings = c.get("/settings").text
     assert 'action="/do/tools.define"' in settings and "/Library/Java/JavaVirtualMachines/*/Contents/Home" in settings
     from oarbank.cli import main as cli
@@ -281,14 +286,15 @@ def test_the_api_cli_and_console_show_the_matrix(db, tmp_path, capsys):
 # ------------------------------------------------------------------------------------------------ migration
 
 def test_the_old_tool_registry_becomes_definitions_with_fleet_search_paths(tmp_path):
+    reg = {"java17": {"trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"], "linux": ["/usr/lib/jvm/java-17"]}},
+           "renderer4": {"trust": "read", "paths": {"windows": ["C:\\Renderer\\4\\renderer.exe"]}}}
+    # a home from before the settings model: the old settings table
     path = tmp_path / "old.sqlite3"
-    DB(path)                                              # a coordinator home of an earlier version
+    DB(path)
     con = sqlite3.connect(path)
-    con.execute("DELETE FROM tool_defs")
-    con.execute("INSERT OR REPLACE INTO settings(key, value_json) VALUES('tool_registry', ?)", (json.dumps({
-        "java17": {"trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"], "linux": ["/usr/lib/jvm/java-17"]}},
-        "renderer4": {"trust": "read", "paths": {"windows": ["C:\\Renderer\\4\\renderer.exe"]}}}),))
-    con.execute("INSERT OR REPLACE INTO settings(key, value_json) VALUES('folder_statements', '{}')")
+    con.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT)")
+    con.execute("INSERT INTO settings(key, value_json) VALUES('tool_registry', ?)", (json.dumps(reg),))
+    con.execute("INSERT INTO settings(key, value_json) VALUES('folder_statements', '{}')")
     con.commit()
     con.close()
     db = DB(path)
@@ -296,10 +302,21 @@ def test_the_old_tool_registry_becomes_definitions_with_fleet_search_paths(tmp_p
     assert defs["java17"]["kind"] == "jdk" and defs["java17"]["search"] == {"darwin": ["/opt/homebrew/opt/openjdk@17"],
                                                                              "linux": ["/usr/lib/jvm/java-17"]}
     assert defs["renderer4"]["kind"] == "executable" and defs["renderer4"]["version"]["args"] == ["--version"]
-    assert db.get_setting("tool_registry") is None and db.get_setting("folder_statements") is None
-    assert db.get_setting(statements.KEY) == {}
+    assert db.get_state("folder_statements") is None and db.get_state(statements.KEY) == {}
     cols = {r[1] for r in db.conn.execute("PRAGMA table_info(nodes)")}
     assert {"tools_json", "want_detect"} <= cols
+    # a home from the settings model's first release: the registry kept as a fleet value
+    path2 = tmp_path / "phase1.sqlite3"
+    DB(path2)
+    con = sqlite3.connect(path2)
+    con.execute("INSERT INTO setting_values(scope,scope_id,module,key,value_json,rev,updated_by,updated_at) "
+                "VALUES('fleet','','','tool_registry',?,1,'x',0)", (json.dumps({"samtools": {"paths": {"linux": ["/usr/bin/samtools"]}}}),))
+    con.commit()
+    con.close()
+    db2 = DB(path2)
+    assert tools.definitions(db2)["samtools"]["search"] == {"linux": ["/usr/bin/samtools"]}
+    assert not db2.q("SELECT 1 FROM setting_values WHERE key='tool_registry'")
+
 
 
 def test_resolution_defaults_to_the_current_version_and_every_node(db, tmp_path):
@@ -308,3 +325,12 @@ def test_resolution_defaults_to_the_current_version_and_every_node(db, tmp_path)
     report(db, mac, {"jdk": [jdk("/opt/jdk-21", "21.0.4")]})
     (row,) = tools.resolution(db, r["name"])
     assert row["need"] == "jdk >=17" and row["ok"] == ["mac"] and not row["failed"]
+
+
+def test_the_console_forms_set_a_tool_path_as_a_setting():
+    from oarbank.console import forms
+    f = {"scope": "node", "scope_id": "n_1", "tool": "jdk", "module": "gatk", "path": " /opt/jdk-17 "}
+    assert forms.params_for("settings.apply", f, {}) == {"changes": [
+        {"scope": "node", "scope_id": "n_1", "module": "gatk", "key": "tool.jdk.path", "value": "/opt/jdk-17"}]}
+    assert forms.params_for("settings.apply", {**f, "path": "", "module": ""}, {}) == {"changes": [
+        {"scope": "node", "scope_id": "n_1", "module": "", "key": "tool.jdk.path", "reset": True}]}

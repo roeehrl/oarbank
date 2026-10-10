@@ -2,13 +2,7 @@
 {% import "_macros.html" as m with context %}
 {% block title %}{{ n.hostname }} · Oarbank{% endblock %}
 {% block body %}
-<p class="small"><a href="/explain/node/{{ n.node_id }}">Why is this node (not) taking work?</a></p>
-<div class="row"><h1>{{ n.hostname }}</h1>
-  <span class="chip {{ 'ok' if n.online else 'bad' }}">{{ 'online' if n.online else 'offline' }}</span>
-  <span class="chip">{{ n.lifecycle }}</span><span class="chip">{{ n.desired_state }}</span>
-  {% if n.quarantine_reason %}<span class="chip bad">{{ n.quarantine_reason }}</span>{% endif %}
-  <span class="sp"></span><span class="mut small">{{ [n.node_id, 'agent ' ~ n.agent_version if n.agent_version, 'release ' ~ n.release_id if n.release_id] | select | join(' · ') }}</span>
-</div>
+{% include "_node_header.html" %}
 
 <div class="grid">
 <div class="card">
@@ -27,7 +21,7 @@
 <div class="card">
   <b>Now</b>
   <div class="kv small" style="margin-top:6px">
-    {% if n.why %}<span class="mut">why</span><span class="why">{{ n.why.line }}</span>{% endif %}
+    {% if d.why %}<span class="mut">why</span><span class="why">{{ d.why.line }}{% if d.why.cites %}<br><span class="small">{% for c in d.why.cites %}<a href="{{ c.href }}">{{ c.text }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}</span>{% endif %}
     <span class="mut">jobs</span><span>{% if not s.reported %}{{ n.live }} running · capacity not reported yet
       {%- elif s.held %}{{ n.live }} running · <b>no new jobs: {{ s.held }}</b>
       {%- elif s.zero_why %}{{ n.live }} running · <b>no CPU slots: {{ s.zero_why }}</b>
@@ -123,23 +117,26 @@
   <tr><th>tool</th><th>for</th><th>path</th><th>kind</th><th class="actions"><span class="sr-only">actions</span></th></tr>
   {% for o in T.overrides %}<tr><td class="mono nowrap">{{ o.tool }}</td><td>{{ o.module or 'every module' }}</td><td class="mono">{{ o.path }}</td>
     <td>{{ 'chosen among what it found' if o.kind == 'choose' else 'added (signed statement; verified by the node)' }}</td>
-    <td class="actions">{% call m.op_form("tools.set_path", n.node_id, "Reset to inherited") %}<input type="hidden" name="tool" value="{{ o.tool }}"><input type="hidden" name="module" value="{{ o.module }}"><input type="hidden" name="path" value="">{% endcall %}</td></tr>
+    <td class="actions">{{ m.op_form("settings.apply", n.node_id, "Reset to inherited", tier="T1", return_to="/nodes/" ~ n.node_id ~ "#tools",
+        params={"changes": [{"scope": "node", "scope_id": n.node_id, "module": o.module, "key": o.key, "reset": true}]}) }}</td></tr>
   {% else %}<tr><td colspan="5" class="mut">none: every tool resolves from what the node found</td></tr>{% endfor %}
   </table>
   <details class="small"><summary>Set path on this node…</summary>
-  {% call m.op_form("tools.set_path", n.node_id, "Set path", inline=False) %}
+  {% call m.op_form("settings.apply", n.node_id, "Set path", inline=False, tier="T1", return_to="/nodes/" ~ n.node_id ~ "#tools") %}
+    <input type="hidden" name="scope" value="node"><input type="hidden" name="scope_id" value="{{ n.node_id }}">
     <label>tool <select name="tool">{% for tid in T.definitions %}<option>{{ tid }}</option>{% endfor %}</select></label>
     <label>only for module (empty: every module) <input name="module" class="mono" placeholder="minos-gatk"></label>
     <label>path <input name="path" class="mono" style="width:100%" required list="tool-paths-{{ n.node_id }}"
       placeholder="{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}{% if loop.first %}{{ i.path }}{% endif %}{% endfor %}{% endfor %}"></label>
     <datalist id="tool-paths-{{ n.node_id }}">{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}<option value="{{ i.path }}">{{ tid }} {{ i.version }}</option>{% endfor %}{% endfor %}</datalist>
-    <span class="mut">An installation the node found is chosen as it is; any other path goes into the node's signed statement, and the node
-      grants it only once it passes the folder rules (no roots, homes, data or system directories) and the tool's detector.</span>
+    <span class="mut">The setting <span class="mono">tool.&lt;id&gt;.path</span> at this node (for one module, or every module). An installation
+      the node found is chosen as it is; any other path goes into the node's signed statement, and the node grants it only once it passes
+      the folder rules (no roots, homes, data or system directories) and the tool's detector.</span>
   {% endcall %}</details>
 </div>
 
 <h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
-{% set P = n.policy.protection or {} %}{% set T = n.tel.protection or {} %}
+{% set P = n.protection or {} %}{% set T = n.tel.protection or {} %}
 <div class="card">
   <div class="row small">{% for c in conditions %}<span class="chip {{ c.tone }}" title="{{ c.message }}">{{ c.code }}</span>{% else %}<span class="chip ok">no conditions</span>{% endfor %}</div>
   <div class="kv small" style="margin-top:6px">
@@ -161,78 +158,15 @@
   {% else %}<tr><td class="mut">no decisions journaled yet</td></tr>{% endfor %}</table></details>
 </div>
 
-<h2 id="limits">Limits (user caps)</h2>
-<div class="card">
-<p class="small mut" style="margin-top:0">Every cap is off by default; the node then runs at its automatic capacity (which already honours the owner's protection
-rules, the memory guard, heat, battery and a present user). A cap can only lower capacity.{% if n.slots.reported %} Current binding limit: <b>{{ n.slots.binding or 'automatic capacity' }}</b>.{% endif %}</p>
-{% call m.op_form("nodes.set_caps", n.node_id, "Apply caps", cls="pri", confirm="Apply caps to " ~ n.hostname ~ "?", inline=False) %}
-<table>
-<tr><th style="width:90px">On</th><th>Cap</th><th>Value</th><th>Hardware / now</th></tr>
-{% set L = n.limits %}
-{% set cores = (n.hw.cores_total ~ ' cores') if n.hw.cores_total %}{% set ram = ((n.hw.memory_gb | num(1)) ~ ' GB in this machine') if n.hw.memory_gb is known %}
-{% set rows = [
-  ('cpu_cores', 'CPU cores', 'cores', [cores, 'caps concurrent jobs × threads']),
-  ('mem_gb', 'Memory', 'GB', [ram, 'for jobs and module services', ('fleet jobs use ' ~ (n.tel.fleet_rss_gb | num(1)) ~ ' GB now') if n.tel.fleet_rss_gb is known]),
-  ('jobs', 'Concurrent jobs', 'jobs', [(n.cap.auto_cpu_slots ~ ' automatic CPU slots now') if n.cap.auto_cpu_slots is known]),
-  ('vm_mem_gb', 'VM memory (services)', 'GB', [ram, 'a module VM service applies it at its next start']),
-  ('vm_cpus', 'VM CPUs (services)', 'cpus', [cores]),
-  ('disk_gb', 'Disk cache', 'GB', [((n.tel.disk_free_gb | num(0)) ~ ' GB free now') if n.tel.disk_free_gb is known]),
-  ('staging_mbps', 'Download bandwidth', 'Mbps', ['dataset staging']) ] %}
-{% for key, label, unit, notes in rows %}
-<tr>
-  <td><input type="checkbox" name="on_{{ key }}" aria-label="cap {{ label }}" {% if L[key] is defined and L[key] is not none %}checked{% endif %}
- data-toggles-row></td>
-  <td>{{ label }}{% if L[key] is defined and L[key] is not none %} <span class="chip acc">changed</span>{% endif %}</td>
-  <td><input type="number" step="any" min="0" name="{{ key }}" aria-label="{{ label }} ({{ unit }})" style="width:90px"
-       value="{{ L[key] if L[key] is defined and L[key] is not none else '' }}" {% if not (L[key] is defined and L[key] is not none) %}disabled{% endif %}> {{ unit }}</td>
-  <td class="small mut">{{ (['default off'] + notes) | select | join(' · ') }}</td>
-</tr>
-{% endfor %}
-<tr>
-  <td><input type="checkbox" name="on_schedule" aria-label="work only inside a schedule" {% if L.schedule %}checked{% endif %}></td>
-  <td>Schedule{% if L.schedule %} <span class="chip acc">changed</span>{% endif %}</td>
-  <td colspan="2"><input type="time" name="sched_start" aria-label="schedule start" value="{{ L.schedule.start if L.schedule else '22:00' }}"> to
-    <input type="time" name="sched_end" aria-label="schedule end" value="{{ L.schedule.end if L.schedule else '07:30' }}">
-    {% for d in range(7) %}<label class="small"><input type="checkbox" name="sched_days" value="{{ d }}"
-      {% if not L.schedule or d in L.schedule.days %}checked{% endif %}>{{ ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d] }}</label>{% endfor %}
-    <span class="small mut">work only inside this window · default off (any time)</span></td>
-</tr>
-</table>
-<div class="row" style="margin-top:8px">
-  <label>Enforcement <select name="enforce">
-    <option value="soft" {% if L.enforce != 'hard' %}selected{% endif %}>soft: stop admitting, let running jobs finish</option>
-    <option value="hard" {% if L.enforce == 'hard' %}selected{% endif %}>hard: also hand back youngest jobs to fit</option></select></label>
-  <span class="sp"></span>
-</div>
-{% endcall %}
-{% if L %}{% call m.op_form("nodes.set_caps", n.node_id, "Remove all caps", confirm="Remove all caps from " ~ n.hostname ~ "? It returns to automatic capacity.") %}<input type="hidden" name="clear_all" value="1">{% endcall %}{% endif %}
-</div>
-
-<h2>Policy</h2>
-<div class="card">
-{# nodepolicy.rows: each setting with this node's default and why; Save is the form's first button, so Enter saves #}
-{% set changed = d.policy | selectattr('changed') | list %}
-{% call m.op_form("nodes.set_policy", n.node_id, "Save policy", confirm="Save policy for " ~ n.hostname ~ "? Role changes re-doctor and re-certify the node.", inline=False, button=False) %}
-<div class="row small"><span class="mut">Defaults come from this {{ {'darwin': 'Mac', 'windows': 'PC'}.get(n.os, 'computer') }}'s hardware; Reset puts a setting back to its default.</span>
-  <span class="sp"></span><button class="pri" title="{{ OPS['nodes.set_policy'].summary }} ({{ OPS['nodes.set_policy'].tier }})">Save policy</button></div>
-<table class="small policy">
-<tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Default</th><th scope="col"><span class="mut">reset</span></th></tr>
-{% for p in d.policy %}
-<tr>
-  <td><label for="p_{{ p.key }}"><b>{{ p.label }}</b></label>{% if p.changed %} <span class="chip acc">changed</span>{% endif %}
-    <div class="mut">{{ p.help }} <span class="mono">{{ p.key }}</span></div></td>
-  <td>{% if p.bool %}<input type="hidden" name="p_{{ p.key }}" value="0"><input type="checkbox" id="p_{{ p.key }}" name="p_{{ p.key }}" value="1"{% if p.value %} checked{% endif %}>
-    {%- elif p.key == 'disabled_services' %}<input id="p_{{ p.key }}" name="p_{{ p.key }}" value="{{ (p.value or []) | join(',') }}" style="width:220px">
-    {%- else %}<input id="p_{{ p.key }}" name="p_{{ p.key }}" value="{{ '' if p.value is none else p.value }}" style="width:80px"> {{ p.unit or '' }}{% endif %}</td>
-  <td class="mut">{{ p.default_text }}</td>
-  <td>{% if p.changed %}<button name="reset" value="{{ p.key }}" title="Put {{ p.label | lower }} back to {{ p.default_text }}">Reset</button>{% endif %}</td>
-</tr>
-{% endfor %}
-</table>
-{% if n.policy.module_settings %}<div class="small mut">module settings: <span class="mono">{{ n.policy.module_settings | tojson }}</span></div>{% endif %}
-{% endcall %}
-{% if changed %}{% call m.op_form("nodes.set_policy", n.node_id, "Reset all to defaults", confirm="Put every setting of " ~ n.hostname ~ " back to its default (" ~ (changed | map(attribute='label') | join(', ')) ~ ")? Role changes re-doctor and re-certify the node.") %}<input type="hidden" name="reset" value="all">{% endcall %}{% endif %}
-{% if node_secrets %}<div class="small mut">module secrets with this node's own value: {% for s in node_secrets %}<a href="/modules/{{ s.module }}/secrets" class="mono">{{ s.module }}/{{ s.name }}</a> ({{ s.fingerprint }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+<h2 id="settings-summary">Settings</h2>
+<div class="card small">
+  {% set st = d.settings %}
+  <div class="row"><span class="chip {{ st.applied.tone }}">{{ st.applied.text }}</span>
+    <span class="mut">groups: {{ st.groups | join(', ') or 'none' }}</span><span class="sp"></span>
+    <a class="btn" href="/nodes/{{ n.node_id }}/settings">Open Settings</a></div>
+  {% set own = st.settings | selectattr('source.scope', 'equalto', 'node') | list %}
+  <p class="mut" style="margin:6px 0 0">{% if own %}Set on this node: {% for x in own %}<a href="/nodes/{{ n.node_id }}/settings?explain={{ x.key }}#s-{{ x.key }}">{{ x.label }} {{ x.value_text }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.{% else %}Nothing is set on this node: it inherits every setting.{% endif %}</p>
+  {% if node_secrets %}<div class="mut">module secrets with this node's own value: {% for s in node_secrets %}<a href="/modules/{{ s.module }}/secrets" class="mono">{{ s.module }}/{{ s.name }}</a> ({{ s.fingerprint }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 </div>
 
 <h2>Last 6 hours</h2>

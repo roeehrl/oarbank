@@ -11,6 +11,7 @@ from oarbank.coordinator import core, invariants, modcalls
 from oarbank_sdk.keys import job_key
 
 from helpers import READY, PARAMS, SCENES, certified_fleet, create_study, fresh, make_db, relay_result
+from helpers import set_fleet
 
 
 @pytest.fixture
@@ -43,7 +44,7 @@ def study(db, datasets=SCENES[:1]):
 
 def test_a_stage_that_does_not_compare_is_never_replicated_disputed_or_cached(db):
     n1, n2 = certified_fleet(db, ("n1", "n2"))
-    db.set_setting("replica_rate", 1.0)                       # every comparable job would be replicated
+    set_fleet(db, "replica_rate", 1.0)                       # every comparable job would be replicated
     sid = study(db)
     enqueue(db, sid, sync_item())
     jid = db.one("SELECT job_id FROM jobs WHERE job_key=?", (SYNC_KEY,))["job_id"]
@@ -212,7 +213,7 @@ def sync_result(items=("r1", "r2"), feed="f1"):
 
 def test_a_staged_job_runs_its_stage_and_never_the_chain(db):
     n1, = certified_fleet(db, ("n1",))
-    db.set_setting("pipeline:relay", "split")
+    set_fleet(db, "pipeline", "split", "relay")
     sid = study(db)
     assert db.one("SELECT COUNT(*) n FROM jobs WHERE campaign_id=? AND kind='call'", (sid,))["n"] == 1   # evaluations split
     enqueue(db, sid, sync_item(), {**sync_item(DEFAULT_KEY), "stage": "eval", "spec": {"params": PARAMS}})
@@ -248,7 +249,7 @@ def test_every_enqueued_job_can_be_sampled_for_a_replica(db):
     """At replica rate 1 every comparing job a node finishes is sampled by its key's digits: an enqueued staged key
     (`<digest>:<stage>`) and an unstaged one both sample, so no key that passed enqueue can break completion."""
     n1, n2 = certified_fleet(db, ("n1", "n2"))
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     sid = study(db)
     enqueue(db, sid, {**sync_item(DEFAULT_KEY), "stage": "eval", "spec": {"params": PARAMS}},
             {**sync_item(DEFAULT_KEY.split(":")[0]), "stage": "eval", "spec": {"params": {**PARAMS, "samples": 11}},

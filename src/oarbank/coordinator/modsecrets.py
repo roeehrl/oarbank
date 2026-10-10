@@ -180,6 +180,51 @@ def listing(db: DB, module: str) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ the core's own secrets (fleet-wide, write-only)
+# Rows with module '' (beside the fingerprint key): the ntfy token. Same encryption, fingerprint and moves as a module's.
+
+CORE = {"ntfy_token": "the ntfy access token (Notifications)"}
+
+
+def _core_name(name: str) -> str:
+    if name not in CORE:
+        raise SecretError(404, "unknown_secret", f"no core secret {name!r} ({', '.join(CORE)})")
+    return name
+
+
+def core_set(db: DB, name: str, value: str, actor: str) -> dict:
+    """Store a core secret (inside the caller's transaction); what may be shown: {set, fingerprint, set_at}."""
+    _core_name(name)
+    raw = value.encode("utf-8") if isinstance(value, str) else b""
+    if not raw or len(raw) > MAX_VALUE:
+        raise SecretError(422, "bad_secret", f"a secret is a string of 1 byte to {MAX_VALUE} bytes")
+    fp, t = fingerprint(db, raw), time.time()
+    db.x("INSERT INTO secrets(module,name,node_id,ciphertext,fingerprint,set_at,set_by,sealed) VALUES('',?,'',?,?,?,?,0) "
+         "ON CONFLICT(module,name,node_id) DO UPDATE SET ciphertext=excluded.ciphertext, fingerprint=excluded.fingerprint, "
+         "set_at=excluded.set_at, set_by=excluded.set_by, sealed=0",
+         (name, _encrypt(_key(db), "", name, "", raw), fp, t, actor))
+    return {"set": True, "fingerprint": fp, "set_at": t}
+
+
+def core_clear(db: DB, name: str) -> dict:
+    _core_name(name)
+    had = db.one("SELECT 1 FROM secrets WHERE module='' AND name=? AND node_id=''", (name,))
+    db.x("DELETE FROM secrets WHERE module='' AND name=? AND node_id=''", (name,))
+    return {"set": False, "cleared": bool(had)}
+
+
+def core_state(r, name: str) -> dict:
+    """What a page may show about a core secret: set or not, its fingerprint, when and by whom. Never the value."""
+    rows = r.q("SELECT fingerprint, set_at, set_by FROM secrets WHERE module='' AND name=? AND node_id=''", (name,))
+    return {"set": True, **rows[0]} if rows else {"set": False}
+
+
+def core_value(db: DB, name: str) -> str | None:
+    r = db.one("SELECT * FROM secrets WHERE module='' AND name=? AND node_id=''", (_core_name(name),))
+    v = _row_value(db, r) if r else None
+    return v.decode("utf-8") if v is not None else None
+
+
 # ------------------------------------------------------------------ delivery
 
 def _readable(db: DB, module: str, name: str, node: str, key: bytes) -> bytes | None:

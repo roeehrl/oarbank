@@ -1450,13 +1450,14 @@ pub mod tests {
     #[cfg(target_os = "macos")]
     fn the_pool_is_offered_only_by_a_ready_runtime() {
         let (_base, base) = temp("pool");
-        let c = colima_at(&base, Profile::Cpu);
+        let mut c = colima_at(&base, Profile::Cpu);
+        assert!(c.vm_mem_gb <= (crate::facts::sysctl_u64("hw.memsize").unwrap() as f64 / 1073741824.0 / 2.0).max(1.0));
+        c.vm_mem_gb = 8.0;                              // a VM with room for a slot, whatever this host has (a 7 GB runner has none)
         assert!(ColimaRuntime::pool_tokens(&c) > 0);
         c.set_report(crate::colima::Report { state: crate::colima::State::Starting, ..ready_report(false) });
         assert_eq!(ContainerRuntime::pool_tokens(&c), 0);
         c.set_report(ready_report(false));
         assert_eq!(ContainerRuntime::pool_tokens(&c), ColimaRuntime::pool_tokens(&c));
-        assert!(c.vm_mem_gb <= (crate::facts::sysctl_u64("hw.memsize").unwrap() as f64 / 1073741824.0 / 2.0).max(1.0));
     }
 
     fn spec(image: &str) -> RunSpec {
@@ -1596,10 +1597,12 @@ pub mod tests {
             return;
         }
         let e = c.ensure_started().unwrap_err();
-        assert!(e.starts_with("colima_home:"), "{e}");
         let r = c.report().unwrap();
         assert_eq!((r["runtime"].as_str(), r["state"].as_str(), r["gpu"].as_str()), (Some("colima"), Some("missing"), Some("undetected")));
-        assert!(r["missing"].as_array().unwrap().iter().any(|m| m["what"] == "colima_home"));
+        let missing = r["missing"].as_array().unwrap();
+        assert!(missing.iter().any(|m| m["what"] == "colima_home"));
+        // the error names the first missing piece (`colima` itself, on a host without it)
+        assert!(missing.iter().any(|m| e.starts_with(&format!("{}:", m["what"].as_str().unwrap()))), "{e}");
         assert_eq!(ContainerRuntime::pool_tokens(&c), 0);
         // the agent's runtime publishes the report the facts read
         assert_eq!(crate::colima::facts(&l.home, || unreachable!())["state"], "missing");

@@ -102,7 +102,8 @@ For a developer checkout, use `--checkout`; it requires the development toolchai
 
 **The console from another device.** By default it answers only on 127.0.0.1. To reach it remotely, put it behind
 something that terminates TLS for a name you control (`tailscale serve`, your own reverse proxy) and add that name
-to the setting `console_hosts`. Passkeys need such a name; TOTP works everywhere.
+to **Settings → Access → Console host names** (`oarbank settings set console_hosts oarbank.example.ts.net`). Passkeys
+need such a name; TOTP works everywhere.
 
 ## 2. Nodes
 
@@ -199,10 +200,12 @@ rules; add rules on the node's Protection page.
 this Mac (14 when idle) · 9.2 GB free for jobs (apps and the system use 46 GB)". A slot is a performance core, or
 two efficiency cores (hardware threads never count). Jobs only get memory the machine has free now, less a margin
 that keeps the memory guard from stepping in, and never more than the memory kept for the system and for the
-person using it allows. The node page's Policy table shows each setting with this machine's default and why; a
-changed setting has a Reset button, and **Reset all to defaults** puts them all back (`oarbank node policy <node>
---reset <key>`, `--reset-all`). On a Mac, a Screen Sharing session counts as someone using it unless you turn off
-"Screen sharing counts as someone using it". `oarbank-agent discover` lists coordinators announcing themselves
+person using it allows. The settings behind it are on the node's **Settings** tab, each with the value in effect and
+where it comes from (this machine's default and why, the fleet's value, a group's, or the node's own); **Override** sets
+a value for that node and **Reset to inherited** takes it back. Fleet-wide defaults are under **Settings → Node
+defaults**, which shows the nodes a change reaches before it saves. From a terminal: `oarbank settings get --node
+<node>`, `oarbank settings set <key> <value> [--node <node>]`, `oarbank settings reset <key> --node <node>`. On a Mac,
+a Screen Sharing session counts as someone using it unless you turn off "Screen sharing counts as someone using it". `oarbank-agent discover` lists coordinators announcing themselves
 on the local network, a hint for the URL only.
 
 **Local Network privacy (macOS 15 and later).** The personal scope's LaunchAgent is not exempt: a macOS that applies
@@ -248,7 +251,7 @@ each node's **Host tools** section show what was found, what each module gets an
   openjdk-17-jdk-headless`, `winget install EclipseAdoptium.Temurin.17.JDK`), then **Re-detect** (`oarbank tools detect
   <node>`; nodes also look again every hour and after every release).
 - **Somewhere unusual?** Add a search path for the OS in Settings → Tools (`oarbank tools define jdk --search
-  darwin=/opt/java/*/Contents/Home`), or set the path on one node (`oarbank tools set-path <node> jdk <path>`). A path
+  darwin=/opt/java/*/Contents/Home`), or set the path on one node (`oarbank settings set tool.jdk.path <path> --node <node>`, or the node page's Set path). A path
   the node did not find itself goes into its signed statement (`oarbank node sign <node>` in signing mode), and the node
   checks it before granting it.
 - **As the node's owner**, list extra candidates in `tool-hints.json` in the agent's home (`{"jdk":

@@ -17,6 +17,7 @@ from oarbank_sdk import manifest as mf, portable, ui as U
 from oarbank_sdk.render import ROLE_RANK, Host, filter_params, interpolate, shape
 
 from ..coordinator import detail, folders as F, nodeservices, placement, platforms as P
+from ..coordinator.settings.store import fleet_value
 from .views import OFFLINE_AFTER, jl
 
 
@@ -242,7 +243,7 @@ def rows_for(r, module: str, man: mf.Manifest, src: U.Source, now: float | None 
     if q == "datasets":
         return _datasets(r, module, man, p)
     if q == "module_settings":
-        return [r.get_setting(f"module_settings:{module}", {}) or {}]
+        return [fleet_value(r, "module.settings", module) or {}]
     if q == "module_events":
         return _events(r, module, p)
     if q == "nodes":

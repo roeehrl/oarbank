@@ -69,7 +69,8 @@ def test_the_coordinator_pkg_ships_the_postinstall_and_no_usr_local_payload():
     assert '$WORK/root/usr' not in text and 'root/usr/local' not in text
     # each command runs through a link to it before it is packaged
     assert 'ln -s "$ROOT/bin/$cmd" "$WORK/linked/$cmd"' in text and '"$WORK/linked/$cmd" --help' in text
-    assert POSTINSTALL.stat().st_mode & 0o111 == 0o111
+    if sys.platform != 'win32':                         # no execute bit on Windows
+        assert POSTINSTALL.stat().st_mode & 0o111 == 0o111
 
 
 def test_the_postinstall_only_links_the_commands():

@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from ..common import canonical_json
 from ..contracts import operations as registry
-from . import audit, clock, core, effects, placement, protection, releases
+from . import audit, clock, core, effects, placement, protection, releases, settings
 from .db import DB, jl
 
 PLAN_TTL_S = 1800
@@ -68,6 +68,14 @@ class Handler:
     prepare: Callable[[DB, "OpRequest"], Any] | None = None   # outside the transaction (module IPC); result in req.prepared
     name: Callable[[DB, OpRequest], str] = lambda db, r: str(r.target)  # what a T3 confirmation must type
     target: Callable[[DB, OpRequest], None] | None = None   # checks the target's form (normalizing it) before anything reads it
+    tier: Callable[[OpRequest], str] | None = None   # the request's own tier when it depends on what it changes (settings.apply)
+
+
+def tier_of(req: OpRequest) -> str:
+    """The friction tier of this request: the registry's, or the handler's own for an operation whose tier follows
+    what it changes (settings.apply: each key's danger tier and scope)."""
+    h = HANDLERS.get(req.op)
+    return h.tier(req) if h is not None and h.tier is not None else registry.REGISTRY[req.op].tier
 
 
 HANDLERS: dict[str, Handler] = {}
@@ -107,8 +115,8 @@ def _make_plan(db: DB, req: OpRequest, h: Handler, impact: dict | None = None) -
          (pid, req.op, json.dumps({"target": req.target, "params": req.params}), json.dumps(vers), json.dumps(impact, default=str),
           req.actor, now, now + PLAN_TTL_S))
     return {"plan_id": pid, "op": req.op, "target": req.target, "params": req.params, "impact": impact,
-            "versions": vers, "expires_at": now + PLAN_TTL_S, "tier": registry.REGISTRY[req.op].tier,
-            "confirm_required": registry.REGISTRY[req.op].tier == "T3", "confirm_name": h.name(db, req)}
+            "versions": vers, "expires_at": now + PLAN_TTL_S, "tier": tier_of(req),
+            "confirm_required": tier_of(req) == "T3", "confirm_name": h.name(db, req)}
 
 
 # ------------------------------------------------------------------ execution
@@ -149,18 +157,20 @@ ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 
 
 def _execute(db: DB, req: OpRequest, op: registry.Operation, h: Handler) -> dict:
-    tier = op.tier
+    tier = tier_of(req)
     if req.role is not None and ROLE_RANK.get(req.role, -1) < ROLE_RANK[op.min_role]:
         raise OpError(403, "forbidden_role", f"{req.op} needs the {op.min_role} role; {req.actor} is {req.role}")
     if req.scope:
         mod = req.scope.split(":", 1)[1] if req.scope.startswith("module:") else ""
         if not mod or not req.op.startswith(f"mod.{mod.replace('-', '_')}."):
             raise OpError(403, "token_scope", f"this token may run only {req.scope}'s own operations, not {req.op}")
-    if req.secret is not None and (req.op != SECRET_OP or req.dry_run or req.plan_id):
-        raise OpError(400, "secret_not_accepted", f"only {SECRET_OP} takes a secret value, and never as a preview or a plan")
+    if req.secret is not None and (req.op not in SECRET_OPS or req.dry_run or req.plan_id):
+        raise OpError(400, "secret_not_accepted", f"only {' and '.join(SECRET_OPS)} take a secret value, and never as a "
+                      "preview or a plan")
     req.payload = req.payload_hash()          # of the request as sent (handlers may fill in the target)
-    # reason policy
-    if op.reason_policy == "required" and not (req.reason and req.reason.strip()) and not req.dry_run:
+    # reason policy (from the request's tier: a settings change set may be T0 on a node and T2 for the fleet)
+    reason_policy = op.reason if op.reason and tier == op.tier else registry.DEFAULT_REASON[tier]
+    if reason_policy == "required" and not (req.reason and req.reason.strip()) and not req.dry_run:
         raise OpError(400, "reason_required", f"{req.op} ({tier}) needs a reason")
     # idempotency for creations
     ikey = None
@@ -201,6 +211,10 @@ def _execute(db: DB, req: OpRequest, op: registry.Operation, h: Handler) -> dict
         planned = json.loads(plan_row["request_json"])
         req.target, req.params = planned["target"], planned["params"]
         req.plan_impact = json.loads(plan_row["impact_json"] or "{}")
+        if h.tier is not None:                # the planned change decides the tier, and so the reason and confirmation
+            tier = tier_of(req)
+            if registry.DEFAULT_REASON[tier] == "required" and not (req.reason and req.reason.strip()):
+                raise OpError(400, "reason_required", f"{req.op} ({tier}) needs a reason")
         if tier == "T3" and (req.confirm or "") != h.name(db, req):
             raise OpError(400, "confirmation_required", f"type the name {h.name(db, req)!r} to confirm")
     try:
@@ -289,11 +303,8 @@ def _node(db, nid):
 
 
 def _node_snap(db, req):
-    n = db.one("SELECT node_id, hostname, lifecycle, desired_state, limits_json, policy_json, quarantine_reason, want_doctor "
-               "FROM nodes WHERE node_id=? OR hostname=?", (req.target, req.target))
-    if not n:
-        return None
-    return {**n, "limits_json": jl(n["limits_json"], {}), "policy_json": jl(n["policy_json"], {})}
+    return db.one("SELECT node_id, hostname, lifecycle, desired_state, settings_rev, quarantine_reason, want_doctor "
+                  "FROM nodes WHERE node_id=? OR hostname=?", (req.target, req.target))
 
 
 def _nid(db, req):
@@ -313,18 +324,18 @@ def _campaign_snap(db, req):
 
 
 def _setting_snap(key):
-    return lambda db, req: {key: db.get_setting(key)}
+    return lambda db, req: {key: db.get_state(key)}
 
 
 # ------------------------------------------------------------------ fleet
 
 def _fleet_snap(db, req):
-    return {"fleet_state": db.get_setting("fleet_state", "active")}
+    return {"fleet_state": db.get_state("fleet_state", "active")}
 
 
 def _set_fleet(state):
     def apply(db, req):
-        db.set_setting("fleet_state", state)
+        db.set_state("fleet_state", state)
         n = 0
         if state == "halted":
             for a in db.q("SELECT attempt_id, node_id FROM attempts WHERE state='live'"):
@@ -368,20 +379,6 @@ def _state_handler(desired):
 for _op, _st in (("nodes.pause", "paused"), ("nodes.resume", "active"), ("nodes.drain", "draining")):
     HANDLERS[_op] = Handler(target_type="node", apply=_state_handler(_st), snapshot=_node_snap,
                             impact=lambda db, r: {"live_attempts": _live_on(db, _nid(db, r))})
-
-
-@handler("nodes.set_caps", target_type="node", snapshot=_node_snap,
-         versions=lambda db, r: [f"node:{_nid(db, r)}:limits"],
-         impact=lambda db, r: {"live_attempts": _live_on(db, _nid(db, r)), "patch": r.params})
-def _caps(db, req):
-    return core.set_limits(db, _nid(db, req), req.params.get("patch") or {}, req.actor,
-                           clear_all=bool(req.params.get("clear_all")))
-
-
-@handler("nodes.set_policy", target_type="node", snapshot=_node_snap,
-         versions=lambda db, r: [f"node:{_nid(db, r)}:policy"])
-def _policy(db, req):
-    return core.set_policy(db, _nid(db, req), req.params.get("patch") or {}, req.actor, reset=req.params.get("reset"))
 
 
 @handler("nodes.quarantine", target_type="node", snapshot=_node_snap,
@@ -478,7 +475,7 @@ def _prot_restore(db, req):
 def _canary_impact(db, r):
     if r.params.get("promote"):
         h = protection.canary_health(db)
-        c = db.get_setting(protection.CANARY_KEY)
+        c = db.get_state(protection.CANARY_KEY)
         targets, skipped = protection.promote_targets(db, c) if c else ([], {})
         return {**h, "targets": targets, "skipped": skipped}
     return {**protection.preview(db, _nid(db, r), _prot_config(db, r)), "canary": True,
@@ -488,14 +485,14 @@ def _canary_impact(db, r):
 def _canary_target(db, req):
     """Promoting names no node: the running canary's node is the target."""
     if req.params.get("promote"):
-        c = db.get_setting(protection.CANARY_KEY)
+        c = db.get_state(protection.CANARY_KEY)
         if not c:
             raise OpError(409, "no_canary", "no protection canary is running: oarbank protection canary <node> <file>")
         req.target = c["node_id"]
 
 
 @handler("protection.rules.canary", target_type="node", impact=_canary_impact, target=_canary_target,
-         snapshot=lambda db, r: {"canary": db.get_setting(protection.CANARY_KEY)})
+         snapshot=lambda db, r: {"canary": db.get_state(protection.CANARY_KEY)})
 def _prot_canary(db, req):
     try:
         if req.params.get("promote"):
@@ -749,7 +746,7 @@ def _module_canary(db, req):
     req.target = n
 
 
-@handler("modules.set_pipeline", target_type="module", target=_module_name, snapshot=lambda db, r: {"pipeline": db.get_setting(f"pipeline:{r.target}", "single")},
+@handler("modules.set_pipeline", target_type="module", target=_module_name, snapshot=lambda db, r: {"pipeline": settings.fleet_value(db, "pipeline", r.target)},
          impact=lambda db, r: {"pending_eval_jobs": db.one("SELECT COUNT(*) n FROM jobs WHERE module=? AND kind='eval' "
                                                            "AND state='pending' AND depends_on IS NULL AND stage IS NULL", (r.target,))["n"]})
 def _pipeline(db, req):
@@ -1401,27 +1398,99 @@ def _pin(db, req):
     from . import config as C
     if not C.RELEASE_SIGNING:
         raise core.ApiError(409, "feature_disabled", "release signing is disabled (OARBANK_RELEASE_SIGNING=1)")
-    cur = db.get_setting("release_pubkey")
+    cur = db.get_state("release_pubkey")
     pub = req.params["pubkey"]
     if cur and cur != pub and not req.params.get("rotate"):
         raise core.ApiError(409, "release_key_pinned", "a different release key is already pinned (rotate=true)")
     if len(base64.b64decode(pub)) != 32:
         raise core.ApiError(400, "bad_key", "expected a base64 raw Ed25519 public key")
-    db.set_setting("release_pubkey", pub)
+    db.set_state("release_pubkey", pub)
     db.event("release_key_set", actor=req.actor, reason="rotated" if cur and cur != pub else "pinned")
     return {"pinned": True}
 
 
 # ------------------------------------------------------------------ settings, audit
 
-@handler("settings.notifications.update", target_type="setting", snapshot=_setting_snap("ntfy"),
-         versions=lambda db, r: ["setting:ntfy"])
-def _ntfy(db, req):
-    p = req.params
-    db.set_setting("ntfy", {"url": (p.get("url") or "").strip() or None, "token": p.get("token") or None,
-                            "click_base": p.get("click_base") or None})
-    db.event("settings_changed", actor=req.actor, reason="ntfy")
-    return {"updated": "ntfy"}
+def _settings(fn):
+    from .settings.apply import ApplyError
+    try:
+        return fn()
+    except ApplyError as e:
+        raise OpError(e.status, e.code, e.detail, extra={"errors": e.errors})
+
+
+def _settings_changes(req) -> list:
+    """The change set; an operator changes nodes, only an admin the fleet or a group (every node at once)."""
+    extra = set(req.params) - {"changes", "comment"}
+    if extra:
+        raise OpError(400, "bad_params", f"settings.apply takes changes and comment, not {sorted(extra)}")
+    changes = req.params.get("changes")
+    wide = [c for c in changes or [] if isinstance(c, dict) and c.get("scope") in ("fleet", "group")]
+    if wide and req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"a fleet or group setting needs the admin role; {req.actor} is {req.role}")
+    return changes
+
+
+def _settings_snap(db, req):
+    """Each changed row as it is (the audit's before and after): {scope:scope_id:module:key: {value, enforced} | None}."""
+    from .settings import store
+    out = {}
+    for c in req.params.get("changes") or []:
+        if isinstance(c, dict) and c.get("key"):
+            sid = c.get("scope_id") or ""
+            if c.get("scope") == "node":
+                n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (sid, sid))
+                sid = n["node_id"] if n else sid
+            x = store.row(db, c.get("scope") or "", sid, c.get("module") or "", c["key"])
+            out[f"{c.get('scope')}:{sid}:{c.get('module') or ''}:{c['key']}"] = \
+                {"value": x["value"], "enforced": bool(x["enforced"]), "rev": x["rev"]} if x else None
+    return out
+
+
+def _settings_confirm(db, req) -> str:
+    cs = [c for c in req.params.get("changes") or [] if isinstance(c, dict)]
+    return next((c.get("key") for c in cs if c.get("enforce")), None) or (cs[0].get("key") if cs else "") or ""
+
+
+@handler("settings.apply", target_type="setting", snapshot=_settings_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _settings(lambda: settings.apply.plan(db, _settings_changes(r))),
+         tier=lambda r: settings.change_tier(r.params.get("changes") if isinstance(r.params.get("changes"), list) else []),
+         name=_settings_confirm)
+def _settings_apply(db, req):
+    """A change set of owner settings (docs/design/settings.md): values set or reset at the fleet, a group or a node,
+    checked against the registry and the merged values on every node it reaches, written under one revision. Its tier
+    follows the keys and scopes it changes."""
+    changes = _settings_changes(req)
+    return _settings(lambda: settings.apply.commit(db, changes, req.actor, req.params.get("comment") or req.reason))
+
+
+def _core_secret(fn):
+    from . import modsecrets
+    try:
+        return fn(modsecrets)
+    except modsecrets.SecretError as e:
+        raise OpError(e.status, e.code, e.detail)
+
+
+@handler("settings.secrets.set", target_type="setting",
+         snapshot=lambda db, r: _core_secret(lambda S: S.core_state(db, r.target or "")))
+def _core_secret_set(db, req):
+    """A core secret (the ntfy token): write-only, encrypted like module secrets, shown only as a fingerprint."""
+    if set(req.params):
+        raise OpError(400, "bad_params", "the value goes beside params, as `secret`")
+    if not req.secret:
+        raise OpError(400, "secret_required", "send the value beside params, as `secret`")
+    out = _core_secret(lambda S: S.core_set(db, req.target or "", req.secret, req.actor))
+    db.event("settings_changed", actor=req.actor, reason=f"core secret {req.target} set ({out['fingerprint']})")
+    return out
+
+
+@handler("settings.secrets.clear", target_type="setting",
+         snapshot=lambda db, r: _core_secret(lambda S: S.core_state(db, r.target or "")))
+def _core_secret_clear(db, req):
+    out = _core_secret(lambda S: S.core_clear(db, req.target or ""))
+    db.event("settings_changed", actor=req.actor, reason=f"core secret {req.target} cleared")
+    return out
 
 
 def _tool_users(db, tool_id: str) -> list[str]:
@@ -1503,28 +1572,6 @@ def _tools_detect(db, req):
     return {"want_detect": True}
 
 
-@handler("tools.set_path", target_type="node", snapshot=_node_snap)
-def _tools_set_path(db, req):
-    """The path of one host tool on one node (`tool`, optionally for one `module`; `path` null resets it to inherited).
-    A path among the installations the node found is a choice; any other is added to the node's signed statement, and
-    the node verifies it before granting it. Interim: becomes settings.apply of tool.<id>.path at the phase-1 merge."""
-    from . import statements, tools
-    nid = _nid(db, req)
-    node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
-    p = req.params
-    try:
-        out = tools.set_override(db, "node", nid, p.get("module") or "", p.get("tool") or "", p.get("path"), node)
-    except tools.ToolError as e:
-        raise core.ApiError(400, "bad_tool_path", str(e))
-    changed = statements.refresh(db, [nid])
-    v = out["value"]
-    db.event("settings_changed", actor=req.actor, node_id=nid,
-             reason=f"tool.{p.get('tool')}.path" + (f" [{p['module']}]" if p.get("module") else "") + ": "
-             + (f"{v['path']} ({'chosen among the detected' if v['kind'] == 'choose' else 'added: signed statement'})" if v else "reset"))
-    return {**out, "statement": bool(changed),
-            **({"next": f"oarbank node sign {nid}"} if changed and _signing() else {})}
-
-
 def _folders_impact(db, r):
     from . import folders
     try:
@@ -1540,7 +1587,7 @@ def _folders_impact(db, r):
 
 
 @handler("settings.folders.update", target_type="setting", impact=_folders_impact,
-         snapshot=lambda db, r: {"folder_registry": db.get_setting("folder_registry")}, versions=lambda db, r: ["setting:folder_registry"])
+         snapshot=lambda db, r: {"folder_registry": settings.fleet_value(db, "folder_registry")}, versions=lambda db, r: ["setting:folder_registry"])
 def _folders(db, req):
     """The folder registry (oarbank-sdk spec/sandbox.md, "Folders"): a folder id mapped to a path on each node, with its
     access. `nodes` entries set to null remove the node; an entry with no nodes left removes the id. Every node whose
@@ -1556,7 +1603,7 @@ def _folders(db, req):
         reg[req.target] = entry
     else:
         reg.pop(req.target, None)
-    db.set_setting(folders.REGISTRY, reg)
+    settings.write_fleet(db, folders.REGISTRY, reg, req.actor, comment=f"folder {req.target}")
     changed = statements.refresh(db, sorted(before | set(entry["nodes"])))
     db.event("settings_changed", actor=req.actor, reason=f"folder_registry {req.target}: {entry['access']} on "
              f"{len(entry['nodes'])} nodes; new statements for {', '.join(changed) or 'none'}")
@@ -1587,7 +1634,7 @@ def _origins_impact(db, r):
 
 
 @handler("settings.origins.update", target_type="setting", impact=_origins_impact,
-         snapshot=lambda db, r: {"dataset_origins": db.get_setting("dataset_origins")}, versions=lambda db, r: ["setting:dataset_origins"])
+         snapshot=lambda db, r: {"dataset_origins": settings.fleet_value(db, "dataset_origins")}, versions=lambda db, r: ["setting:dataset_origins"])
 def _origins(db, req):
     """The origin host policy (docs/design/datasets-media-checkpoints.md): host patterns dataset origins must match
     (`example.org`, `*.example.org`, with an optional `:port`); none admits every public https host. It applies when a
@@ -1596,7 +1643,7 @@ def _origins(db, req):
     imp = _origins_impact(db, req)
     if imp.get("refused"):
         raise core.ApiError(400, "bad_origin_policy", imp["refused"])
-    db.set_setting(blobstore.ORIGIN_SETTING, {"hosts": imp["after"]})
+    settings.write_fleet(db, blobstore.ORIGIN_SETTING, imp["after"], req.actor)
     db.event("settings_changed", actor=req.actor, reason=f"dataset_origins: {', '.join(imp['after']) or 'any host'}")
     return {"hosts": imp["after"]}
 
@@ -1721,7 +1768,7 @@ def _default_account(db) -> str | None:
 
 def _join_urls(db) -> list[str]:
     from . import config as C
-    urls = [u for u in [db.get_setting("coordinator_url")] + list(db.get_setting("join_urls") or []) if u]
+    urls = [u for u in [db.get_state("coordinator_url")] + list(db.get_state("join_urls") or []) if u]
     return list(dict.fromkeys(u.rstrip("/") for u in urls)) or [f"https://{C.AGENT_BIND}:{C.AGENT_PORT}"]
 
 
@@ -1826,19 +1873,10 @@ def _pk_remove(db, req):
     return _access(fn)(db, req)
 
 
-@handler("settings.update", target_type="setting", snapshot=lambda db, r: {r.target: db.get_setting(r.target)},
-         versions=lambda db, r: [f"setting:{r.target}"])
-def _setting(db, req):
-    if req.target in ("release_pubkey", "ntfy", "fleet_state", "audit_pubkey", "node_statements", "tool_path_values"):
-        raise core.ApiError(400, "use_typed_operation", f"{req.target} has its own operation")
-    db.set_setting(req.target, req.params.get("value"))
-    db.event("settings_changed", actor=req.actor, reason=req.target)
-    return {"updated": req.target}
-
-
 # ------------------------------------------------------------------ module secrets (write-only)
 
 SECRET_OP = "secrets.set"
+SECRET_OPS = (SECRET_OP, "settings.secrets.set")      # the operations that take a value beside params
 
 
 def _secret_scope(db, req) -> tuple[str, str, str]:
@@ -1900,8 +1938,6 @@ def _verify(db, req):
 
 # ------------------------------------------------------------------ module operations (D23)
 
-def _module_settings_key(module: str) -> str:
-    return effects.settings_key(module)
 
 
 def apply_effects(db: DB, module: str, decl, effs: list[dict], actor: str = "system") -> list[dict]:
@@ -1966,7 +2002,7 @@ def module_handler(module: str, decl) -> Handler:
                 "result": res.get("result") or {}}
 
     return Handler(target_type="module", apply=apply, prepare=prepare, impact=impact,
-                   snapshot=lambda db, r: {"settings": db.get_setting(_module_settings_key(module), {})})
+                   snapshot=lambda db, r: {"settings": effects.module_settings(db, module)})
 
 
 def register_module(module: str) -> list[str]:

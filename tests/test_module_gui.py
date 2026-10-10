@@ -20,6 +20,7 @@ from oarbank.coordinator import app as coord_app, core
 from oarbank.coordinator import modcalls, modfiles, modsandbox, modstore, modviews, ops
 from oarbank_sdk import manifest as mf, ui as U
 from test_console import SECRET, Server
+from oarbank.coordinator.settings import fleet_value
 
 EX = Path(__file__).parents[1] / "vendor" / "oarbank-sdk" / "examples"
 TOY, REEL, MODELSERVER, GPUINFO, TASKBENCH = (EX / m for m in ("toy", "reel", "modelserver", "gpuinfo", "taskbench"))
@@ -104,11 +105,11 @@ def test_module_operation_end_to_end_and_audited(env):
     db, c = env["db"], env["c"]
     r = c.post("/do/mod.toy.set_favorite", data={"p.n": "9", "return_to": "/modules/toy"}, follow_redirects=False)
     assert r.status_code == 303 and "kind=ok" in r.headers["location"], r.headers.get("location")
-    assert db.get_setting("module_settings:toy") == {"favorite_n": 9}
+    assert fleet_value(db, "module.settings", "toy") == {"favorite_n": 9}
     a = db.one("SELECT * FROM audit ORDER BY event_id DESC LIMIT 1")
     assert (a["operation"], a["outcome"], a["source"]) == ("mod.toy.set_favorite", "ok", "gui")
     r = c.post("/do/mod.toy.set_favorite", data={"p.n": "-1", "return_to": "/"}, follow_redirects=False)
-    assert "kind=bad" in r.headers["location"] and db.get_setting("module_settings:toy") == {"favorite_n": 9}
+    assert "kind=bad" in r.headers["location"] and fleet_value(db, "module.settings", "toy") == {"favorite_n": 9}
 
 
 def test_undeclared_effects_are_refused():
@@ -150,10 +151,10 @@ def test_a_frame_operation_posts_with_the_session_csrf_through_the_real_console(
     fields = {"target": "", "return_to": "/modules/toy", "idem": "frame-op-1", "params": json.dumps({"n": 12})}
     r = c.post("/do/mod.toy.set_favorite", data=fields, follow_redirects=False)
     assert r.status_code == 403 and r.json()["error"] == "csrf"
-    assert db.get_setting("module_settings:toy") is None
+    assert fleet_value(db, "module.settings", "toy") == {}
     r = c.post("/do/mod.toy.set_favorite", data={**fields, "csrf": token}, follow_redirects=False)
     assert r.status_code == 303 and "kind=ok" in r.headers["location"]
-    assert db.get_setting("module_settings:toy") == {"favorite_n": 12}      # a number: params arrive as JSON, intact
+    assert fleet_value(db, "module.settings", "toy") == {"favorite_n": 12}      # a number: params arrive as JSON, intact
     a = db.one("SELECT * FROM audit ORDER BY event_id DESC LIMIT 1")
     assert (a["operation"], a["outcome"], a["source"]) == ("mod.toy.set_favorite", "ok", "gui")
 

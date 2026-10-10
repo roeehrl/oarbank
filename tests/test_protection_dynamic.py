@@ -92,7 +92,7 @@ def test_rules_update_is_versioned_previewed_and_restorable(db):
     assert e.value.code == "bad_protection"
     plan, r = planned(db, "protection.rules.update", nid, {"config": {"schema": 1, "rule": [RULE]}})
     assert [m["rule"] for m in plan["impact"]["matches"]] == ["studio"] and r["result"]["version"] == 1
-    assert json.loads(fresh(db, node)["policy_json"])["protection"]["rule"] == [RULE]
+    assert json.loads(fresh(db, node)["protection_json"])["rule"] == [RULE]
     two = {"schema": 1, "node": {"mode": "fleet_first"}, "rule": []}
     planned(db, "protection.rules.update", nid, {"config": two})
     stale = op(db, "protection.rules.update", nid, params={"config": {"schema": 1, "rule": [RULE]}}, dry_run=True)["plan"]
@@ -105,15 +105,18 @@ def test_rules_update_is_versioned_previewed_and_restorable(db):
     hist = protection.history(db, nid)
     assert [h["version"] for h in hist] == [4, 3, 2, 1] and hist[0]["config"] == hist[-1]["config"]
     assert hist[1]["config"]["node"]["mode"] == "strict_yield" and hist[1]["source"] == "mode.set"
-    assert json.loads(fresh(db, node)["policy_json"])["protection"]["rule"] == [RULE]
+    assert json.loads(fresh(db, node)["protection_json"])["rule"] == [RULE]
     with pytest.raises(core.ApiError):
         op(db, "nodes.set_mode", nid, params={"mode": "yolo"})
 
 
-def test_policy_route_changes_are_versioned_too(db):
+def test_every_protection_write_is_versioned_and_reaches_the_agents_policy(db):
     nid = enrolled_node(db)[1]["node_id"]
-    core.set_policy(db, nid, {"protection": {"schema": 1, "rule": [RULE]}}, "oarbank")
+    with db.tx():
+        protection.write_version(db, nid, {"schema": 1, "rule": [RULE]}, "oarbank", None)
     assert protection.current(db, nid) == (1, {"schema": 1, "rule": [RULE]})
+    assert json.loads(db.one("SELECT settings_json FROM nodes WHERE node_id=?", (nid,))["settings_json"])["policy"]["protection"] \
+        == {"schema": 1, "rule": [RULE]}
 
 
 def test_probe_now_is_sent_once(db):
@@ -134,15 +137,15 @@ def test_canary_then_promote_after_a_clean_soak(db):
     with pytest.raises(core.ApiError) as e:
         op(db, "protection.rules.canary", plan_id=plan["plan_id"], reason="too early")
     assert e.value.code == "canary_not_promotable"
-    s = db.get_setting(protection.CANARY_KEY)
-    db.set_setting(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
+    s = db.get_state(protection.CANARY_KEY)
+    db.set_state(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
     core.heartbeat(db, fresh(db, a), {})
     _, r = planned(db, "protection.rules.canary", a["node_id"], {"promote": True})
     assert sorted(r["result"]["promoted"]) == sorted([b["node_id"], c["node_id"]])
     for n in (b, c):
         assert protection.current(db, n["node_id"])[1] == cfg
         assert protection.history(db, n["node_id"])[0]["source"] == "rules.promote"
-    assert db.get_setting(protection.CANARY_KEY) is None
+    assert db.get_state(protection.CANARY_KEY) is None
 
 
 def test_shared_support_vectors_hold_for_the_python_refusals():
@@ -164,16 +167,16 @@ def test_a_rule_a_node_s_os_cannot_run_is_refused_there_and_skipped_by_promotion
     with pytest.raises(core.ApiError) as e:
         op(db, "protection.rules.update", linux["node_id"], params={"config": cfg}, dry_run=True)
     assert e.value.code == "bad_protection" and "on linux: rule studio: match.bundle_id" in str(e.value)
-    with pytest.raises(core.ApiError) as e:                          # every route that writes the section
-        core.set_policy(db, win["node_id"], {"protection": cfg}, "test")
+    with pytest.raises(protection.ProtectionError) as e:            # every route that writes the section
+        protection.write_version(db, win["node_id"], cfg, "test", None)
     assert "on windows:" in str(e.value)
     portable = {"schema": 1, "rule": [{"id": "trainer", "match": {"path_contains": "trainer"}, "pause_fleet": {}}]}
     planned(db, "protection.rules.update", linux["node_id"], {"config": portable})
     assert protection.current(db, linux["node_id"])[1] == portable
     # a canary on the Mac promotes to every node that can run it, and says which it skipped and why
     protection.start_canary(db, mac["node_id"], cfg, "t", "try")
-    s = db.get_setting(protection.CANARY_KEY)
-    db.set_setting(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
+    s = db.get_state(protection.CANARY_KEY)
+    db.set_state(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
     core.heartbeat(db, fresh(db, mac), {})
     plan, r = planned(db, "protection.rules.canary", mac["node_id"], {"promote": True})
     assert plan["impact"]["targets"] == [] and sorted(plan["impact"]["skipped"]) == sorted([linux["node_id"], win["node_id"]])
@@ -206,8 +209,8 @@ def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain
 def test_a_refused_actuation_blocks_promotion(db):
     a = certify(db, enrolled_node(db, "desk")[1])
     protection.start_canary(db, a["node_id"], {"schema": 1, "rule": [RULE]}, "t", "try")
-    s = db.get_setting(protection.CANARY_KEY)
-    db.set_setting(protection.CANARY_KEY, {**s, "started_at": time.time() - 4000})
+    s = db.get_state(protection.CANARY_KEY)
+    db.set_state(protection.CANARY_KEY, {**s, "started_at": time.time() - 4000})
     core.heartbeat(db, fresh(db, a), {"journal": [{"t": time.time(), "seq": 1, "kind": "actuation_refused", "reason": "S16_GUARD"}]})
     h = protection.canary_health(db)
     assert not h["promotable"] and "refused actuation" in h["why"][0]
@@ -270,8 +273,9 @@ def _journal(db, node, recs):
 def test_s18_checks_rules_are_enforced_in_time(db):
     node = certify(db, enrolled_node(db)[1])
     nid = node["node_id"]
-    core.set_policy(db, nid, {"protection": {"schema": 1, "rule": [{"id": "zoom", "match": {"bundle_id": "us.zoom.xos"},
-                                                                    "cap_fleet": {"slots": 0}}]}}, "t")
+    with db.tx():
+        protection.write_version(db, nid, {"schema": 1, "rule": [{"id": "zoom", "match": {"bundle_id": "us.zoom.xos"},
+                                                                 "cap_fleet": {"slots": 0}}]}, "t", None)
     t = time.time()
     db.x("UPDATE protection_versions SET created_at=? WHERE node_id=?", (t - 7200, nid))
     _journal(db, node, [{"t": t - 3000, "kind": "rule_active", "reason": "PROTECTION_ACTIVE", "rule": "zoom"},

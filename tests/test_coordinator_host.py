@@ -46,7 +46,7 @@ def test_the_host_document_names_the_platform_the_services_and_the_sandbox(tmp_p
     assert [s["name"] for s in h["services"]] == list(service.SERVICES) and h["pid"] == os.getpid()
     assert h["managed"] is False                                  # the suite is no service of anything
     assert h["sandbox"]["backend"] and ("helper" in h["sandbox"]) == (sys.platform == "win32")
-    assert db.get_setting(hostinfo.SETTING)["at"] == h["at"]
+    assert db.get_state(hostinfo.SETTING)["at"] == h["at"]
 
 
 def test_the_api_the_cli_and_the_console_show_it(tmp_path):

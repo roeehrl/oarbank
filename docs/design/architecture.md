@@ -103,6 +103,14 @@ actions on fleet jobs.
   the value beside its params, the `secrets` table holds it AES-256-GCM encrypted, pages and reads show only a keyed
   fingerprint, and only the grant of a job whose stage lists it (resolved per node) or `host.secrets.get` (with
   `secrets:read:self`) carries it. A coordinator move seals each value to the target's transport key.
+- **Owner settings** ([settings.md](settings.md)) are one registry in code, one sparse table of the values an owner set
+  (`setting_values`: fleet, group or node, optionally per module; absence inherits) and one resolver: the default
+  (static or computed from the node's facts), the fleet's value, the node's groups' by rank, the node's own, with locks
+  first and per-key merge rules (caps take the lowest). `settings.apply` is the one operation that writes them, with a
+  per-node preview and a tier from the keys and scopes it touches. Each node's complete effective policy and caps travel
+  in every heartbeat reply with a revision; the agent checks every key against a table generated from the registry and
+  reports the revision it applied and any key it refused. Machine state (fleet id, move phase, alive marks) is
+  `system_state`, written only by the code that owns it. The ntfy token is a core secret in the secrets store.
 - **Module processes** run in the OS's sandbox (Seatbelt on macOS; elsewhere through the agent's launcher,
   `bin/oarbank-sandbox` in a coordinator build: Landlock and seccomp, an AppContainer; `sandboxexec.py`), each in a
   process container of its own, with the module's own venv (`python` resolves to the bundle's `.venv`). A coordinator
