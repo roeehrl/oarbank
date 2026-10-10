@@ -759,16 +759,20 @@ def cmd_node(a):
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
 
 
-def _setting_value(key: str, raw: str):
+def _setting_value(key: str, raw: str, schema: dict | None = None):
     """A value from the command line: JSON when it parses (true, 2, 1.5, null, ["a"]), a list from commas for a list
-    setting, else the text."""
+    setting, else the text; the text itself for a text setting (`schema`: a module's own key's, from the coordinator)."""
     from ..coordinator.settings import REGISTRY
     d = REGISTRY.get(key)
+    sch = d.schema if d is not None else (schema or {})
+    types = sch.get("type") if isinstance(sch.get("type"), list) else [sch.get("type")]
     try:
         v = json.loads(raw)
     except json.JSONDecodeError:
         v = raw
-    if d is not None and d.schema.get("type") == "array" and isinstance(v, str):
+    if "string" in types and not isinstance(v, str) and v is not None:
+        v = raw
+    if "array" in types and isinstance(v, str):
         v = [x.strip() for x in v.split(",") if x.strip()]
     return v
 
@@ -835,8 +839,9 @@ def cmd_settings(a):
             return
         if d.get("node"):
             print(f"{d['node']['hostname']}: {d['applied']['text']}; groups {', '.join(d.get('groups') or []) or 'none'}")
+        w = max([22, *(len(x["key"]) for x in d["settings"])])
         for x in d["settings"]:
-            print(f"  {x['key']:<22} {x['label']:<42} {x['value_text']:<16} {x['badge']}"
+            print(f"  {x['key']:<{w}} {x['label']:<42} {x['value_text']:<16} {x['badge']}"
                   + (f"  [{x['applied']['text']}]" if x.get("applied") and x["applied"]["state"] == "rejected" else "")
                   + "".join(f"\n      error: {e}" for e in x.get("errors") or []))
         return
@@ -860,7 +865,13 @@ def cmd_settings(a):
     if a.action == "set":
         if a.value is None:
             sys.exit("oarbank settings set <key> <value> [--node N | --group G]")
-        change["value"] = _setting_value(a.key, a.value)
+        schema = None
+        if a.module:                                      # a module's own key: its type comes from the coordinator
+            from ..coordinator.settings import REGISTRY
+            if REGISTRY.get(a.key) is None:
+                full = a.key if a.key.startswith("module.") else f"module.{a.module}.{a.key}"
+                schema = next((s["schema"] for s in api("GET", "/api/v1/settings/schema")["settings"] if s["key"] == full), None)
+        change["value"] = _setting_value(a.key, a.value, schema)
         if a.enforce:
             change["enforce"] = True
     else:
@@ -1265,7 +1276,8 @@ def parser() -> argparse.ArgumentParser:
     st.add_argument("value", nargs="?", help="set: JSON (true, 2, 1.5, null, [\"a\"]) or text; a list setting also takes a,b")
     st.add_argument("--node", help="a node (id or name): its own value; get/explain: the value in effect on it")
     st.add_argument("--group", help="a group (id or name): built in are macOS, Linux, Windows, Coordinator host")
-    st.add_argument("--module", help="the module of a module's own setting")
+    st.add_argument("--module", help="a module: one of its own settings (vm_mem_gb, or module.<module>.vm_mem_gb), or a core key "
+                                     "set for it (enabled, services.disabled, pipeline, replica_rate); get: all of its keys")
     st.add_argument("--enforce", action="store_true", help="set at the fleet or a group: lock it (lower scopes may not set it)")
     st.add_argument("--explain", action="store_true", help="get: the whole chain for the key")
     st.add_argument("--comment", help="kept with the value (the reason is the audit's)")
@@ -1486,13 +1498,6 @@ def parser() -> argparse.ArgumentParser:
     ag.set_defaults(fn=cmd_agent)
     sub.add_parser("modules").set_defaults(fn=lambda a: [print(f"{m['name']:<12} v{m['version']} requires={m['requires']} "
                                                                f"{'enabled' if m['enabled'] else 'disabled'}") for m in api("GET", "/api/v1/modules")])
-    pl = sub.add_parser("pipeline", help="run a module single-stage or as its stage chain (head on every node, tail where its pools are)")
-    pl.add_argument("mode", choices=["single", "split"])
-    pl.add_argument("--module", required=True)
-    pl.add_argument("--reason")
-    pl.add_argument("--yes", action="store_true")
-    pl.set_defaults(fn=lambda a: print(json.dumps(run_op("modules.set_pipeline", a.module, {"mode": a.mode}, a.reason, a.yes),
-                                                  indent=1, default=str)))
     v = sub.add_parser("verify", help="check protocol invariants and fleet health (exit 1 on violations)")
     v.add_argument("--strict", action="store_true", help="also fail on warnings")
     v.set_defaults(fn=cmd_verify)

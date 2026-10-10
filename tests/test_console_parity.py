@@ -161,8 +161,13 @@ def test_settings_commands_do_what_the_settings_pages_do(fleet, capsys):
     assert "node   mini" in out and "10 GB" in out
     assert oarbank(capsys, "settings", "reset", "os_reserve_gb", "--node", nid, "--yes")[0] == 0
     assert vals()["policy"]["os_reserve_gb"] == 4 and not db.q("SELECT 1 FROM setting_values WHERE scope='node'")
-    code, out = oarbank(capsys, "settings", "set", "disabled_services", "relay/scorer,relay/vm", "--node", nid, "--dry-run")
+    code, out = oarbank(capsys, "settings", "set", "services.disabled", "scorer,vm", "--module", "relay", "--node", nid,
+                        "--dry-run")
     assert code == 2 and "plan pl_" in out and vals()["policy"]["disabled_services"] == []
+    code, out = oarbank(capsys, "settings", "set", "tile_size", "64", "--module", "relay", "--node", nid, "--yes")
+    assert code == 0 and vals()["policy"]["module_settings"]["relay"]["tile_size"] == 64      # a module's own node setting
+    code, out = oarbank(capsys, "settings", "get", "--module", "relay", "--node", nid)
+    assert any(x.split()[0] == "module.relay.tile_size" and "64" in x and "This node" in x for x in out.splitlines()), out
     assert oarbank(capsys, "node", "policy", nid)[0] != 0 and oarbank(capsys, "node", "limits", nid)[0] != 0
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(
         {"cpu_slots": 10, "idle_cpu_slots": 10, "slots": 10, "mem_gb_free": 14.0, "mem_binding": "in_use", "mem_in_use_gb": 6.0,

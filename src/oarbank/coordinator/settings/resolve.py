@@ -16,16 +16,23 @@ SOURCE_NAMES = {"default": "Default", "fleet": "Fleet", "node": "This node"}
 
 
 class Snap:
-    """Every value row and group, read once for a batch of resolutions."""
+    """Every value row and group, read once for a batch of resolutions, with the installed modules and their own keys."""
 
     def __init__(self, r):
+        from . import modkeys
         self.groups = store.groups(r)
         self.rows: dict[tuple, dict] = {}
         for x in store.rows(r):
             self.rows[(x["scope"], x["scope_id"], x["module"], x["key"])] = x
+        self.defs: dict[str, R.Setting] = modkeys.load(r)          # module.<module>.<key>: each module's own keys
+        self.modules: list[str] = modkeys.module_names(r)
 
     def get(self, scope, scope_id, module, key):
         return self.rows.get((scope, scope_id, module, key))
+
+    def defn(self, key: str) -> R.Setting:
+        """A core key's definition, or a module's own key's (SettingError when neither)."""
+        return R.get(key, self.defs)
 
 
 def snapshot(r) -> Snap:
@@ -102,7 +109,7 @@ def chain(snap: Snap, node: dict | None, d: R.Setting, module: str = "") -> list
             for g in node_groups(snap, node):
                 row = snap.get("group", g["id"], mm, d.key) if "group" in d.scopes else None
                 name = f"Group: {g['name']}" + tag
-                if row is None and not mm and g["builtin"] and d.key in store.BUILTIN_VALUES.get(g["id"], {}):
+                if row is None and mm == passes[-1] and g["builtin"] and d.key in store.BUILTIN_VALUES.get(g["id"], {}):
                     v, reason = store.BUILTIN_VALUES[g["id"]][d.key]
                     out.append(_layer("group", g["id"], name, mm, value=json.loads(json.dumps(v)), reason=reason, builtin=True))
                 else:
@@ -129,7 +136,7 @@ def _fold(d: R.Setting, layers: list[dict]) -> dict:
 
 def resolve(snap: Snap, node: dict | None, key: str, module: str = "") -> dict:
     """One key's effective value for a node (None: fleet-wide), with its provenance."""
-    d = R.get(key)
+    d = snap.defn(key)
     layers = chain(snap, node, d, module)
     set_ = [x for x in layers if x["set"]]
     lock = next((x for x in layers if x["scope"] == "fleet" and x["enforced"]), None) or next(
@@ -189,17 +196,43 @@ def effective(snap: Snap, node: dict) -> dict:
     return out
 
 
-def module_node_settings(snap: Snap, node_id: str) -> dict:
-    """{module: settings} a node's runners get (module.node_settings, set per module on the node)."""
-    return {m: x["value"] for (scope, sid, m, key), x in sorted(snap.rows.items())
-            if scope == "node" and sid == node_id and key == "module.node_settings" and m}
+def module_settings(snap: Snap, node: dict | None, module: str, scope: str | None = "node") -> dict:
+    """What one module's processes get: each of its own keys (of `scope`: `node` for its runners and services on `node`,
+    None for every key, as its coordinator side gets them with `node` None) with its effective value, else its default;
+    a key with neither is absent. Only this module's keys: another module's never reach it."""
+    from . import modkeys
+    out = {}
+    for key, d in snap.defs.items():
+        m, name = modkeys.split(key)
+        if m != module or (scope == "node" and "node" not in d.scopes):
+            continue
+        res = resolve(snap, node, key, module)
+        if res["source"]["scope"] != "default" or modkeys.has_default(d):
+            out[name] = res["value"]
+    return out
 
 
-def agent_sections(snap: Snap, node: dict, eff: dict | None = None) -> tuple[dict, dict]:
-    """(policy, limits) as the agent gets them: every key present (a cap with no value is null: uncapped)."""
+def node_modules(snap: Snap, node: dict) -> dict:
+    """Per installed module on this node: its node-scoped settings, the services it does not run, whether it runs here,
+    and the required settings with no value here."""
+    from . import modkeys
+    out = {}
+    for m in snap.modules:
+        out[m] = {"settings": module_settings(snap, node, m),
+                  "services_disabled": list(resolve(snap, node, "services.disabled", m)["value"] or []),
+                  "enabled": bool(resolve(snap, node, "enabled", m)["value"]),
+                  "unset": modkeys.unset(snap, node, m)}
+    return out
+
+
+def agent_sections(snap: Snap, node: dict, eff: dict | None = None, mods: dict | None = None) -> tuple[dict, dict]:
+    """(policy, limits) as the agent gets them: every key present (a cap with no value is null: uncapped); per module
+    its node settings (`module_settings`) and the services it does not run (`disabled_services`, as module/service)."""
     eff = eff or effective(snap, node)
+    mods = node_modules(snap, node) if mods is None else mods
     policy = {k: eff[k]["value"] for k in R.WIRE_POLICY}
-    policy["module_settings"] = module_node_settings(snap, node["node_id"])
+    policy["module_settings"] = {m: x["settings"] for m, x in mods.items() if x["settings"]}
+    policy["disabled_services"] = sorted(f"{m}/{s}" for m, x in mods.items() for s in x["services_disabled"])
     limits = {k: eff[k]["value"] for k in R.WIRE_LIMITS}
     return policy, limits
 
@@ -236,11 +269,11 @@ def explain(snap: Snap, node: dict | None, key: str, module: str = "", applied: 
     """The whole chain for one key (GET /api/v1/settings/explain): each scope, its value or "not set", the winner, any
     lock, when and by whom, and the node's applied state."""
     res = resolve(snap, node, key, module)
-    d = R.get(key)
+    d = snap.defn(key)
     res["label"], res["unit"], res["help"] = d.label, d.unit, d.help
-    res["value_text"] = R.show(key, res["value"])
+    res["value_text"] = R.show(key, res["value"], d)
     for x in res["chain"]:
-        x["value_text"] = R.show(key, x["value"]) if x["set"] or x["scope"] == "default" else "not set"
+        x["value_text"] = R.show(key, x["value"], d) if x["set"] or x["scope"] == "default" else "not set"
     res["badge"] = badge(res)
     if node is not None:
         res["node"] = {"node_id": node["node_id"], "hostname": node.get("hostname")}
@@ -254,13 +287,13 @@ def explain(snap: Snap, node: dict | None, key: str, module: str = "", applied: 
 def overrides(snap: Snap, nodes: list[dict], key: str, module: str = "") -> dict:
     """The reverse view (GET /api/v1/settings/overrides): every group and node value of a key, and the nodes whose
     effective value comes from somewhere below the fleet."""
-    d = R.get(key)
+    d = snap.defn(key)
     m = module if d.qualifier == "required" else ""
     rows = [x for (scope, sid, mm, k), x in snap.rows.items() if k == key and mm == m and scope in ("group", "node")]
     names = {n["node_id"]: n.get("hostname") for n in nodes}
     gnames = {g["id"]: g["name"] for g in snap.groups}
     vals = [{"scope": x["scope"], "id": x["scope_id"], "name": names.get(x["scope_id"]) if x["scope"] == "node"
-             else gnames.get(x["scope_id"], x["scope_id"]), "value": x["value"], "value_text": R.show(key, x["value"]),
+             else gnames.get(x["scope_id"], x["scope_id"]), "value": x["value"], "value_text": R.show(key, x["value"], d),
              "enforced": bool(x["enforced"]), "rev": x["rev"], "by": x["updated_by"], "at": x["updated_at"],
              "comment": x["comment"]} for x in rows]
     below = []
@@ -268,10 +301,10 @@ def overrides(snap: Snap, nodes: list[dict], key: str, module: str = "") -> dict
         for n in nodes:
             res = resolve(snap, n, key, module)
             if res["source"]["scope"] in ("group", "node"):
-                below.append({"node_id": n["node_id"], "hostname": n.get("hostname"), "value_text": R.show(key, res["value"]),
+                below.append({"node_id": n["node_id"], "hostname": n.get("hostname"), "value_text": R.show(key, res["value"], d),
                               "source": badge(res)})
     fleet = resolve(snap, None, key, module)
-    return {"key": key, "module": m, "label": d.label, "fleet": {"value": fleet["value"], "value_text": R.show(key, fleet["value"]),
+    return {"key": key, "module": m, "label": d.label, "fleet": {"value": fleet["value"], "value_text": R.show(key, fleet["value"], d),
                                                                  "source": badge(fleet)},
             "values": sorted(vals, key=lambda v: (v["scope"], v["name"] or "")), "nodes": sorted(below, key=lambda v: v["hostname"] or ""),
             "count": sum(1 for v in vals if v["scope"] == "node")}

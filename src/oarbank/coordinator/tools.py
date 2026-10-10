@@ -476,8 +476,9 @@ def fixes(r, node: dict, module: str, req: dict, res: dict, defs: dict | None = 
 def _module_manifests(r, node: dict | None = None, module: str | None = None) -> dict:
     """{name: manifest dict} of the enabled modules (the node's version of each when a node is given)."""
     from . import modstore
+    off = set() if module else modstore.disabled_names(r)
     names = [module] if module else [x["name"] for x in r.q(
-        "SELECT name FROM module_channels WHERE current IS NOT NULL AND disabled=0 ORDER BY name")]
+        "SELECT name FROM module_channels WHERE current IS NOT NULL ORDER BY name") if x["name"] not in off]
     out = {}
     for name in names:
         ver = modstore.version_for_node(r, name, (node or {}).get("node_id")) if node else (modstore.channel(r, name)["current"])

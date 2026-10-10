@@ -15,6 +15,7 @@ import json
 import time
 
 from ...common import canonical_json
+from . import modcore, modkeys
 from . import registry as R
 from . import resolve as V
 from . import store
@@ -57,16 +58,19 @@ def normalize(db, changes) -> list[dict]:
         if not isinstance(c, dict):
             errors.append({"index": i, "message": "a change is an object"})
             continue
-        key, scope = c.get("key") or "", c.get("scope") or ""
-        err = lambda msg, code="bad_value": errors.append({"index": i, "key": key, "scope": scope,
+        key, scope, module = c.get("key") or "", c.get("scope") or "", c.get("module") or ""
+        err = lambda msg, code="bad_value": errors.append({"index": i, "key": key, "scope": scope, "module": module,
                                                           "scope_id": c.get("scope_id") or "", "code": code, "message": msg})
         extra = set(c) - {"scope", "scope_id", "module", "key", "value", "reset", "enforce"}
         if extra:
             err(f"unknown fields {sorted(extra)}", "bad_params")
             continue
-        d = R.REGISTRY.get(key)
+        key, module = modkeys.resolve_key(snap, key, c.get("module") or "")
+        d = R.lookup(key, snap.defs)
+        if d is None and c.get("reset") and modkeys.split(key)[0]:
+            d = _orphan(key)                           # a value its module no longer declares: it can be reset
         if d is None:
-            err(f"no setting {key!r}", "unknown_setting")
+            err(f"no setting {key!r}" + (f" (the module {module} declares no such key)" if module else ""), "unknown_setting")
             continue
         if d.writer:
             err(f"{d.label} ({key}) is changed with {d.writer}, which checks it and applies its effects", "use_typed_operation")
@@ -77,12 +81,14 @@ def normalize(db, changes) -> list[dict]:
         if scope not in d.scopes:
             err(f"{d.label} can be set for: {', '.join(d.scopes)}", "not_settable_here")
             continue
-        module = c.get("module") or ""
         if d.qualifier == "required" and not module:
             err(f"{key} is a module's own setting: name the module", "module_required")
             continue
         if module and not d.qualifier:
-            err(f"{key} is not set per module (yet)", "not_settable_here")
+            err(f"{key} is not set per module", "not_settable_here")
+            continue
+        if modkeys.split(key)[0] not in (None, module):
+            err(f"{key} is {modkeys.split(key)[0]}'s own setting, not {module}'s", "not_settable_here")
             continue
         if module and not db.one("SELECT 1 FROM modules WHERE name=?", (module,)):
             err(f"no module {module!r} is installed", "unknown_module")
@@ -108,9 +114,13 @@ def normalize(db, changes) -> list[dict]:
         value = None
         if not reset:
             try:
-                value = R.check(key, c["value"])
+                value = R.check(key, c["value"], d)
             except R.SettingError as e:
                 err(e.detail.replace(key + ":", d.label + ":", 1) if e.detail.startswith(key) else e.detail, e.code)
+                continue
+            why = modcore.check(db, key, module, value) if module else None
+            if why:
+                err(why, "bad_value")
                 continue
         ident = (scope, sid, module, key)
         if ident in seen:
@@ -123,11 +133,22 @@ def normalize(db, changes) -> list[dict]:
                 err(f"locked by {lock}: change it there", "locked")
                 continue
         out.append({"scope": scope, "scope_id": sid, "module": module, "key": key, "reset": reset,
-                    "value": value, "enforce": enforce})
+                    "value": value, "enforce": enforce, **({"orphan": True} if d.section == "orphan" else {})})
     if errors:
         raise ApplyError(400, "invalid_settings", "; ".join(f"{e.get('key') or '#' + str(e['index'])}: {e['message']}"
                                                             for e in errors)[:800], errors)
     return out
+
+
+def _orphan(key: str) -> R.Setting:
+    """A stand-in definition for a value whose module no longer declares its key (modkeys.orphans): it can only be
+    reset, and it reaches no node."""
+    return R.Setting(key, modkeys.split(key)[1], "No longer declared by the module's registered version.", {},
+                     applies="coordinator", qualifier="required", section="orphan", lockable=False)
+
+
+def _defn(snap: V.Snap, c: dict) -> R.Setting:
+    return _orphan(c["key"]) if c.get("orphan") else snap.defn(c["key"])
 
 
 def _lock_above(snap, db, scope, sid, module, key) -> str | None:
@@ -164,12 +185,12 @@ def _reaches(snap: V.Snap, node: dict, c: dict) -> bool:
 
 
 def _change_text(c: dict, names: dict, before: V.Snap) -> str:
-    d = R.REGISTRY[c["key"]]
+    d = _defn(before, c)
     where = {"fleet": "Fleet", "group": f"group {names.get(c['scope_id'], c['scope_id'])}",
              "node": names.get(c["scope_id"], c["scope_id"])}[c["scope"]]
     old = before.get(c["scope"], c["scope_id"], c["module"], c["key"])
-    was = R.show(c["key"], old["value"]) if old else "not set"
-    now = "reset (inherits)" if c["reset"] else R.show(c["key"], c["value"]) + (" (locked)" if c["enforce"] else "")
+    was = R.show(c["key"], old["value"], d) if old else "not set"
+    now = "reset (inherits)" if c["reset"] else R.show(c["key"], c["value"], d) + (" (locked)" if c["enforce"] else "")
     return f"{d.label}{' [' + c['module'] + ']' if c['module'] else ''} at {where}: {was} → {now}"
 
 
@@ -181,10 +202,11 @@ def plan(db, changes) -> dict:
     after = _after(before, norm)
     nodes = _nodes(db)
     names = {n["node_id"]: n["hostname"] for n in nodes} | {g["id"]: g["name"] for g in before.groups}
-    # keys a node takes: the agent's policy and caps, a module's node settings, and host tool paths (tool_pins and the
-    # node statement)
-    wire_keys = sorted({c["key"] for c in norm if R.REGISTRY[c["key"]].wire or c["key"] == "module.node_settings"
-                        or "statement" in R.REGISTRY[c["key"]].effects})
+    # keys a node takes: the agent's policy and caps, host tool paths (tool_pins and the node statement), and per module
+    # whether it runs there, its services and its node-scoped settings (everything not applied by the coordinator alone)
+    defn = before.defn
+    wire_keys = sorted({c["key"] for c in norm if not c.get("orphan") and (defn(c["key"]).wire or defn(c["key"]).applies
+                                                                             != "coordinator")})
     diff, unaffected, errors, changed_nodes = [], [], [], []
     for n in nodes:
         reach = [c for c in norm if _reaches(before, n, c) and c["key"] in wire_keys]
@@ -198,8 +220,9 @@ def plan(db, changes) -> dict:
         for p in moved_pairs:
             k, m = p
             diff.append({"node_id": n["node_id"], "hostname": n["hostname"], "key": k, "module": m,
-                         "label": R.REGISTRY[k].label + (f" [{m}]" if m else ""), "old": b[p]["value"], "new": a[p]["value"],
-                         "old_text": R.show(k, b[p]["value"]), "new_text": R.show(k, a[p]["value"]), "source": V.badge(a[p])})
+                         "label": defn(k).label + (f" [{m}]" if m else ""), "old": b[p]["value"], "new": a[p]["value"],
+                         "old_text": R.show(k, b[p]["value"], defn(k)), "new_text": R.show(k, a[p]["value"], defn(k)),
+                         "source": V.badge(a[p])})
         a = {p[0]: a[p] for p in pairs}
         if moved:
             changed_nodes.append(n)
@@ -210,8 +233,8 @@ def plan(db, changes) -> dict:
                        c["scope"] == a[k]["source"]["scope"] and c["scope_id"] == a[k]["source"]["id"] for c in reach)
                    else "same value")
             unaffected.append({"node_id": n["node_id"], "hostname": n["hostname"], "key": k, "why": why,
-                               "value_text": R.show(k, a[k]["value"]), "source": V.badge(a[k])})
-        if any(R.REGISTRY[k].wire for k in moved):
+                               "value_text": R.show(k, a[k]["value"], defn(k)), "source": V.badge(a[k])})
+        if any(defn(k).wire for k in moved):
             full_b = {k: V.resolve(before, n, k)["value"] for k in (*R.WIRE_POLICY, *R.WIRE_LIMITS)}
             full_a = {k: V.resolve(after, n, k)["value"] for k in (*R.WIRE_POLICY, *R.WIRE_LIMITS)}
             src_b = {k: V.resolve(before, n, k)["source"]["scope"] for k in (*R.WIRE_POLICY, *R.WIRE_LIMITS)}
@@ -248,6 +271,7 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
     """Write a checked change set (inside the operation's transaction): one revision, effect hooks, node refresh."""
     p = plan(db, changes)
     norm = p["_changes"]
+    defn = V.snapshot(db).defn
     n = store.next_rev(db)
     for c in norm:
         if c["reset"]:
@@ -256,13 +280,14 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
             store.put(db, c["scope"], c["scope_id"], c["module"], c["key"], c["value"], actor, n, comment, c["enforce"])
     hooks: dict[str, set] = {}
     for x in p["_diff"]:
-        for e in R.REGISTRY[x["key"]].effects:
+        for e in defn(x["key"]).effects:
             hooks.setdefault(e, set()).add(x["node_id"])
-    if any("statement" in R.REGISTRY[c["key"]].effects for c in norm):
+    if any(not c.get("orphan") and "statement" in defn(c["key"]).effects for c in norm):
         from .. import statements                 # host tool paths: a path a node did not find goes into its statement
         statements.refresh(db)
     for nid in sorted(hooks.get("redoctor", ())):
-        _redoctor(db, nid, [x for x in p["_diff"] if x["node_id"] == nid and "redoctor" in R.REGISTRY[x["key"]].effects])
+        _redoctor(db, nid, [x for x in p["_diff"] if x["node_id"] == nid and "redoctor" in defn(x["key"]).effects])
+    modcore.after_commit(db, norm, p["_diff"], actor)
     touched = sorted({x["node_id"] for x in p["_diff"]})
     sync_nodes(db, touched, rev_=n)
     db.event("settings_changed", actor=actor, reason=f"rev {n}: " + "; ".join(p["changes"])[:400], rev=n,
@@ -278,23 +303,28 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
 
 
 def _redoctor(db, nid: str, diffs: list[dict]) -> None:
-    """disabled_services changed on a node: its role changed, so every module is re-doctored and re-certified."""
+    """A module's services.disabled changed on a node: that module's role there changed, so it (and no other module) is
+    re-doctored and re-certified."""
     from .. import core
-    new = next((x["new"] for x in diffs if x["key"] == "disabled_services"), None)
-    for m in core.node_modules(db.one("SELECT modules_json FROM nodes WHERE node_id=?", (nid,))):
-        core._revoke_quiet(db, nid, m, f"disabled_services -> {sorted(new or [])}")
+    have = core.node_modules(db.one("SELECT modules_json FROM nodes WHERE node_id=?", (nid,)))
+    for x in diffs:
+        if x["module"] in have:
+            core._revoke_quiet(db, nid, x["module"], f"services.disabled -> {sorted(x['new'] or [])}")
     db.x("UPDATE nodes SET want_doctor=1 WHERE node_id=?", (nid,))
 
 
 # ------------------------------------------------------------------ what the agent gets
 
 def node_document(snap: V.Snap, node: dict) -> dict:
-    """{"policy", "limits"}: the complete effective settings the agent gets (policy carries protection and module
-    settings beside the registry's keys)."""
-    policy, limits = V.agent_sections(snap, node)
+    """{"policy", "limits", "modules_disabled", "settings_unset"}: the complete effective settings the agent gets
+    (policy carries protection, each module's node settings and the services it does not run beside the registry's
+    keys), the modules that do not run on the node, and per module the required settings with no value for it."""
+    mods = V.node_modules(snap, node)
+    policy, limits = V.agent_sections(snap, node, mods=mods)
     prot = node.get("protection_json")
     policy["protection"] = (json.loads(prot) if isinstance(prot, str) and prot else None) or copy.deepcopy(DEFAULT_PROTECTION)
-    return {"policy": policy, "limits": limits}
+    return {"policy": policy, "limits": limits, "modules_disabled": sorted(m for m, x in mods.items() if not x["enabled"]),
+            "settings_unset": {m: x["unset"] for m, x in mods.items() if x["unset"]}}
 
 
 def sync_nodes(db, node_ids=None, rev_: int | None = None, snap: V.Snap | None = None) -> dict:
@@ -318,12 +348,15 @@ def sync_nodes(db, node_ids=None, rev_: int | None = None, snap: V.Snap | None =
 
 
 def directive(db, node: dict) -> dict:
-    """The heartbeat's settings: {"policy", "limits", "settings_rev"} (refreshed first: facts and groups may have moved)."""
+    """The heartbeat's settings: {"policy", "limits", "settings_rev", "modules_disabled"} (refreshed first: facts and
+    groups may have moved). `modules_disabled`: the modules whose `[module] enabled` is off for this node; their services
+    stop there (the kill switch when the fleet's value is off)."""
     with db.tx():
         sync_nodes(db, [node["node_id"]])
         n = db.one("SELECT settings_json, settings_rev FROM nodes WHERE node_id=?", (node["node_id"],))
     doc = json.loads(n["settings_json"] or "{}") or {}
-    return {"policy": doc.get("policy") or {}, "limits": doc.get("limits") or {}, "settings_rev": n["settings_rev"] or 0}
+    return {"policy": doc.get("policy") or {}, "limits": doc.get("limits") or {}, "settings_rev": n["settings_rev"] or 0,
+            "modules_disabled": list(doc.get("modules_disabled") or [])}
 
 
 def observe(db, node: dict, report) -> None:

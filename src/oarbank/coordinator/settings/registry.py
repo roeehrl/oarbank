@@ -40,13 +40,17 @@ class Setting:
     applies: str = "agent"            # coordinator | agent | both
     wire: str | None = None           # the agent directive section: policy | limits
     section: str | None = None        # where the console shows it (SECTIONS)
-    qualifier: str | None = None      # None: a core key; "required": a module's own key, set per module; "optional": a
-                                      # core key a module may qualify (its module-qualified chain wins over the plain one)
+    qualifier: str | None = None      # None: a core key; "required": set per module only (a core key every module has,
+                                      # or a module's own key); "optional": a core key a module may qualify (its
+                                      # module-qualified chain wins over the plain one)
     writer: str | None = None         # the operation that owns its writes (settings.apply refuses it)
     effects: tuple = ()               # hooks run on nodes whose effective value changed (apply.py)
     hardware: str | None = None       # cores | ram: a node's own value may not exceed its hardware
     note: str | None = None           # beside the row (for example: not applied by agents yet)
     examples: tuple = field(default=())
+    required: bool = False            # a module's own key the owner must set (readiness, SETTINGS_NOT_SET)
+    validator: Callable[[Any], Any] | None = None   # the value normalized, or SettingError (a module's own key: its
+                                                    # property's whole JSON Schema); None: the `schema` subset below
 
     @property
     def nullable(self) -> bool:
@@ -61,7 +65,7 @@ def _os_reserve(facts: dict) -> tuple:
     return (4 if ram <= 32 else (8 if ram >= 96 else 6)), f"{ram:g} GB RAM"
 
 
-SERVICE = r"^(\*|[a-z0-9][a-z0-9_.-]{0,63})/[a-z0-9][a-z0-9_.-]{0,63}$"
+SERVICE_NAME = r"^[a-z0-9][a-z0-9_.-]{0,63}$"
 HOST = r"^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:[0-9]{1,5})?$"
 NUM_GE0 = {"type": "number", "minimum": 0}
 POS_NUM = {"type": "number", "exclusiveMinimum": 0}
@@ -77,9 +81,13 @@ SECTIONS = {
     "access": ("Access", "Host names the console and the admin API answer to besides localhost (the remote mode)."),
     "verification": ("Data and verification", "How often finished work is re-run on another node to catch a wrong one."),
     "tools": ("Host tools", "Which installation of a host tool a node grants (docs/design/host-tools.md)."),
+    "module": ("Running it", "Where the module runs, which of its services run, and how its work is split and checked."),
+    "module_own": ("Its settings", "The settings the module declares in its manifest."),
 }
 NODE_SECTIONS = ("memory", "presence", "jobs", "caps")
 FLEET_SECTIONS = ("notifications", "access", "verification")
+# the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
+MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
 
 SETTINGS = (
     # ---------------------------------------------------------------- memory
@@ -121,11 +129,11 @@ SETTINGS = (
     Setting("hard_limits", "Hard limits",
             "Jobs over their memory or CPU reservation are stopped where the OS enforces it (Linux cgroups, Windows Job "
             "Objects; macOS has none).", {"type": "boolean"}, default=False, wire="policy", section="jobs", advanced=True),
-    Setting("disabled_services", "Services this computer does not run",
-            "Module services as module/service (or */service); a change re-checks and re-certifies the node.",
-            {"type": "array", "items": {"type": "string", "pattern": SERVICE}, "maxItems": 64}, default=[],
-            wire="policy", section="jobs", advanced=True, applies="both", effects=("redoctor",),
-            examples=("relay/scorer",)),
+    Setting("services.disabled", "Services that do not run",
+            "The module's services by name; a change re-checks and re-certifies the module on the nodes it reaches.",
+            {"type": "array", "items": {"type": "string", "pattern": SERVICE_NAME}, "maxItems": 64}, default=[],
+            section="module", advanced=True, applies="both", qualifier="required", effects=("redoctor",),
+            examples=("scorer",)),
     # ---------------------------------------------------------------- caps (min: every scope's cap applies)
     Setting("cpu_cores", "CPU cores", "Caps concurrent jobs times their threads.", {"type": "number", "exclusiveMinimum": 0},
             unit="cores", wire="limits", section="caps", merge="min", danger="T0", hardware="cores"),
@@ -161,9 +169,10 @@ SETTINGS = (
             default=[], scopes=("fleet",), applies="coordinator", section="access", lockable=False,
             examples=("oarbank.example.ts.net",)),
     Setting("replica_rate", "Replica rate",
-            "The share of finished jobs re-run on another node and compared (0 to 1).",
+            "The share of finished jobs re-run on another node and compared (0 to 1); a module's own rate can only raise "
+            "the fleet's (the higher applies).",
             {"type": "number", "minimum": 0, "maximum": 1}, default=0.03, scopes=("fleet",), merge="max",
-            applies="coordinator", section="verification", lockable=False),
+            applies="coordinator", section="verification", lockable=False, qualifier="optional"),
     # ---------------------------------------------------------------- written by their own operations
     Setting("folder_registry", "Folders", "A folder id mapped to its access and a path on each node.", {"type": "object"},
             default={}, scopes=("fleet",), applies="coordinator", lockable=False, writer="settings.folders.update",
@@ -171,16 +180,15 @@ SETTINGS = (
     Setting("dataset_origins", "Dataset origins", "Host patterns dataset origins must match; none: any public https host.",
             {"type": "array", "items": {"type": "string", "pattern": HOST}}, default=[], scopes=("fleet",),
             applies="coordinator", lockable=False, writer="settings.origins.update", danger="T2"),
-    Setting("pipeline", "Pipeline", "single: one job runs every stage; split: the module's stage chain.",
+    # ---------------------------------------------------------------- every module's own core keys ([module] <key>)
+    Setting("enabled", "Run this module",
+            "Off: none of its work runs and its services stop, on the whole fleet or on the nodes this value reaches.",
+            {"type": "boolean"}, default=True, applies="both", qualifier="required", section="module",
+            effects=("module_enabled",)),
+    Setting("pipeline", "Pipeline",
+            "single: one job runs every stage; split: the module's stage chain (switching to split splits its queued jobs).",
             {"type": "string", "enum": ["single", "split"]}, default="single", scopes=("fleet",), applies="coordinator",
-            lockable=False, qualifier="required", writer="modules.set_pipeline", danger="T2"),
-    Setting("module.settings", "Module settings", "The module's own fleet-wide settings, which its operations write.",
-            {"type": "object"}, default={}, scopes=("fleet",), applies="coordinator", lockable=False,
-            qualifier="required"),
-    Setting("module.node_settings", "Module settings on this node",
-            "Handed to the module's runners and services on this node (OARBANK_SETTINGS_FILE), for example a VM size.",
-            {"type": "object"}, default={}, scopes=("node",), applies="agent", lockable=False, qualifier="required",
-            advanced=True),
+            qualifier="required", section="module", effects=("pipeline",), danger="T1"),
 )
 
 # Key families: one definition stands for every key its pattern matches (`tool.<id>.path`, one per host tool).
@@ -220,6 +228,12 @@ class _Registry(dict):
 
 
 REGISTRY: dict[str, Setting] = _Registry({s.key: s for s in SETTINGS})
+
+
+def lookup(key: str, extra: dict | None = None) -> Setting | None:
+    """A core key or key family, else one of `extra` (a module's own keys, `module.<module>.<key>`: modkeys.py)."""
+    d = REGISTRY.get(key)
+    return d if d is not None or not extra else extra.get(key)
 WIRE_POLICY = tuple(s.key for s in SETTINGS if s.wire == "policy")
 WIRE_LIMITS = tuple(s.key for s in SETTINGS if s.wire == "limits")
 NODE_KEYS = tuple(s.key for s in SETTINGS if s.section in NODE_SECTIONS)
@@ -232,8 +246,8 @@ class SettingError(ValueError):
         self.code, self.detail, self.key = code, detail, key
 
 
-def get(key: str) -> Setting:
-    d = REGISTRY.get(key)
+def get(key: str, extra: dict | None = None) -> Setting:
+    d = lookup(key, extra)
     if d is None:
         raise SettingError("unknown_setting", f"no setting {key!r} (oarbank settings get lists them)", key)
     return d
@@ -331,9 +345,11 @@ def _schedule(v, where: str) -> dict:
     return out
 
 
-def check(key: str, v):
-    """A value for `key`, normalized, or SettingError naming what is wrong."""
-    return _check(get(key).schema, v, key)
+def check(key: str, v, d: Setting | None = None):
+    """A value for `key` (its definition `d` when it is a module's own key), normalized, or SettingError naming what is
+    wrong."""
+    d = d or get(key)
+    return d.validator(v) if d.validator else _check(d.schema, v, key)
 
 
 def default(d: Setting, facts: dict | None) -> tuple:
@@ -361,9 +377,9 @@ def _num(v) -> str:
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-def show(key: str, v) -> str:
-    """A value as a person reads it."""
-    d = REGISTRY.get(key)
+def show(key: str, v, d: Setting | None = None) -> str:
+    """A value as a person reads it (`d`: the definition of a module's own key)."""
+    d = d or REGISTRY.get(key)
     t = _types(d.schema) if d else []
     if "boolean" in t:
         return "on" if v else "off"
@@ -403,9 +419,10 @@ def change_tier(changes) -> str:
 
 
 def schema_doc(module_keys: dict | None = None) -> list[dict]:
-    """GET /api/v1/settings/schema: every definition as data (a key family once, by its pattern's name)."""
+    """GET /api/v1/settings/schema: every definition as data (a key family once, by its pattern's name; each module's
+    own keys from `module_keys`)."""
     out = []
-    for d in (*SETTINGS, *(f for _, f in FAMILIES)):
+    for d in (*SETTINGS, *(f for _, f in FAMILIES), *(module_keys or {}).values()):
         dv, why = default(d, None)
         out.append({"key": d.key, "label": d.label, "help": d.help, "unit": d.unit, "schema": d.schema,
                     "default": dv if d.computed is None else None, "computed_default": d.computed_how,
@@ -413,5 +430,5 @@ def schema_doc(module_keys: dict | None = None) -> list[dict]:
                     "scopes": list(d.scopes), "merge": d.merge, "lockable": d.lockable, "advanced": d.advanced,
                     "danger": d.danger, "applies": d.applies, "wire": d.wire, "section": d.section,
                     "qualifier": d.qualifier, "writer": d.writer, "effects": list(d.effects), "note": d.note,
-                    "hardware": d.hardware, "examples": list(d.examples)})
+                    "hardware": d.hardware, "examples": list(d.examples), "required": d.required})
     return out

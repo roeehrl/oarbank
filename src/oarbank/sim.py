@@ -144,7 +144,7 @@ class Simulation:
         if self.faults.split:
             for i, ag in enumerate(self.agents):
                 ag.pools = 4 if i == 0 else 0
-                settings_store.put(self.db, "node", ag.node_id, "", "disabled_services", [] if i == 0 else ["relay/scorer"], "sim",
+                settings_store.put(self.db, "node", ag.node_id, "relay", "services.disabled", [] if i == 0 else ["scorer"], "sim",
                                    settings_store.next_rev(self.db))
                 self.db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"scorer": ag.pools}}), ag.node_id))
                 sync_nodes(self.db, [ag.node_id])
@@ -165,9 +165,11 @@ class Simulation:
             modstore.dev_install_dir(db, m, actor="sim")
         modcalls.use(db)
         # render-only nodes certify on the golden frame digest
-        write_fleet(db, "module.settings", {"goldens": [{"name": "G1", "params": PARAMS, "dataset": "demo:atrium",
-                                                         "expected": {"score": "0.947512", "tiles": 1536, "image_sha256": "g"}}]},
-                    "sim", "relay")
+        from .coordinator.settings import modkeys
+        with db.tx():
+            modkeys.write(db, "relay", {"goldens": [{"name": "G1", "params": PARAMS, "dataset": "demo:atrium",
+                                                     "expected": {"score": "0.947512", "tiles": 1536, "image_sha256": "g"}}]},
+                          "sim")
         self.datasets = [f"scene:s{i}" for i in range(n_datasets)]
         for did in self.datasets + ["demo:atrium"]:
             db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at) VALUES(?,?,?,?,?,?)",

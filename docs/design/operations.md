@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-90 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+89 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -66,7 +66,6 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `modules.set_pipeline` — Run a module single-stage or split | T2 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=modules.set_pipeline)<br>`POST /do/{op}` (op=modules.set_pipeline) | oarbank pipeline single|split --module <module> |
 | `modules.install` — Install a module bundle: verify every file hash and the digest, check compatibility, self-test (enables nothing) | T2 | required | yes | admin | natural | modules.uninstall | `POST /api/v1/ops/{op}` (op=modules.install)<br>`POST /api/v1/modules/bundles`<br>`POST /do/{op}` (op=modules.install)<br>`POST /stage/{op}` (op=modules.install) | oarbank module install <bundle.mfb> |
 | `modules.uninstall` — Remove an installed module version that no channel or pin uses | T2 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=modules.uninstall)<br>`POST /do/{op}` (op=modules.uninstall) | oarbank module uninstall <name>@<version> |
 | `modules.verify` — Re-verify installed bundles against their recorded digests | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=modules.verify)<br>`POST /do/{op}` (op=modules.verify) | oarbank module verify [name] |

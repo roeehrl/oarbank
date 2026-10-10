@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 90 operations, 2 explain kinds, 126 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 89 operations, 2 explain kinds, 127 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -38,7 +38,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `campaigns.rebind_platform` | T2 | yes | `oarbank campaign rebind <id> --platform <token>` | yes |
 | `datasets.register` | T1 | yes | `oarbank dataset upload <dir> --kind <kind>`<br>`oarbank dataset register <file.json>` | yes |
 | `settings.origins.update` | T2 | yes | `oarbank op settings.origins.update -p hosts=...` | yes |
-| `modules.set_pipeline` | T2 | yes | `oarbank pipeline single|split --module <module>` | yes |
 | `modules.install` | T2 | yes | `oarbank module install <bundle.mfb>` | yes |
 | `modules.uninstall` | T2 | yes | `oarbank module uninstall <name>@<version>` | yes |
 | `modules.verify` | T0 | yes | `oarbank module verify [name]` | yes |
@@ -124,6 +123,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `STAGE_CAPABILITY_MISSING` | `nodes.run_doctor` |
 | `GPU_API_MISSING` | `nodes.run_doctor` |
 | `SECRETS_NOT_SET` | `secrets.set` |
+| `SETTINGS_NOT_SET` | `settings.apply` |
 | `DATASET_PLATFORM_MISMATCH` | `jobs.cancel` |
 | `TOOL_NOT_FOUND` | `tools.detect`, `tools.define` |
 | `TOOL_VERSION_UNMET` | `tools.detect` |

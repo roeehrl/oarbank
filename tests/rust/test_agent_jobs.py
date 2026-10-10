@@ -66,8 +66,8 @@ def test_a_bootstrap_stage_provisions_what_the_goldens_mount_on_a_fresh_fleet(ag
         node = wait(lambda: next(iter(coordinator.api("GET", "/api/v1/fleet")["nodes"]), None))
         coordinator.api("POST", "/api/v1/ops/settings.apply", json={              # settings a bootstrap job must never see
             "target": node["node_id"], "reason": "e2e", "params": {"changes": [
-                {"scope": "node", "scope_id": node["node_id"], "module": "depot", "key": "module.node_settings",
-                 "value": {"token": "secret"}}]}})
+                {"scope": "node", "scope_id": node["node_id"], "module": "depot", "key": "mirror",
+                 "value": "https://mirror.example/secret"}]}})
         wait(lambda: node_modules(coordinator).get("depot", {}).get("state") == "certifying", timeout=120)
         assert not [d for d in coordinator.api("GET", "/api/v1/datasets") if d["dataset_id"] == "tool:depot-1"]
         coordinator.api("POST", "/api/v1/ops/mod.depot.provision", json={"params": {"evals": 2}, "reason": "e2e"},

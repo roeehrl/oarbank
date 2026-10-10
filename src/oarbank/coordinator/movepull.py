@@ -331,7 +331,10 @@ def verify_modules(staging: Path, move_id: str | None = None) -> dict:
     out, built = {}, []
     try:
         relink_external(vdb)
-        for ch in vdb.q("SELECT name, current FROM module_channels WHERE current IS NOT NULL AND disabled=0 ORDER BY name"):
+        enabled = set(modstore.enabled_names(vdb))
+        for ch in vdb.q("SELECT name, current FROM module_channels WHERE current IS NOT NULL ORDER BY name"):
+            if ch["name"] not in enabled:
+                continue
             name = ch["name"]
             rec = vdb.one("SELECT path FROM modules WHERE name=? AND version=?", (name, ch["current"]))
             if not rec or not vdb.abs(rec["path"]).is_dir():
@@ -409,12 +412,12 @@ def finish_install(db: DB, home: Path) -> bool:
         db.set_state("reaper_grace_until", time.time() + C.LEASE_TTL + 120)
         db.set_state("coordinator_cik", identity.key(home).public_b64)
         relink_external(db)
-        from . import modlife
+        from . import modlife, modstore
         plan = db.get_state("move_rules_plan") or {}
         modlife.apply_move_rules(db, plan)
         db.set_state("move_postflight_pending", {
             "move_id": st.get("move_id"), "from_url": st.get("from_url"), "epoch": int(st["epoch"]), "items": plan.get("items") or [],
-            "modules": [r["name"] for r in db.q("SELECT name FROM module_channels WHERE current IS NOT NULL AND disabled=0")]})
+            "modules": modstore.enabled_names(db)})
         for k in ("move_rules_plan", "move_blockers", "move_preflight_at", "move_draining_at"):
             db.set_state(k, None)
         if st.get("move_id"):

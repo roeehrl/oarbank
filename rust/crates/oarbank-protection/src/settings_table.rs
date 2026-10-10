@@ -18,7 +18,6 @@ pub const DEFS: &[Def] = &[
     Def { key: "max_slots", section: Section::Policy, kind: Kind::Integer, nullable: true, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "null" },
     Def { key: "nice", section: Section::Policy, kind: Kind::Integer, nullable: false, min: Some(0.0), exclusive_min: false, max: Some(20.0), choices: &[], default: "10" },
     Def { key: "hard_limits", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "false" },
-    Def { key: "disabled_services", section: Section::Policy, kind: Kind::Strings, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "[]" },
     Def { key: "cpu_cores", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
     Def { key: "mem_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
     Def { key: "jobs", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null" },
@@ -28,6 +27,7 @@ pub const DEFS: &[Def] = &[
     Def { key: "vm_cpus", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null" },
     Def { key: "disk_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
     Def { key: "staging_mbps", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null" },
+    Def { key: "disabled_services", section: Section::Policy, kind: Kind::Strings, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "[]" },
     Def { key: "module_settings", section: Section::Policy, kind: Kind::Object, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "{}" },
     Def { key: "protection", section: Section::Policy, kind: Kind::Object, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null" },
 ];

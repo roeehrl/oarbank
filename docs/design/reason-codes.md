@@ -27,6 +27,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `STAGE_CAPABILITY_MISSING` | Its stage needs {capabilities}; this node's services, probes and module doctor do not provide {missing} | P1 | – | `nodes.run_doctor` | – |
 | `GPU_API_MISSING` | Needs {need}; this node provides {have} (its doctor's GPU APIs) | P1 | – | `nodes.run_doctor` | – |
 | `SECRETS_NOT_SET` | Its stage receives secrets {missing}, which have no value for this node | P1 | – | `secrets.set` | – |
+| `SETTINGS_NOT_SET` | Module {module} needs settings {missing}, which have no value for this node | P1 | – | `settings.apply` | – |
 | `DATASET_PLATFORM_MISMATCH` | Its dataset is bound to {platforms}; this node is {platform} | P1 | – | `jobs.cancel` | – |
 | `OS_VERSION_UNSUPPORTED` | Module {module} needs another OS version than {os_version} (requires.os) | P1 | – | – | – |
 | `TOOL_NOT_FOUND` | Module {module} needs a host tool this node does not have: {tools} | P1 | – | `tools.detect`, `tools.define` | – |

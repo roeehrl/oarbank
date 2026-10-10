@@ -45,7 +45,7 @@ def test_every_definition_is_complete():
 @pytest.mark.parametrize("key, value, why", [
     ("job_mem_gb", "abc", "expected number"), ("job_mem_gb", 0, "must be more than 0"), ("nice", 21, "above 20"),
     ("threads_per_job", 1.5, "not a whole number"), ("run_on_battery", "yes", "expected boolean"),
-    ("disabled_services", ["Relay Scorer"], "expected form"), ("console_hosts", "a.example", "expected array"),
+    ("services.disabled", ["Relay Scorer"], "expected form"), ("console_hosts", "a.example", "expected array"),
     ("schedule", {"start": "25:00", "end": "07:00"}, "a time as HH:MM"), ("enforce", "firm", "not one of soft, hard"),
     ("ntfy.url", "ftp://x", "not an http(s) URL"), ("replica_rate", 2, "above 1")])
 def test_values_are_type_checked(key, value, why):
@@ -118,12 +118,12 @@ def test_a_lock_holds_against_a_lower_value(db):
 def test_the_coordinator_host_group_runs_every_service(db, monkeypatch):
     import socket
     monkeypatch.setattr(socket, "gethostname", lambda: "studio.local")
-    set_fleet(db, "disabled_services", ["relay/scorer"])
+    set_fleet(db, "services.disabled", ["scorer"], "relay")
     worker = enrolled_node(db, "mini")[1]
     studio = enrolled_node(db, "studio", facts={**FACTS, "hostname": "studio"})[1]
     assert node_settings(db, worker)["disabled_services"] == ["relay/scorer"]
     assert node_settings(db, studio)["disabled_services"] == []
-    res = V.resolve(V.snapshot(db), node_row(db, studio), "disabled_services")
+    res = V.resolve(V.snapshot(db), node_row(db, studio), "services.disabled", "relay")
     assert V.badge(res) == "Group: Coordinator host · the coordinator's own machine runs every service"
 
 
@@ -182,7 +182,8 @@ def test_changing_a_fleet_default_reaches_every_non_overriding_node_and_the_prev
 def test_the_agent_gets_a_complete_policy_with_a_revision_and_reports_what_it_applied(db):
     n = certify(db, enrolled_node(db)[1])
     d = core._node_directives(db, node_row(db, n))
-    assert set(d["policy"]) == {*R.WIRE_POLICY, "module_settings", "protection"} and set(d["limits"]) == set(R.WIRE_LIMITS)
+    assert set(d["policy"]) == {*R.WIRE_POLICY, "disabled_services", "module_settings", "protection"}
+    assert set(d["limits"]) == set(R.WIRE_LIMITS) and d["modules_disabled"] == []
     assert d["limits"]["jobs"] is None and d["policy"]["protection"]["node"]["mode"] == "moderate"
     rev = d["settings_rev"]
     assert A.applied_state(node_row(db, n))["state"] == "unknown"           # an agent that does not report
@@ -234,7 +235,10 @@ def test_the_settings_api(db):
     set_node(db, n, "job_mem_gb", 3)
     c = TestClient(coord_app.admin_app(db, coord_app.EventBus()), headers=admin_headers(db))
     schema = c.get("/api/v1/settings/schema").json()
-    assert {s["key"] for s in schema["settings"]} == set(R.REGISTRY) | {"tool.<id>.path"}           # a key family once
+    module_keys = {f"module.toy.{k}" for k in ("favorite_n", "greeting")} | {
+        f"module.relay.{k}" for k in ("goldens", "tool_datasets", "vm_mem_gb", "tile_size")}
+    assert {s["key"] for s in schema["settings"]} == set(R.REGISTRY) | {"tool.<id>.path"} | module_keys  # a family once
+    assert schema["modules"] == ["relay", "toy"]
     assert schema["groups"][0]["id"] == "os-darwin"
     eff = c.get("/api/v1/settings/effective", params={"node": "mini"}).json()
     row = next(x for x in eff["settings"] if x["key"] == "job_mem_gb")
@@ -269,16 +273,20 @@ def make_old_home(tmp_path) -> Path:
         CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT);
         INSERT INTO settings SELECT key, value_json FROM system_state WHERE key != 'settings_rev';
         DELETE FROM system_state; DELETE FROM setting_values;
-        UPDATE nodes SET settings_json=NULL, settings_digest=NULL, settings_rev=NULL, protection_json=NULL;""")
+        UPDATE nodes SET settings_json=NULL, settings_digest=NULL, settings_rev=NULL, protection_json=NULL;
+        DROP TABLE module_setting_keys;
+        ALTER TABLE module_channels ADD COLUMN disabled INT DEFAULT 0;
+        UPDATE module_channels SET disabled=1 WHERE name='toy';""")
     owner = {"ntfy": {"url": "https://ntfy.sh/topic", "token": None, "click_base": None}, "replica_rate": 0.05,
              "console_hosts": "oarbank.example.ts.net", "default_worker_disabled_services": ["relay/scorer"],
              "tool_registry": {"java17": {"trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"]}}},
              "dataset_origins": {"hosts": ["example.org"]}, "pipeline:relay": "split",
-             "module_settings:relay": {"goldens": []}, "dataset_groups": {"g": 1}, "release_pubkey": "abc"}
+             "module_settings:relay": {"goldens": [], "tool_datasets": {"lut": "lut:1"}, "nope": 1, "vm_mem_gb": "big"},
+             "module_settings:toy": {"favorite_n": 7}, "dataset_groups": {"g": 1}, "release_pubkey": "abc"}
     c.executemany("INSERT OR REPLACE INTO settings VALUES(?,?)", [(k, json.dumps(v)) for k, v in owner.items()])
     c.execute("UPDATE nodes SET policy_json=?, limits_json='{}' WHERE node_id=?", (json.dumps(OLD_POLICY), a["node_id"]))
-    pol_b = {**OLD_POLICY, "os_reserve_gb": 6, "job_mem_gb": 3, "nice": "high",
-             "module_settings": {"relay": {"vm_mem_gb": 12}},
+    pol_b = {**OLD_POLICY, "os_reserve_gb": 6, "job_mem_gb": 3, "nice": "high", "disabled_services": [],
+             "module_settings": {"relay": {"vm_mem_gb": 12, "goldens": []}, "toy": {"greeting": "hello"}},
              "protection": {"schema": 1, "node": {"mode": "strict_yield"}, "rule": []}}
     c.execute("UPDATE nodes SET policy_json=?, limits_json=? WHERE node_id=?",
               (json.dumps(pol_b), json.dumps({"jobs": 2, "enforce": "hard"}), b["node_id"]))
@@ -298,12 +306,19 @@ def test_an_earlier_home_is_converted_once_keeping_only_choices(tmp_path):
     nid = {r["hostname"]: r["node_id"] for r in db.q("SELECT node_id, hostname FROM nodes")}
     # a's policy was a copy of what it inherits: nothing of it remains; b keeps its two choices and its caps
     assert {(s, k) for (s, m, k), r in rows.items() if s == "node" and r["scope_id"] == nid["a"]} == set()
-    assert {k: r["value"] for (s, m, k), r in rows.items() if s == "node" and r["scope_id"] == nid["b"]} == {
-        "job_mem_gb": 3, "jobs": 2, "enforce": "hard", "module.node_settings": {"vm_mem_gb": 12}}
+    # b keeps its choices: two policy values, its caps, relay's VM size per key, and relay's services (it ran the scorer
+    # while the fleet's workers did not); toy's greeting was a copy of its default and goes
+    assert {(m, k): r["value"] for (s, m, k), r in rows.items() if s == "node" and r["scope_id"] == nid["b"]} == {
+        ("", "job_mem_gb"): 3, ("", "jobs"): 2, ("", "enforce"): "hard", ("relay", "module.relay.vm_mem_gb"): 12,
+        ("relay", "services.disabled"): []}
     assert {(m, k): r["value"] for (s, m, k), r in rows.items() if s == "fleet"} == {
         ("", "ntfy.url"): "https://ntfy.sh/topic", ("", "replica_rate"): 0.05, ("", "console_hosts"): ["oarbank.example.ts.net"],
-        ("", "disabled_services"): ["relay/scorer"],
-        ("", "dataset_origins"): ["example.org"], ("relay", "pipeline"): "split", ("relay", "module.settings"): {"goldens": []}}
+        ("relay", "services.disabled"): ["scorer"], ("toy", "enabled"): False,
+        ("", "dataset_origins"): ["example.org"], ("relay", "pipeline"): "split",
+        ("relay", "module.relay.tool_datasets"): {"lut": "lut:1"}, ("toy", "module.toy.favorite_n"): 7}
+    assert "disabled" not in {r[1] for r in db.conn.execute("PRAGMA table_info(module_channels)")}
+    from oarbank.coordinator import modstore
+    assert modstore.disabled_names(db) == {"toy"} and modstore.channel(db, "toy")["disabled"]
     assert db.get_state("release_pubkey") == "abc" and db.get_state("fleet_id")
     from oarbank.coordinator import tools                             # the tool registry became a host tool definition
     assert tools.definitions(db)["java17"]["search"] == {"darwin": ["/opt/homebrew/opt/openjdk@17"]}
@@ -311,9 +326,16 @@ def test_an_earlier_home_is_converted_once_keeping_only_choices(tmp_path):
     ev = db.one("SELECT payload_json FROM events WHERE kind='settings_migrated'")
     report = json.loads(ev["payload_json"])
     assert "b: nice: expected integer, got str 'high'" in report["dropped"] and any("dataset_groups" in x for x in report["dropped"])
+    assert "fleet: relay.nope (not a setting relay declares)" in report["dropped"]
+    assert "b: relay.goldens (set for the whole fleet only)" in report["dropped"]
+    assert any(x.startswith("fleet: relay.vm_mem_gb (Scorer VM memory: 'big' is not of type 'number'") for x in report["dropped"]), report
+    assert report["modules"] == ["relay 1.0.0: 4 settings", "toy 0.1.0: 2 settings"]
     d = core._node_directives(db, node_row(db, nid["b"]))
     assert d["policy"]["job_mem_gb"] == 3 and d["policy"]["os_reserve_gb"] == 6 and d["limits"]["jobs"] == 2
-    assert d["policy"]["module_settings"] == {"relay": {"vm_mem_gb": 12}} and d["settings_rev"] >= 1
+    assert d["policy"]["module_settings"] == {"relay": {"vm_mem_gb": 12, "tile_size": 32}, "toy": {"greeting": "hello"}}
+    assert d["policy"]["disabled_services"] == [] and d["modules_disabled"] == ["toy"] and d["settings_rev"] >= 1
+    a_doc = core._node_directives(db, node_row(db, nid["a"]))                # a inherits the fleet's: relay's scorer off
+    assert a_doc["policy"]["disabled_services"] == ["relay/scorer"]
     db.conn.close()
     again = DB(path)                                                  # converted once: opening it again changes nothing
     assert again.q("SELECT COUNT(*) n FROM events WHERE kind='settings_migrated'")[0]["n"] == 1
