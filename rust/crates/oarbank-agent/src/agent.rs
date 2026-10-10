@@ -81,6 +81,14 @@ pub struct Agent {
     services_halted: bool,
     /// The status document (status.rs): joining, pending, connected, and errors with their codes.
     pub status: crate::status::Status,
+    /// The coordinator's settings revision this agent applied and the keys it refused (`settings` in heartbeats).
+    pub settings_report: Value,
+}
+
+/// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
+pub fn initial_directives() -> Value {
+    use oarbank_protection::settings::{defaults, Section};
+    json!({"policy": defaults(Section::Policy), "limits": defaults(Section::Limits)})
 }
 
 /// What the session asks of the rest of the agent each round (releases, jobs, protection), so the session logic can
@@ -110,7 +118,7 @@ impl Agent {
         let release = release::current(&layout);
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
         let a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
-                   directives: Value::Null, hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
+                   directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
                    last_release_error: None, need_hello: false, table: Table::default(), healthy: vec![],
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
@@ -118,7 +126,8 @@ impl Agent {
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
-            services_halted: false, coord_install: Default::default(), status: Default::default(), layout };
+            services_halted: false, coord_install: Default::default(), status: Default::default(), layout,
+            settings_report: Value::Null };
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
         #[cfg(target_os = "macos")]
@@ -326,6 +335,9 @@ impl Agent {
         if let Some(svc) = &self.services {
             merge(&mut body, svc.lock().unwrap().report());              // `services` and `probes`
         }
+        if !self.settings_report.is_null() {
+            body["settings"] = self.settings_report.clone();
+        }
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
         merge(&mut body, self.update.report());
@@ -336,7 +348,32 @@ impl Agent {
         Ok(d)
     }
 
+    /// The directive's `policy` and `limits` checked against the settings table (docs/design/settings.md): a refused
+    /// or missing key keeps the value it had and is reported, with the revision, in the next heartbeat.
+    fn apply_settings(&mut self, d: &Value) -> Value {
+        use oarbank_protection::settings::{validate, Section};
+        let mut out = d.clone();
+        if !d.is_object() || (d.get("policy").is_none() && d.get("limits").is_none()) {
+            return out;
+        }
+        let (policy, mut rejected) = validate(Section::Policy, &d["policy"], &self.directives["policy"]);
+        let (limits, more) = validate(Section::Limits, &d["limits"], &self.directives["limits"]);
+        rejected.extend(more);
+        for r in &rejected {
+            warn!(key = %r.key, reason = %r.reason, "a setting from the coordinator was refused; the node keeps its previous value");
+        }
+        out["policy"] = policy;
+        out["limits"] = limits;
+        if let Some(rev) = d["settings_rev"].as_i64() {
+            self.settings_report = json!({"applied_rev": rev,
+                "rejected": rejected.iter().map(|r| json!({"key": r.key, "reason": r.reason})).collect::<Vec<_>>()});
+        }
+        out
+    }
+
     async fn after_directives(&mut self, d: &Value) {
+        let applied = self.apply_settings(d);
+        let d = &applied;
         if let Some(n) = d["node_id"].as_str() {
             self.node_id = Some(n.to_string());
         }
@@ -869,7 +906,7 @@ impl Agent {
         let f = facts::collect(&self.layout.home);
         let cores = f["cpu"]["logical"].as_f64().unwrap_or(1.0);
         let mem = f["memory_gb"].as_f64().unwrap_or(8.0);
-        let reserve_mem = self.directives["policy"]["os_reserve_gb"].as_f64().unwrap_or(4.0);
+        let reserve_mem = self.directives["policy"]["os_reserve_gb"].as_f64().unwrap_or(oarbank_protection::settings_table::OS_RESERVE_GB);
         let t = self.table.lock().unwrap();
         let used_cpu: f64 = t.values().map(|j| j.cpu).sum();
         let used_mem: f64 = t.values().map(|j| j.mem_gb).sum();
@@ -1196,6 +1233,29 @@ pub mod tests {
     }
 
     /// The owner key set a directive carries pins its rescue locations; a rescue move published there is recorded as
+    /// The coordinator's settings: a section is checked key by key against the generated table; a refused key keeps
+    /// its last value and is reported with the revision (docs/design/settings.md), nothing falls back silently.
+    #[test]
+    fn settings_from_the_coordinator_are_checked_and_reported() {
+        use oarbank_protection::settings::{defaults, Section};
+        let tmp = crate::scratch("agent-settings");
+        let home = tmp.path().join("agent");
+        let mut agent = Agent::open(Layout::new(home), Some("https://127.0.0.1:9")).unwrap();
+        assert_eq!(agent.directives["policy"]["job_mem_gb"], json!(1.5));      // before the first heartbeat: the table's defaults
+        let mut policy = defaults(Section::Policy);
+        policy["job_mem_gb"] = json!(2.5);
+        let d = agent.apply_settings(&json!({"policy": policy, "limits": defaults(Section::Limits), "settings_rev": 7}));
+        assert_eq!(d["policy"]["job_mem_gb"], json!(2.5));
+        assert_eq!(agent.settings_report, json!({"applied_rev": 7, "rejected": []}));
+        agent.directives = d;
+        let mut bad = defaults(Section::Policy);
+        bad["job_mem_gb"] = json!("abc");
+        let d = agent.apply_settings(&json!({"policy": bad, "limits": defaults(Section::Limits), "settings_rev": 8}));
+        assert_eq!(d["policy"]["job_mem_gb"], json!(2.5));                      // the last applied value, not a default
+        assert_eq!(agent.settings_report["applied_rev"], json!(8));
+        assert_eq!(agent.settings_report["rejected"][0]["key"], json!("job_mem_gb"));
+    }
+
     /// The doctor report always names the node's capabilities, even before a release: the coordinator grants stages
     /// whose `requires.capabilities` only on nodes that report them.
     #[test]
