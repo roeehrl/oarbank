@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Wrap a compiled coordinator build in a native Installer package. No host installation.
 # scripts/package-coordinator-macos.sh [archive]
+# Its postinstall (deploy/macos/coordinator/scripts) links /usr/local/bin/oarbank and oarbank-setup to the app's
+# launchers; it touches no service.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/pyproject.toml" | head -1)"
@@ -18,6 +20,12 @@ tar -xzf "$ARCHIVE" -C "$ROOT"
 PY="$ROOT/python/bin/python3.12"
 "$PY" -I -B -c 'import json, sys; from pathlib import Path; m=json.loads((Path(sys.argv[1])/"oarbank-coordinator.json").read_text()); assert m["format"] == 1 and m["version"] == sys.argv[2] and m["platform"] == sys.argv[3]; import oarbank.setup' "$ROOT" "$VERSION" "$PLATFORM"
 [[ -x "$ROOT/install-oarbankd.sh" && -x "$ROOT/bin/oarbank-setup" ]] || { echo "build has no guided setup" >&2; exit 1; }
+# the postinstall puts these on the PATH as links (/usr/local/bin): each must run through a link to it, as by its path
+mkdir "$WORK/linked"
+for cmd in oarbank oarbank-setup; do
+    ln -s "$ROOT/bin/$cmd" "$WORK/linked/$cmd"
+    "$WORK/linked/$cmd" --help >/dev/null || { echo "bin/$cmd does not run through a link to it" >&2; exit 1; }
+done
 cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -37,8 +45,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement "$REPO/deploy/macos/coordinator/Launcher.swift" -o "$APP/Contents/MacOS/Oarbank Coordinator"
-# Remove inherited extended attributes before sealing the application.
-xattr -cr "$WORK/root"
+# Remove inherited extended attributes before sealing the application (and from the scripts: no ._ files).
+cp -R "$REPO/deploy/macos/coordinator/scripts" "$WORK/scripts"
+xattr -cr "$WORK/root" "$WORK/scripts"
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
 sign_with_timestamp() {
     local attempt
@@ -65,7 +74,7 @@ while plutil -extract "$n.RootRelativeBundlePath" raw -o /dev/null "$WORK/compon
     n=$((n + 1))
 done
 [[ $n -gt 0 ]] || { echo "pkgbuild found no bundle in the payload (Oarbank Coordinator.app)" >&2; exit 1; }
-pkgbuild --quiet --root "$WORK/root" --component-plist "$WORK/components.plist" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
+pkgbuild --quiet --root "$WORK/root" --component-plist "$WORK/components.plist" --scripts "$WORK/scripts" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
 # macOS can retain provenance attributes despite xattr -cr. pkgbuild then embeds
 # AppleDouble siblings; omit those without changing signed app resources, link
 # targets, file modes or Installer's recommended root ownership.
@@ -108,7 +117,7 @@ XML
 PKG="$OUT/oarbank-coordinator-$VERSION-macos-$ARCH.pkg"
 SIGN=()
 [[ -z "${OARBANK_INSTALLER_IDENTITY:-}" ]] || SIGN=(--sign "$OARBANK_INSTALLER_IDENTITY" --timestamp)
-productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" "${SIGN[@]}" "$PKG"
+productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" ${SIGN[@]+"${SIGN[@]}"} "$PKG"
 if [[ -n "${OARBANK_NOTARY_PROFILE:-}" ]]; then
     [[ -n "${OARBANK_INSTALLER_IDENTITY:-}" && "$ID" != "-" ]] || { echo "notarization needs Developer ID signatures" >&2; exit 1; }
     xcrun notarytool submit "$PKG" --keychain-profile "$OARBANK_NOTARY_PROFILE" --wait

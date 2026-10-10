@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The coordinator MSI owns only the build tree and its setup shortcut. The portable wizard creates/configures
-  services with install-oarbankd.ps1 -Installed PACKAGEFOLDER. Fleet data stays in ProgramData\Oarbank\coordinator.
+  The coordinator MSI owns only the build tree, its setup shortcut and its CLI folder's system PATH entry. The
+  portable wizard creates/configures services with install-oarbankd.ps1 -Installed PACKAGEFOLDER. Fleet data stays in ProgramData\Oarbank\coordinator.
   Build with scripts/package-coordinator-windows.ps1 -Build <coordinator archive> (WiX 5 + Util extension).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -37,6 +37,16 @@
                         Target="[PACKAGEFOLDER]Oarbank Coordinator.exe"
                         WorkingDirectory="PACKAGEFOLDER" Advertise="no" Icon="OarbankIcon" IconIndex="0" />
             </Component>
+            <!-- `oarbank` in any new prompt: package\cli holds only oarbank.cmd, which runs the CLI of the build the
+                 services use (Coordinator\current) or, before setup, this package's own. The folder is the MSI's and
+                 stays put across upgrades; an uninstall takes it off the PATH again. Its admin channel needs an
+                 elevated prompt. -->
+            <Component Id="CoordinatorCliPath" Bitness="always64">
+              <RegistryValue Root="HKLM" Key="Software\Codonic\Oarbank\Coordinator" Name="CliDirectory"
+                             Type="string" Value="[PACKAGEFOLDER]cli" KeyPath="yes" />
+              <Environment Id="CoordinatorCliPath" Name="PATH" Value="[PACKAGEFOLDER]cli" Action="set" Part="last"
+                           System="yes" Permanent="no" />
+            </Component>
             <!-- Initial installation has no services: the wizard creates them later. Only control services found
                  by AppSearch. Transitive components reevaluate the condition during a subsequent repair/upgrade.
                  An upgrade retains service configuration; a true uninstall uses the script below. -->
@@ -57,6 +67,7 @@
     <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Main">
       <ComponentRef Id="CoordinatorRegistration" />
+      <ComponentRef Id="CoordinatorCliPath" />
       <ComponentRef Id="ExistingCoordinatorService" />
       <ComponentRef Id="ExistingConsoleService" />
       <Files Directory="PACKAGEFOLDER" Include="$(var.PackageDir)\**" />

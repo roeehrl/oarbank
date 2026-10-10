@@ -20,9 +20,9 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 
 | File | Built by | What |
 |---|---|---|
-| `oarbank-coordinator-<v>-macos-arm64.pkg` | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-macos.sh` | Software-only installer: `/Applications/Oarbank Coordinator.app`, bundled Python/core, CLI, uv and browser setup wizard |
-| `oarbank-coordinator-<v>-linux-amd64.deb`, `.rpm` (also `linux-arm64`) | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-linux.sh` | Software-only installer: `/opt/oarbank/coordinator`, application menu entry and `oarbank-setup` |
-| `oarbank-coordinator-<v>-windows-x64.msi` (also `windows-arm64`) | `scripts\build-coordinator.ps1`, then `scripts\package-coordinator-windows.ps1` | Software-only installer: `C:\Program Files\Oarbank\Coordinator\package`, Start menu tray application |
+| `oarbank-coordinator-<v>-macos-arm64.pkg` | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-macos.sh` | Software-only installer: `/Applications/Oarbank Coordinator.app`, bundled Python/core, CLI, uv and browser setup wizard; `oarbank` and `oarbank-setup` on the PATH (`/usr/local/bin`) |
+| `oarbank-coordinator-<v>-linux-amd64.deb`, `.rpm` (also `linux-arm64`) | `scripts/build-coordinator.sh`, then `scripts/package-coordinator-linux.sh` | Software-only installer: `/opt/oarbank/coordinator`, application menu entry, and `oarbank` and `oarbank-setup` in `/usr/bin` |
+| `oarbank-coordinator-<v>-windows-x64.msi` (also `windows-arm64`) | `scripts\build-coordinator.ps1`, then `scripts\package-coordinator-windows.ps1` | Software-only installer: `C:\Program Files\Oarbank\Coordinator\package`, Start menu tray application, `oarbank` on the system PATH |
 | `oarbank-coordinator-<v>-<os>-<arch>.tar.gz` | `scripts/build-coordinator.sh` or `scripts\build-coordinator.ps1` | Advanced relocatable build for signed coordinator moves and manual setup; includes its service installer and guided setup |
 | `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-macos-x86_64.pkg` | `scripts/package-macos.sh [<v>] [arm64\|x86_64]` | the node, for Macs with Apple silicon or Intel Macs (each refuses the other): `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}`, the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host), the join window, `/Applications/Oarbank Node.app` (menu bar) and `/usr/local/bin/oarbank-node` |
 | `oarbank-agent_<v>_amd64.deb`, `oarbank-agent-<v>-1.x86_64.rpm` (also arm64) | `scripts/package-linux.sh` | the node for Linux: `/usr/lib/oarbank`, `/usr/bin/oarbank-node`, the **Oarbank Node** desktop entry |
@@ -66,8 +66,9 @@ In **Preferences**, enable **Start automatically at sign-in** if you want the co
 
 If you close the wizard before verification, choose **Open web app** again. The saved address and account are shown;
 enter the original password to continue. Existing accounts and keys are preserved. Reopening completed setup opens the console login.
-If services need restarting after an upgrade or relocation, explicitly run the bundled `bin/oarbank-setup` helper
-(`/usr/bin/oarbank-setup` on Linux; on macOS it is inside the app’s `Contents/Resources/coordinator` directory).
+If services need restarting after an upgrade or relocation, explicitly run the bundled `oarbank-setup` helper
+(on the PATH: `/usr/local/bin/oarbank-setup` on macOS, `/usr/bin/oarbank-setup` on Linux; on Windows,
+`C:\Program Files\Oarbank\Coordinator\package\oarbank-setup.ps1`).
 The helper refreshes an existing wizard-managed installation without creating a new fleet. An older manually configured
 coordinator keeps its existing console; stop/start or migrate its services explicitly.
 
@@ -80,11 +81,14 @@ it in System Settings, Privacy & Security, Local Network, or enroll nodes with j
 address and need no discovery
 ([architecture.md](design/architecture.md#network-and-access)).
 
-**Command line.** The bundled CLI is at
-`/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin/oarbank` on macOS,
-`/opt/oarbank/coordinator/bin/oarbank` on Linux, and
-`C:\Program Files\Oarbank\Coordinator\current\bin\oarbank.cmd` on Windows. The CLI uses the coordinator's
-local owner channel; Windows requires an elevated prompt. Outside that local account, sign in with
+**Command line.** The packages put the coordinator's CLI on the PATH as `oarbank` (open a new terminal after
+installing). On macOS `/usr/local/bin/oarbank` links to
+`/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin/oarbank` (an existing `oarbank` there that is
+not a link is left alone); on Linux `/usr/bin/oarbank` links to `/opt/oarbank/coordinator/bin/oarbank`. On Windows the
+MSI adds `C:\Program Files\Oarbank\Coordinator\package\cli` to the system PATH: its `oarbank.cmd` runs
+`C:\Program Files\Oarbank\Coordinator\current\bin\oarbank.cmd`, the build the services use (before setup, the
+package's own). `oarbank` and the full path behave the same: the CLI uses the coordinator's local owner channel for the
+account that runs it; Windows requires an elevated prompt. Outside that local account, sign in with
 `oarbank console login` or use a personal access token (`oarbank token create`).
 The wizard performs the initial owner signing setup; see [release-signing.md](release-signing.md) for ongoing
 release signing and key recovery.
@@ -211,13 +215,16 @@ whole networks (`sudo defaults write com.apple.network.local-network AllowedEthe
   deletes it), Installed apps on Windows.
 - The coordinator: `launchctl bootout gui/$(id -u)/dev.codonic.oarbank.oarbankd` (and `.console`), then remove the
   two plists from `~/Library/LaunchAgents`. Its state stays in `~/Library/Application Support/Oarbank/coordinator`
-  until you delete it. Then delete `/Applications/Oarbank Coordinator.app`; repeat the service cleanup for each user
-  who configured it. Keep the `Oarbank/keys` directory unless deliberately destroying your owner keys.
-- Linux coordinator: remove `oarbank-coordinator` through your package manager. Its removal hook stops and removes
+  until you delete it. Then delete `/Applications/Oarbank Coordinator.app` and the package's `oarbank` and
+  `oarbank-setup` links, which point into it:
+  `sudo find /usr/local/bin -lname '/Applications/Oarbank Coordinator.app/*' -delete`. Repeat the service cleanup
+  for each user who configured it. Keep the `Oarbank/keys` directory unless deliberately destroying your owner keys.
+- Linux coordinator: remove `oarbank-coordinator` through your package manager (this also removes `/usr/bin/oarbank`
+  and `/usr/bin/oarbank-setup`). Its removal hook stops and removes
   user services that reference its installed payload, including registered custom XDG unit locations. It preserves
   data, keys, logs and lingering. If cleanup fails, removal stops so you can correct the service problem and retry.
 - Windows coordinator: uninstall **Oarbank Coordinator** from Installed apps. It stops/removes both services and
-  the firewall rule, while preserving the coordinator's state and signing keys.
+  the firewall rule and takes `oarbank` off the PATH, while preserving the coordinator's state and signing keys.
 
 ## Linux nodes
 
@@ -301,9 +308,9 @@ services can open; its logs are in its `logs` folder. An inbound firewall rule l
 of the oarbankd service; the console and the admin API answer on loopback only. `-DryRun` prints every step.
 
 After wizard setup, in an elevated prompt on the coordinator (it talks to oarbankd over a named pipe only administrators and the
-services can open, so it needs no token):
+services can open, so it needs no token). The MSI puts `oarbank` on the system PATH, so a prompt opened after installing finds it:
 ```powershell
-& "C:\Program Files\Oarbank\Coordinator\current\bin\oarbank.cmd" join-code --label <node>
+oarbank join-code --label <node>
 ```
 A module's own CLI (`oarbank cli <module>`) is limited to the admin API through the elevated helper the agent's MSI
 installs; install the agent on the coordinator too to use one. Module processes run in AppContainers, as on a Windows
