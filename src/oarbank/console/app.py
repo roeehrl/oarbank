@@ -466,6 +466,51 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return HTMLResponse('<p class="mut">status unavailable (the database is busy); retrying</p>', status_code=503)
         return HTMLResponse(join_status_html(request, d, newtab=tab == "new"))
 
+    @app.get("/nodes/bulk", response_class=HTMLResponse)
+    async def nodes_bulk(request: Request, group: str = "", label: str = ""):
+        """Bulk changes (docs/design/settings.md, "Bulk changes"): tick nodes, then set or reset one setting on each, or
+        add or remove labels, as one change; a settings change always shows the per-node preview first."""
+        actor = who(request)
+        d = await drill(views.bulk_page, group, label)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy; reload", "actor": actor}, 503)
+        return render(request, "nodes_bulk.html", {**d, "actor": actor, "errors": []})
+
+    @app.get("/groups", response_class=HTMLResponse)
+    async def groups_list(request: Request):
+        """Node groups in rank order, with their rules, members and values, and the new-group form."""
+        actor = who(request)
+        d = await drill(views.groups_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy; reload", "actor": actor}, 503)
+        return render(request, "groups.html", {**d, "actor": actor})
+
+    @app.get("/groups/{gid}", response_class=HTMLResponse)
+    async def group_detail(gid: str, request: Request):
+        actor = who(request)
+        d = await drill(views.group_page, gid)
+        if d is None:
+            return render(request, "error.html", {"message": f"no group {gid} (or the database is busy)", "actor": actor}, 404)
+        d["explain"] = request.query_params.get("explain") or ""
+        _saved(d, request)
+        _with_errors(d["sections"], None, None)
+        return render(request, "group.html", {**d, "actor": actor})
+
+    @app.get("/frag/groups/preview", response_class=HTMLResponse)
+    async def frag_group_preview(request: Request):
+        """The live member preview while a group's rule is edited: which nodes it takes in and why (a read)."""
+        actor = who(request)
+        q = request.query_params
+        try:
+            g = forms.group_params(q)
+            r = await coordinator_json("GET", "/api/v1/groups/preview?" + urlencode(
+                {"selector": json.dumps(g["selector"]), "members": ",".join(g["members"])}), actor)
+            body = r.json() if r.status_code == 200 else None
+            ctx = {"p": body} if body is not None else {"error": (r.json() or {}).get("detail") or r.text[:300]}
+        except ValueError as e:
+            ctx = {"error": str(e)[:300]}
+        return HTMLResponse(T.get_template("_group_preview.html").render({**page_context(request, ctx), "request": request}))
+
     @app.get("/nodes/{nid}", response_class=HTMLResponse)
     async def node(nid: str, request: Request):
         actor = who(request)
@@ -508,6 +553,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                 sec["form_errors"] += [{"key": r["key"], "label": r["label"], "message": m} for m in msgs]
                 if form is not None and form.get(f"o.{r['key']}"):
                     r["form_value"], r["typed"] = form.get(f"v.{r['key']}") or "", True
+                    r["typed_lock"] = bool(form.get(f"enf.{r['key']}"))
             if not sec["form_errors"] and errors and form is not None and form.get("section") == sec["id"]:
                 sec["form_errors"] = [{"key": e.get("key") or "", "label": e.get("key") or "", "message": e.get("message")}
                                       for e in errors]
@@ -940,7 +986,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
         r = await coordinator_json("GET", f"/api/v1/modules/{name}/secrets", actor)
         nodes = await drill(lambda rd: rd.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")) or []
-        return render(request, "module_secrets.html", {"name": name, "man": man, "tab": "secrets", "nodes": nodes,
+        groups = await drill(lambda rd: rd.q("SELECT id, name FROM node_groups ORDER BY rank DESC")) or []
+        return render(request, "module_secrets.html", {"name": name, "man": man, "tab": "secrets", "nodes": nodes, "groups": groups,
                                                         "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
                                                         "actor": actor})
 
@@ -1083,14 +1130,19 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             headers["idempotency-key"] = form["idem"]
         tier = entry.tier
         if op == "settings.apply":
-            # the tier follows what the change set touches; a fleet or group change always shows who it reaches first
-            from ..coordinator.settings import change_tier
-            tier = change_tier(params.get("changes") if isinstance(params.get("changes"), list) else [])
-            if any(isinstance(c, dict) and c.get("scope") in ("fleet", "group") for c in params.get("changes") or []):
+            # the tier follows what the change set touches; a fleet or group change, or one across several nodes (bulk),
+            # always shows who it reaches first
+            from ..coordinator.settings import bulk
+            cs = [c for c in (params.get("changes") if isinstance(params.get("changes"), list) else []) if isinstance(c, dict)]
+            tier = bulk.tier(cs)
+            if any(c.get("scope") in ("fleet", "group") for c in cs) or len({c.get("scope_id") for c in cs
+                                                                             if c.get("scope") == "node"}) > 1:
                 tier = "T2" if tier in ("T0", "T1") else tier
+        if op in ("settings.promote", "nodes.label", "groups.create") and tier in ("T0", "T1"):
+            tier = "T2"                                   # these always show who they reach before anything changes
         if tier in ("T2", "T3"):
             r = await http.post(f"/api/v1/ops/{op}", json={"target": target, "params": params, "dry_run": True}, headers=headers)
-            if r.status_code != 200 and op == "settings.apply" and (r.json() or {}).get("errors"):
+            if r.status_code != 200 and op in ("settings.apply", "settings.promote") and (r.json() or {}).get("errors"):
                 return await settings_refused(request, actor, form, r.json()["errors"], return_to)
             if r.status_code != 200:
                 return back(return_to, f"{op}: {r.json().get('detail') or r.text}", "bad")
@@ -1116,6 +1168,18 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             d = await settings_ctx(request, actor)
             _with_errors(d["fs"]["node_defaults"] + d["fs"]["fleet"], errors, form)
             return render(request, "settings.html", {**d, "actor": actor}, 400)
+        if page.startswith("group:"):
+            d = await drill(views.group_page, page[6:])
+            if d is not None:
+                d["explain"], d["saved"] = "", ""
+                _with_errors(d["sections"], errors, form)
+                return render(request, "group.html", {**d, "actor": actor}, 400)
+        if page == "bulk":
+            d = await drill(views.bulk_page, "", "")
+            if d is not None:
+                return render(request, "nodes_bulk.html", {**d, "actor": actor, "errors": errors,
+                                                            "typed": {k: form.get(k) for k in ("bulk_key", "bulk_value", "bulk_action")},
+                                                            "ticked": form.getlist("node") if hasattr(form, "getlist") else []}, 400)
         return back(return_to, "settings.apply: " + "; ".join(e.get("message") or "" for e in errors)[:300], "bad")
 
     @app.post("/stage/{op}")

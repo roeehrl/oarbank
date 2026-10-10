@@ -65,9 +65,10 @@ def _without(snap: V.Snap, scope: str, scope_id: str, key: str, module: str = ""
 
 
 def row(snap: V.Snap, d: R.Setting, scope: str, node: dict | None, counts: dict | None = None,
-        errors: dict | None = None, now: float | None = None) -> dict:
-    """One setting at one scope (fleet: node None; node: that node)."""
-    sid = node["node_id"] if scope == "node" else ""
+        errors: dict | None = None, now: float | None = None, scope_id: str = "") -> dict:
+    """One setting at one scope (fleet: node None; node: that node; group: `scope_id`, with `node` a stand-in member,
+    group_sections)."""
+    sid = node["node_id"] if scope == "node" else scope_id
     res = V.resolve(snap, node, d.key)
     own = snap.get(scope, sid, "", d.key)
     inh = V.resolve(_without(snap, scope, sid, d.key), node, d.key) if own else res
@@ -83,12 +84,12 @@ def row(snap: V.Snap, d: R.Setting, scope: str, node: dict | None, counts: dict 
            "inherited": {"value": inh["value"], "text": R.show(d.key, inh["value"]), "badge": V.badge(inh)},
            "locked_by": res["locked_by"] if res["locked_by"] and res["locked_by"]["scope"] != scope else None,
            "lock_text": lock_text(res["locked_by"]) if res["locked_by"] and res["locked_by"]["scope"] != scope else None,
-           "locked_here": bool(own and own["enforced"]),
+           "locked_here": bool(own and own["enforced"]), "own_text": R.show(d.key, own["value"]) if own else None,
            "chain": res["chain"], "default": {**res["default"], "text": R.show(d.key, res["default"]["value"])},
            "errors": list((errors or {}).get(d.key, [])), "form_errors": [], "typed": False,
            "override_count": (counts or {}).get(d.key, 0) if scope == "fleet" else None,
            "applied": applied_state(node, d.key, now) if scope == "node" and node is not None and d.wire else None}
-    if node is None and d.computed is not None:
+    if (node is None or scope == "group") and d.computed is not None:
         # fleet-wide, a computed default has no single value: say how each node gets its own
         per_node = "computed per node"
         for x in out["chain"]:
@@ -120,12 +121,12 @@ def lock_text(lock: dict) -> str:
 
 
 def sections(snap: V.Snap, scope: str, node: dict | None, keys_by_section: tuple, counts: dict | None = None,
-             errors: dict | None = None) -> list[dict]:
+             errors: dict | None = None, scope_id: str = "") -> list[dict]:
     now = time.time()
     out = []
     for sec in keys_by_section:
         title, blurb = R.SECTIONS[sec]
-        rows = [row(snap, d, scope, node, counts, errors, now) for d in R.SETTINGS
+        rows = [row(snap, d, scope, node, counts, errors, now, scope_id) for d in R.SETTINGS
                 if d.section == sec and scope in d.scopes and not d.writer]
         if not rows:
             continue
@@ -148,6 +149,7 @@ def node_page(r, nid: str) -> dict | None:
     modules = V.module_node_settings(snap, node["node_id"])
     return {"node": node, "sections": sections(snap, "node", node, R.NODE_SECTIONS, errors=errors),
             "applied": applied_state(node), "groups": [g["name"] for g in V.node_groups(snap, node)],
+            "labels": snap.node_labels(node), "memberships": membership_rows(snap, node),
             "module_settings": modules, "rev": node.get("settings_rev") or 0}
 
 
@@ -219,3 +221,28 @@ def overrides_doc(r, key: str, module: str = "", scope: str = "") -> dict:
     if scope:
         out["values"] = [v for v in out["values"] if v["scope"] == scope]
     return out
+
+
+# ------------------------------------------------------------------ a group's settings (the group page)
+
+STAND_IN = "__group_member__"
+
+
+def group_sections(r, gid: str) -> dict | None:
+    """A group's Settings: each node setting at the group's scope, as its members get it from the default, the fleet
+    and this group (a stand-in member of this group alone resolves it), with the lock toggles and, for a value set
+    here, Promote to fleet."""
+    from .groups import find
+    g = find(r, gid)
+    if g is None:
+        return None
+    snap = V.snapshot(r)
+    alone = copy.copy(snap)
+    alone.groups = [{**g, "members": [STAND_IN], "selector": {}}]
+    alone.labels = {}
+    stand_in = {"node_id": STAND_IN, "hostname": f"a member of {g['name']}", "facts": {}}
+    secs = sections(alone, "group", stand_in, R.NODE_SECTIONS, scope_id=g["id"])
+    for sec in secs:
+        for x in sec["rows"] + sec["advanced"]:
+            x["chain"] = [c for c in x["chain"] if c["scope"] != "node"]
+    return {"group": g, "sections": secs}

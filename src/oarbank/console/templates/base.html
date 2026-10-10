@@ -22,7 +22,7 @@
 <div id="stale-banner"><span id="stale-msg">Live updates paused, reconnecting; data may be out of date</span>; last update <span id="stale-age"></span>. <button type="button" data-reload data-always>Reload</button></div>
 <header>
   <b>Oarbank</b>
-  <nav class="main-nav" aria-label="Sections"><a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/datasets">Datasets</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}</nav>
+  <nav class="main-nav" aria-label="Sections"><a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/datasets">Datasets</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/groups">Groups</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}</nav>
   {% if not meta.coordinator_ok %}<span class="chip bad">coordinator unreachable{% if meta.coordinator_down_since %} since {{ meta.coordinator_down_since | hm }}{% endif %}</span>{% endif %}
   <span class="who"><span id="live" class="live" data-state="connecting" title="Connecting to live updates"><i class="dot" aria-hidden="true"></i><span class="live-text">Connecting…</span></span> · as of <time id="as-of">{{ meta.built_at | hm }}</time> · <a href="/account">{{ actor }}</a></span>
   <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Sign out</button></form>

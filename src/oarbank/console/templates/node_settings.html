@@ -4,12 +4,26 @@
 {% block title %}{{ n.hostname }} settings · Oarbank{% endblock %}
 {% block body %}
 {% include "_node_header.html" %}
+<div class="grid">
 <div class="card small settings-intro">
-  <div class="row"><span class="chip {{ applied.tone }}">{{ applied.text }}</span>
-    <span class="mut">Groups: {{ groups | join(', ') or 'none' }}</span></div>
+  <div class="row"><span class="chip {{ applied.tone }}">{{ applied.text }}</span></div>
   <p class="mut" style="margin:6px 0 0">Each setting shows the value in effect and where it comes from. This node inherits the
   default, the fleet's value and its groups' unless you override a setting here; Reset to inherited deletes this node's
-  value, so later fleet changes reach it again. <a href="/settings#node-defaults">Fleet node defaults</a></p>
+  value, so later fleet changes reach it again. A value a group or the fleet locks shows who locked it.
+  <a href="/settings#node-defaults">Fleet node defaults</a> · <a href="/groups">Groups</a></p>
+  <h2 class="small-h">Groups</h2>
+  <ul class="group-preview-list">{% for g in memberships %}<li><a href="/groups/{{ g.id }}"><b>{{ g.name }}</b></a>{% if g.builtin %} <span class="mut">(built in)</span>{% endif %} <span class="mut">because {{ g.why | join(', ') }}</span></li>{% else %}<li class="mut">none</li>{% endfor %}</ul>
+</div>
+<section class="card small" id="labels" aria-labelledby="h-labels">
+  <h2 id="h-labels" class="small-h">Labels</h2>
+  <p class="mut" style="margin:0 0 6px">Groups select nodes by label. "From facts" labels come from what the node reports.</p>
+  <div class="row">{% for l in labels.owner %}<span class="chip acc">{{ l }}</span>{% call m.op_form("nodes.label", n.node_id, "Remove", cls="small", params={"remove": [l]}, return_to="/nodes/" ~ n.node_id ~ "/settings#labels") %}{% endcall %}{% endfor %}
+    {% for l in labels.facts %}<span class="chip" title="from the node's facts">{{ l }} · from facts</span>{% endfor %}
+    {% if not labels.all %}<span class="mut">no labels</span>{% endif %}</div>
+  {% call m.op_form("nodes.label", n.node_id, "Add…", return_to="/nodes/" ~ n.node_id ~ "/settings#labels") %}
+    <label for="add-label">New labels</label> <input id="add-label" name="labels" placeholder="render, lab" autocomplete="off" required>
+  {% endcall %}
+</section>
 </div>
 <div class="settings-sections">
 {% for sec in sections %}{{ S.section_form(sec, "node", n.node_id, "node:" ~ n.node_id, "/nodes/" ~ n.node_id ~ "/settings", n.hostname, explain) }}{% endfor %}

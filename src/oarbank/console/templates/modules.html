@@ -53,7 +53,8 @@
     <td class="actions">
       {% if not ch.current %}{{ m.op_form("modules.enable", s.name ~ "@" ~ v.version, "Enable", cls="pri", confirm="Enable " ~ s.name ~ " " ~ v.version ~ " on every node?") }}
       {% elif v.version != ch.current and v.version != ch.canary %}
-        {% call m.op_form("modules.enable_canary", s.name ~ "@" ~ v.version, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes" size="1">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}
+        {% call m.op_form("modules.enable_canary", s.name ~ "@" ~ v.version, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes" size="1">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>
+          <select name="p.group" aria-label="or a group's members"><option value="">or a group…</option>{% for g in groups or [] %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select>{% endcall %}
         {% if v.version != ch.previous %}{{ m.op_form("modules.uninstall", s.name ~ "@" ~ v.version, "Uninstall…", cls="danger") }}{% endif %}
       {% endif %}
       {% call m.op_form("modules.pin", s.name ~ "@" ~ v.version, "Pin") %}<select name="p.node" aria-label="node to pin">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}

@@ -311,11 +311,12 @@ def test_protection_editor_previews_live_and_applies_through_a_plan(env):
     plan_id = r.text.split('name="plan_id" value="')[1].split('"')[0]
     r = c.post("/apply/protection.rules.update", data={"plan_id": plan_id, "reason": "protect the studio tool",
                                                         "return_to": "/", "idem": "k1"}, follow_redirects=False)
-    assert r.status_code == 303 and protection.current(db, n["node_id"]) == (1, {"schema": 1, "rule": [RULE]})
+    assert r.status_code == 303 and protection.current(db, n["node_id"]) == (1, {"schema": 1, "node": {"mode": "moderate"},
+                                                                                 "rule": [RULE]})
     r = form(c, "nodes.set_mode", target=n["node_id"], **{"p.mode": "strict_yield", "reason": "away"})
     assert r.status_code == 303 and protection.current(db, n["node_id"])[1]["node"]["mode"] == "strict_yield"
     r = c.get(f"/nodes/{n['node_id']}/protection")
-    assert "Restore…" in r.text and "mode.set" in r.text
+    assert "History" in r.text and "settings rev" in r.text and "This node sets its own mode (strict_yield)" in r.text
 
 
 def test_a_session_in_use_stays_signed_in(env):

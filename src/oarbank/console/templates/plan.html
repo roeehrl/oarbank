@@ -4,9 +4,12 @@
 <h1>Review: {{ entry.summary }}</h1>
 {% if drift %}<div class="flash bad" role="alert">{{ drift }}</div>{% endif %}
 <div class="card plan">
-  {% if plan.op == 'settings.apply' and plan.impact.summary %}{% set I = plan.impact %}
+  {% if plan.op in ('settings.apply', 'settings.promote') and plan.impact.summary %}{% set I = plan.impact %}
   <p role="status"><b>{{ I.summary }}.</b></p>
   <ul class="small">{% for c in I.changes %}<li>{{ c }}</li>{% endfor %}</ul>
+  {% if I.lock_notes %}<div class="flash warn small" role="note"><b>The lock overrides values set below it</b> (they are kept, and apply again when the lock goes):
+    <ul>{% for x in I.lock_notes %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
+  {% if I.protection_notes %}<ul class="small mut">{% for x in I.protection_notes %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
   {% if I._diff %}<table class="small"><caption class="sr-only">Nodes whose effective value changes</caption>
   <tr><th scope="col">node</th><th scope="col">setting</th><th scope="col">now</th><th scope="col">after saving</th><th scope="col">from</th></tr>
   {% for x in I._diff %}<tr><td>{{ x.hostname }}</td><td>{{ x.label }}</td><td class="mono">{{ x.old_text }}</td><td class="mono"><b>{{ x.new_text }}</b></td><td>{{ x.source }}</td></tr>{% endfor %}</table>{% endif %}
@@ -18,12 +21,12 @@
   <div class="kv small">
     <span class="mut">operation</span><span class="mono">{{ plan.op }} ({{ plan.tier or entry.tier }})</span>
     {% if plan.target %}<span class="mut">target</span><span class="mono">{{ plan.target }}</span>{% endif %}
-    {% if plan.params and plan.op != 'settings.apply' %}<span class="mut">change</span><pre>{{ plan.params | tojson(indent=1) }}</pre>{% endif %}
+    {% if plan.params and plan.op not in ('settings.apply', 'settings.promote') %}<span class="mut">change</span><pre>{{ plan.params | tojson(indent=1) }}</pre>{% endif %}
     {% if plan.impact.matches is defined %}<span class="mut">live matches</span><span><table class="small">
       {% for r in plan.impact.matches %}<tr><td class="mono">{{ r.rule }}</td><td class="num">{{ r.processes | length }}</td>
       <td class="mono small">{% for q in r.processes[:8] %}{{ q.pid }} {{ (q.path or '').rsplit('/', 1)[-1] }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endfor %}</table></span>{% endif %}
     {% if plan.impact.why is defined and plan.impact.why %}<span class="mut">not promotable</span><span>{% for w in plan.impact.why %}<div class="chip bad">{{ w }}</div>{% endfor %}</span>{% endif %}
-    {% for row in (impact_rows(plan.impact) if plan.op != 'settings.apply' else []) %}<span class="mut">{{ row.label }}</span><span>{% if row['items'] | length == 1 %}{{ row['items'][0] }}{% else %}<ul style="margin:0;padding-left:1.1em">{% for x in row['items'] %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}</span>
+    {% for row in (impact_rows(plan.impact) if plan.op not in ('settings.apply', 'settings.promote') else []) %}<span class="mut">{{ row.label }}</span><span>{% if row['items'] | length == 1 %}{{ row['items'][0] }}{% else %}<ul style="margin:0;padding-left:1.1em">{% for x in row['items'] %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}</span>
     {% endfor %}
     <span class="mut">as JSON</span><details><summary class="small">the plan's impact, as stored</summary><pre>{{ plan.impact | tojson(indent=1) }}</pre></details>
     {% if plan.versions %}<span class="mut">versions read</span><span class="mono">{{ plan.versions | tojson }}</span>{% endif %}
@@ -42,7 +45,7 @@
       <input name="confirm" required autocomplete="off"></label>
     {% endif %}
     <div class="row" style="margin-top:8px"><a class="btn" href="{{ return_to or '/' }}" autofocus>Cancel</a>
-      <button class="{{ 'danger' if (plan.tier or entry.tier) == 'T3' else 'pri' }}">{% if plan.op == 'settings.apply' and plan.impact._button_label %}{{ plan.impact._button_label }}{% else %}Apply {{ plan.op }}{% endif %}</button></div>
+      <button class="{{ 'danger' if (plan.tier or entry.tier) == 'T3' else 'pri' }}">{% if plan.op in ('settings.apply', 'settings.promote') and plan.impact._button_label %}{{ plan.impact._button_label }}{% else %}Apply {{ plan.op }}{% endif %}</button></div>
   </form>
 </div>
 {% endblock %}
