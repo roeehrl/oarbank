@@ -656,4 +656,12 @@
                                                    uploading: uploading}; }};
 
   if (doc.readyState !== "loading") chart(); else doc.addEventListener("DOMContentLoaded", chart);
+
+  // A refused settings save (templates/_settings.html): its error summary takes focus, so a screen reader reads it first
+  // and the links below it move to each field (GOV.UK error summary).
+  function focusErrors() {
+    var e = doc.querySelector(".error-summary[data-focus-on-load]");
+    if (e) { e.focus(); e.scrollIntoView({block: "start"}); }
+  }
+  if (doc.readyState !== "loading") focusErrors(); else doc.addEventListener("DOMContentLoaded", focusErrors);
 })();
