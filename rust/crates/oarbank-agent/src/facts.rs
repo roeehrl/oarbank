@@ -187,8 +187,9 @@ pub fn collect(home: &std::path::Path) -> Value {
 }
 
 /// The node's container report: `gpu` is how containers get the node's GPUs (container_runtime::gpu_passthrough):
-/// `cdi:<kind>` on Linux with a container engine and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS with
-/// krunkit, `cdi:microsoft.com/wslc` on Windows from a ready WSL containers session whose VM has a GPU, else
+/// `cdi:<kind>` on Linux with a container engine and a CDI spec with an `all` device, `virtio-gpu:venus` on macOS from a
+/// ready Colima runtime with krunkit (macOS reports its runtime's state and what is missing, crate::colima;
+/// docs/design/macos-containers.md), `cdi:microsoft.com/wslc` on Windows from a ready WSL containers session whose VM has a GPU, else
 /// `undetected`. Windows adds its session's state (wslc.rs writes it on every change; docs/design/windows-containers.md,
 /// "The node's report"). The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs).
 fn containers(home: &std::path::Path) -> Value {
@@ -196,7 +197,11 @@ fn containers(home: &std::path::Path) -> Value {
     {
         crate::wslc::facts(home)
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        crate::colima::facts(home, || crate::container_runtime::mac_report_now(home))
+    }
+    #[cfg(target_os = "linux")]
     {
         let _ = home;
         json!({"gpu": crate::container_runtime::gpu_passthrough().map(|p| p.kind).unwrap_or_else(|| "undetected".into())})

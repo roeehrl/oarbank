@@ -80,7 +80,7 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Session helpers (the system service) | a LaunchAgent in every GUI login, reporting over `/Library/Application Support/Oarbank/run/session.sock` | a global systemd user unit per person, reporting over `/run/oarbank/session.sock` | started by the elevated helper in each person's session, reporting over `\\.\pipe\oarbank-session` |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
 | Module sandbox | Seatbelt | Landlock and seccomp | AppContainer in a Job Object, plus an elevated helper for the egress allowlist |
-| Containers | agent-owned Colima profiles: one on Virtualization.framework with Rosetta, and one on krunkit for GPU jobs where krunkit is installed | rootless Podman, else Docker Engine | an agent-owned WSL containers session (a VM of its own) |
+| Containers | agent-owned Colima profiles in the agent's home, brought up when a release wants containers: one on Virtualization.framework with Rosetta, and one on krunkit for GPU jobs where krunkit is installed ([macos-containers.md](macos-containers.md)) | rootless Podman, else Docker Engine | an agent-owned WSL containers session (a VM of its own) |
 
 Host protection runs on every OS ([protection.md](protection.md), "On each OS" and "Whose processes"): the rules,
 their process trees and triggers, presence, the front app, GPU time, the dynamic controller's measured signals and its
@@ -257,7 +257,9 @@ lists, mounts confined to the job's directories, no other flags; the `containers
 verifies a set image's signature before the runtime pulls it, offline with the key, through its own small OCI registry
 client (`imageset.rs`, on `oarbank-core`'s `images.rs`), and reports each set image an attempt ran so the coordinator
 audits each digest's first run ([secrets-and-signed-images.md](secrets-and-signed-images.md)). macOS uses an
-agent-owned Colima profile, Linux the host's rootless Podman or Docker Engine (platforms from binfmt: any enabled
+agent-owned Colima profile in the agent's own home, started when a release first wants containers and reported in the
+facts (`containers.runtime = "colima"`, its state and each missing prerequisite with its fix;
+[macos-containers.md](macos-containers.md)), Linux the host's rootless Podman or Docker Engine (platforms from binfmt: any enabled
 handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). GPU passthrough: a Linux node with a CDI spec for its
 GPU offers the `gpu` pool and runs `gpus = "all"` containers with `--device <kind>=all`, its containers' GPU APIs read
 from the spec; a Mac with krunkit runs the containers of jobs that reserved the `gpu` pool in a second agent-owned

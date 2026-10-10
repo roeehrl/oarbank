@@ -11,10 +11,11 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
   and glibc 2.39 or newer on x86-64 or arm64, or a Windows machine (x64: Windows 10 1809 / Windows Server 2019 or later; arm64: Windows 11;
   [Windows coordinator](#windows-coordinator)) that stays on, reachable by the nodes on one address
   (port 7443/tcp).
-- Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, Docker through the
-  agent's own Colima, and so on). On a Mac with Apple silicon, krunkit gives GPU containers Vulkan on the Mac's GPU,
-  in a second agent-owned Colima VM: `brew tap slp/krun && brew trust slp/krun && brew install krunkit` (Homebrew asks
-  you to trust a third-party tap).
+- Whatever the installed modules' doctors check (their READMEs say: a JDK, Homebrew tools, containers through the
+  agent's own Colima, and so on). A Mac that runs containers needs `brew install colima docker`, and Rosetta 2 on
+  Apple silicon for linux/amd64 images ([Containers on Mac nodes](#containers-on-mac-nodes)). On Apple silicon,
+  krunkit gives GPU containers Vulkan on the Mac's GPU, in a second agent-owned Colima VM: `brew tap slp/krun && brew
+  trust slp/krun && brew install krunkit` (Homebrew asks you to trust a third-party tap).
 
 ## The packages
 
@@ -218,6 +219,32 @@ whole networks (`sudo defaults write com.apple.network.local-network AllowedEthe
   data, keys, logs and lingering. If cleanup fails, removal stops so you can correct the service problem and retry.
 - Windows coordinator: uninstall **Oarbank Coordinator** from Installed apps. It stops/removes both services and
   the firewall rule, while preserving the coordinator's state and signing keys.
+
+## Containers on Mac nodes
+
+Containers run in the agent's own Colima VM ([design/macos-containers.md](design/macos-containers.md)). Install the
+tools once, as the administrator who owns Homebrew; the agent does the rest:
+```bash
+brew install colima docker                                         # Colima brings Lima; Docker Desktop is not needed
+softwareupdate --install-rosetta --agree-to-license                # Apple silicon: linux/amd64 images run under Rosetta
+brew tap slp/krun && brew trust slp/krun && brew install krunkit   # optional, Apple silicon: GPU containers (Vulkan)
+```
+The agent finds them in `/opt/homebrew/bin` or `/usr/local/bin` whatever its PATH (a tool in a person's home is not
+one the `_oarbank` account may run). When a release first wants containers it creates and starts its own profile,
+`oarbank`, in its home (`/Library/Application Support/Oarbank/agent/colima` for a system install, `~/.colima` for a
+personal one), sized from the Mac's memory and mounting only its work and modules-data directories; the first start
+downloads the VM image and takes a few minutes. Never start or delete the `oarbank` or `oarbank-gpu` profiles
+yourself; your own Colima profiles are untouched.
+
+The node reports the runtime in its facts (`oarbank node show <node>`: `containers: colima ready`, or `missing` with
+each piece and its fix, or `failed` with the end of the Colima log) and offers the `containers` pool only while it is
+ready. On the node, as the agent's account:
+```bash
+sudo -u _oarbank /Library/Oarbank/bin/oarbank-agent --home "/Library/Application Support/Oarbank/agent" containers doctor [--probe [--gpu]]
+```
+prints the same report (exit 3 while something is missing); `--probe` starts the runtime and runs real containers
+through it. GPU containers (`containers.gpu = "virtio-gpu:venus"`) are offered only once the runtime is ready and
+krunkit is installed; their VM starts with the first GPU job.
 
 ## Linux nodes
 

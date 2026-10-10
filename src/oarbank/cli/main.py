@@ -582,7 +582,8 @@ def cmd_fleet(a):
         mods = ",".join(f"{m}:{st.get('state')}" for m, st in (n.get("mods") or {}).items()) or "-"
         g = (n.get("doctor") or {}).get("gpu_apis") or {}
         gpu = f"gpu {','.join(g.get('host') or []) or '-'} containers {','.join(g.get('containers') or []) or '-'}"
-        # a container runtime that reports its own state (Windows: the agent's WSL containers session), and what it misses
+        # a container runtime that reports its own state (Windows: the agent's WSL containers session; macOS: its Colima
+        # profile), and what it misses
         ct = (n.get("facts") or {}).get("containers") or {}
         runtime = f" runtime {ct['runtime']} {ct.get('state')}" if ct.get("runtime") else ""
         runtime += "".join(f" MISSING {m.get('what')}" for m in ct.get("missing") or [])

@@ -106,7 +106,11 @@ spec/platforms.md):
 - **Containers.** `gpu` is how containers get the node's GPUs (`cdi:<kind>`, `virtio-gpu:venus`), else `undetected`;
   the APIs such a container can use are the doctor report's `gpu_apis.containers` (below). A Windows node adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
   node's report"): `runtime` (`wslc`), `state` (`absent`, `starting`, `ready`, `missing`, `failed`), `session`,
-  `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes.
+  `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes. A macOS node
+  reports its Colima runtime the same way ([design/macos-containers.md](design/macos-containers.md)): `runtime`
+  (`colima`), the same `state` values, `profile`, `colima_home`, `platforms`, `missing`, `detail` when failed, and
+  `gpu_profile` (`{profile, state, missing}`: `unavailable`, `on_demand`, `starting`, `ready`, `failed`); its `gpu` is
+  `virtio-gpu:venus` only while the runtime is ready and krunkit is installed.
 
 `hostname` is the name the node reports: the machine's host name, or `OARBANK_NODE_NAME` in the agent's
 environment when the owner names it. The coordinator names the node after it, unless the node enrolled with a

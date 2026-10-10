@@ -119,6 +119,10 @@ impl Agent {
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
             services_halted: false, coord_install: Default::default(), status: Default::default(), layout };
+        // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
+        // containers the facts show what the agent finds now
+        #[cfg(target_os = "macos")]
+        let _ = std::fs::remove_file(crate::colima::report_file(&a.layout.home));
         // folder entries a statement or a release no longer grants are removed when the agent starts, too
         #[cfg(windows)]
         crate::sandbox_windows::reconcile_folder_grants(&a.layout, a.release.as_ref(), &a.folders);
@@ -725,7 +729,7 @@ impl Agent {
     }
 
     /// The container runtimes, once a release has a module approved for containers and a runtime exists here (on
-    /// Windows it always does: it reports what is missing itself).
+    /// Windows and macOS it always does: it reports what is missing itself).
     fn container_runtime(&mut self) -> Option<crate::container_runtime::Containers> {
         let wants = self.release.as_ref().is_some_and(|r| r.modules.iter()
             .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))));
@@ -733,7 +737,19 @@ impl Agent {
             return None;
         }
         if self.containers.is_none() {
-            self.containers = crate::container_runtime::for_node(&self.layout);
+            #[cfg(target_os = "macos")]
+            {
+                // the agent's own runtime publishes its report (the facts' `containers`) and comes up now, in the
+                // background (docs/design/macos-containers.md, "Bring-up")
+                self.containers = crate::container_runtime::for_node_mac(&self.layout, true);
+                if let Some(rts) = &self.containers {
+                    rts.all().iter().for_each(|rt| rt.recheck());
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.containers = crate::container_runtime::for_node(&self.layout);
+            }
         }
         self.containers.clone()
     }
