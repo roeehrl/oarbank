@@ -136,6 +136,10 @@ pub fn expand(pattern: &str) -> Vec<PathBuf> {
         let Some(val) = std::env::var_os(name).filter(|v| !v.is_empty()) else { return vec![] };
         text = format!("{}{tail}", val.to_string_lossy());
     }
+    if cfg!(windows) {
+        // `/` is a separator on Windows except in a `\\?\` path (what canonicalize returns), where it would be part of a name
+        text = text.replace('/', "\\");
+    }
     let path = PathBuf::from(&text);
     if !path.is_absolute() {
         return vec![];
@@ -542,7 +546,7 @@ mod tests {
         fake_jdk(&t.join("jdk-17/libexec/openjdk.jdk/Contents/Home"), "17.0.12", "aarch64");    // Homebrew's layout
         fake_jdk(&t.join("zulu-8"), "1.8.0_392", "x86_64");
         std::fs::create_dir_all(t.join("broken/bin")).unwrap();
-        std::fs::write(t.join("broken/bin/java"), b"").unwrap();
+        std::fs::write(t.join("broken/bin").join(if cfg!(windows) { "java.exe" } else { "java" }), b"").unwrap();
         std::fs::create_dir_all(t.join("empty")).unwrap();
         match probe_jdk(&t.join("jdk-17")) {
             Probe::Found { path, version, arch, vendor } => {
