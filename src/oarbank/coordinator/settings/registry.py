@@ -78,8 +78,10 @@ SECTIONS = {
     "access": ("Access", "Host names the console and the admin API answer to besides localhost (the remote mode)."),
     "verification": ("Data and verification", "How often finished work is re-run on another node to catch a wrong one."),
     "tools": ("Host tools", "Which installation of a host tool a node grants (docs/design/host-tools.md)."),
+    "protection": ("Protection", "How fleet work yields to the owner's own programs. Protected-process rules from every "
+                                 "scope apply together; they are edited on the protection pages."),
 }
-NODE_SECTIONS = ("memory", "presence", "jobs", "caps")
+NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection")
 FLEET_SECTIONS = ("notifications", "access", "verification")
 
 SETTINGS = (
@@ -149,6 +151,21 @@ SETTINGS = (
             unit="GB", wire="limits", section="caps", merge="min", danger="T0", advanced=True),
     Setting("staging_mbps", "Download bandwidth", "Dataset staging.", {"type": "number", "exclusiveMinimum": 0},
             unit="Mbps", wire="limits", section="caps", merge="min", danger="T0", advanced=True),
+    # ---------------------------------------------------------------- protection (assembled into the agent's policy)
+    Setting("protection.mode", "Protection mode",
+            "fleet_first: static rules and guards only; moderate: an adaptive budget that protects the front app and "
+            "the owner's busy programs; strict_yield: fleet work pauses at once on any protected activity.",
+            {"type": "string", "enum": ["fleet_first", "moderate", "strict_yield"]}, default="moderate",
+            section="protection", effects=("protection",)),
+    Setting("protection.rules", "Protected-process rules",
+            "Programs fleet work yields to, and how (reserve, cap, lower, pause, evict fleet work). Every scope's rules "
+            "apply together: a rule only ever protects more.", {"type": "array", "x-kind": "protection_rules",
+                                                                "maxItems": 64}, default=[], merge="union",
+            lockable=False, effects=("protection",)),
+    Setting("protection.node", "Protection tuning",
+            "The memory guard, timing, GPU jobs and longest pause beside the mode (the node section of a protection "
+            "config).", {"type": "object", "x-kind": "protection_node"}, default={}, advanced=True,
+            effects=("protection",)),
     # ---------------------------------------------------------------- fleet-wide (the coordinator)
     Setting("ntfy.url", "Topic URL", "The ntfy topic alerts are pushed to; none: notifications off.",
             {"type": ["string", "null"], "format": "uri", "maxLength": 2048}, scopes=("fleet",), applies="coordinator",
@@ -259,6 +276,9 @@ def _check(schema: dict, v, where: str):
         raise SettingError("bad_value", f"{where}: a value is required (reset it to inherit)")
     if schema.get("x-kind") == "schedule":
         return _schedule(v, where)
+    if schema.get("x-kind") in ("protection_rules", "protection_node"):
+        from ..protection import check_kind
+        return check_kind(schema["x-kind"], v, where)
     if "boolean" in types and isinstance(v, bool):
         return v
     if ("integer" in types or "number" in types) and isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -370,6 +390,8 @@ def show(key: str, v) -> str:
         return "on" if v else "off"
     if v is None or v == [] or v == {}:
         return "none"
+    if d and d.schema.get("x-kind") == "protection_rules" and isinstance(v, list):
+        return ", ".join(str(r.get("id")) for r in v if isinstance(r, dict))
     if d and d.schema.get("x-kind") == "schedule" and isinstance(v, dict):
         days = v.get("days")
         when = "every day" if not days or len(days) == 7 else ", ".join(DAYS[i] for i in days)

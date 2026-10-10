@@ -428,92 +428,83 @@ def _retire(db, req):
     return {"lifecycle": "retired", "pinned_jobs_cancelled": len(pinned)}
 
 
-# ------------------------------------------------------------------ protection
+# ------------------------------------------------------------------ protection (on the settings chain)
 
-def _prot_keys(db, r):
-    nid = _nid(db, r)
-    return [protection.resource_key(nid), f"node:{nid}:policy"]
+def _prot_scope(db, req) -> tuple[str, str]:
+    try:
+        return protection.scope_of(db, req.target)
+    except protection.ProtectionError as e:
+        raise core.ApiError(404, "not_found", str(e))
 
 
 def _prot_config(db, req) -> dict:
     cfg = req.params.get("config")
     if cfg is None:
-        raise core.ApiError(400, "missing_config", "params.config: the full protection section")
+        raise core.ApiError(400, "missing_config", "params.config: the scope's own protection section")
+    scope, sid = _prot_scope(db, req)
     try:
-        return protection.validate(cfg, protection.node_os(db, _nid(db, req)))
+        return protection.validate(cfg, protection.node_os(db, sid) if scope == "node" else None)
     except protection.ProtectionError as e:
         raise core.ApiError(422, "bad_protection", str(e))
 
 
-def _prot_version(db, req) -> dict:
-    nid = _nid(db, req)
+def _prot_changes(db, req) -> list:
+    from .settings import resolve as V
+    scope, sid = _prot_scope(db, req)
+    changes = protection.changes_for(V.snapshot(db), scope, sid, _prot_config(db, req))
+    if not changes:
+        raise core.ApiError(409, "no_change", "the section is what this scope already sets")
+    return changes
+
+
+def _prot_impact(db, req) -> dict:
+    out = _settings(lambda: settings.apply.plan(db, _prot_changes(db, req)))
+    scope, sid = _prot_scope(db, req)
+    if scope == "node":
+        try:
+            out.update({k: v for k, v in protection.preview(db, sid, _prot_config(db, req)).items() if k != "node_id"})
+        except protection.ProtectionError as e:
+            raise core.ApiError(422, "bad_protection", str(e))
+    return out
+
+
+def _prot_snap(db, req):
+    from .settings import resolve as V
     try:
-        v = int(req.params.get("version"))
-    except (TypeError, ValueError):
-        raise core.ApiError(400, "missing_version", "params.version")
-    r = db.one("SELECT config_json FROM protection_versions WHERE node_id=? AND version=?", (nid, v))
-    if not r:
-        raise core.ApiError(404, "not_found", f"protection version {v} of {nid}")
-    return json.loads(r["config_json"])
+        scope, sid = protection.scope_of(db, req.target)
+    except protection.ProtectionError:
+        return None
+    return {"scope": scope, "scope_id": sid, "own": protection.own(V.snapshot(db), scope, sid)}
 
 
-@handler("protection.rules.update", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: protection.preview(db, _nid(db, r), _prot_config(db, r)))
+@handler("protection.rules.update", target_type="protection", snapshot=_prot_snap, versions=lambda db, r: ["settings"],
+         impact=_prot_impact, name=lambda db, r: str(r.target))
 def _prot_update(db, req):
-    v = protection.write_version(db, _nid(db, req), _prot_config(db, req), req.actor, req.reason)
-    return {"version": v}
+    """A scope's own protection section (a node, `fleet` or `group:<group>`): its rules, node section and mode, as one
+    settings change set; the node's effective section is every scope's rules together (docs/design/settings.md,
+    "Protection on the chain")."""
+    scope, _ = _prot_scope(db, req)
+    if scope != "node" and req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"fleet or group protection needs the admin role; {req.actor} is {req.role}")
+    return _settings(lambda: settings.apply.commit(db, _prot_changes(db, req), req.actor, req.reason))
 
 
-@handler("protection.rules.restore", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: {**protection.preview(db, _nid(db, r), _prot_version(db, r)), "restores": r.params.get("version")})
-def _prot_restore(db, req):
-    v = protection.write_version(db, _nid(db, req), _prot_version(db, req), req.actor, req.reason,
-                                 source=f"rules.restore:{req.params.get('version')}")
-    return {"version": v, "restored": int(req.params["version"])}
+def _mode_impact(db, r):
+    from .settings import resolve as V
+    nid = _nid(db, r)
+    res = V.resolve(V.snapshot(db), _node(db, nid), "protection.mode")
+    return {"mode": {"from": res["value"], "to": r.params.get("mode"), "now_from": V.badge(res)},
+            "live_attempts": _live_on(db, nid)}
 
 
-def _canary_impact(db, r):
-    if r.params.get("promote"):
-        h = protection.canary_health(db)
-        c = db.get_state(protection.CANARY_KEY)
-        targets, skipped = protection.promote_targets(db, c) if c else ([], {})
-        return {**h, "targets": targets, "skipped": skipped}
-    return {**protection.preview(db, _nid(db, r), _prot_config(db, r)), "canary": True,
-            "then": "promote after a clean soak of %d s" % protection.CANARY_MIN_SOAK_S}
-
-
-def _canary_target(db, req):
-    """Promoting names no node: the running canary's node is the target."""
-    if req.params.get("promote"):
-        c = db.get_state(protection.CANARY_KEY)
-        if not c:
-            raise OpError(409, "no_canary", "no protection canary is running: oarbank protection canary <node> <file>")
-        req.target = c["node_id"]
-
-
-@handler("protection.rules.canary", target_type="node", impact=_canary_impact, target=_canary_target,
-         snapshot=lambda db, r: {"canary": db.get_state(protection.CANARY_KEY)})
-def _prot_canary(db, req):
-    try:
-        if req.params.get("promote"):
-            return protection.promote(db, req.actor, req.reason, force=bool(req.params.get("force")))
-        c = protection.start_canary(db, _nid(db, req), _prot_config(db, req), req.actor, req.reason)
-        return {k: v for k, v in c.items() if k != "config"}
-    except protection.ProtectionError as e:
-        raise core.ApiError(409, "canary_not_promotable", str(e))
-
-
-@handler("nodes.set_mode", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: {"mode": {"from": ((protection.current(db, _nid(db, r))[1].get("node") or {}).get("mode")),
-                                        "to": r.params.get("mode")}, "live_attempts": _live_on(db, _nid(db, r))})
+@handler("nodes.set_mode", target_type="node", snapshot=lambda db, r: _prot_snap(db, r), versions=lambda db, r: ["settings"],
+         impact=_mode_impact)
 def _set_mode(db, req):
+    """This node's own protection mode (protection.mode at node scope; a lock above refuses it)."""
     mode = req.params.get("mode")
     if mode not in ("fleet_first", "moderate", "strict_yield"):
         raise core.ApiError(400, "bad_mode", f"{mode!r}: fleet_first | moderate | strict_yield")
-    try:
-        return {"version": protection.set_mode(db, _nid(db, req), mode, req.actor, req.reason)}
-    except protection.ProtectionError as e:
-        raise core.ApiError(422, "bad_protection", str(e))
+    return _settings(lambda: protection.set_mode(db, _nid(db, req), mode, req.actor, req.reason))
 
 
 @handler("protection.probe_now", target_type="node", snapshot=_node_snap)
@@ -1628,8 +1619,12 @@ def _groups_delete(db, req):
 
 
 def _label_nodes(db, req) -> list[str]:
-    ids = [_nid(db, req)] + [core_node_id(db, x) for x in (req.params.get("nodes") or [])]
-    return list(dict.fromkeys(ids))
+    """The target node and `nodes` (the target may be `nodes` when only the list names them: the bulk page)."""
+    first = [] if (req.target or "nodes") == "nodes" else [_nid(db, req)]
+    ids = list(dict.fromkeys(first + [core_node_id(db, x) for x in (req.params.get("nodes") or [])]))
+    if not ids:
+        raise OpError(400, "bad_params", "nodes.label: name a node (the target) or nodes")
+    return ids
 
 
 def _label_impact(db, req) -> dict:
@@ -1672,7 +1667,10 @@ def _no_lock_escape(db, ids: list, remove: list, actor: str, role: str) -> None:
 def _label_snap(db, req):
     from .settings import store as S
     have = S.labels(db)
-    return {n: have.get(n, []) for n in _label_nodes(db, req)}
+    try:
+        return {n: have.get(n, []) for n in _label_nodes(db, req)}
+    except (OpError, core.ApiError):
+        return None
 
 
 @handler("nodes.label", target_type="node", snapshot=_label_snap, versions=lambda db, r: ["settings"],

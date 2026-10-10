@@ -745,8 +745,10 @@ lowest wins:
 - **`disabled_services`** sets a node's role. Changing it re-doctors and re-certifies the node.
 - **`module_settings.<module>`** holds what a module's runners and services read on this node (the setting
   `module.node_settings`, set per module).
-- **`protection`** is owner-set host protection (schema 1), the node's own section (`nodes.protection_json`). The
-  console edits it with versions, restore and canary; see docs/design/protection.md.
+- **`protection`** is owner-set host protection (schema 1): the node's effective section, which the coordinator
+  assembles from the settings chain (`protection.mode`, `protection.rules` from every scope together, `protection.node`;
+  a rule the node's OS cannot run is left out). See docs/design/protection.md and docs/design/settings.md,
+  "Protection on the chain".
 - **`hard_limits`** (default `false`) turns each job's reservation (`resources.cpu`, `resources.mem_gb`) into hard
   limits where the OS has them: a cgroup v2 leaf on Linux (when systemd delegated the agent's cgroup), the Job
   Object on Windows; macOS has none. A job over its memory limit fails with `oom`, the job's fault.

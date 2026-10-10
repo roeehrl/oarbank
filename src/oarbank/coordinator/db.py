@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS nodes (
   agent_version TEXT, release_id TEXT, boot_id TEXT,
   cert_generation INT DEFAULT 0, cert_release TEXT, cert_os_version TEXT, cert_at REAL,
   platform TEXT, os TEXT, arch TEXT, os_version TEXT,   -- from the agent's facts (spec/platforms.md)
-  protection_json TEXT,            -- the owner's protection section (protection.py; its versions: protection_versions)
   settings_json TEXT, settings_digest TEXT, settings_rev INT,   -- the effective policy and caps the agent gets (settings/apply.py)
   settings_applied_rev INT, settings_rejected_json TEXT,         -- what the agent reports it applied, and refused
   last_heartbeat_at REAL, last_hello_at REAL, capacity_json TEXT, telemetry_json TEXT,
@@ -219,7 +218,7 @@ CREATE TABLE IF NOT EXISTS coordinator_moves (
   created_at REAL, not_before REAL, ended_at REAL, actor TEXT, reason TEXT, final_snapshot_json TEXT, report_json TEXT,
   cancel_payload TEXT, cancel_sig TEXT,
   modules_json TEXT, force INT DEFAULT 0);          -- what modules said about the move; the operator's override of blockers
--- Immutable versions of each node's protection section (restore writes a new version)
+-- The history of each node's effective protection section (protection.record_if_changed), one row per change
 CREATE TABLE IF NOT EXISTS protection_versions (
   node_id TEXT NOT NULL, version INT NOT NULL, config_json TEXT NOT NULL, config_hash TEXT, actor TEXT, reason TEXT,
   source TEXT, created_at REAL, PRIMARY KEY (node_id, version));
@@ -270,7 +269,7 @@ class _TimedLock:
 
 # Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
 ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
-                 "nodes": {"protection_json": "TEXT", "settings_json": "TEXT", "settings_digest": "TEXT",
+                 "nodes": {"settings_json": "TEXT", "settings_digest": "TEXT",
                            "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
                            "tools_json": "TEXT", "want_detect": "INT DEFAULT 0"}}
 
@@ -322,6 +321,8 @@ class DB:
         with self.tx():
             migrate_registry(self)
             statements_migrate(self)
+        from .protection import migrate as protection_migrate
+        protection_migrate(self)                # per-node protection sections: hoisted onto the settings chain once
 
     # -- low level ---------------------------------------------------------
     # Stored file paths are relative to the coordinator's home (the database's directory) whenever the file is inside

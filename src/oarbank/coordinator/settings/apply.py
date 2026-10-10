@@ -19,9 +19,6 @@ from . import registry as R
 from . import resolve as V
 from . import store
 
-DEFAULT_PROTECTION = {"schema": 1, "node": {"mode": "moderate"}, "rule": []}
-
-
 class ApplyError(Exception):
     def __init__(self, status: int, code: str, detail: str, errors: list | None = None):
         super().__init__(f"{code}: {detail}")
@@ -29,7 +26,7 @@ class ApplyError(Exception):
 
 
 def _nodes(r) -> list[dict]:
-    return r.q("SELECT node_id, hostname, os, arch, platform, facts_json, protection_json, last_heartbeat_at, settings_rev, "
+    return r.q("SELECT node_id, hostname, os, arch, platform, facts_json, last_heartbeat_at, settings_rev, "
                "settings_applied_rev, settings_rejected_json, agent_version FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
 
 
@@ -217,7 +214,8 @@ def plan(db, changes) -> dict:
     # keys a node takes: the agent's policy and caps, a module's node settings, and host tool paths (tool_pins and the
     # node statement)
     wire_keys = sorted({c["key"] for c in norm if R.REGISTRY[c["key"]].wire or c["key"] == "module.node_settings"
-                        or "statement" in R.REGISTRY[c["key"]].effects})
+                        or "statement" in R.REGISTRY[c["key"]].effects or "protection" in R.REGISTRY[c["key"]].effects})
+    prot_notes = []
     diff, unaffected, errors, changed_nodes = [], [], [], []
     for n in nodes:
         reach = [c for c in norm if _reaches(before, n, c) and c["key"] in wire_keys]
@@ -244,6 +242,21 @@ def plan(db, changes) -> dict:
                    else "same value")
             unaffected.append({"node_id": n["node_id"], "hostname": n["hostname"], "key": k, "why": why,
                                "value_text": R.show(k, a[k]["value"]), "source": V.badge(a[k])})
+        if any("protection" in R.REGISTRY[c["key"]].effects for c in reach):
+            from .. import protection as PR
+            had = set(PR.chain_errors(before, n))
+            aft = PR.assemble(after, n)
+            for msg in aft["conflicts"]:
+                if msg not in had:
+                    errors.append({"key": "protection.rules", "scope": "node", "scope_id": n["node_id"], "node": n["hostname"],
+                                   "code": "cross_check", "message": f"{n['hostname']}: {msg}"})
+            for x in aft["skipped"]:
+                if any(c["scope"] == "node" and c["key"] == "protection.rules" and c["scope_id"] == n["node_id"] for c in reach) \
+                        and x["source"] == "This node":
+                    errors.append({"key": "protection.rules", "scope": "node", "scope_id": n["node_id"], "node": n["hostname"],
+                                   "code": "cross_check", "message": f"{n['hostname']} ({n['os']}): {x['why']}"})
+                else:
+                    prot_notes.append(f"rule {x['rule']} ({x['source']}) is skipped on {n['hostname']} ({n['os']}): {x['why']}")
         if any(R.REGISTRY[k].wire for k in moved):
             full_b = {k: V.resolve(before, n, k)["value"] for k in (*R.WIRE_POLICY, *R.WIRE_LIMITS)}
             full_a = {k: V.resolve(after, n, k)["value"] for k in (*R.WIRE_POLICY, *R.WIRE_LIMITS)}
@@ -268,7 +281,7 @@ def plan(db, changes) -> dict:
         summary = "Changes a fleet-wide setting the coordinator applies"
     fleetish = any(c["scope"] in ("fleet", "group") for c in norm)
     return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm],
-            "lock_notes": _lock_notes(before, nodes, norm, names),
+            "lock_notes": _lock_notes(before, nodes, norm, names), "protection_notes": sorted(set(prot_notes)),
             "nodes_changed": [f"{x['hostname']}: {x['label']} {x['old_text']} → {x['new_text']}" for x in diff],
             "nodes_unaffected": [f"{x['hostname']}: keeps {x['value_text']} ({x['why']}: {x['source']})" for x in unaffected],
             "then": ("each node gets its new settings at its next heartbeat and reports the revision it applied"
@@ -306,7 +319,8 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
             store.delete(db, c["scope"], c["scope_id"], c["module"], c["key"])
         else:
             store.put(db, c["scope"], c["scope_id"], c["module"], c["key"], c["value"], actor, n, comment, c["enforce"])
-    touched = refresh(db, p["_diff"], n, statements=any("statement" in R.REGISTRY[c["key"]].effects for c in norm))
+    touched = refresh(db, p["_diff"], n, statements=any("statement" in R.REGISTRY[c["key"]].effects for c in norm),
+                      actor=actor)
     db.event("settings_changed", actor=actor, reason=f"rev {n}: " + "; ".join(p["changes"])[:400], rev=n,
              changes=[{k: c[k] for k in ("scope", "scope_id", "module", "key", "reset", "enforce")} for c in norm])
     now = time.time()
@@ -319,7 +333,7 @@ def commit(db, changes, actor: str, comment: str | None = None) -> dict:
             "message": " · ".join([f"Saved · rev {n}", *parts])}
 
 
-def refresh(db, diff: list[dict], rev_: int | None, statements: bool = False) -> list[str]:
+def refresh(db, diff: list[dict], rev_: int | None, statements: bool = False, actor: str | None = None) -> list[str]:
     """After a change (a change set, or a group or label change that moved nodes between groups): run the effect hooks
     on the nodes whose effective value changed (`diff`: [{node_id, key, new}]), rebuild the node statements when host
     tool paths may have moved, and refresh the changed nodes' effective settings under `rev_`. Returns their ids."""
@@ -334,7 +348,7 @@ def refresh(db, diff: list[dict], rev_: int | None, statements: bool = False) ->
     for nid in sorted(hooks.get("redoctor", ())):
         _redoctor(db, nid, [x for x in diff if x["node_id"] == nid and "redoctor" in R.REGISTRY[x["key"]].effects])
     touched = sorted({x["node_id"] for x in diff})
-    sync_nodes(db, touched, rev_=rev_)
+    sync_nodes(db, touched, rev_=rev_, actor=actor)
     return touched
 
 
@@ -350,17 +364,19 @@ def _redoctor(db, nid: str, diffs: list[dict]) -> None:
 # ------------------------------------------------------------------ what the agent gets
 
 def node_document(snap: V.Snap, node: dict) -> dict:
-    """{"policy", "limits"}: the complete effective settings the agent gets (policy carries protection and module
-    settings beside the registry's keys)."""
+    """{"policy", "limits"}: the complete effective settings the agent gets (policy carries protection, assembled from
+    its settings, and module settings beside the registry's keys)."""
+    from .. import protection
     policy, limits = V.agent_sections(snap, node)
-    prot = node.get("protection_json")
-    policy["protection"] = (json.loads(prot) if isinstance(prot, str) and prot else None) or copy.deepcopy(DEFAULT_PROTECTION)
+    policy["protection"] = protection.effective(snap, node)
     return {"policy": policy, "limits": limits}
 
 
-def sync_nodes(db, node_ids=None, rev_: int | None = None, snap: V.Snap | None = None) -> dict:
+def sync_nodes(db, node_ids=None, rev_: int | None = None, snap: V.Snap | None = None, actor: str | None = None) -> dict:
     """Recompute nodes' effective settings; a node whose document changed gets it with a new revision (`rev_`, else
-    one new revision for the batch). Returns {node_id: rev} of the nodes that changed."""
+    one new revision for the batch), and a history row when its protection changed. Returns {node_id: rev} of the
+    nodes that changed."""
+    from .. import protection
     snap = snap or V.snapshot(db)
     sql = "SELECT * FROM nodes WHERE lifecycle!='retired'"
     rows = db.q(sql) if node_ids is None else [n for n in (db.one("SELECT * FROM nodes WHERE node_id=?", (x,)) for x in node_ids) if n]
@@ -374,6 +390,7 @@ def sync_nodes(db, node_ids=None, rev_: int | None = None, snap: V.Snap | None =
             rev_ = store.next_rev(db)
         db.x("UPDATE nodes SET settings_json=?, settings_digest=?, settings_rev=? WHERE node_id=?",
              (json.dumps(doc), digest, rev_, n["node_id"]))
+        protection.record_if_changed(db, n["node_id"], doc["policy"]["protection"], rev_, actor)
         out[n["node_id"]] = rev_
     return out
 

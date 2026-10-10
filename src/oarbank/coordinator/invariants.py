@@ -227,8 +227,8 @@ def _rule_at(db: DB, node_id: str, rule_id: str, t: float) -> dict | None:
     if r:
         cfg = json.loads(r["config_json"])
     else:
-        n = db.one("SELECT protection_json FROM nodes WHERE node_id=?", (node_id,))
-        cfg = (jl(n["protection_json"], {}) or {}) if n else {}
+        n = db.one("SELECT settings_json FROM nodes WHERE node_id=?", (node_id,))       # what the agent was sent
+        cfg = ((jl(n["settings_json"], {}) or {}).get("policy") or {}).get("protection") or {} if n else {}
     return next((x for x in cfg.get("rule") or [] if x.get("id") == rule_id), None)
 
 

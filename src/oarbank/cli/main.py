@@ -1026,8 +1026,9 @@ def _protection_file(path: str) -> dict:
 
 
 def print_protection(d: dict) -> None:
-    live, c = d["live"], d["canary"]
-    print(f"protection on {d['hostname']} ({d['node_id']}): version {d['version']}, mode {d['mode']}")
+    live = d["live"]
+    print(f"protection on {d['hostname']} ({d['node_id']}): mode {d['mode']} · {d['mode_source']}"
+          + (f" (locked by {d['mode_locked_by']})" if d.get("mode_locked_by") else "") + f"; history version {d['version']}")
     print(f"live: active {', '.join(live.get('active') or []) or 'none'}; rung {live.get('rung') or 0}"
           + (f"; budget {live['budget_cores']} cores" if live.get("budget_cores") is not None else "")
           + f"; guard {d['guard'] or 'not reported'}" + (f"; CONFIG ERROR {live['config_error']}" if live.get("config_error") else ""))
@@ -1036,24 +1037,30 @@ def print_protection(d: dict) -> None:
     for r in d["config"].get("rule") or []:
         st = state.get(r.get("id")) or {}
         print(f"  {r.get('id'):<20} {'active' if st.get('active') else st.get('reason') or 'not reported':<14} "
-              f"{st.get('processes', '-')} processes  match {json.dumps(r.get('match'))}")
+              f"{st.get('processes', '-')} processes  from {d['sources'].get(r.get('id'), '?'):<18} match {json.dumps(r.get('match'))}")
+    for x in d.get("skipped") or []:
+        print(f"  {x['rule']:<20} skipped here ({x['source']}): {x['why']}")
+    for x in d.get("conflicts") or []:
+        print(f"  conflict: {x}")
     for x in d["conditions"]:
         print(f"  {x['code']}: {x['message']}")
-    if c["canary"]:
-        print(f"canary: {c['canary']['node_id']} version {c['canary']['version']}, soaked {c['soak_s']} s, "
-              + ("promotable: oarbank protection promote" if c["promotable"] else f"not promotable: {'; '.join(c['why'])}"))
-    print("versions:")
+    own = d.get("own") or {}
+    print(f"this node's own section: {len(own.get('rule') or [])} rules"
+          + (f", mode {own['node']['mode']}" if (own.get("node") or {}).get("mode") else "")
+          + "  (oarbank protection set <node> <file> replaces it; fleet and group rules: oarbank protection set fleet|group:<g>)")
+    print("history:")
     for h in d["history"]:
         print(f"  {h['version']:<4} {_when(h['created_at'])}  {h['actor']:<14} {h['source']:<16} {','.join(h['rules']) or '-'}  "
               f"{h['mode']}  {h['reason'] or ''}")
 
 
 def cmd_protection(a):
-    """oarbank protection <show|set|preview|restore|canary|promote|probe>: a node's protected-process rules, as the
-    console's protection page edits them (the mode: oarbank node mode)."""
+    """oarbank protection <show|set|preview|probe>: protection on the settings chain. `set` replaces a scope's own
+    section (a node, `fleet` or `group:<group>`); every scope's rules apply together on a node. To roll rules out, set
+    them on a group first, then `oarbank settings promote protection.rules --group <group>` (the mode: oarbank node
+    mode, or oarbank settings set protection.mode)."""
     ask = dict(reason=a.reason, yes=a.yes)
-    need = {"show": "<node>", "probe": "<node>", "set": "<node> <file>", "preview": "<node> <file>", "canary": "<node> <file>",
-            "restore": "<node> <version>"}
+    need = {"show": "<node>", "probe": "<node>", "set": "<node|fleet|group:G> <file>", "preview": "<node|fleet|group:G> <file>"}
     if a.action in need and (not a.node or need[a.action].count("<") == 2 and not a.value):
         sys.exit(f"oarbank protection {a.action} {need[a.action]}")
     if a.action == "show":
@@ -1065,12 +1072,6 @@ def cmd_protection(a):
         return
     if a.action in ("set", "preview"):
         res = run_op("protection.rules.update", a.node, {"config": _protection_file(a.value)}, dry_run=a.action == "preview", **ask)
-    elif a.action == "canary":
-        res = run_op("protection.rules.canary", a.node, {"config": _protection_file(a.value)}, **ask)
-    elif a.action == "promote":
-        res = run_op("protection.rules.canary", None, {"promote": True, **({"force": True} if a.force else {})}, **ask)
-    elif a.action == "restore":
-        res = run_op("protection.rules.restore", a.node, {"version": int(a.value)}, **ask)
     else:
         res = run_op("protection.probe_now", a.node, None, **ask)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
@@ -1424,12 +1425,12 @@ def parser() -> argparse.ArgumentParser:
     jb.add_argument("--reason")
     jb.add_argument("--yes", "-y", action="store_true")
     jb.set_defaults(fn=cmd_job)
-    pr = sub.add_parser("protection", help="a node's protected-process rules: show, set, preview, restore, canary, promote, "
-                                           "probe (the mode: oarbank node mode)")
-    pr.add_argument("action", choices=["show", "set", "preview", "restore", "canary", "promote", "probe"])
-    pr.add_argument("node", nargs="?", help="a node id or hostname (every action but promote)")
-    pr.add_argument("value", nargs="?", help="set, preview, canary: a rules file (JSON, or TOML ending .toml); restore: a version")
-    pr.add_argument("--force", action="store_true", help="promote: even when the canary is not promotable")
+    pr = sub.add_parser("protection", help="protected-process rules on the settings chain: show (a node's effective "
+                                           "rules and where each comes from), set / preview (a node's, the fleet's or "
+                                           "a group's own section), probe (the mode: oarbank node mode)")
+    pr.add_argument("action", choices=["show", "set", "preview", "probe"])
+    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>")
+    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml)")
     pr.add_argument("--json", action="store_true", help="show: as JSON")
     pr.add_argument("--reason")
     pr.add_argument("--yes", "-y", action="store_true")
