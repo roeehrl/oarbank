@@ -3,7 +3,7 @@
 Oarbank's owner settings are one model: a **registry** declared in code, one **sparse store** of the values an owner
 set, and one **resolver** that says, for every node and key, what is in effect and where it comes from. This note is
 the model's reference; the code is `src/oarbank/coordinator/settings/` (registry.py, store.py, resolve.py, apply.py,
-views.py, migrate.py, rustgen.py) and the agent's side `rust/crates/oarbank-protection/src/settings.rs` over the
+views.py, migrate.py, rustgen.py, and for modules modkeys.py and modcore.py) and the agent's side `rust/crates/oarbank-protection/src/settings.rs` over the
 generated `settings_table.rs`.
 
 It replaces the stores whose scope was fixed by where a value happened to be written: per-node copies of a default
@@ -28,35 +28,35 @@ Each key is one `Setting` (registry.py):
 | `applies` | `coordinator`, `agent` or `both` |
 | `wire` | The agent directive section it travels in: `policy` or `limits` |
 | `section` | The console section that shows it |
-| `qualifier` | `required` for a module's own key, set per module (`pipeline`, `module.settings`, `module.node_settings`) |
-| `writer` | The operation that owns writes to it (`settings.folders.update`, `settings.origins.update`, `modules.set_pipeline`): `settings.apply` refuses the key and names that operation, which checks it and applies its effects |
-| `effects` | Hooks run on the nodes whose effective value changed (`redoctor`: `disabled_services` changes a node's role, so its modules are re-doctored and re-certified) |
+| `qualifier` | `required`: set per module only (the core keys every module has, `enabled`, `services.disabled`, `pipeline`, and each module's own keys); `optional`: a core key a module may qualify (`replica_rate`, `tool.<id>.path`) |
+| `writer` | The operation that owns writes to it (`settings.folders.update`, `settings.origins.update`): `settings.apply` refuses the key and names that operation, which checks it and applies its effects |
+| `required` | A module's own key the owner must set before its work runs ([Module settings](#module-settings)) |
+| `validator` | A module's own key: its property's whole JSON Schema checks the value (the core keys use the `schema` subset) |
+| `effects` | Hooks run on the nodes whose effective value changed (`redoctor`: a module's `services.disabled` changes its role on a node, so that module is re-doctored and re-certified there; `module_enabled`: a module turned off releases its live attempts there; `pipeline`: split splits its queued jobs) |
 | `hardware` | `cores` or `ram`: a node's own value may not exceed its hardware |
 
 The keys, by section:
 
 - **Memory**: `os_reserve_gb`, `user_reserve_gb`, `job_mem_gb`, `mem_in_use_bound`.
 - **When someone is using it**: `user_present_slots`, `user_idle_s`, `screen_sharing_present`, `run_on_battery`.
-- **Jobs**: `threads_per_job`, `max_slots`; advanced `nice` (not applied by agents yet), `hard_limits`,
-  `disabled_services`.
+- **Jobs**: `threads_per_job`, `max_slots`; advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
   advanced `vm_mem_gb`, `vm_cpus`, `disk_gb`, `staging_mbps`.
 - **Notifications** (fleet only): `ntfy.url`, `ntfy.click_base`. The ntfy token is not a setting: it is a core secret
   in the encrypted secrets store (write-only, shown as a fingerprint; `settings.secrets.set` / `clear`).
 - **Access** (fleet only): `console_hosts`, a typed list of host names (an optional `:port`).
-- **Data and verification** (fleet only): `replica_rate`, 0 to 1.
-- **Written by their own operations** (fleet only): `folder_registry`, `dataset_origins`, `pipeline` per module,
-  `module.settings` (a module's own fleet settings, which its operations write through the `module_settings.update`
-  effect).
+- **Data and verification** (fleet only): `replica_rate`, 0 to 1, which a module may raise for its own work.
+- **Written by their own operations** (fleet only): `folder_registry`, `dataset_origins`.
+- **Every module's core keys** (`[module] <key>`): `enabled`, `services.disabled`, `pipeline`, and `replica_rate`
+  qualified ([Module settings](#module-settings)).
+- **Each module's own keys** (`module.<module>.<key>`), from its manifest's settings schema.
 - **Host tools** (a key family): `tool.<id>.path` at fleet, group or node scope, optionally qualified by a module, the
   installation of a host tool a node grants ([host-tools.md](host-tools.md)). Its value is an absolute path (no globs,
   roots or `..`); its effect hook rebuilds the node statements, which carry the node values naming a path the node did
   not find itself. A key that names a module resolves the module's chain above the plain one: a value set for the
   module beats a plain value at any scope (the registry's `qualifier = "optional"`).
-- **Per module on a node**: `module.node_settings`, handed to the module's runners and services there
-  (`OARBANK_SETTINGS_FILE`).
-
-`GET /api/v1/settings/schema` returns the registry as data; `oarbank settings schema` prints it.
+`GET /api/v1/settings/schema` returns the registry as data, every installed module's own keys included;
+`oarbank settings schema` prints it.
 
 ### The agent's table is generated
 
@@ -83,9 +83,9 @@ nodes: protection_json, settings_json, settings_digest, settings_rev, settings_a
   the audit log (who, when, each row before and after, the reason).
 - **Groups** are named selectors over node facts with a unique rank. The built-in groups have the lowest ranks and
   system-defined membership: `os-darwin` (macOS), `os-linux`, `os-windows` and `coordinator-host` (the coordinator's own
-  machine, rank 4, above the OS groups). The coordinator-host group sets `disabled_services = []` by itself ("the
-  coordinator's own machine runs every service"), replacing the old special case that gave that machine every
-  service at enrolment. Membership is evaluated when values are resolved, so a node whose facts change moves at once.
+  machine, rank 4, above the OS groups). The coordinator-host group sets `services.disabled = []` by itself, for every
+  module ("the coordinator's own machine runs every service"), replacing the old special case that gave that machine
+  every service at enrolment. Membership is evaluated when values are resolved, so a node whose facts change moves at once.
   Owner groups (rank 100 and up), labels and their console come later; values can already be set on a built-in group
   (`oarbank settings set … --group macOS`).
 - **System state** is not settings: it is written only by the code that owns it, never by an operation that takes a raw
@@ -138,20 +138,21 @@ invalid state never blocks an unrelated save.
   1 pending (offline)".
 
 `settings.apply` replaced `nodes.set_policy`, `nodes.set_caps`, `settings.notifications.update` (its URL fields; the
-token became `settings.secrets.set`) and the raw `settings.update`; host tools replaced `settings.tools.update` with tool
+token became `settings.secrets.set`), the raw `settings.update` and `modules.set_pipeline` (`[module] pipeline`, whose
+check needs a stage chain and whose effect splits queued jobs); host tools replaced `settings.tools.update` with tool
 definitions (`tools.define`, `tools.delete`) and the `tool.<id>.path` keys. The folder and origin operations
-(`settings.folders.update`, `settings.origins.update`) and `modules.set_pipeline` keep their own operations until the
-module-settings phase, because each validates against more than a type (paths
-per OS, per node, a module's stage chain) and has its own side effects (release rebuilds, signed folder statements,
-splitting queued jobs); they now store their values as fleet rows through `store.write_fleet`.
+(`settings.folders.update`, `settings.origins.update`) keep their own operations, because each validates against more
+than a type (paths per OS, per node) and has its own side effects (release rebuilds, signed folder statements); they
+store their values as fleet rows through `store.write_fleet`.
 
 ## What the agent gets
 
 The coordinator resolves everything and keeps each node's complete effective settings in `nodes.settings_json`:
-`{"policy": {every policy key, "module_settings": {module: …}, "protection": {…}}, "limits": {every cap, null when
-unset}}`, with the revision at which the document last changed (`settings_rev`; a change set's revision, or a new one
-when the node's facts or group membership moved it). Every hello and heartbeat reply carries `policy`, `limits` and
-`settings_rev`. Hot paths (claim, placement, golden node classes) read this document instead of resolving.
+`{"policy": {every policy key, "disabled_services": ["<module>/<service>", …], "module_settings": {module: {key: value}},
+"protection": {…}}, "limits": {every cap, null when unset}, "modules_disabled": […], "settings_unset": {module: […]}}`,
+with the revision at which the document last changed (`settings_rev`; a change set's revision, or a new one
+when the node's facts or group membership moved it). Every hello and heartbeat reply carries `policy`, `limits`,
+`settings_rev` and `modules_disabled` (the modules whose `enabled` is off for that node: their services stop there). Hot paths (claim, placement, golden node classes) read this document instead of resolving.
 
 The agent checks each key against its generated table (`settings::validate`): a value of the right type and range is
 applied; a wrong type, a value out of range, a missing key or a key this agent does not know is refused, keeps the value
@@ -162,6 +163,77 @@ Each row then shows its applied state: "Applied on the node · rev 41", "Pending
 heartbeat", "Pending: node offline", "Refused by the node: …", or, for an agent from before this protocol,
 "Pending: this agent does not report what it applied (update it)". Services still get only the caps that are set in
 `OARBANK_LIMITS_FILE`, as before.
+
+## Module settings
+
+A module's settings are settings like any other: values in `setting_values`, one row per key and scope with `module`
+naming the module, resolved by the same chain, written by `settings.apply` with its dry run and per-node preview. Two
+kinds of keys exist per module.
+
+**Its own keys** come from its manifest. The `[settings].schema` file is a JSON Schema whose properties are the
+module's settings (oarbank-sdk `spec/manifest.md`, "Settings"):
+
+```json
+{"type": "object", "properties": {
+  "vm_mem_gb": {"type": "number", "minimum": 2, "maximum": 64, "default": 8, "title": "VM memory",
+                "description": "Memory the module's VM gets on a node.", "x-oarbank": {"scope": "node", "unit": "GB"}},
+  "pool_tao": {"type": "number", "minimum": 0, "title": "Miner pool per round",
+               "x-oarbank": {"scope": "fleet", "unit": "TAO", "required": true}}}}
+```
+
+- **Registration** (modkeys.py). When a version is installed, enabled, promoted, rolled back or uninstalled, the
+  coordinator reads the schema of the module's registered version (its current version, else its newest installed one)
+  and keeps its keys in `module_setting_keys`. Each becomes a registry definition `module.<module>.<key>`: label from
+  `title`, help from `description`, the unit, `advanced`, `required`, scopes (`fleet` only, or fleet, group and node for
+  `scope = node`), merge `replace`, lockable, tier T1, and a validator that checks a value against the property's whole
+  JSON Schema. `oarbank-sdk check`, `bundle build` and `bundle verify` refuse a schema the core would not read, so an
+  installed bundle always registers.
+- **A new version's keys.** A key the new version no longer declares keeps its values, inert (nothing resolves or
+  delivers them), listed on the module's Settings tab with a Delete, until a later version (or a rollback) declares it
+  again. A value the new version's schema refuses (its type or range changed, or the key became fleet-only and the value
+  was set below the fleet) is deleted. The `module_settings_registered` event names what was added, removed, changed
+  and dropped, with the dropped values.
+- **Writes.** `settings.apply` takes the full key (`module.relay.vm_mem_gb`) or the short one with the module
+  (`{"key": "vm_mem_gb", "module": "relay"}`; a name that is also a core key a module qualifies, such as `enabled`, is
+  the core key). The value must validate, the key must be declared by that module, and a fleet key may be set only for
+  the fleet. A module's own operations change its settings with the `module_settings.update` effect: one change set at
+  fleet scope through the same checks (`null` resets a key); one undeclared key or invalid value refuses the whole
+  effect (`bad_settings`).
+- **What each process gets.** A node's runners, doctor and services of a module get `policy.module_settings[<module>]`
+  in `OARBANK_SETTINGS_FILE`: that module's `node` keys resolved for the node (the value set for the fleet, a group or
+  the node, else the key's default; a key with neither is absent), and no other module's. The agent writes each module's
+  file only when its content changes, so a change to one module's settings never touches another module's file. The
+  module's coordinator side (`host.settings.get`, the `module_settings` UI query, op and campaign contexts) gets every key
+  at fleet scope the same way (effects.module_settings).
+- **Required keys.** A key marked `required` has no default. Until it has a value for a node (a fleet value covers
+  every node), the module's work there waits with `SETTINGS_NOT_SET` (claim and explain share the predicate; bootstrap
+  jobs, which get no settings, are exempt), and the readiness checklist's step **Required settings** is blocked while
+  a fleet key, or a node key on every node, has none; nodes still missing one are listed by what they miss.
+
+**The core keys every module has** (`[module] <key>`, registry `qualifier = "required"` unless noted; modcore.py):
+
+| Key | Scopes | What it does |
+|---|---|---|
+| `enabled` | fleet (lockable), group, node; default on | Off for the fleet is the kill switch (`modules.disable` writes it, `modules.enable` resets it): no dispatch, live attempts released (`module_disabled`), services stopped on every node. Off for a group or node does the same on those nodes only; each node's heartbeat lists the modules it must not run (`modules_disabled`) |
+| `services.disabled` | fleet, group, node; default `[]` | The module's services a node does not run (service names). The coordinator turns each node's per-module values into the agent's `disabled_services` list (`<module>/<service>`). A change re-doctors and re-certifies that module, and only that module, on the nodes whose value changed. The built-in coordinator-host group sets `[]` for every module |
+| `pipeline` | fleet | `single` or `split`; split needs a module whose stages form a chain, and switching to it splits the module's queued jobs (`pipeline_changed`). Replaces `modules.set_pipeline` |
+| `replica_rate` | fleet (`qualifier = "optional"`) | A module's own rate; merge `max`, so it can only raise the fleet's for that module's work |
+
+**The console.** The module page's **Settings** tab (`/modules/<module>/settings`) shows the readiness checklist on
+top, then two explicit-save sections at fleet scope, Running it (the core keys; `pipeline` only for a module with a
+stage chain) and Its settings (its own keys, Advanced ones under the disclosure), through the same `setting_row` macro:
+source badge, Override and Reset to inherited, "Overridden on N nodes" linking to `/settings/overrides?key=…&module=…`,
+Explain, a "required: not set" chip with the row's error text. A change opens the per-node preview first. Below them,
+**Set for groups and nodes** lists every value of the module's keys set below the fleet with a Reset each, and **Values
+<module> no longer declares** lists the inert ones. The node's Settings tab ends with **Modules on this node**: one
+section per installed module at node scope (`enabled`, `services.disabled`, its node keys), each a form of its own,
+whose "Configure the fleet value" links to the module's tab.
+
+**The API and CLI.** `GET /api/v1/settings/schema` lists the modules and their keys; `effective?module=M` (with or
+without `node`) returns that module's keys with their provenance; `explain?key=vm_mem_gb&module=relay&node=N` and
+`overrides?key=…&module=…` take the short or the full key. `oarbank settings get --module relay [--node N]`,
+`oarbank settings set vm_mem_gb 12 --module relay --node mini` (the value typed from the module's schema),
+`oarbank settings set enabled false --module relay --group macOS`, `oarbank settings set pipeline split --module relay`.
 
 ## The console
 
@@ -186,11 +258,13 @@ heartbeat", "Pending: node offline", "Refused by the node: …", or, for an agen
   `novalidate`, so the Save button stays usable and the server's messages are the ones shown.
 - **The why line** on the node page cites the settings it rests on with their value and source ("Run jobs on battery:
   off · Default"), each linked to its Explain row.
+- **A module's Settings tab** and the node tab's per-module sections: [Module settings](#module-settings).
 
 ## The CLI
 
 ```text
 oarbank settings get [<key>] [--node N] [--module M] [--json]     effective values with their source, or one key's chain
+                                                                  (--module M alone: that module's keys)
 oarbank settings explain <key> [--node N]                         the whole chain
 oarbank settings set <key> <value> [--node N | --group G] [--module M] [--enforce] [--dry-run]
 oarbank settings reset <key> [--node N | --group G] [--module M]
@@ -207,28 +281,34 @@ the command that resets each.
 
 `migrate.run`, when the coordinator opens a home made before the settings model, in one transaction:
 
+- Every installed module's keys are registered first, so module values convert key by key against the schema it
+  declares.
 - The `settings` table splits: owner keys become fleet rows (`ntfy` → `ntfy.url`, `ntfy.click_base`, its token into
   the secrets store; `console_hosts` (a string becomes a one-entry list), `replica_rate`, `default_worker_disabled_services`
-  → the fleet's `disabled_services`, `tool_registry` → host tool definitions, `folder_registry`, `dataset_origins` (its
-  host list), `pipeline:<m>`, `module_settings:<m>` → that module's `module.settings`); `dataset_groups` is dropped (no
-  owner control, no reader); every other key is machine state and moves to `system_state`. The table is dropped.
+  → each module's fleet `services.disabled` (`relay/scorer` → `[relay] services.disabled = [scorer]`; `*/x` → every
+  installed module with a service x), `tool_registry` → host tool definitions, `folder_registry`, `dataset_origins` (its
+  host list), `pipeline:<m>` → `[m] pipeline`, `module_settings:<m>` → one fleet row per key `m` declares);
+  `dataset_groups` is dropped (no owner control, no reader); every other key is machine state and moves to
+  `system_state`. The table is dropped.
 - For each node, a policy value becomes a node row only where it differs from what the node now inherits (its computed
   default, the fleet's and its groups' values), so copies disappear and choices stay; caps become node rows (`enforce`
-  only when hard, beside a cap); each module's node settings become `module.node_settings` rows; the protection section
-  moves to `nodes.protection_json` (its history stays in `protection_versions`). Then `policy_json` and `limits_json`
-  are dropped.
-- Values the registry refuses are dropped and named, with the counts, in the `settings_migrated` event.
+  only when hard, beside a cap); each module's node settings become one node row per key, and its disabled services
+  `[m] services.disabled`, by the same rule; the protection section moves to `nodes.protection_json` (its history stays
+  in `protection_versions`). Then `policy_json` and `limits_json` are dropped.
+- `module_channels.disabled` (the kill switch) becomes `[m] enabled = false` for the fleet, and the column is dropped.
+- A home made by a 2.9 build before module settings converts its `module.settings`, `module.node_settings` and
+  `disabled_services` rows the same way, and deletes them.
+- Values the registry refuses (an undeclared module key, a value its schema refuses, a fleet-only module key set on a
+  node) are dropped and named, with the counts and each module's registration, in the `settings_migrated` event.
 
-On the owner's fleet (six nodes whose policies differed only in the RAM-computed `os_reserve_gb`, no caps, no owner keys)
-this yields no node rows at all: the old model stored copies, not choices.
+On the owner's fleet (six nodes whose policies differed only in the RAM-computed `os_reserve_gb`, `module_settings`
+`{}` and `disabled_services` `[]` everywhere, no caps, no owner keys, minos-gatk 4.0.0 installed and never enabled) this
+yields no rows at all, only minos-gatk's registration: the old model stored copies, not choices.
 
 ## Later phases
 
 - **Host tools**: tool definitions, node-side detection reported in `tools_json`, per-node overrides in a signed node
   statement, module version constraints, per-node tool reason codes.
-- **Module settings**: manifest key annotations validated on write, a module Settings tab, module-qualified core keys
-  (`enabled`, `services.disabled`, `replica_rate`, `pipeline`); both old module-settings stores (`module.settings`,
-  `module.node_settings`) replaced by per-key values.
 - **Groups and locks in the console**: owner groups with rank and selectors, labels, bulk set and reset, canary to a
   group, secrets on the same chain, protection on the chain (mode replace and lockable, rules union).
 - **Campaigns, settings as code, drift**: campaign-overridable keys (tighten-only for safety keys), per-scope YAML

@@ -218,7 +218,7 @@ their process groups, deletes their workspaces, and does not report them.
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
-| `modules_disabled` | Modules the owner disabled (the kill switch, `modules.disable`): every service of theirs is disabled on the node (stopped, never offered) until they are enabled again. |
+| `modules_disabled` | Modules that must not run on this node: their effective `[module] enabled` is off here (for the fleet: the kill switch, `modules.disable`; or for a group the node is in, or the node itself). Every service of theirs is disabled on the node (stopped, never offered) until they are enabled again; the coordinator grants none of their work there. |
 | `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
 | `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
 | `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
@@ -681,8 +681,8 @@ certification run there (docs/design/stage-gating.md). Release-install refusals 
 
 A module whose manifest has a stage `B` with `after = "A"` can run a job as the chain A → B. Its
 single-stage form is the default stage: the one marked `default = true`, or the only stage that neither runs `after`
-another nor is depended on. The chain is enabled when the module's pipeline is split (`oarbank pipeline split --module
-<name>`, setting `pipeline:<module>`), for jobs that name no stage. A `jobs.enqueue` item that names a standalone stage
+another nor is depended on. The chain is enabled when the module's pipeline is split (the setting `[module] pipeline`:
+`oarbank settings set pipeline split --module <name>`), for jobs that name no stage. A `jobs.enqueue` item that names a standalone stage
 (`stage`, host capability `jobs.stage`) runs exactly that stage in any pipeline mode, with that stage's resources,
 timeout, retry and platforms; its envelope names the stage, except the default stage, which stays absent.
 
@@ -739,9 +739,14 @@ lowest wins:
   even without input.
 - **`mem_in_use_bound`** (default `true`): the memory for jobs never exceeds what the machine has available now (see
   Capacity and host protection); `false` leaves the reserves alone.
-- **`disabled_services`** sets a node's role. Changing it re-doctors and re-certifies the node.
-- **`module_settings.<module>`** holds what a module's runners and services read on this node (the setting
-  `module.node_settings`, set per module).
+- **`disabled_services`** sets a node's role: `<module>/<service>` for each service a module does not run here, which
+  the coordinator computes from each module's effective `[module] services.disabled` for the node (set for the fleet, a
+  group or the node). Changing a module's re-doctors and re-certifies that module on the node.
+- **`module_settings.<module>`** is exactly what that module's runners, doctor and services read on this node in
+  `OARBANK_SETTINGS_FILE`: each key its settings schema declares with `"x-oarbank": {"scope": "node"}`, resolved for
+  the node (the fleet's, a group's or the node's value, else the key's default; a key with neither is absent). A module
+  appears only when it has such a value, and never sees another module's keys. The agent rewrites a module's file only
+  when its content changes, through a temporary file and a rename; a bootstrap job gets `{}`.
 - **`protection`** is owner-set host protection (schema 1), the node's own section (`nodes.protection_json`). The
   console edits it with versions, restore and canary; see docs/design/protection.md.
 - **`hard_limits`** (default `false`) turns each job's reservation (`resources.cpu`, `resources.mem_gb`) into hard
