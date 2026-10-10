@@ -96,6 +96,14 @@ jobs:
         with:
           workspaces: rust
       - run: uv sync --extra dev --frozen
+      - name: the node runtime, signed as the package signs it, loads a native wheel it did not ship (docs/release-signing.md)
+        # ad hoc (CI holds no keys), which never enforces library validation: the static entitlement check stands in
+        # for it, and the canary proves the signed interpreter, its uv and a wheel from PyPI work together
+        run: |
+          case "$(uname -m)" in arm64) platform=darwin-arm64 ;; *) platform=darwin-amd64 ;; esac
+          scripts/build-node-runtime.sh "$RUNNER_TEMP/runtime" "$platform"
+          scripts/macos-codesign.sh tree - "$RUNNER_TEMP/runtime"
+          OARBANK_NODE_RUNTIME="$RUNNER_TEMP/runtime" uv run pytest -q -p no:cacheprovider tests/test_node_packages_macos.py tests/test_packaging.py -k node_runtime
       - run: cargo test --workspace --locked
         working-directory: rust
       - run: uv run pytest -q -p no:cacheprovider tests/rust

@@ -67,6 +67,43 @@ targets, each version, hash and expiry checked, with versions remembered against
 - The owner mirrors what the vendor publishes: `oarbank vendor-metadata upload <repo>` (or the Agents page).
 - Developer builds without a compiled-in root skip the check; the owner's signature (above) still applies.
 
+## macOS code signatures
+
+Separate from the owner's statements above, the macOS packages carry Apple code signatures:
+`OARBANK_CODESIGN_IDENTITY` (a Developer ID Application identity) signs every Mach-O file with the hardened runtime
+and a secure timestamp, as notarization requires ([install.md](install.md); without it, everything is signed ad hoc).
+
+**The interpreters that run module code have library validation off.** The node runtime's
+`/Library/Oarbank/bin/runtime/bin/python3.12` and the coordinator's `python/bin/python3.12` (the coordinator build and
+`Oarbank Coordinator.app`) are signed with [`deploy/macos/python.entitlements`](../deploy/macos/python.entitlements),
+which holds one entitlement, `com.apple.security.cs.disable-library-validation`. Module environments (`uv venv`) link
+to these interpreters, so every module process runs under that signature.
+
+- **Why.** The hardened runtime turns on library validation: a process may map only code signed by Apple or by the
+  same team as its executable. Modules install wheels from PyPI (numpy, pysam, ...) whose extension modules and
+  bundled libraries are signed ad hoc by the linker or by their own publishers, never by the fleet's team, so without
+  the entitlement every one of them fails to import under a Developer ID build: `code signature ... not valid for use
+  in process: mapping process and mapped file (non-platform) have different Team IDs`. 2.8.0 shipped that way; only
+  the wheels the build itself signed (pydantic_core) loaded.
+- **The trade-off.** With library validation off, the interpreter will map any validly signed library, including one
+  a module brings. That is the point: module code is the owner's chosen code, already admitted by the release
+  signature checks above. What confines it does not depend on library validation: module processes still run in the
+  Seatbelt sandbox ([design/module-sandbox.md](design/module-sandbox.md)), which limits what they read, write, execute
+  and reach. The rest of the hardened runtime stays on (no DYLD_* environment variables, no unsigned executable
+  memory, no debugger attachment), every library must still carry a valid signature, and the entitlement is on the
+  interpreters alone: the agent, the launcher, uv and the apps keep library validation. Apple's notary service accepts
+  this entitlement.
+- **Checks.** `scripts/macos-codesign.sh` is the one place that signs the interpreters; the packaging scripts
+  (`scripts/package-macos.sh`, `scripts/build-coordinator.sh`, `scripts/package-coordinator-macos.sh`) then run
+  `scripts/check-macos-signing.py`, and a build fails unless each interpreter carries exactly that entitlement (with
+  `--developer-id`, also the hardened runtime and a team) and no other executable carries any. Its `--canary` makes a
+  fresh environment on the signed interpreter with the build's own uv, installs a pinned native wheel from PyPI that
+  the build did not sign, and imports its extension module: under a Developer ID build without the entitlement that
+  import fails as it did on 2.8.0 (an ad hoc build never enforces library validation, which is why the static check
+  exists too). CI builds the node runtime on every change, signs it ad hoc through the same script and runs both
+  checks; `tests/test_node_packages_macos.py` and `tests/test_coordinator_native_macos.py` cover the scripts and, given
+  `OARBANK_NODE_PKG`, `OARBANK_NODE_RUNTIME` or `OARBANK_COORDINATOR_PKG`, a built artifact.
+
 ## Testing
 
 `tests/test_signing.py` and `tests/test_coordinator_move.py` cover the statements and the owner rules;

@@ -127,12 +127,18 @@ for b in oarbank-agent oarbank-launcher; do
     [[ "$signed" == *"Identifier=dev.codonic.$b"* && "$signed" == *"Info.plist entries="* ]] \
         || { echo "$b is not signed with its Info.plist as dev.codonic.$b" >&2; exit 1; }
 done
-# every Mach-O file of the runtime, signed like the binaries
-find "$PAYLOAD/runtime" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0 | while IFS= read -r -d '' f; do
-    file -b "$f" | grep Mach-O >/dev/null || continue
-    if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-    else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
-done
+# every Mach-O file of the runtime, signed like the binaries; its interpreter with deploy/macos/python.entitlements
+# (library validation off, so the hardened interpreter loads the wheels modules install from PyPI, whose code is signed
+# ad hoc or by other teams; scripts/macos-codesign.sh, docs/release-signing.md "macOS code signatures")
+source "$REPO/scripts/macos-codesign.sh"
+macos_sign_tree "$ID" "$PAYLOAD/runtime"
+# the interpreter carries exactly that entitlement (with the hardened runtime under a Developer ID), and loads a native
+# wheel from PyPI that the build did not sign, in an environment of its own outside the payload
+DEVELOPER_ID=()
+[[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)
+uv run --no-project --python 3.12 python "$REPO/scripts/check-macos-signing.py" ${DEVELOPER_ID[@]+"${DEVELOPER_ID[@]}"} \
+    --canary --work "$WORK/canary" "$PAYLOAD/runtime"
+rm -rf "$WORK/canary"
 # the app, sealed as a bundle under its identifier (hardened runtime with a Developer ID); no extended attribute may be
 # on its files when it is signed (codesign refuses Finder information and resource forks)
 xattr -cr "$APP"
