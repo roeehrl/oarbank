@@ -8,7 +8,7 @@ declare or loosen it.
   worked example in `src/oarbank/contracts/fixtures/protection-example.toml`.
 - **The engine** is the agent's `oarbank-protection` crate: a pure decision core over process, meter and owner sources,
   with a native backend per OS (macOS, Linux and Windows).
-- **The central copy** is the `protection` section of the node's policy, edited in the console (versioned, with restore
+- **The central copy** is the node's protection section (`nodes.protection_json`, sent in its policy), edited in the console (versioned, with restore
   and canary). **The local copy** is `protection.json` beside the agent's home on the node. The agent unions both, and
   the stricter setting wins on every dimension, so the two never conflict.
 
@@ -192,10 +192,11 @@ slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap
   reported capacity: "2 slots while someone is using this Mac (14 when idle) · 9.2 GB free for jobs (apps and the
   system use 46 GB)", or what holds the node back and how to allow it ("no new jobs: on battery (allow it in
   settings: Run jobs on battery)"); `coordinator/nodepolicy.py`.
-- **Settings.** The node page's Policy table labels each setting, says this node's default and why ("default 6 GB
-  (64 GB RAM)", from `config.policy_defaults`, the function that set the node's policy when it joined), marks the ones
-  that differ, and resets one or all through `nodes.set_policy` (`reset: [keys] | "all"`; `oarbank node policy <nid>
-  --reset <key>`, `--reset-all`).
+- **Settings.** The why line cites the settings it rests on with their value and source ("Run jobs on battery: off ·
+  Default"), each linked to its Explain row on the node's Settings tab, which labels every setting and shows where its
+  value comes from ("Default · 64 GB RAM", "Fleet", "This node"); Override and Reset to inherited write and delete the
+  node's own value through `settings.apply` (`oarbank settings set|reset <key> --node <node>`). The model:
+  [settings.md](settings.md).
 
 ## The controller
 
