@@ -20,6 +20,7 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <a href="https://docs.codonic.dev/oarbank/get-started">Get started</a> ·
   <a href="https://docs.codonic.dev/oarbank/concepts/how-oarbank-works">How it works</a> ·
   <a href="https://docs.codonic.dev/oarbank/build/tutorial">Build a module</a> ·
+  <a href="https://docs.codonic.dev/oarbank/operate/troubleshooting">Troubleshooting</a> ·
   <a href="https://codonic.dev/apps/oarbank">Product page</a>
 </p>
 
@@ -118,6 +119,12 @@ if you want it to execute jobs.
 
 Then install the agent on each computer with its join code (the macOS pkg, the deb or rpm, or the Windows MSI). The
 node joins, installs its release, runs each module's doctor and golden jobs, and takes work.
+
+**With an AI agent.** The [Oarbank skill](https://github.com/roeehrl/oarbank-sdk/tree/main/skills/oarbank) lets
+Claude Code, Codex and other coding agents help you install, run, troubleshoot and build modules, reading the current
+docs and asking before they change anything: `npx skills add roeehrl/oarbank-sdk --skill oarbank -g`, or the
+`oarbank@codonic` plugin. Every agent's steps are in
+[Use Oarbank with an AI agent](https://docs.codonic.dev/oarbank/get-started#use-oarbank-with-an-ai-agent).
 
 ## How it works
 
