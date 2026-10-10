@@ -15,6 +15,7 @@
   <supportedOn>
     <definitions>
       <definition name="SUPPORTED_Oarbank_2_8" displayName="$(string.SUPPORTED_Oarbank_2_8)" />
+      <definition name="SUPPORTED_Oarbank_2_9" displayName="$(string.SUPPORTED_Oarbank_2_9)" />
     </definitions>
   </supportedOn>
   <categories>
@@ -66,6 +67,17 @@
             key="SOFTWARE\Policies\Codonic\Oarbank\Agent" valueName="AllowUserJoin">
       <parentCategory ref="Node" />
       <supportedOn ref="SUPPORTED_Oarbank_2_8" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="ShowStatusIcon" class="Machine" displayName="$(string.ShowStatusIcon)" explainText="$(string.ShowStatusIcon_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent" valueName="ShowStatusIcon">
+      <parentCategory ref="Node" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
       <enabledValue>
         <decimal value="1" />
       </enabledValue>
