@@ -91,6 +91,14 @@ pub struct Agent {
     detected: Option<std::time::Instant>,
     /// The coordinator's settings revision this agent applied and the keys it refused (`settings` in heartbeats).
     pub settings_report: Value,
+    /// The `policy` and `limits` as applied from the coordinator (or the table's defaults), before this machine's
+    /// managed settings tighten them: what a refused or missing key keeps, and what a change of managed policy re-applies to.
+    settings_base: Value,
+    /// This machine's managed settings (policy.rs `Settings`), raw, and who manages it (`ManagedByOrganizationName`).
+    pub managed: serde_json::Map<String, Value>,
+    pub managed_by: Option<String>,
+    /// When the managed policy was last read: at most once a minute, since a read runs plutil or reg.
+    managed_read: Option<std::time::Instant>,
 }
 
 /// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
@@ -125,7 +133,7 @@ impl Agent {
         cfg.save(&layout.config())?;
         let release = release::current(&layout);
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
-        let a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
+        let mut a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
                    last_release_error: None, need_hello: false, table: Table::default(), offered: vec![],
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
@@ -135,7 +143,9 @@ impl Agent {
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
             services_halted: false, coord_install: Default::default(), status: Default::default(), layout,
-            tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null };
+            tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null,
+            settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None };
+        a.refresh_managed();                    // the defaults the agent starts from are tightened, too
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
         #[cfg(target_os = "macos")]
@@ -356,30 +366,87 @@ impl Agent {
         Ok(d)
     }
 
+    /// Read this machine's managed policy again when a minute has passed since the last read.
+    fn refresh_managed(&mut self) {
+        if self.managed_read.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        self.managed_read = Some(std::time::Instant::now());
+        let p = crate::policy::read();
+        self.set_managed(p.settings, p.managed_by);
+    }
+
+    /// Take new managed settings; they tighten the directives in force at once (and every directive after).
+    pub fn set_managed(&mut self, settings: serde_json::Map<String, Value>, by: Option<String>) {
+        if settings == self.managed && by == self.managed_by {
+            return;
+        }
+        let (_, _, _, refused) = self.with_managed();
+        let before: Vec<String> = refused.into_iter().map(|r| r.key).collect();
+        self.managed = settings;
+        self.managed_by = by;
+        let (policy, limits, _, refused) = self.with_managed();
+        let keys: Vec<String> = refused.into_iter().map(|r| r.key).collect();
+        if !keys.is_empty() && keys != before {
+            // the keys only: values stay out of logs (policy.rs)
+            warn!(keys = %keys.join(", "), "this machine's managed policy sets settings it may not set, or invalid values; they are ignored");
+        }
+        if self.directives.is_object() {
+            self.directives["policy"] = policy;
+            self.directives["limits"] = limits;
+        }
+    }
+
+    /// The settings in force: the coordinator's (`settings_base`) with this machine's managed settings laid over, each
+    /// only tightening. (policy, limits, the managed keys, the managed keys refused.)
+    fn with_managed(&self) -> (Value, Value, Vec<oarbank_protection::settings::Managed>, Vec<oarbank_protection::settings::Rejected>) {
+        use oarbank_protection::settings::{apply_managed, unknown_managed, Section};
+        let (policy, mut set, mut refused) = apply_managed(Section::Policy, &self.settings_base["policy"], &self.managed);
+        let (limits, more_set, more_refused) = apply_managed(Section::Limits, &self.settings_base["limits"], &self.managed);
+        set.extend(more_set);
+        refused.extend(more_refused);
+        refused.extend(unknown_managed(&self.managed));
+        (policy, limits, set, refused)
+    }
+
     /// The directive's `policy` and `limits` checked against the settings table (docs/design/settings.md): a refused
-    /// or missing key keeps the value it had and is reported, with the revision, in the next heartbeat.
+    /// or missing key keeps the value it had and is reported, with the revision, in the next heartbeat. This machine's
+    /// managed settings then tighten them ("Managed on this machine"), reported only when the policy sets any.
     fn apply_settings(&mut self, d: &Value) -> Value {
         use oarbank_protection::settings::{validate, Section};
         let mut out = d.clone();
         if !d.is_object() || (d.get("policy").is_none() && d.get("limits").is_none()) {
             return out;
         }
-        let (policy, mut rejected) = validate(Section::Policy, &d["policy"], &self.directives["policy"]);
-        let (limits, more) = validate(Section::Limits, &d["limits"], &self.directives["limits"]);
+        let (policy, mut rejected) = validate(Section::Policy, &d["policy"], &self.settings_base["policy"]);
+        let (limits, more) = validate(Section::Limits, &d["limits"], &self.settings_base["limits"]);
         rejected.extend(more);
         for r in &rejected {
             warn!(key = %r.key, reason = %r.reason, "a setting from the coordinator was refused; the node keeps its previous value");
         }
+        self.settings_base = json!({"policy": policy, "limits": limits});
+        let (policy, limits, set, refused) = self.with_managed();
         out["policy"] = policy;
         out["limits"] = limits;
         if let Some(rev) = d["settings_rev"].as_i64() {
-            self.settings_report = json!({"applied_rev": rev,
+            let mut rep = json!({"applied_rev": rev,
                 "rejected": rejected.iter().map(|r| json!({"key": r.key, "reason": r.reason})).collect::<Vec<_>>()});
+            if !self.managed.is_empty() {
+                rep["managed"] = set.iter().map(|m| json!({"key": m.key, "value": m.value, "binding": m.binding})).collect();
+                if !refused.is_empty() {
+                    rep["managed_refused"] = refused.iter().map(|r| json!({"key": r.key, "reason": r.reason})).collect();
+                }
+                if let Some(by) = &self.managed_by {
+                    rep["managed_by"] = json!(by);
+                }
+            }
+            self.settings_report = rep;
         }
         out
     }
 
     async fn after_directives(&mut self, d: &Value) {
+        self.refresh_managed();
         let applied = self.apply_settings(d);
         let d = &applied;
         if let Some(n) = d["node_id"].as_str() {
@@ -1310,6 +1377,7 @@ pub mod tests {
         let tmp = crate::scratch("agent-settings");
         let home = tmp.path().join("agent");
         let mut agent = Agent::open(Layout::new(home), Some("https://127.0.0.1:9")).unwrap();
+        agent.set_managed(Default::default(), None);                          // whatever this machine's own policy sets
         assert_eq!(agent.directives["policy"]["job_mem_gb"], json!(1.5));      // before the first heartbeat: the table's defaults
         let mut policy = defaults(Section::Policy);
         policy["job_mem_gb"] = json!(2.5);
@@ -1323,6 +1391,44 @@ pub mod tests {
         assert_eq!(d["policy"]["job_mem_gb"], json!(2.5));                      // the last applied value, not a default
         assert_eq!(agent.settings_report["applied_rev"], json!(8));
         assert_eq!(agent.settings_report["rejected"][0]["key"], json!("job_mem_gb"));
+    }
+
+    /// A machine's managed settings only tighten what the coordinator sends, from before the first heartbeat on, and
+    /// are reported with who manages it; a key managed policy may not set is refused and reported, not applied.
+    #[test]
+    fn managed_settings_only_tighten_the_coordinators() {
+        use oarbank_protection::settings::{defaults, Section};
+        let tmp = crate::scratch("agent-managed");
+        let mut agent = Agent::open(Layout::new(tmp.path().join("agent")), Some("https://127.0.0.1:9")).unwrap();
+        let managed = json!({"run_on_battery": false, "jobs": 4, "job_mem_gb": 3, "os_reserve_gb": "6", "enforce": "hard"});
+        agent.set_managed(managed.as_object().unwrap().clone(), Some("Example".into()));
+        // before the first heartbeat: the table's defaults, tightened
+        assert_eq!((&agent.directives["policy"]["os_reserve_gb"], &agent.directives["limits"]["enforce"]), (&json!(6), &json!("hard")));
+        assert_eq!((&agent.directives["limits"]["jobs"], &agent.directives["policy"]["job_mem_gb"]), (&json!(4), &json!(1.5)));
+        let mut policy = defaults(Section::Policy);
+        policy["run_on_battery"] = json!(true);
+        policy["os_reserve_gb"] = json!(10);
+        let mut limits = defaults(Section::Limits);
+        limits["jobs"] = json!(2);
+        let d = agent.apply_settings(&json!({"policy": policy, "limits": limits, "settings_rev": 3}));
+        assert_eq!(d["policy"]["run_on_battery"], json!(false));                // managed off holds
+        assert_eq!(d["limits"]["jobs"], json!(2));                              // managed 4 does not loosen 2
+        assert_eq!(d["policy"]["os_reserve_gb"], json!(10));
+        assert_eq!(d["limits"]["enforce"], json!("hard"));
+        assert_eq!(d["policy"]["job_mem_gb"], json!(1.5));                      // refused: not managed
+        assert_eq!(agent.settings_report, json!({"applied_rev": 3, "rejected": [],
+            "managed": [{"key": "run_on_battery", "value": false, "binding": true},
+                        {"key": "os_reserve_gb", "value": 6, "binding": false},
+                        {"key": "jobs", "value": 4, "binding": false},
+                        {"key": "enforce", "value": "hard", "binding": true}],
+            "managed_refused": [{"key": "job_mem_gb", "reason": "not a setting managed policy may set"}],
+            "managed_by": "Example"}));
+        agent.directives = d;
+        // the managed policy goes away: the coordinator's values apply at once, and the report is as without one
+        agent.set_managed(Default::default(), None);
+        assert_eq!((&agent.directives["policy"]["run_on_battery"], &agent.directives["limits"]["enforce"]), (&json!(true), &json!("soft")));
+        agent.apply_settings(&json!({"policy": defaults(Section::Policy), "limits": defaults(Section::Limits), "settings_rev": 4}));
+        assert_eq!(agent.settings_report, json!({"applied_rev": 4, "rejected": []}));
     }
 
     /// The doctor report always names the node's capabilities, even before a release: the coordinator grants stages

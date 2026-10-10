@@ -45,7 +45,7 @@ def render() -> str:
         "//! default. GENERATED from the settings registry (src/oarbank/coordinator/settings/registry.py) by",
         "//! `uv run python -m oarbank.coordinator.settings.rustgen`; do not edit (tests/test_settings.py checks it).",
         "",
-        "use crate::settings::{Def, Kind, Section};",
+        "use crate::settings::{Def, Kind, Section, Tighten};",
         "",
         "/// Every key, in the registry's order (the policy's extra keys last).",
         "pub const DEFS: &[Def] = &[",
@@ -59,11 +59,12 @@ def render() -> str:
         lines.append(f"    Def {{ key: {_rs_str(d.key)}, section: Section::{d.wire.capitalize()}, kind: Kind::{_kind(d)}, "
                      f"nullable: {'true' if d.nullable or d.wire == 'limits' and d.default is None else 'false'}, "
                      f"min: {_f(lo)}, exclusive_min: {'true' if 'exclusiveMinimum' in sch else 'false'}, max: {_f(sch.get('maximum'))}, "
-                     f"choices: &[{choices}], default: {_rs_str(json.dumps(d.default))} }},")
+                     f"choices: &[{choices}], default: {_rs_str(json.dumps(d.default))}, "
+                     f"tighten: Tighten::{(d.tighten_dir or 'none').capitalize()}, managed: {'true' if d.managed else 'false'} }},")
     for key, kind, nullable, dflt in EXTRA_POLICY:
         lines.append(f"    Def {{ key: {_rs_str(key)}, section: Section::Policy, kind: Kind::{kind}, nullable: "
                      f"{'true' if nullable else 'false'}, min: None, exclusive_min: false, max: None, choices: &[], "
-                     f"default: {_rs_str(json.dumps(dflt))} }},")
+                     f"default: {_rs_str(json.dumps(dflt))}, tighten: Tighten::None, managed: false }},")
     lines += ["];", "", "// The defaults the capacity engine's Policy starts from (pre-first-heartbeat only)."]
     for d in R.SETTINGS:
         if d.wire != "policy":

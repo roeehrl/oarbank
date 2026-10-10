@@ -47,6 +47,11 @@ class Setting:
     effects: tuple = ()               # hooks run on nodes whose effective value changed (apply.py)
     hardware: str | None = None       # cores | ram: a node's own value may not exceed its hardware
     campaign: bool = False            # a campaign may override it while it runs (bounded by locks; apply.campaign_refusals)
+    tighten: str | None = None        # a safety key: which way is stricter, "lower" or "higher" (a boolean: off < on; a
+                                      # choice: `order`); a campaign and a machine's managed policy may only move it that
+                                      # way. A min/max merge implies it (tighten_dir)
+    managed: bool = False             # a machine's managed policy (MDM, Group Policy, /etc/oarbank/policy.json) may set it,
+                                      # tighten-only, on that machine (docs/design/settings.md, "Managed on this machine")
     note: str | None = None           # beside the row (for example: not applied by agents yet)
     examples: tuple = field(default=())
     required: bool = False            # a module's own key the owner must set (readiness, SETTINGS_NOT_SET)
@@ -57,6 +62,12 @@ class Setting:
     def nullable(self) -> bool:
         t = self.schema.get("type")
         return isinstance(t, list) and "null" in t
+
+    @property
+    def tighten_dir(self) -> str | None:
+        """"lower" or "higher": the stricter direction of a safety key (a cap's min merge is "lower", a max merge
+        "higher"), else None (a preference: any value)."""
+        return self.tighten or {"min": "lower", "max": "higher"}.get(self.merge)
 
 
 def _os_reserve(facts: dict) -> tuple:
@@ -97,41 +108,44 @@ SETTINGS = (
     Setting("os_reserve_gb", "Memory kept for the system", "Never offered to jobs, whoever is using the computer.",
             NUM_GE0, default=4, computed=_os_reserve,
             computed_how="4 GB up to 32 GB of RAM, 8 GB from 96 GB, 6 GB between (6 GB when RAM is not reported)",
-            unit="GB", wire="policy", section="memory", applies="both"),
+            unit="GB", wire="policy", section="memory", applies="both", tighten="higher", managed=True),
     Setting("user_reserve_gb", "Memory kept for the person using it", "Also kept free while someone is using the computer.",
-            NUM_GE0, default=8, unit="GB", wire="policy", section="memory", applies="both"),
+            NUM_GE0, default=8, unit="GB", wire="policy", section="memory", applies="both", tighten="higher", managed=True),
     Setting("job_mem_gb", "Memory per job slot",
             "The memory one job slot stands for: the jobs it can take are its free memory divided by this.",
             POS_NUM, default=1.5, unit="GB", wire="policy", section="memory"),
     Setting("mem_in_use_bound", "Fit jobs into the memory free now",
             "On: jobs get at most what the computer has available now, less the memory guard's floor and 1 GB; off: only "
             "the two reserves above decide (the memory guard still stops new jobs at its floor).",
-            {"type": "boolean"}, default=True, wire="policy", section="memory"),
+            {"type": "boolean"}, default=True, wire="policy", section="memory", tighten="higher", managed=True),
     # ---------------------------------------------------------------- presence
     Setting("user_present_slots", "Jobs while someone is using this computer",
             "The most jobs at once while someone is at it; 0 holds every new job back.",
-            {"type": "integer", "minimum": 0}, default=2, unit="jobs", wire="policy", section="presence"),
+            {"type": "integer", "minimum": 0}, default=2, unit="jobs", wire="policy", section="presence", tighten="lower",
+            managed=True, campaign=True),
     Setting("user_idle_s", "Idle time before the computer counts as free",
             "Seconds without keyboard or mouse input before it runs at full capacity.",
-            NUM_GE0, default=300, unit="s", wire="policy", section="presence", applies="both"),
+            NUM_GE0, default=300, unit="s", wire="policy", section="presence", applies="both", tighten="higher", managed=True),
     Setting("screen_sharing_present", "Screen sharing counts as someone using it",
             "A remote Screen Sharing session holds jobs back like a person at the keyboard, even without input (macOS).",
-            {"type": "boolean"}, default=True, wire="policy", section="presence"),
+            {"type": "boolean"}, default=True, wire="policy", section="presence", tighten="higher", managed=True),
     Setting("run_on_battery", "Run jobs on battery", "Off: a laptop on battery power takes no new jobs.",
-            {"type": "boolean"}, default=False, wire="policy", section="presence", applies="both"),
+            {"type": "boolean"}, default=False, wire="policy", section="presence", applies="both", tighten="lower",
+            managed=True, campaign=True),
     # ---------------------------------------------------------------- jobs
     Setting("threads_per_job", "Threads per job",
             "Threads one job counts as against a CPU cores cap (the cap divided by this is the jobs it allows).",
             POS_INT, default=1, unit="threads", wire="policy", section="jobs"),
     Setting("max_slots", "Most jobs at once", "An upper bound on job slots whatever the hardware allows; none: no bound.",
             {"type": ["integer", "null"], "minimum": 0}, default=None, unit="slots", wire="policy", section="jobs",
-            applies="both"),
+            applies="both", tighten="lower", managed=True),
     Setting("nice", "Job priority (nice)", "0 normal to 20 lowest.",
             {"type": "integer", "minimum": 0, "maximum": 20}, default=10, wire="policy", section="jobs", advanced=True,
             note="Not applied by agents yet: protection lowers jobs when the owner's work needs it."),
     Setting("hard_limits", "Hard limits",
             "Jobs over their memory or CPU reservation are stopped where the OS enforces it (Linux cgroups, Windows Job "
-            "Objects; macOS has none).", {"type": "boolean"}, default=False, wire="policy", section="jobs", advanced=True),
+            "Objects; macOS has none).", {"type": "boolean"}, default=False, wire="policy", section="jobs", advanced=True,
+            tighten="higher", managed=True),
     Setting("services.disabled", "Services that do not run",
             "The module's services by name; a change re-checks and re-certifies the module on the nodes it reaches.",
             {"type": "array", "items": {"type": "string", "pattern": SERVICE_NAME}, "maxItems": 64}, default=[],
@@ -139,26 +153,26 @@ SETTINGS = (
             examples=("scorer",)),
     # ---------------------------------------------------------------- caps (min: every scope's cap applies)
     Setting("cpu_cores", "CPU cores", "Caps concurrent jobs times their threads.", {"type": "number", "exclusiveMinimum": 0},
-            unit="cores", wire="limits", section="caps", merge="min", danger="T0", hardware="cores"),
+            unit="cores", wire="limits", section="caps", merge="min", danger="T0", hardware="cores", managed=True),
     Setting("mem_gb", "Memory", "For jobs and module services.", {"type": "number", "exclusiveMinimum": 0},
-            unit="GB", wire="limits", section="caps", merge="min", danger="T0", hardware="ram"),
+            unit="GB", wire="limits", section="caps", merge="min", danger="T0", hardware="ram", managed=True),
     Setting("jobs", "Concurrent jobs", "The most jobs running at once.", POS_INT, unit="jobs", wire="limits",
-            section="caps", merge="min", danger="T0", applies="both"),
+            section="caps", merge="min", danger="T0", applies="both", managed=True, campaign=True),
     Setting("schedule", "Schedule", "Work only inside this window (local time on the node); none: any time.",
             {"type": "object", "x-kind": "schedule"}, unit=None, wire="limits", section="caps", danger="T0"),
     Setting("enforce", "Cap enforcement",
             "soft: stop admitting and let running jobs finish; hard: also hand back the youngest jobs to fit.",
             {"type": "string", "enum": ["soft", "hard"]}, default="soft", wire="limits", section="caps", merge="max",
-            order=("soft", "hard"), danger="T0", applies="both"),
+            order=("soft", "hard"), danger="T0", applies="both", managed=True),
     Setting("vm_mem_gb", "VM memory (services)", "A module VM service applies it at its next start.",
             {"type": "number", "exclusiveMinimum": 0}, unit="GB", wire="limits", section="caps", merge="min",
-            danger="T0", advanced=True, hardware="ram"),
+            danger="T0", advanced=True, hardware="ram", managed=True),
     Setting("vm_cpus", "VM CPUs (services)", "A module VM service applies it at its next start.", POS_INT,
-            unit="cpus", wire="limits", section="caps", merge="min", danger="T0", advanced=True, hardware="cores"),
+            unit="cpus", wire="limits", section="caps", merge="min", danger="T0", advanced=True, hardware="cores", managed=True),
     Setting("disk_gb", "Disk cache", "Dataset and image cache on the node.", {"type": "number", "exclusiveMinimum": 0},
-            unit="GB", wire="limits", section="caps", merge="min", danger="T0", advanced=True),
+            unit="GB", wire="limits", section="caps", merge="min", danger="T0", advanced=True, managed=True),
     Setting("staging_mbps", "Download bandwidth", "Dataset staging.", {"type": "number", "exclusiveMinimum": 0},
-            unit="Mbps", wire="limits", section="caps", merge="min", danger="T0", advanced=True),
+            unit="Mbps", wire="limits", section="caps", merge="min", danger="T0", advanced=True, managed=True),
     # ---------------------------------------------------------------- protection (assembled into the agent's policy)
     Setting("protection.mode", "Protection mode",
             "fleet_first: static rules and guards only; moderate: an adaptive budget that protects the front app and "
@@ -190,7 +204,7 @@ SETTINGS = (
             "The share of finished jobs re-run on another node and compared (0 to 1); a module's own rate can only raise "
             "the fleet's (the higher applies).",
             {"type": "number", "minimum": 0, "maximum": 1}, default=0.03, scopes=("fleet",), merge="max",
-            applies="coordinator", section="verification", lockable=False, qualifier="optional"),
+            applies="coordinator", section="verification", lockable=False, qualifier="optional", campaign=True),
     # ---------------------------------------------------------------- written by their own operations
     Setting("folder_registry", "Folders", "A folder id mapped to its access and a path on each node.", {"type": "object"},
             default={}, scopes=("fleet",), applies="coordinator", lockable=False, writer="settings.folders.update",
@@ -389,6 +403,49 @@ def same(a, b) -> bool:
     return a == b
 
 
+def _strictness(d: Setting, v):
+    """A value's place on the key's scale, loosest lowest (a "lower" key: smaller is stricter; none, an unset cap or no
+    bound, is the loosest of all)."""
+    if v is None:
+        return float("-inf")
+    if d.order:
+        x = d.order.index(v) if v in d.order else -1
+    elif isinstance(v, bool):
+        x = int(v)
+    elif isinstance(v, (int, float)):
+        x = float(v)
+    else:
+        return None
+    return -x if d.tighten_dir == "lower" else x
+
+
+def tighter(d: Setting, a, b):
+    """The stricter of two values of a safety key (`a` when they are as strict, or the key has no direction)."""
+    if d.tighten_dir is None:
+        return a
+    sa, sb = _strictness(d, a), _strictness(d, b)
+    if sa is None or sb is None:
+        return a
+    return b if sb > sa else a
+
+
+def loosens(d: Setting, new, base) -> bool:
+    """Whether `new` is looser than `base` for a safety key (always False for a preference)."""
+    if d.tighten_dir is None:
+        return False
+    sn, sb = _strictness(d, new), _strictness(d, base)
+    return sn is not None and sb is not None and sn < sb
+
+
+def tighten_text(d: Setting) -> str:
+    """The stricter direction in words: "lower", "higher", "off", "on", or a choice ("hard")."""
+    if d.order:
+        return d.order[-1] if d.tighten_dir == "higher" else d.order[0]
+    if "boolean" in _types(d.schema):
+        return "on" if d.tighten_dir == "higher" else "off"
+    return d.tighten_dir or ""
+
+
 # ------------------------------------------------------------------ how values read
 
 def _num(v) -> str:
@@ -455,5 +512,7 @@ def schema_doc(module_keys: dict | None = None) -> list[dict]:
                     "scopes": list(d.scopes), "merge": d.merge, "lockable": d.lockable, "advanced": d.advanced,
                     "danger": d.danger, "applies": d.applies, "wire": d.wire, "section": d.section,
                     "qualifier": d.qualifier, "writer": d.writer, "effects": list(d.effects), "note": d.note,
-                    "hardware": d.hardware, "examples": list(d.examples), "required": d.required})
+                    "hardware": d.hardware, "examples": list(d.examples), "required": d.required,
+                    "campaign": d.campaign, "tighten": d.tighten_dir if (d.campaign or d.managed or d.tighten) else None,
+                    "managed": d.managed})
     return out

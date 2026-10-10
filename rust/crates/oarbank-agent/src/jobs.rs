@@ -241,6 +241,16 @@ pub async fn run(ctx: Arc<Ctx>, grant: Value, deadline: Option<Instant>) {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A runner's settings: the module's own node settings with the grant's `settings` (the job's campaign overrides of
+/// them) laid over key by key, the grant's value winning.
+fn runner_settings(module_settings: &Value, grant: &Value) -> Value {
+    let mut out = module_settings.as_object().cloned().unwrap_or_default();
+    if let Some(over) = grant["settings"].as_object() {
+        out.extend(over.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    Value::Object(out)
+}
+
 /// The secrets a grant carries for its stage, `(name, value)`.
 fn secrets_of(grant: &Value) -> Vec<(String, Value)> {
     grant["secrets"].as_object().map(|m| m.iter().filter(|(_, v)| v.is_string()).map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -336,10 +346,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         crate::fsutil::private_dir(&data.join("tmp"))?;
     }
     let grants_dir = ws.join(".grants");
-    let mut settings = ctx.policy["module_settings"][module].clone();
-    if settings.is_null() || bootstrap {
-        settings = json!({});                            // operators keep credentials in settings: never a bootstrap job's
-    }
+    let settings = if bootstrap {
+        json!({})                                        // operators keep credentials in settings: never a bootstrap job's
+    } else {
+        runner_settings(&ctx.policy["module_settings"][module], grant)
+    };
     // folders: runners only, never a bootstrap job; exactly what this node's applied statement provides for the
     // module's approved requests
     let folders = if bootstrap { serde_json::Map::new() } else { ctx.folders.granted(&entry["sandbox"]["folders"]) };
@@ -860,6 +871,17 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    /// A campaign's overrides of the module's settings reach its runners, key by key; the rest stay the node's.
+    #[test]
+    fn a_grants_settings_override_the_modules_key_by_key() {
+        let module = json!({"region": "eu", "batch": 8, "token": "t"});
+        assert_eq!(runner_settings(&module, &json!({"settings": {"batch": 32, "extra": true}})),
+                   json!({"region": "eu", "batch": 32, "token": "t", "extra": true}));
+        assert_eq!(runner_settings(&module, &json!({"spec": {}})), module);
+        assert_eq!(runner_settings(&Value::Null, &json!({"settings": {"batch": 2}})), json!({"batch": 2}));
+        assert_eq!(runner_settings(&Value::Null, &json!({"settings": "x"})), json!({}));
     }
 
     /// (what removes the scratch directory when dropped, its path)
