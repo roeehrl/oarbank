@@ -72,14 +72,17 @@ def _without(snap: V.Snap, scope: str, scope_id: str, key: str, module: str = ""
 def row(snap: V.Snap, d: R.Setting, scope: str, node: dict | None, counts: dict | None = None,
         errors: dict | None = None, now: float | None = None, scope_id: str = "", module: str = "") -> dict:
     """One setting at one scope (fleet: node None; node: that node; group: `scope_id`, with `node` a stand-in member,
-    group_sections), for a module when it names one (a module's own key, or a core key set for the module)."""
+    group_sections; campaign: `scope_id`, fleet-wide as the campaign's jobs get it), for a module when it names one (a
+    module's own key, or a core key set for the module)."""
     sid = node["node_id"] if scope == "node" else scope_id
-    res = V.resolve(snap, node, d.key, module)
-    own = snap.get(scope, sid, module, d.key)
-    inh = V.resolve(_without(snap, scope, sid, d.key, module), node, d.key, module) if own else res
+    camp = sid if scope == "campaign" else None
+    om = module if scope != "campaign" or d.qualifier == "required" else ""      # a campaign's core key: its row alone
+    res = V.resolve(snap, node, d.key, module, camp)
+    own = snap.get(scope, sid, om, d.key)
+    inh = V.resolve(_without(snap, scope, sid, d.key, om), node, d.key, module, camp) if own else res
     show = lambda v: R.show(d.key, v, d)
     for x in res["chain"]:
-        x["value_text"] = show(x["value"]) if x["set"] or x["scope"] == "default" else "not set"
+        x["value_text"] = show(x["value"]) if x["set"] or x["scope"] == "default" or x.get("inactive") else "not set"
     inp = input_of(d)
     out = {"key": d.key, "label": d.label, "unit": d.unit, "help": d.help, "note": d.note, "advanced": d.advanced,
            "section": d.section, "input": inp, "scope": scope, "scope_id": sid, "lockable": d.lockable,
@@ -99,7 +102,15 @@ def row(snap: V.Snap, d: R.Setting, scope: str, node: dict | None, counts: dict 
            "required": d.required, "missing": d.required and res["source"]["scope"] == "default",
            "override_count": (counts or {}).get(d.key, 0) if scope == "fleet" else None,
            "applied": applied_state(node, d.key, now) if scope == "node" and node is not None
-           and (d.wire or d.applies != "coordinator") else None}
+           and (d.wire or d.applies != "coordinator") else None,
+           "campaign": d.campaign, "tighten": R.tighten_text(d) if d.tighten_dir else None,
+           "managed_here": next(({"value": x["value"], "text": show(x["value"]), "by": x["by"], "binds": x["role"] == "winner"}
+                                 for x in res["chain"] if x["scope"] == "managed"), None)}
+    if scope == "campaign":
+        out["dom"] = "c-" + out["dom"]
+        if d.tighten_dir:
+            out["note"] = ((out["note"] or "") + f" A campaign may only tighten it ({R.tighten_text(d)} is stricter); "
+                           "where a node's own value is stricter, the node's applies.").strip()
     if (node is None or scope == "group") and d.computed is not None:
         # fleet-wide, a computed default has no single value: say how each node gets its own
         per_node = "computed per node"
@@ -269,10 +280,32 @@ def _module_rows(snap: V.Snap, node: dict | None, module: str, now: float) -> li
     return out
 
 
-def effective_doc(r, nid: str | None = None, module: str = "") -> dict:
+def effective_doc(r, nid: str | None = None, module: str = "", campaign: str = "") -> dict:
     """GET /api/v1/settings/effective: every key for a node (or fleet-wide), with provenance and applied state; with a
-    module, that module's keys (the core keys every module has, then its own)."""
+    module, that module's keys (the core keys every module has, then its own); with a campaign, the keys it may
+    override as its jobs get them (on a node, or fleet-wide)."""
     snap = V.snapshot(r)
+    if campaign:
+        c = r.q("SELECT campaign_id, module, name, state FROM campaigns WHERE campaign_id=?", (campaign,))
+        if not c:
+            raise R.SettingError("unknown_campaign", f"no campaign {campaign!r}")
+        c = c[0]
+        node = None
+        if nid:
+            n = r.q("SELECT * FROM nodes WHERE (node_id=? OR hostname=?) AND lifecycle!='retired'", (nid, nid))
+            if not n:
+                return None
+            node = n[0]
+        rows = []
+        for d in campaign_defs(snap, c["module"]):
+            res = V.resolve(snap, node, d.key, c["module"] if d.qualifier else "", campaign)
+            own = snap.get("campaign", campaign, c["module"] if d.qualifier == "required" else "", d.key)
+            rows.append({"key": d.key, "module": res["module"], "label": d.label, "value": res["value"],
+                         "value_text": R.show(d.key, res["value"], d), "badge": V.badge(res), "source": res["source"],
+                         "campaign_value": own["value"] if own else None, "set_by_campaign": own is not None,
+                         "tighten": R.tighten_text(d) if d.tighten_dir else None, "section": d.section})
+        return {"node": {"node_id": node["node_id"], "hostname": node["hostname"]} if node else None,
+                "campaign": {**c, "active": c["state"] in V.CAMPAIGN_ACTIVE}, "settings": rows}
     if module and module not in snap.modules:
         raise R.SettingError("unknown_setting", f"no module {module!r} is installed")
     if not nid:
@@ -311,8 +344,13 @@ def membership_rows(snap: V.Snap, node: dict) -> list[dict]:
             for g in reversed(V.memberships(snap, node)) if g["member"]]
 
 
-def explain_doc(r, key: str, nid: str | None = None, module: str = "") -> dict | None:
+def explain_doc(r, key: str, nid: str | None = None, module: str = "", campaign: str = "") -> dict | None:
     snap = V.snapshot(r)
+    if campaign:
+        c = r.q("SELECT module FROM campaigns WHERE campaign_id=?", (campaign,))
+        if not c:
+            raise R.SettingError("unknown_campaign", f"no campaign {campaign!r}")
+        module = module or c[0]["module"]
     node = None
     if nid:
         n = r.q("SELECT * FROM nodes WHERE (node_id=? OR hostname=?) AND lifecycle!='retired'", (nid, nid))
@@ -321,8 +359,8 @@ def explain_doc(r, key: str, nid: str | None = None, module: str = "") -> dict |
         node = n[0]
     key, module = modkeys.resolve_key(snap, key, module)
     d = snap.defn(key)
-    return V.explain(snap, node, key, module, applied_state(node, key) if node is not None
-                     and (d.wire or d.applies != "coordinator") else None)
+    return V.explain(snap, node, key, module if d.qualifier else "", applied_state(node, key) if node is not None
+                     and (d.wire or d.applies != "coordinator") else None, campaign or None)
 
 
 def overrides_doc(r, key: str, module: str = "", scope: str = "") -> dict:
@@ -333,6 +371,38 @@ def overrides_doc(r, key: str, module: str = "", scope: str = "") -> dict:
     if scope:
         out["values"] = [v for v in out["values"] if v["scope"] == scope]
     return out
+
+
+# ------------------------------------------------------------------ a campaign's overrides (the campaign page)
+
+def campaign_defs(snap: V.Snap, module: str) -> list[R.Setting]:
+    """The keys a campaign of `module` may override: the core keys a campaign may override, then the module's own keys
+    declared `campaign` in its settings schema."""
+    return [d for d in R.SETTINGS if d.campaign] + [d for k, d in snap.defs.items()
+                                                   if modkeys.split(k)[0] == module and d.campaign]
+
+
+def campaign_section(r, cid: str) -> dict | None:
+    """The campaign page's "While this campaign runs" section: each key it may override, as its jobs get it (fleet-wide;
+    a node-applied key's per-node value is in Explain and the preview), with Override and Reset, locks and the
+    tighten-only rule of safety keys. Inactive (shown, not applied) once the campaign is done or cancelled."""
+    c = r.q("SELECT campaign_id, module, name, state FROM campaigns WHERE campaign_id=?", (cid,))
+    if not c:
+        return None
+    c = c[0]
+    snap = V.snapshot(r)
+    now = time.time()
+    rows = [row(snap, d, "campaign", None, now=now, scope_id=cid, module=c["module"] if d.qualifier else "")
+            for d in campaign_defs(snap, c["module"])]
+    for x in rows:
+        x["chain"] = [y for y in x["chain"] if y["scope"] != "node"]
+    sec = {"id": "campaign-settings", "title": "While this campaign runs",
+           "blurb": f"Settings {c['name'] or cid}'s jobs get instead of the fleet's while it runs. A lock at the fleet or a "
+                    "group holds against them; safety settings may only be tightened.",
+           "rows": [x for x in rows if not x["advanced"]], "advanced": [x for x in rows if x["advanced"]],
+           "changed": sum(1 for x in rows if x["overridden_here"]),
+           "advanced_changed": sum(1 for x in rows if x["advanced"] and x["overridden_here"])}
+    return {"campaign": c, "section": sec, "active": c["state"] in V.CAMPAIGN_ACTIVE}
 
 
 # ------------------------------------------------------------------ a group's settings (the group page)

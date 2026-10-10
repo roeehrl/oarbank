@@ -10,6 +10,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `QUEUED_BEHIND` | Eligible, but behind {ahead} higher-priority jobs | P1 | – | `jobs.set_priority` | – |
 | `DEPENDENCY_UNMET` | Waiting for stage {stage} (job {job_id}) | P1 | – | – | – |
 | `CAMPAIGN_PAUSED` | Campaign {campaign} is not running | P1 | – | `campaigns.resume` | – |
+| `CAMPAIGN_SETTING_HOLDS` | Its campaign's settings hold its jobs here: {setting} ({have}) | P1 | – | `settings.apply` | – |
 | `OARBANK_PAUSED` | The fleet is paused | P1 | – | `fleet.resume` | `fleet_halt` |
 | `BACKOFF` | Retrying after {seconds} s (backoff) | P1 | – | – | – |
 | `POOL_EXHAUSTED` | No free {pool} token ({free} free, {need} needed) | P1 | – | – | – |

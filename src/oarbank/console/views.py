@@ -369,7 +369,8 @@ def campaign_page(r, cid: str, now: float) -> dict | None:
     stranded = r.q("SELECT rule, detail FROM alerts WHERE subject=? AND state='open' AND rule LIKE 'placement_%'", (f"campaign:{cid}",))
     platforms = sorted(set(PLATFORM_TOKENS) | {x["platform"] for x in r.q("SELECT DISTINCT platform FROM nodes WHERE platform IS NOT NULL")})
     return {"c": c, "jobs": jobs, "eta_s": eta(r, cid, now), "history": history, "events": events, "results": results,
-            "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms}
+            "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms,
+            "overrides": settings_views.campaign_section(r, cid)}
 
 
 def result_cell(v, fmt: str | None, unit: str | None) -> str:

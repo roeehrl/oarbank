@@ -32,7 +32,7 @@
    "default": 32,
    "title": "Tile size",
    "description": "The render tile edge on a node.",
-   "x-oarbank": {"scope": "node"}
+   "x-oarbank": {"scope": "node", "campaign": true}
   }
  }
 }

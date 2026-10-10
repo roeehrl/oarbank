@@ -67,6 +67,10 @@ class NodeView:
     runner_ready: set = field(default_factory=set)   # offered modules whose runner started here (doctor_ran) in a RUNNER_STATE
     secrets_unset: dict = field(default_factory=dict)  # {module: declared secrets with no readable value for this node}
     settings_unset: dict = field(default_factory=dict)  # {module: its required settings with no value for this node}
+    on_battery: bool = False          # the node runs on battery now (its telemetry)
+    user_present: bool = False        # someone is using the node now (its capacity report)
+    granted: int = 0                  # jobs this claim has granted so far (beside `live`)
+    campaign_rules: object = None     # (campaign_id) -> {key: value}: what a running campaign holds its jobs to here
     release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
 
     @property
@@ -217,6 +221,27 @@ def platform_fits(job: dict, platform: str | None) -> bool:
         and (not cmp.get("class") or _cls(platform, cmp.get("scope")) == cmp["class"])
 
 
+def campaign_settings_check(job: dict, nv: NodeView) -> PredicateResult:
+    """A running campaign's overrides of the keys a node applies (settings/resolve.campaign_rules), for its jobs on this
+    node: at most `jobs` running here, none while on battery when `run_on_battery` is off, at most `user_present_slots`
+    while someone uses it."""
+    rules = nv.campaign_rules(job.get("campaign_id")) if (nv.campaign_rules and job.get("campaign_id")) else {}
+    if not rules:
+        return R("campaign settings", "CAMPAIGN_SETTING_HOLDS", True, None, None)
+    running = nv.live + nv.granted
+    if rules.get("jobs") is not None and running >= int(rules["jobs"]):
+        return R("campaign settings: jobs", "CAMPAIGN_SETTING_HOLDS", False, f"{running} jobs running here",
+                 f"at most {int(rules['jobs'])} (Concurrent jobs)")
+    if rules.get("run_on_battery") is False and nv.on_battery:
+        return R("campaign settings: run_on_battery", "CAMPAIGN_SETTING_HOLDS", False, "on battery",
+                 "off (Run jobs on battery)")
+    if rules.get("user_present_slots") is not None and nv.user_present and running >= int(rules["user_present_slots"]):
+        return R("campaign settings: user_present_slots", "CAMPAIGN_SETTING_HOLDS", False,
+                 f"someone is using it, {running} jobs running", f"at most {int(rules['user_present_slots'])} "
+                 "(Jobs while someone is using this computer)")
+    return R("campaign settings", "CAMPAIGN_SETTING_HOLDS", True, sorted(rules), None)
+
+
 def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_state: str | None,
               other_can_take=lambda: True, datasets: list | None = None, resources: dict | None = None,
               dep_artifacts: bool = True, first_fail: bool = False, gpu: bool = False) -> list[PredicateResult]:
@@ -270,6 +295,7 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
         lambda: R("dependency done", "DEPENDENCY_UNMET", not job.get("depends_on") or dep_done, dep_done, True),
         lambda: R("campaign running", "CAMPAIGN_PAUSED", golden or job.get("campaign_id") is None or campaign_state == "running",
                   campaign_state, "running"),
+        lambda: campaign_settings_check(job, nv),
         lambda: R("golden only on its node", "PINNED_ELSEWHERE", not golden or job.get("target_node") == nid,
                   job.get("target_node"), nid),
         lambda: (lambda left: R("retries left (stage retry)", "RETRIES_EXHAUSTED", golden or left > 0, left, "> 0"))(

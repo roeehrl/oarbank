@@ -646,6 +646,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         d = await campaign_ctx(cid, request, actor)
         if d is None:
             return render(request, "error.html", {"message": f"campaign {cid} not found (or the database is busy)", "actor": actor}, 404)
+        d["explain"] = request.query_params.get("explain") or ""
+        _saved(d, request)
         return render(request, "campaign.html", {**d, "actor": actor})
 
     @app.get("/frag/campaign/{cid}", response_class=HTMLResponse)
@@ -1159,7 +1161,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             from ..coordinator.settings import bulk
             cs = [c for c in (params.get("changes") if isinstance(params.get("changes"), list) else []) if isinstance(c, dict)]
             tier = bulk.tier(cs)
-            if any(c.get("scope") in ("fleet", "group") for c in cs) or len({c.get("scope_id") for c in cs
+            if any(c.get("scope") in ("fleet", "group", "campaign") for c in cs) or len({c.get("scope_id") for c in cs
                                                                              if c.get("scope") == "node"}) > 1:
                 tier = "T2" if tier in ("T0", "T1") else tier
         if op in ("settings.promote", "nodes.label", "groups.create") and tier in ("T0", "T1"):
@@ -1196,6 +1198,12 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             d = await settings_ctx(request, actor)
             _with_errors(d["fs"]["node_defaults"] + d["fs"]["fleet"], errors, form)
             return render(request, "settings.html", {**d, "actor": actor}, 400)
+        if page.startswith("campaign:"):
+            d = await campaign_ctx(page[9:], request, actor)
+            if d is not None and d.get("overrides"):
+                d["explain"], d["saved"] = "", ""
+                _with_errors([d["overrides"]["section"]], errors, form)
+                return render(request, "campaign.html", {**d, "actor": actor}, 400)
         if page.startswith("group:"):
             d = await drill(views.group_page, page[6:])
             if d is not None:

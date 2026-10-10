@@ -875,8 +875,26 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
             unset[m] = set(modsecrets.missing_for(db, m, names, nid))
     from .settings.apply import node_values
     settings_unset = {m: set(v) for m, v in (node_values(node).get("settings_unset") or {}).items() if m in runs}
+    rules_cache: dict = {}
+
+    def campaign_rules(cid):
+        """What a running campaign holds its jobs to on this node (read once per campaign, and only for campaigns that
+        set a node-applied key)."""
+        if cid not in rules_cache:
+            if "snap" not in rules_cache:
+                from .settings import resolve as V
+                ids = {r["scope_id"] for r in db.q("SELECT DISTINCT scope_id FROM setting_values WHERE scope='campaign' "
+                                                   "AND key IN ('jobs','run_on_battery','user_present_slots')")}
+                rules_cache["snap"] = V.snapshot(db) if ids else None
+                rules_cache["ids"] = ids
+            snap = rules_cache["snap"]
+            from .settings import resolve as V
+            rules_cache[cid] = V.campaign_rules(snap, node, cid) if snap is not None and cid in rules_cache["ids"] else {}
+        return rules_cache[cid]
+    tel, cap = jl(node.get("telemetry_json"), {}) or {}, jl(node.get("capacity_json"), {}) or {}
     return predicates.NodeView(
-        secrets_unset=unset, settings_unset=settings_unset,
+        secrets_unset=unset, settings_unset=settings_unset, campaign_rules=campaign_rules,
+        on_battery=bool(tel.get("on_battery")), user_present=bool(cap.get("user_present")),
         node=node, states=node_modules(node), offered=runs, excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in runs},
@@ -945,6 +963,20 @@ def envelope(db: DB, j: dict, version: str | None, resources: dict | None = None
             "protocol": 1, "datasets": datasets, "mounts": mounts, "platform": platform, "inputs": inputs, "resources": res,
             "timeout_s": spec.get("timeout_s") or mi.stage_timeout(j["stage"], platform),
             "payload": {k: v for k, v in spec.items() if k not in ENVELOPE_KEYS + HOST_KEYS}}
+
+
+def _campaign_settings(db: DB, j: dict, cache: dict) -> dict:
+    """A campaign's values of its module's own keys a job's runner gets over the node's (settings/resolve.campaign_values),
+    read once per claim for the campaigns that set any."""
+    key = ("campaign_settings", j["campaign_id"])
+    if key not in cache:
+        if not db.one("SELECT 1 FROM setting_values WHERE scope='campaign' AND scope_id=? AND module=?",
+                      (j["campaign_id"], j["module"])):
+            cache[key] = {}
+        else:
+            from .settings import resolve as V
+            cache[key] = V.campaign_values(V.snapshot(db), j["campaign_id"], j["module"])
+    return cache[key]
 
 
 def claim(db: DB, node: dict, body: dict) -> dict:
@@ -1043,6 +1075,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             for p, k in (res.get("pools") or {}).items():
                 nv.pool_use[p] = nv.pool_use.get(p, 0) + int(k)
             nv.gpu_use += modcalls.job_uses_gpu(j["module"], res, node.get("platform"))
+            nv.granted += 1
             per_campaign[j["campaign_id"]] = per_campaign.get(j["campaign_id"], 0) + 1
             grant = {"attempt_id": aid, "job_id": j["job_id"], "job_key": j["job_key"],
                      "generation": j["generation"], "kind": j["kind"], "module": j["module"],
@@ -1057,6 +1090,9 @@ def claim(db: DB, node: dict, body: dict) -> dict:
                 grant["images"] = images
             if ckpt:                        # the job resumes from its checkpoint: the agent stages these files
                 grant["checkpoint"] = {"files": jl(ckpt["files_json"], [])}
+            over = _campaign_settings(db, j, cache=bindings) if j.get("campaign_id") else {}
+            if over:                        # the campaign's values of the module's own keys, over the node's (its runners)
+                grant["settings"] = over
             grants.append(grant)
     for g in grants:
         db.event("granted", node_id=nid, job_id=g["job_id"], attempt_id=g["attempt_id"], reason=g["module"], module=g["module"])
@@ -1305,7 +1341,8 @@ def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: s
     if not modcalls.compares(j["module"], j["stage"], version):
         return
     from .settings import resolve as V
-    rate = float(V.resolve(V.snapshot(db), None, "replica_rate", j["module"] or "")["value"])   # the module's, when higher
+    # the module's rate when higher, and a running campaign's (which may only raise it) for that campaign's jobs
+    rate = float(V.resolve(V.snapshot(db), None, "replica_rate", j["module"] or "", j.get("campaign_id"))["value"])
     if not force and (rate <= 0 or int(j["job_key"][:8], 16) / 0xFFFFFFFF >= rate):
         return
     if db.one("SELECT 1 FROM jobs WHERE kind='replica' AND job_key=?", (j["job_key"] + ":replica",)):

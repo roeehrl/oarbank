@@ -846,8 +846,10 @@ def _setting_value(key: str, raw: str, schema: dict | None = None):
 
 
 def _scope(a) -> tuple[str, str]:
-    if a.node and a.group:
-        sys.exit("give --node or --group, not both")
+    if sum(bool(x) for x in (a.node, a.group, getattr(a, "campaign", None))) > 1:
+        sys.exit("give one of --node, --group or --campaign")
+    if getattr(a, "campaign", None):
+        return "campaign", a.campaign
     return ("node", a.node) if a.node else ("group", a.group) if a.group else ("fleet", "")
 
 
@@ -859,7 +861,7 @@ def print_explain_setting(x: dict) -> None:
         print(f"  locked by {x['locked_by']['name']}")
     for c in x["chain"]:
         role = {"winner": "<- in effect", "shadowed": "(overridden below)", "ignored": "(ignored: locked above)",
-                "merged": f"(also applies: {x['merge']})"}.get(c.get("role") or "", "")
+                "merged": f"(also applies: {x['merge']})", "looser": "(not applied: looser)"}.get(c.get("role") or "", "")
         when = f"  rev {c['rev']} by {c['by']} at {_when(c['at'])}" + (f" \"{c['comment']}\"" if c.get("comment") else "") if c.get("rev") else ""
         print(f"  {c['name']:<26} {c['value_text']:<22}{' (' + c['reason'] + ')' if c.get('reason') else ''} {role}{when}")
     for e in x.get("errors") or []:
@@ -901,9 +903,19 @@ def cmd_settings(a):
     if a.action in ("explain", "overrides", "set", "reset", "promote") and not a.key:
         sys.exit(f"oarbank settings {a.action} <key>")
     if a.action == "get" and not a.key:
-        d = api("GET", "/api/v1/settings/effective?" + q(node=a.node or "", module=a.module or ""))
+        d = api("GET", "/api/v1/settings/effective?" + q(node=a.node or "", module=a.module or "", campaign=a.campaign or ""))
         if a.json:
             print(json.dumps(d, indent=1, default=str))
+            return
+        if d.get("campaign"):
+            c = d["campaign"]
+            print(f"campaign {c['campaign_id']} ({c['module']}, {c['state']}"
+                  + ("" if c["active"] else ": its overrides apply only while it runs") + ")"
+                  + (f" on {d['node']['hostname']}" if d.get("node") else ""))
+            for x in d["settings"]:
+                print(f"  {x['key']:<26} {x['label']:<42} {x['value_text']:<16} {x['badge']}"
+                      + ("  (set by the campaign)" if x["set_by_campaign"] else "")
+                      + (f"  [tighten only: {x['tighten']} is stricter]" if x.get("tighten") else ""))
             return
         if d.get("node"):
             print(f"{d['node']['hostname']}: {d['applied']['text']}; groups {', '.join(d.get('groups') or []) or 'none'}")
@@ -914,7 +926,8 @@ def cmd_settings(a):
                   + "".join(f"\n      error: {e}" for e in x.get("errors") or []))
         return
     if a.action in ("explain", "get"):                    # one key: its value and the whole chain behind it
-        d = api("GET", "/api/v1/settings/explain?" + q(key=a.key, node=a.node or "", module=a.module or ""))
+        d = api("GET", "/api/v1/settings/explain?" + q(key=a.key, node=a.node or "", module=a.module or "",
+                                                       campaign=a.campaign or ""))
         return print(json.dumps(d, indent=1, default=str)) if a.json else print_explain_setting(d)
     if a.action == "overrides":
         d = api("GET", "/api/v1/settings/overrides?" + q(key=a.key, module=a.module or ""))
@@ -942,16 +955,19 @@ def cmd_settings(a):
     base = {"key": a.key, **({"module": a.module} if a.module else {})}
     if a.action == "set":
         schema = None
-        if a.module:                                      # a module's own key: its type comes from the coordinator
+        mod = a.module
+        if a.campaign and not mod:                        # a campaign's module names its own keys
+            mod = (api("GET", f"/api/v1/campaigns/{a.campaign}") or {}).get("module")
+        if mod:                                           # a module's own key: its type comes from the coordinator
             from ..coordinator.settings import REGISTRY
             if REGISTRY.get(a.key) is None:
-                full = a.key if a.key.startswith("module.") else f"module.{a.module}.{a.key}"
+                full = a.key if a.key.startswith("module.") else f"module.{mod}.{a.key}"
                 schema = next((s["schema"] for s in api("GET", "/api/v1/settings/schema")["settings"] if s["key"] == full), None)
         base["value"] = _setting_value(a.key, a.value, schema)
     else:
         base["reset"] = True
     if a.nodes or a.label:                                # bulk: the same change on every selected node
-        if a.node or a.group or a.enforce:
+        if a.node or a.group or a.enforce or a.campaign:
             sys.exit("--nodes and --label set each node's own value: not with --node, --group or --enforce")
         q = lambda **kw: "&".join(f"{k}={v}" for k, v in kw.items() if v)
         picked = [x.strip() for x in (a.nodes or "").split(",") if x.strip()]
@@ -1443,6 +1459,8 @@ def parser() -> argparse.ArgumentParser:
     st.add_argument("--nodes", help="set/reset: each of these nodes' own value (comma-separated names): one change set")
     st.add_argument("--label", help="set/reset: each node carrying this label: its own value, one change set")
     st.add_argument("--to", help="promote: fleet (the default) or a wider group")
+    st.add_argument("--campaign", help="a campaign: set/reset its override of a key it may override (while it runs; safety "
+                                       "keys only tighten); get/explain: the value its jobs get")
     st.add_argument("--module", help="a module: one of its own settings (vm_mem_gb, or module.<module>.vm_mem_gb), or a core key "
                                      "set for it (enabled, services.disabled, pipeline, replica_rate); get: all of its keys")
     st.add_argument("--enforce", action="store_true", help="set at the fleet or a group: lock it (lower scopes may not set it)")

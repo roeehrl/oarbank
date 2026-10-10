@@ -118,6 +118,8 @@ def _reason_params(j: dict, r: predicates.PredicateResult, nv: predicates.NodeVi
         v["tools"] = r.observed if isinstance(r.observed, str) and r.observed != r.code else "?"
     elif r.code in ("POOL_ABSENT", "POOL_EXHAUSTED"):
         v.update(pool=r.predicate.split("(", 1)[-1].split(")", 1)[0], need=r.required)
+    elif r.code == "CAMPAIGN_SETTING_HOLDS":
+        v.update(setting=r.required, have=r.observed)
     elif r.code == "RETRIES_EXHAUSTED":
         v.update(failures=j.get("exec_failures"), max_attempts=predicates.retry_max(j, n.get("platform")))
     return v
