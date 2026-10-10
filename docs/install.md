@@ -27,7 +27,7 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 | `oarbank-agent-<v>-macos-arm64.pkg`, `oarbank-agent-<v>-macos-x86_64.pkg` | `scripts/package-macos.sh [<v>] [arm64\|x86_64]` | the node, for Macs with Apple silicon or Intel Macs (each refuses the other): `/Library/Oarbank/bin/{oarbank-agent, oarbank-launcher, oarbank-uninstall}`, the node runtime `runtime/` (CPython 3.12 with the module SDK, and uv: what modules get from the host), the join window, `/Applications/Oarbank Node.app` (menu bar) and `/usr/local/bin/oarbank-node` |
 | `oarbank-agent_<v>_amd64.deb`, `oarbank-agent-<v>-1.x86_64.rpm` (also arm64) | `scripts/package-linux.sh` | the node for Linux: `/usr/lib/oarbank`, `/usr/bin/oarbank-node`, the **Oarbank Node** desktop entry |
 | `oarbank-agent-<v>-windows-x64.msi` (also arm64), `oarbank-agent-<v>-windows-admx.zip` | `scripts\package-windows.ps1` | the node for Windows: `C:\Program Files\Oarbank`, `oarbank-node.exe` on PATH, the **Oarbank Node** tray app; the Group Policy template |
-| `oarbank-install.sh`, `oarbank-install.ps1` | `scripts/package-install-scripts.sh` | one-line installers: download this release's node package for the computer, verify it and join |
+| `oarbank-install.sh`, `oarbank-install.ps1` | `scripts/package-install-scripts.sh` | one-line installers: download this release's node package for the computer, verify and install it, and join with a code they are given |
 | `oarbank-agent-<v>-darwin-arm64`, `oarbank-agent-<v>-darwin-amd64` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
 
 Signing the packages is the owner's: `OARBANK_CODESIGN_IDENTITY` (Developer ID Application) for the binaries,
@@ -143,11 +143,14 @@ identity or certificate authority does not match the code, 6 network, 7 already 
 root or an administrator. `oarbank-node check` runs the checks without joining, `oarbank-node status [--follow]` shows
 where the node is, `oarbank-node leave` forgets the coordinator, and `oarbank-node doctor` adds the container runtime.
 
-**One line** (downloads the release's package for this computer, verifies its SHA-256 and installs it, then joins;
-it prompts for the code on the terminal, or reads `OARBANK_JOIN_CODE`):
+**One line** (downloads the release's package for this computer, verifies its SHA-256 and installs it; with the
+console's command, which fills in `OARBANK_JOIN_CODE`, it also joins; otherwise run `sudo oarbank-node join`
+afterwards):
 ```bash
 curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh | sudo sh
 ```
+Piped into `sudo sh`, the script never asks for the code itself: sudo 1.9.14 and later runs it on a terminal of its own
+and leaves yours echoing, so a pasted code would show. Join with `sudo oarbank-node join`, which hides it.
 ```powershell
 irm https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.ps1 | iex
 ```

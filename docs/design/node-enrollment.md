@@ -135,9 +135,20 @@ staged in `state/join-code` (0600, the service account's), then follows the stat
 |---|---|---|---|
 | Attended GUI | the pkg opens **Oarbank Node** (menu bar) at the join window after a double-click install | the **Oarbank Node** app entry opens the join window | the MSI's last page opens **Oarbank Node** (tray) at the join window; or paste the code on the MSI's join page |
 | SSH / script | `sudo installer -pkg … -target /` then `sudo oarbank-node join` (prompt or `--code-stdin`) | `sudo OARBANK_JOIN_CODE=… apt install ./….deb`, or install then `sudo oarbank-node join` | `msiexec /i … /qn JOINCODEFILE=…` or `JOINCODE=…` |
-| One-liner | `curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh \| sudo sh` (prompts on the terminal, or reads `OARBANK_JOIN_CODE`) | same | `irm https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.ps1 \| iex` |
+| One-liner | `curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh \| sudo sh` installs and verifies; with `OARBANK_JOIN_CODE` (the console's command) it also joins, otherwise run `sudo oarbank-node join` afterwards (it never prompts: see below) | same | `irm https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.ps1 \| iex` (asks for the code with `Read-Host -AsSecureString` when it has none) |
 | MDM / policy | profile, domain `dev.codonic.oarbank.agent` | `/etc/oarbank/policy.json` | `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent` (ADMX template in the release) |
 | Deep link | `oarbank://join?code=…` → join window, confirmation first | same (`x-scheme-handler/oarbank`) | same (`HKCR\oarbank`) |
+
+The one-liner never prompts for the code when its standard input is not a terminal (piped, as above). sudo 1.9.14 and
+later (`use_pty`) runs the command on a pseudo-terminal of its own and puts the person's terminal in raw mode only when
+sudo's own standard input is a terminal; piped from curl it is not, so the person's terminal keeps echoing, and a prompt
+that turns echo off on sudo's pseudo-terminal would show the pasted code. Without `OARBANK_JOIN_CODE`,
+`OARBANK_JOIN_CODE_FILE` or `OARBANK_COORDINATOR` it installs, prints `Installed. Join this computer with: sudo
+oarbank-node join`, and exits 0; run as a file (`sudo sh oarbank-install.sh`, standard input the terminal) it runs
+`oarbank-node join` there. `OARBANK_COORDINATOR` may still ask the device-code fingerprint question (y/N, nothing secret)
+on the terminal. `oarbank-node join`'s own prompt reads the terminal back after turning echo off and says the code will
+show when the terminal did not take it; it cannot see a terminal beyond sudo's, which is why the one-liner does not
+prompt.
 
 ### Managed policy keys
 
