@@ -161,6 +161,7 @@ prompt.
 | `Name` | string | The node's name when the code has no label |
 | `AllowUserJoin` | boolean | `false` hides Join and Leave in the app |
 | `ManagedByOrganizationName` | string | Shown in the app and status |
+| `ShowStatusIcon` | boolean (Windows DWORD) | `false` hides Oarbank Node's menu bar (macOS) or notification-area (Windows) icon on every account and keeps it from opening at login; `true` keeps it shown. Set either way, the app's setting is greyed out ("Managed by …"). No effect on Linux (no node tray) or on the node itself. 2.9 and later |
 
 A managed node is always the system service. Values are never logged. On macOS a root launchd job (`dev.codonic.oarbank.agent.policy`, `WatchPaths` on the
 managed-preferences file) applies policy, so a profile delivered before or after the pkg both work. On Linux and
@@ -269,6 +270,76 @@ Node** tray app (`[INSTALLFOLDER]Oarbank Node.exe`, Start menu, registers `oarba
 `dev.codonic.oarbank.node.desktop` (registers `x-scheme-handler/oarbank`). Each shows the status document (state,
 coordinator, errors), offers **Join this machine…** while not joined (hidden when policy `AllowUserJoin` is false) and
 **Status…** once joining started, and runs the join window for both (a node does not know its console's address).
+How they appear, start and leave is [Menu bar and tray](#menu-bar-and-tray).
+
+## Menu bar and tray
+
+The node is a service with a lifetime of its own: on macOS a LaunchDaemon (`dev.codonic.oarbank.agent`, a personal
+install's LaunchAgent), on Windows the service `dev.codonic.oarbank.agent`, on Linux a systemd unit. It starts with the
+computer, before anyone signs in, and no front end starts or stops it. The front ends are views of it, and say so: there
+is no "Quit Oarbank Node", whose name reads as stopping the node. The coordinator's macOS app (Oarbank Coordinator) has
+the same model; both share `deploy/macos/shared/MenuBar.swift`. Practice followed: Apple's HIG on menu bar extras (an
+optional, user-removable item; a template image; a menu, not a window, as the main interface) and `SMAppService`;
+Tailscale, Docker Desktop and 1Password, whose menu bar apps open at login through a login item, keep their daemons
+separate, and say what keeps running when the app quits.
+
+**One setting: "Show Oarbank Node in the menu bar"** (Windows: "in the notification area").
+
+| | macOS | Windows |
+|---|---|---|
+| On | the item is shown; the app's login item is registered (`SMAppService.mainApp`), so it opens at login | the icon is shown; this user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `OarbankNode` starts it at sign-in |
+| Off | the app unregisters its login item and quits | the Run value goes and the app exits |
+| Source of truth | macOS: removing the app from System Settings, Login Items, Open at Login turns the setting off too | the Run value (Startup Apps can disable it) |
+| Default | on: the app's first launch registers it (an attended install opens the app; an MDM or command-line install starts nothing) | on: a start from the Start menu or the installer's last page registers it |
+| Turned off by | **Hide from Menu Bar** (⌘Q; the menu shows "This Mac's node keeps running" under it and asks first) or the setting in the window | **Hide from notification area** ("This PC's node keeps running" under it; asks first) |
+| Back on | open Oarbank Node from Applications or Spotlight: with no item to show it opens its window, where the setting is | start Oarbank Node from the Start menu |
+| Managed | `ShowStatusIcon`: the login item follows the policy, the setting is greyed out with "Managed by <org>" (and Hide is disabled while it forces the item on) | `ShowStatusIcon`: 0 never shows the icon (a Start-menu start only opens the join window); 1 hides nothing |
+
+**The window** (`--settings`, Settings… ⌘, in the menu, or any launch with no item to show) has two labelled sections:
+
+- **This Mac's node**: the service in plain words ("Running as a system service — starts with the Mac, before anyone
+  signs in, and keeps running when this app quits"; a personal install's: "…for your account — starts when you sign
+  in…"), the node's state from the status document (Connected to <coordinator>, Not joined, Waiting for approval…),
+  "Managed by <org>", **Join this Mac…** or **Status…** (the join window), and **Open Console** on a Mac that also runs
+  the coordinator (it asks Oarbank Coordinator to open its web app; elsewhere a node does not know its console's
+  address).
+- **Menu bar**: the setting and one line on what it does.
+
+**Open Login Items… is only a fix**, offered in two cases: macOS reports the app's login item `.requiresApproval`, or
+System Settings, Login Items, **Allow in the Background** has switched the node off. The second is detected with
+`SMAppService.statusForLegacyPlist(at:)` on each of the node's launchd property lists (`.requiresApproval` there means
+the person switched it off, and launchd then starts none of them): the window replaces the service line with "The node
+is turned off in Login Items → Allow in the Background. Turn Oarbank Node back on there." and the button, and the menu
+shows **Turned off in Login Items…**.
+
+**Allow in the Background names the app.** Every launchd job the node installs carries `AssociatedBundleIdentifiers`
+= `dev.codonic.oarbank.node` (the policy and helper daemons in the pkg, the agent's LaunchDaemon or LaunchAgent and the
+session helper the launcher writes, `svc_launchd.rs`), and the coordinator's oarbankd and console LaunchAgents carry
+`dev.codonic.oarbank.coordinator` (`install-oarbankd.sh`, and `coordinstall.rs` for a coordinator move). System
+Settings then lists them under the app's name and icon instead of the signing team's ("BlueGuru LLC"), so switching
+that entry off visibly means switching off the node. Apple requires the job's program and the app to be signed by the
+same team for the association to hold (Developer ID builds are; ad-hoc test builds fall back to the old listing). The
+coordinator's programs are shell launchers inside its app: whether macOS attributes those (unsigned) scripts to the app
+is to be checked on a signed install. A managed profile's `com.apple.servicemanagement` rule (`LabelPrefix`
+`dev.codonic.oarbank`) still pre-approves them all.
+
+**One item per Mac.** Where Oarbank Coordinator is installed (Launch Services knows it, or it is running), it is the
+Mac's one Oarbank item: its menu gains a **This Mac's Node** section (the node's state and detail, **Turned off in
+Login Items…** when that applies, **Join this Mac…** while not joined and allowed, **Oarbank Node…** for the node's
+window), and Oarbank Node shows no item, unregisters its own login item at launch and greys its setting out with "On
+this Mac, Oarbank Coordinator's menu bar item shows this node." Opening Oarbank Node there opens its window (nothing
+opens it at login). The coordinator's menu opens the node app with `--join` (the join window) or plainly (a reopen:
+its window). Chosen over a shared defaults key or a distributed notification because installation is what decides,
+it needs no protocol between the apps, and nothing flickers at login (the node never races the coordinator for the
+menu bar). A test build with a suffixed bundle identifier (`dev.codonic.oarbank.node.preview`) pairs only with the
+coordinator of the same suffix.
+
+**Glyphs**: one oar for the node, the logo's three oars for the coordinator (deploy/icons/README.md), 18 pt template
+images at @1x and @2x.
+
+**Linux** has no node tray: the desktop entry `dev.codonic.oarbank.node.desktop` opens the join window when chosen
+from the applications menu and never starts at login, which is the hidden state of the model above. `ShowStatusIcon`
+has nothing to hide there.
 
 ### macOS elevation
 
