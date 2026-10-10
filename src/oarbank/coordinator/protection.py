@@ -259,6 +259,26 @@ def runtime_conditions(tel: dict) -> list[dict]:
     if prot.get("source_error"):
         out.append({"code": "PROTECTION_SOURCE_ERROR", "tone": "bad", "values": {"error": prot["source_error"]},
                     "message": f"the process table cannot be read: {prot['source_error']}"})
+    # owner sources the agent cannot read (D51): a phase then counts as on and a progress source as a violation, so the
+    # condition says which and how to fix it instead of a silent hold
+    unread = [(p.get("rule"), p.get("key"), p.get("reader")) for p in prot.get("phases") or [] if p.get("readable") is False]
+    unread += [(p.get("rule"), p.get("rule"), p.get("reader")) for p in prot.get("progress") or [] if p.get("readable") is False]
+    for rule, key, reader in unread:
+        if reader == "helper":
+            out.append({"code": "PROTECTION_SOURCE_NEEDS_HELPER", "tone": "warn", "values": {"rule": rule, "source": key},
+                        "message": f"rule {rule}: source {key} is in a person's home, which this agent's account may not "
+                                   "read; their session helper reads it while they are logged in. Nobody's helper reports "
+                                   "it now, so protection holds fleet work back as if the phase were on"})
+        else:
+            out.append({"code": "PROTECTION_SOURCE_UNREADABLE", "tone": "warn", "values": {"rule": rule, "source": key},
+                        "message": f"rule {rule}: source {key} cannot be read by the agent (no matching file, or no "
+                                   "permission); protection holds fleet work back until it reads"})
+    budget = prot.get("gpu_budget") or {}
+    if budget.get("not_certified"):
+        rules = ", ".join(budget["not_certified"])
+        out.append({"code": "GPU_NOT_CERTIFIED", "tone": "acc", "values": {"rules": rules},
+                    "message": f"gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet GPU work "
+                               "waits as with when_no_gpu_protected (oarbank protection ab sweep <node> --rule <id>)"})
     return out
 
 
@@ -419,7 +439,13 @@ def status(db: DB, ident: str, history_limit: int = 20) -> dict | None:
             "mode": a["config"]["node"]["mode"], "mode_source": a["mode_source"],
             "mode_locked_by": (a["mode_locked_by"] or {}).get("name"), "sources": a["sources"], "skipped": a["skipped"],
             "conflicts": a["conflicts"], "own": own(snap, "node", n["node_id"]), "history": hist,
-            "live": tel.get("protection") or {}, "guard": tel.get("guard"), "conditions": runtime_conditions(tel)}
+            "live": tel.get("protection") or {}, "guard": tel.get("guard"), "conditions": runtime_conditions(tel),
+            "cotenancy": _cotenancy_card(db, n)}
+
+
+def _cotenancy_card(db: DB, n: dict) -> dict:
+    from . import cotenancy
+    return cotenancy.node_card(db, n)
 
 
 # ------------------------------------------------------------------ alerts (from the journals)

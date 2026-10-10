@@ -513,6 +513,36 @@ def _probe_now(db, req):
     return {"run_probe": True}
 
 
+# ------------------------------------------------------------------ co-tenancy: the on/off harness (D52)
+
+def _ab(fn):
+    from . import cotenancy
+    try:
+        return fn(cotenancy)
+    except cotenancy.CotenancyError as e:
+        raise core.ApiError(422, "bad_ab_run", str(e))
+
+
+@handler("protection.ab.start", target_type="node", snapshot=_node_snap,
+         impact=lambda db, r: _ab(lambda c: c.plan(db, _nid(db, r), r.params)))
+def _ab_start(db, req):
+    """Ask a node for a paired on/off run over one protected rule (docs/design/gpu-cotenancy.md)."""
+    return _ab(lambda c: c.start(db, _nid(db, req), req.params, req.actor, req.reason))
+
+
+@handler("protection.ab.abort", target_type="ab_run", snapshot=lambda db, r: db.one(
+    "SELECT run_id, state, node_id FROM ab_runs WHERE run_id=?", (r.target,)))
+def _ab_abort(db, req):
+    return _ab(lambda c: c.abort(db, str(req.target), req.actor, req.reason))
+
+
+@handler("protection.ab.sweep", target_type="node", snapshot=_node_snap,
+         impact=lambda db, r: _ab(lambda c: {**c.plan(db, _nid(db, r), {**r.params, "duty": c.levels_of(r.params)[0]}),
+                                             "levels": c.levels_of(r.params)}))
+def _ab_sweep(db, req):
+    return _ab(lambda c: c.sweep(db, _nid(db, req), req.params, req.actor, req.reason))
+
+
 # ------------------------------------------------------------------ alerts
 
 def _alert_row(db, req):

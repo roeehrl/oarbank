@@ -651,6 +651,15 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         return render(request, "protection.html", {**d, "actor": actor})
 
+    @app.get("/protection/ab/{run_id}", response_class=HTMLResponse)
+    async def ab_run_page(run_id: str, request: Request):
+        """A harness run: its blocks, interval and decision (docs/design/gpu-cotenancy.md)."""
+        actor = who(request)
+        d = await drill(views.ab_run_page, run_id)
+        if d is None:
+            return render(request, "error.html", {"message": f"run {run_id} not found (or the database is busy)", "actor": actor}, 404)
+        return render(request, "ab_run.html", {**d, "actor": actor})
+
     @app.get("/frag/nodes/{nid}/protection/preview", response_class=HTMLResponse)
     async def node_protection_preview(nid: str, request: Request):
         """Live preview while editing: pure computation over a read connection (a GET: the console has no

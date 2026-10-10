@@ -37,6 +37,9 @@ Safety (must hold after every committed transaction):
       payload, and artifacts that each hold one pin's files (reads the catalogue's manifests)
   S23 an attempt that resumed from a checkpoint resumed from one recorded by an earlier attempt of the same job under the
       same job generation
+  S25 for a rule marked immediate, a phase the agent's event path saw begin is followed by its pause request within
+      100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
+      the source event)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -292,6 +295,48 @@ def s18_rules_enforced(db: DB, since: float = 0.0):
     return out
 
 
+S25_LIMIT_S = 0.1        # docs/design/gpu-cotenancy.md: the pause request within 100 ms of the source event
+
+
+def s25_immediate_phases_pause_at_once(db: DB, since: float = 0.0):
+    """S25: an immediate rule's phase that the event path saw begin (`phase_change` PROTECTION_PHASE_ON via watch,
+    helper or exec) and that paused fleet work (an `attempt_paused` naming the phase within the S18 window) was paused
+    first by the event path (the record carries the source event's time), within 100 ms of the event. A phase first
+    read by a tick (via poll: the rule was not armed, or the agent just started) is S18's to judge."""
+    out = []
+    for n in db.q("SELECT DISTINCT node_id FROM protection_decisions WHERE kind='phase_change' AND t>=?", (since,)):
+        nid = n["node_id"]
+        recs = db.q("SELECT seq, t, kind, reason, rule, record_json FROM protection_decisions WHERE node_id=? AND t>=? "
+                    "AND kind IN ('phase_change','attempt_paused') ORDER BY t, seq", (nid, since))
+        pauses = [(r, json.loads(r["record_json"] or "{}")) for r in recs if r["kind"] == "attempt_paused"]
+        for r in recs:
+            if r["reason"] != "PROTECTION_PHASE_ON":
+                continue
+            rec = json.loads(r["record_json"] or "{}")
+            if rec.get("via") not in ("watch", "helper", "exec"):
+                continue
+            rule = _rule_at(db, nid, r["rule"], r["t"] or 0)
+            if not rule or not rule.get("immediate"):
+                continue
+            block = rec.get("block")
+            blocks = rule.get("during") or []
+            if not isinstance(block, int) or block >= len(blocks) or blocks[block].get("pause_fleet") is None:
+                continue
+            key, t0 = f"{r['rule']}#{block}", r["t"] or 0
+            mine = [(p, d) for p, d in pauses if key in (d.get("rules") or []) and t0 - 1 <= (p["t"] or 0) <= t0 + S18_WINDOW_S]
+            if not mine:
+                continue                                   # nothing pausable was in the phase's scope
+            first, d = mine[0]
+            ev = d.get("event_t")
+            if ev is None:
+                out.append(f"S25 node {nid} journal #{r['seq']}: phase {key} began at {t0:.3f}, but the first pause came "
+                           f"from a tick at {first['t']:.3f}, not the event path")
+            elif (first["t"] or 0) - float(ev) > S25_LIMIT_S:
+                out.append(f"S25 node {nid} journal #{first['seq']}: phase {key} paused {((first['t'] or 0) - float(ev)) * 1000:.0f} "
+                           f"ms after its source event (limit {S25_LIMIT_S * 1000:.0f} ms)")
+    return out
+
+
 def s20_units_stay_in_their_class(db: DB):
     bound = {r["unit"]: r for r in db.q("SELECT unit, parent, mix, class FROM placement_bindings")}
 
@@ -383,7 +428,7 @@ SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_gener
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
-          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint]
+          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s25_immediate_phases_pause_at_once]
 
 
 def check_all(db: DB) -> list[str]:
