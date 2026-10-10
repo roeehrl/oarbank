@@ -1,8 +1,9 @@
 # Host tools
 
-Status: built (settings scope redesign, phase 2), unreleased: core after 2.8.0, oarbank-sdk after 1.5.0. Replaces the
+Status: built (settings scope redesign, phase 2), ships in core 2.9.0 and oarbank-sdk 1.6.0. Replaces the
 per-OS tool registry (`tool_registry`, `settings.tools.update`) and its `TOOL_UNAVAILABLE` outright; no compatibility
-shim.
+shim. oarbank-sdk 1.6.0 refuses a `version`, or an `arch` other than `any`, unless the module's `requires.core`
+admits only 2.9 and later (older cores ignore both).
 
 A module that needs a program installed on the node (a JDK, an interpreter, a tool such as samtools) used to name an
 operator-defined registry id (`java17`) that the coordinator mapped to absolute paths **per OS** and baked into the
@@ -19,7 +20,7 @@ machine, and only the machine can see them. So the job is split four ways:
 | Node override (add) | Operator, owner-signed | the node statement `oarbank.node/v1` | "Use this path here" (verified before it is granted) |
 | Local hint | Node owner | `<agent home>/tool-hints.json` | Extra candidates only |
 | Module request | Module author; owner approves | manifest `[sandbox].tools`, `module_grants` | Id, version range, arch, trust |
-| Module-on-node pin | Operator | the setting `tool.<id>.path` at node scope, qualified by the module | "minos-gatk uses JDK 17 here even though 21 exists" |
+| Module-on-node pin | Operator | the setting `tool.<id>.path` at node scope, qualified by the module | "genomics uses JDK 17 here even though 21 exists" |
 
 Code: `src/oarbank/coordinator/tools.py` (definitions, overrides, resolution, views, migration), `statements.py` (the
 node statement), `rust/crates/oarbank-agent/src/tools.rs` (detection and grants), `rust/crates/oarbank-core/src/tools.rs`
@@ -252,7 +253,7 @@ One shot, at upgrade (`DB.__init__`):
   named like a JDK, `java*`/`jdk*`/`openjdk*`, becomes kind `jdk`; any other an `executable` read with `--version`);
   the setting and its `trust` are deleted. The live fleet had no registry row.
 - A module version asking for `java17` against no definition cannot be converted: its jobs wait with `TOOL_NOT_FOUND`
-  and its checklist says it needs a new version (minos-gatk: `{ id = "jdk", version = ">=17", trust = "code-exec" }`,
+  and its checklist says it needs a new version (genomics: `{ id = "jdk", version = ">=17", trust = "code-exec" }`,
   one re-approval for the new digest).
 - `folder_statements` → `node_statements`, reissued as `oarbank.node/v1`.
 - `nodes` gains `tools_json` and `want_detect`.
@@ -262,6 +263,4 @@ One shot, at upgrade (`DB.__init__`):
 - Owner groups with ranks (phase 4): `tool.<id>.path` already resolves through every group a node is in, but search
   paths are per platform group only.
 - A managed install: deferred, see [Installing a tool](#installing-a-tool) for what a safe version needs decided.
-- An SDK core-version gate for `version` and `arch` (`requires.core >= 2.9`): the SDK's rule for keys older cores
-  ignore, deferred until the integration branch reports core 2.9.0 (today it still reports 2.8.0, so every module using
-  them would be refused at install).
+

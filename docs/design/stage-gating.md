@@ -1,14 +1,14 @@
 # Stage gating: doctor checks and certification gate only the stages that need them
 
-Status: built (PLAN D43), unreleased: core after 2.8.0, oarbank-sdk after 1.5.0. Amends
+Status: built (PLAN D43), ships in core 2.9.0 and oarbank-sdk 1.6.0. Amends
 [bootstrap-stages.md](bootstrap-stages.md) (which nodes run a bootstrap job) and the claim, doctor and certification
 sections of [docs/protocol.md](../protocol.md).
 
 ## The problem
 
-A fleet of five darwin-arm64 nodes and one windows-amd64 node running minos-gatk 4.0.0: its bootstrap campaign
-(four `fetch` jobs and two `profile` jobs) and its live rounds (one `sync` job) all pending, unbound, nothing leased.
-The darwin nodes' minos-gatk doctors all reported:
+A fleet of five darwin-arm64 nodes and one windows-amd64 node running genomics 4.0.0: its bootstrap campaign
+(four `fetch` jobs and two `profile` jobs) and its live feed (one `sync` job) all pending, unbound, nothing leased.
+The darwin nodes' genomics doctors all reported:
 
 - `java17`: failed, "java17 is not granted on this node (no granted path has bin/java)", so the module said
   `undetected`;
@@ -23,8 +23,8 @@ a JDK nor pysam:
 2. **Any failed doctor check gated every stage.** The agent offered only `healthy` modules in claims, and the
    coordinator let a bootstrap job run only where the module was `certifying` or `certified`, which needs a healthy
    doctor. One unrelated dependency blocked a fresh fleet's bootstrap.
-3. **Every non-bootstrap stage waited for certification**, which for minos-gatk needs JDK 17, pysam and containers.
-   `sync` compares nothing and needs nothing a node must prove, yet waited; the live rounds it archives are gone after
+3. **Every non-bootstrap stage waited for certification**, which for genomics needs JDK 17, pysam and containers.
+   `sync` compares nothing and needs nothing a node must prove, yet waited; the live feed it archives are gone after
    about five days.
 4. **Explain said only "No node can run this job right now"**, with per-node codes in the summary, so it did not say
    which requirement no node met.
@@ -51,7 +51,7 @@ the module as a whole, for certification; it no longer decides these stages. Eve
 anti-affinity).
 
 **Why an implicit rule and not a manifest flag** (`certification = "exempt"` per stage). The rule follows from facts
-the manifest already states, so it needs no new key, no core floor, no approval and no new module version: minos-gatk
+the manifest already states, so it needs no new key, no core floor, no approval and no new module version: genomics
 4.0.0's `sync` qualifies as it is. A flag would let an author exempt a stage whose results the host compares, which
 would have to be refused anyway, so the flag could only ever restate the rule.
 
@@ -69,7 +69,7 @@ for a bootstrap stage, job-generation fencing, the node's admission by the owner
 keep failing revokes the module there, which stops these stages too until its doctor runs again). Their results never
 count toward certification.
 
-**Why `exact` stages still wait (minos-gatk `profile`).** A stage that compares has its result cached under its job key
+**Why `exact` stages still wait (genomics `profile`).** A stage that compares has its result cached under its job key
 and served to every campaign that asks for the same key, and replicas compare against it. An uncertified node's wrong
 result would become canonical and spread through the cache before any replica could catch it; certification is the
 admission control for exactly that. A stage that needs a capability or a pool waits too: a capability is node software
@@ -84,7 +84,7 @@ attempts.
 ### 2. A failed doctor check gates only the stages that need what it proves
 
 The mapping already existed in the manifest's capability namespace: a probe's name is the capability it provides
-(spec/manifest.md rule 2), and minos-gatk names its doctor check `java17` after its `java17` probe. The rule:
+(spec/manifest.md rule 2), and genomics names its doctor check `java17` after its `java17` probe. The rule:
 
 > A doctor check named after a capability (a probe's name, or a capability one of the module's services provides)
 > proves that capability for the module on that node. When it fails, the node lacks the capability for the module's
@@ -132,10 +132,10 @@ failure with its values filled in and the nodes it covers by platform, commonest
 
 - `No node can run this job right now: Its stage needs java17; this node's services, probes and module doctor do not
   provide java17 (5 nodes: 5 darwin-arm64)`
-- `... Module minos-gatk is not ready on this node (doctor: undetected; failed checks java17, pysam_import) (5 nodes:
+- `... Module genomics is not ready on this node (doctor: undetected; failed checks java17, pysam_import) (5 nodes:
   5 darwin-arm64)`
-- `... Module minos-gatk needs host tools the tool registry has no darwin paths for: java17 (5 nodes: 5 darwin-arm64);
-  Module minos-gatk does not run on windows-amd64 (requires.platforms) (1 node: 1 windows-amd64)`
+- `... Module genomics needs host tools the tool registry has no darwin paths for: java17 (5 nodes: 5 darwin-arm64);
+  Module genomics does not run on windows-amd64 (requires.platforms) (1 node: 1 windows-amd64)`
 
 Each summary row carries the same sentence in `detail.text` and its platform counts in `detail.platforms`. The module
 check of an exempt job is its own predicate, `module_runner_ready(<module>)` (bootstrap jobs keep
@@ -146,7 +146,7 @@ and why. The tool codes' messages name the tool, what the node found and what th
 ### 6. Doctor details are kept whole
 
 The coordinator, `oarbank node show` (and `--json`) and the console's node page never shortened a check's detail. The
-300-character cut seen on that fleet is minos-gatk's own: its doctor's `add()` keeps `str(detail)[:300]`, the beginning
+300-character cut seen on that fleet is genomics's own: its doctor's `add()` keeps `str(detail)[:300]`, the beginning
 of the message, which drops the `dlopen` error's cause at its end. That is the module's to change (keep the whole
 detail, or its end). What the core side did shorten is the agent's own report for a doctor that printed no
 DoctorOutput: it kept the last 300 characters of stderr; it now keeps the last 4000 (stdout when stderr is empty). The
@@ -175,10 +175,10 @@ The Hypothesis machine, the simulator and `oarbank verify` check it with the res
 On a copy of its coordinator database (with a copy of its module store, under a scratch home): the five darwin nodes are
 `undetected` with their runners started; the four `fetch` jobs and the `sync` job are eligible on all five
 (`QUEUED_BEHIND`), and a claim from an updated agent is granted them. The two `profile` jobs wait, and explain says why:
-`Module minos-gatk needs host tools the tool registry has no darwin paths for: java17 (5 nodes: 5 darwin-arm64)`.
+`Module genomics needs host tools the tool registry has no darwin paths for: java17 (5 nodes: 5 darwin-arm64)`.
 Certifying the module there still needs the operator: map `java17` for darwin in the tool registry
 (`settings.tools.update`) and fix the pysam build the darwin venvs load (the `dlopen` failure). (Core 2.9 replaced the
-registry with host tools detected on each node: minos-gatk asks for `jdk >=17` in a new version, and each node reports
+registry with host tools detected on each node: genomics asks for `jdk >=17` in a new version, and each node reports
 whether it has one; see [host-tools.md](host-tools.md).)
 
 ## Tests

@@ -44,7 +44,7 @@ fn swap_growth_and_stale_signals() {
     assert_eq!(s.reason, "memory signals stale (20 s)");
 }
 
-/// TNT-PC (Windows, 15.8 GB) was held at "swap +282 MB/min" with 54 % of its memory free: the commit charge beyond
+/// A Windows node (15.8 GB) was held at "swap +282 MB/min" with 54 % of its memory free: the commit charge beyond
 /// physical use had been read as swap. Swap growth with that much free is housekeeping, never a floor.
 #[test]
 fn swap_growth_with_plenty_free_is_not_pressure() {

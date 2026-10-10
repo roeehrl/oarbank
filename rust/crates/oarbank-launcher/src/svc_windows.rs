@@ -61,6 +61,14 @@ pub fn helper_config(opts: &[String]) -> Result<()> {
 }
 
 /// `service install|uninstall|status [--system [--user ACCOUNT]] [--label NAME] [--dry-run] [-- agent args...]`
+/// `service refresh`: nothing to render again on Windows. The service's stop wait (the wait hint and the launcher's
+/// wait for the agent) lives in the launcher binary itself, which the MSI replaces in place, and a major upgrade runs
+/// `setup --scope system`, which creates the service again (oarbank-agent.wxs, SetupWaiting).
+pub fn refresh(_rest: &[String]) -> Result<()> {
+    println!("up to date: the Windows service's stop wait is the launcher's own");
+    Ok(())
+}
+
 pub fn service(home: &Home, rest: &[String]) -> Result<()> {
     let split = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
     let (opts, agent_args) = (&rest[..split], rest.get(split + 1..).unwrap_or(&[]));

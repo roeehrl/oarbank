@@ -133,6 +133,92 @@ pub fn session_helper_unit(agent: &str, account: &str) -> String {
              [Install]\nWantedBy=default.target\n", systemd_quote(agent))
 }
 
+/// The spec of a launchd job this module rendered, read back from its property list as JSON (`plutil -convert json`),
+/// so an upgrade can render it again with today's keys (`oarbank-launcher service refresh`). None: not a job these
+/// functions render (no label or program, or a session helper's `LimitLoadToSessionType`).
+pub fn launchd_spec(v: &serde_json::Value) -> Option<ServiceSpec> {
+    let o = v.as_object()?;
+    if o.contains_key("LimitLoadToSessionType") {
+        return None;
+    }
+    let text = |k: &str| o.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let program: Vec<String> = o.get("ProgramArguments")?.as_array()?.iter().map(|a| a.as_str().map(str::to_string))
+        .collect::<Option<_>>()?;
+    if program.is_empty() {
+        return None;
+    }
+    // plutil's JSON keeps no key order: by name, as the launcher writes them
+    let mut env: Vec<(String, String)> = match o.get("EnvironmentVariables") {
+        Some(e) => e.as_object()?.iter().map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect::<Option<_>>()?,
+        None => vec![],
+    };
+    env.sort();
+    let (keep_alive, restart_on_failure) = match o.get("KeepAlive") {
+        Some(serde_json::Value::Bool(b)) => (*b, false),
+        Some(serde_json::Value::Object(d)) => (false, d.get("SuccessfulExit") == Some(&serde_json::Value::Bool(false))),
+        _ => (false, false),
+    };
+    Some(ServiceSpec {
+        label: text("Label")?, program, env, working_dir: text("WorkingDirectory"), stdout: text("StandardOutPath"),
+        stderr: text("StandardErrorPath"), user: text("UserName"), keep_alive, restart_on_failure,
+        associated_bundle: o.get("AssociatedBundleIdentifiers").and_then(|a| a.get(0)).and_then(|b| b.as_str()).map(str::to_string),
+        stop_timeout_s: o.get("ExitTimeOut").and_then(|t| t.as_u64()).map(|t| t as u32),
+    })
+}
+
+/// Undo systemd_quote: the words of an ExecStart or Environment value this module wrote (each in double quotes).
+fn systemd_words(v: &str) -> Option<Vec<String>> {
+    let mut out = vec![];
+    let mut it = v.chars().peekable();
+    loop {
+        while it.peek() == Some(&' ') {
+            it.next();
+        }
+        match it.next() {
+            None => return Some(out),
+            Some('"') => {}
+            Some(_) => return None,
+        }
+        let mut w = String::new();
+        loop {
+            match it.next()? {
+                '"' => break,
+                '\\' => w.push(it.next()?),
+                '%' => { if it.next()? != '%' { return None; } w.push('%') }
+                c => w.push(c),
+            }
+        }
+        out.push(w);
+    }
+}
+
+/// The spec and description of a systemd unit systemd_unit rendered, read back so an upgrade can render it again with
+/// today's settings (`oarbank-launcher service refresh`). None: a unit these functions did not write.
+pub fn systemd_spec(text: &str) -> Option<(ServiceSpec, String)> {
+    let mut spec = ServiceSpec::default();
+    let mut description = None;
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k {
+            "Description" => description = Some(v.to_string()),
+            "ExecStart" => spec.program = systemd_words(v)?,
+            "Environment" => {
+                let (ek, ev) = systemd_words(v)?.into_iter().next()?.split_once('=').map(|(a, b)| (a.to_string(), b.to_string()))?;
+                spec.env.push((ek, ev));
+            }
+            "WorkingDirectory" => spec.working_dir = Some(v.to_string()),
+            "User" => spec.user = Some(v.to_string()),
+            "Restart" => { spec.keep_alive = v == "always"; spec.restart_on_failure = v == "on-failure"; }
+            "TimeoutStopSec" => spec.stop_timeout_s = Some(v.parse().ok()?),
+            _ => {}
+        }
+    }
+    if spec.program.is_empty() {
+        return None;
+    }
+    Some((spec, description?))
+}
+
 /// `sc.exe create` arguments for a Windows service whose binary path is `program` (quoted per the Windows rules),
 /// started automatically (delayed) as `account` (a virtual account such as `NT SERVICE\\<name>` by default).
 pub fn sc_create_args(name: &str, display: &str, program: &[String], account: Option<&str>) -> Vec<String> {
@@ -202,6 +288,46 @@ mod tests {
         let a = sc_create_args("OarbankAgent", "Oarbank agent", &[r"C:\Program Files\Oarbank\oarbank-launcher.exe".into(), "run".into()], None);
         assert_eq!(a[3], r#""C:\Program Files\Oarbank\oarbank-launcher.exe" run"#);
         assert_eq!(a[7], r"NT SERVICE\OarbankAgent");
+    }
+
+    #[test]
+    fn a_rendered_definition_reads_back_and_an_old_one_gains_the_stop_timeout() {
+        // a 2.8 node's LaunchDaemon (no ExitTimeOut), as plutil -convert json gives it
+        let old = ServiceSpec { label: "dev.codonic.oarbank.agent".into(),
+            program: vec!["/Library/Oarbank/bin/oarbank-launcher".into(), "--home".into(), "/Library/Oarbank/agent".into(),
+                          "run".into(), "--session-hub".into()],
+            env: vec![("OARBANK_LOG".into(), "info".into()), ("PATH".into(), "/usr/bin:/bin".into())],
+            working_dir: Some("/Library/Oarbank/agent".into()), stdout: Some("/x/launcher.log".into()),
+            stderr: Some("/x/launcher.log".into()), user: Some("_oarbank".into()), keep_alive: true,
+            associated_bundle: Some("dev.codonic.oarbank.node".into()), ..Default::default() };
+        let json = serde_json::json!({"Label": "dev.codonic.oarbank.agent", "ProgramArguments": old.program,
+            "EnvironmentVariables": {"OARBANK_LOG": "info", "PATH": "/usr/bin:/bin"}, "WorkingDirectory": "/Library/Oarbank/agent",
+            "StandardOutPath": "/x/launcher.log", "StandardErrorPath": "/x/launcher.log", "UserName": "_oarbank",
+            "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 10, "ProcessType": "Standard",
+            "AssociatedBundleIdentifiers": ["dev.codonic.oarbank.node"]});
+        let back = launchd_spec(&json).unwrap();
+        assert_eq!(launchd_plist(&back), launchd_plist(&old));
+        let now = launchd_plist(&ServiceSpec { stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S), ..back });
+        assert!(now.contains("<key>ExitTimeOut</key><integer>60</integer>") && now.contains("<string>--session-hub</string>"));
+        let mut with = json.clone();
+        with["ExitTimeOut"] = 60.into();
+        assert_eq!(launchd_spec(&with).unwrap().stop_timeout_s, Some(60));
+        with["KeepAlive"] = serde_json::json!({"SuccessfulExit": false});
+        assert!(launchd_spec(&with).map(|s| s.restart_on_failure && !s.keep_alive).unwrap());
+        assert!(launchd_spec(&serde_json::json!({"Label": "x", "ProgramArguments": ["/a"], "LimitLoadToSessionType": "Aqua"})).is_none());
+        assert!(launchd_spec(&serde_json::json!({"Label": "x"})).is_none());
+        // a 2.8 system unit: every word quoted, % doubled
+        let unit = ServiceSpec { label: "dev.codonic.oarbank.agent".into(),
+            program: vec!["/usr/lib/oarbank/oarbank-launcher".into(), "--home".into(), "/var/lib/oarbank/a \"b\" 100%".into(), "run".into()],
+            env: vec![("OARBANK_LOG".into(), "info".into())], working_dir: Some("/var/lib/oarbank/agent".into()),
+            user: Some("oarbank".into()), keep_alive: true, ..Default::default() };
+        let text = systemd_unit(&unit, "Oarbank agent", true);
+        let (back, desc) = systemd_spec(&text).unwrap();
+        assert_eq!((systemd_unit(&back, &desc, true), back.stop_timeout_s), (text, None));
+        let now = systemd_unit(&ServiceSpec { stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S), ..back }, &desc, true);
+        assert!(now.contains("TimeoutStopSec=60\n") && now.contains("\"/var/lib/oarbank/a \\\"b\\\" 100%%\""));
+        assert_eq!(systemd_spec(&now).unwrap().0.stop_timeout_s, Some(60));
+        assert!(systemd_spec("[Service]\nExecStart=/bin/true\n").is_none());          // not quoted as this module writes
     }
 
     #[test]

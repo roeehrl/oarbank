@@ -21,6 +21,57 @@ fn systemctl(user: bool, args: &[&str], dry: bool) -> Result<std::process::Outpu
     Ok(Command::new("systemctl").args(&all).output()?)
 }
 
+/// The unit file of `label` in either scope.
+fn unit_path(system: bool, label: &str) -> Result<PathBuf> {
+    let unit = format!("{label}.service");
+    Ok(if system { PathBuf::from("/etc/systemd/system").join(&unit) } else {
+        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).context("HOME is not set")?;
+        base.join("systemd/user").join(&unit)
+    })
+}
+
+/// `service refresh [--system] [--label L] [--dry-run]`: render the installed unit again with this launcher's settings
+/// (an upgrade's: a 2.8 unit has no `TimeoutStopSec`), keeping its program, account and environment, and restart it if
+/// it runs (`try-restart`, after a daemon-reload when the unit changed). Not installed: an error (the caller restarts what it has). The package's
+/// postinstall runs it on every upgrade.
+pub fn refresh(rest: &[String]) -> Result<()> {
+    let opts = rest;
+    let dry = opts.iter().any(|o| o == "--dry-run");
+    let system = opts.iter().any(|o| o == "--system");
+    let label = flag(opts, "--label").unwrap_or_else(|| LABEL.to_string());
+    if label.is_empty() || !label.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)) {
+        bail!("bad label {label:?}");
+    }
+    let unit = format!("{label}.service");
+    let path = unit_path(system, &label)?;
+    let Ok(old) = std::fs::read_to_string(&path) else {
+        bail!("not installed: {}", path.display());
+    };
+    let (mut spec, description) = oarbank_core::service::systemd_spec(&old)
+        .with_context(|| format!("{} is not a unit this launcher installs", path.display()))?;
+    spec.label = label.clone();
+    spec.stop_timeout_s = Some(oarbank_core::service::AGENT_STOP_TIMEOUT_S);
+    let text = oarbank_core::service::systemd_unit(&spec, &description, system);
+    let changed = text != old;
+    if changed {
+        if dry {
+            println!("# {}\n{text}", path.display());
+        } else {
+            let tmp = path.with_extension("service.tmp");
+            std::fs::write(&tmp, &text)?;
+            std::fs::rename(&tmp, &path)?;
+        }
+        systemctl(!system, &["daemon-reload"], dry)?;
+    }
+    let o = systemctl(!system, &["try-restart", &unit], dry)?;
+    if !o.status.success() {
+        bail!("systemctl try-restart failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+    }
+    println!("{} {unit}", if changed { "refreshed" } else { "up to date:" });
+    Ok(())
+}
+
 /// `service install|uninstall|status [--system [--user NAME]] [--label L] [--dry-run] [-- agent args...]`
 pub fn service(home: &Home, rest: &[String]) -> Result<()> {
     let split = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
@@ -34,11 +85,7 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
     let unit = format!("{label}.service");
     let helper_unit = format!("{label}.session.service");
     let helper_path = PathBuf::from("/etc/systemd/user").join(&helper_unit);
-    let path = if system { PathBuf::from("/etc/systemd/system").join(&unit) } else {
-        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).context("HOME is not set")?;
-        base.join("systemd/user").join(&unit)
-    };
+    let path = unit_path(system, &label)?;
     match opts.get(1).map(String::as_str) {
         Some("install") => {
             let exe = std::fs::canonicalize(std::env::current_exe()?)?;
@@ -122,6 +169,6 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 "last_exit": field("ExecMainStatus"), "current": home.current_target()}))?);
             Ok(())
         }
-        _ => bail!("usage: oarbank-launcher --home <dir> service install|uninstall|status [--system [--user NAME]] [--label L] [--dry-run] [-- agent args]"),
+        _ => bail!("usage: oarbank-launcher --home <dir> service install|uninstall|status [--system [--user NAME]] [--label L] [--dry-run] [-- agent args] | oarbank-launcher service refresh [--system] [--label L] [--dry-run]"),
     }
 }

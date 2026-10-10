@@ -29,7 +29,7 @@ INSTALL_PS1 = REPO / "scripts" / "install" / "oarbank-install.ps1"
 PACKAGE_INSTALL = REPO / "scripts" / "package-install-scripts.sh"
 SECRET = "OB2-0SECRETCODE0DONOTPRINT0"
 URL = "https://coord.example:7443"
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 
 SHELLS = ["sh"] + (["dash"] if shutil.which("dash") else [])
 
@@ -317,11 +317,19 @@ def test_without_systemd_it_stages_without_a_service_and_exits_0(tmp_path):
     assert "systemd is not running" in r.stdout and SECRET not in r.stdout + r.stderr
 
 
-def test_an_upgrade_of_a_joined_node_restarts_the_service_and_runs_no_setup(post):
+def test_an_upgrade_of_a_joined_node_renders_its_unit_again_and_runs_no_setup(post):
+    # a 2.8 unit has no TimeoutStopSec: the new launcher renders it again (and restarts the service itself), so a stop
+    # gives the agent the time to stop its jobs
     (post.var / "agent").mkdir(parents=True)
     (post.var / "agent" / "agent.json").write_text("{}")
     r = post.run(env={"OARBANK_JOIN_CODE": SECRET})
-    assert r.returncode == 0 and post.calls() == []
+    assert r.returncode == 0 and [c["argv"] for c in post.calls()] == [["service", "refresh", "--system"]]
+    assert post.tools() == [] and r.stdout.splitlines() == ["Oarbank: upgraded; the service restarted on the new launcher"]
+    # a launcher that cannot refresh it (an edited unit): the service still restarts on the new launcher
+    post.rcs(1)
+    (post.bin / "calls.jsonl").unlink()
+    r = post.run()
+    assert r.returncode == 0 and [c["argv"] for c in post.calls()] == [["service", "refresh", "--system"]]
     assert ["systemctl", "try-restart", "dev.codonic.oarbank.agent.service"] in post.tools()
 
 

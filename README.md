@@ -35,10 +35,12 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Release 2.8.0** is out: install, then join. Node packages ask nothing; paste the join code into **Oarbank Node**
-> or run `sudo oarbank-node join`, and the console's **Add machine…** shows what to run on each system. Installers
-> (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI), one-line installers and native coordinator
-> installers are on the [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0).
+> **Release 2.9.0** is out: one settings model for the whole fleet (groups, locks, campaign overrides, settings as
+> code, managed settings that only tighten), host tools by version, module settings, the macOS and Linux coordinator
+> as a system service (a 2.8 coordinator moves with a guided migration), a new menu bar and tray, and nodes that stop
+> their jobs cleanly. See the [changelog](CHANGELOG.md) for what changes on upgrade. Installers (macOS pkg for Apple
+> silicon and Intel, deb and rpm, Windows MSI), one-line installers and native coordinator installers are on the
+> [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.9.0).
 > [Get started](https://docs.codonic.dev/oarbank/get-started) walks through the setup.
 
 ## What it does
@@ -105,7 +107,7 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Download the packages for your computers from the [2.8.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0), check the
+Download the packages for your computers from the [2.9.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.9.0), check the
 [Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
 packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1` for agents;
@@ -179,7 +181,7 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Yes: the [2.8.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.8.0) has the installers for macOS, Linux and Windows.
+**Can I install it today?** Yes: the [2.9.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.9.0) has the installers for macOS, Linux and Windows.
 [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the

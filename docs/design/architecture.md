@@ -211,7 +211,10 @@ runner to stop as a release does (a checkpointing runner checkpoints first; a fr
 what has not stopped after at most 15 s, releases each attempt as `agent_stop` (`AGENT_STOPPED`: requeued, no charge to
 the job or the node), waits up to 10 s more for the releases and a last checkpoint's upload, lets dropped services finish
 stopping, and exits. The launcher's service definitions give it 60 s (launchd `ExitTimeOut`, systemd `TimeoutStopSec`,
-the Windows service's stop wait hint). A job a cancel or revoke already ends keeps that ending. Module services are not
+the Windows service's stop wait hint). A package upgrade renders an installed definition again with the new launcher's
+settings (`oarbank-launcher service refresh`, run by the pkg's and the deb/rpm's postinstall; it keeps the job's program,
+account and environment), so a node set up by 2.8 gets the 60 s too; a Windows major upgrade runs setup, which creates
+the service anew. A job a cancel or revoke already ends keeps that ending. Module services are not
 stopped: a lasting one is adopted by the next agent (service-endpoints.md).
 
 An agent that ends without stopping its runners (killed, crashed) leaves none either. On Windows a runner's Job Object is

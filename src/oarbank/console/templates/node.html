@@ -132,7 +132,7 @@
   {% call m.op_form("settings.apply", n.node_id, "Set path", inline=False, tier="T1", return_to="/nodes/" ~ n.node_id ~ "#tools") %}
     <input type="hidden" name="scope" value="node"><input type="hidden" name="scope_id" value="{{ n.node_id }}">
     <label>tool <select name="tool">{% for tid in T.definitions %}<option>{{ tid }}</option>{% endfor %}</select></label>
-    <label>only for module (empty: every module) <input name="module" class="mono" placeholder="minos-gatk"></label>
+    <label>only for module (empty: every module) <input name="module" class="mono" placeholder="genomics"></label>
     <label>path <input name="path" class="mono" style="width:100%" required list="tool-paths-{{ n.node_id }}"
       placeholder="{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}{% if loop.first %}{{ i.path }}{% endif %}{% endfor %}{% endfor %}"></label>
     <datalist id="tool-paths-{{ n.node_id }}">{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}<option value="{{ i.path }}">{{ tid }} {{ i.version }}</option>{% endfor %}{% endfor %}</datalist>

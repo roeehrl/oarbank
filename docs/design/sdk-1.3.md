@@ -1,7 +1,7 @@
 # SDK 1.3 and core 2.3: what a real module needed
 
 Status: design for the six open issues on the public SDK repository (oarbank-sdk #2–#7). Each was written with the
-SDK's invented `render` example; a real module, minos-gatk, works around every one of them today. One release
+SDK's invented `render` example; a real module, a genomics pipeline, works around every one of them today. One release
 resolves them all: **oarbank-sdk 1.3.0** and **core 2.3.0**.
 
 **Implementation status.** Built as designed (SDK 1.3.0, core 2.3.0). Where the build adds to the design:

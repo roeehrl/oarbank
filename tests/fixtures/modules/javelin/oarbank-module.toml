@@ -13,7 +13,7 @@ stability = "experimental"
 description = "Core test fixture: a host JDK resolved by version on each node"
 
 [requires]
-core = ">=2.5,<3"
+core = ">=2.9,<3"
 module_protocol = [1]
 runner_protocol = [1]
 platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]
