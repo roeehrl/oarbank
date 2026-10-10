@@ -98,7 +98,7 @@ def test_install_refusals(db, tmp_path):
         modstore.install(db, bundle_of(relay_version("1.2.0", fields_type="number")), self_test=False)
     modstore.install(db, bundle_of(relay_version("2.0.0", fields_type="number")), self_test=False)   # a major may
     d = relay_version("1.3.0")
-    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.3,<3"', 'core = ">=3.0"')
+    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.9,<3"', 'core = ">=3.0"')
     (d / "oarbank-module.toml").write_text(m)
     with pytest.raises(modstore.InstallError, match="needs core >=3.0"):
         modstore.install(db, bundle_of(d), self_test=False)
@@ -118,7 +118,7 @@ def relay_declaring(version: str, requires: str = "", tail: str = "") -> Path:
     """The relay fixture at `version` with per-platform declarations: lines added to [requires], and
     tables appended to the manifest."""
     d = relay_version(version)
-    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.3,<3"', 'core = ">=2.3,<3"\n' + requires)
+    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.9,<3"', 'core = ">=2.9,<3"\n' + requires)
     (d / "oarbank-module.toml").write_text(m + tail)
     return d
 

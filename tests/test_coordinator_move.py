@@ -423,7 +423,7 @@ def coordinator_here_only(tmp_path) -> Path:
     d = tmp_path / "relay-here"
     shutil.copytree(RELAY_DIR, d, ignore=shutil.ignore_patterns("__pycache__", "dist"))
     m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace(
-        'core = ">=2.3,<3"', f'core = ">=2.3,<3"\ncoordinator_platforms = ["{portable.host_platform()}"]')
+        'core = ">=2.9,<3"', f'core = ">=2.9,<3"\ncoordinator_platforms = ["{portable.host_platform()}"]')
     (d / "oarbank-module.toml").write_text(m)
     return d
 

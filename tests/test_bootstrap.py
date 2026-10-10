@@ -331,10 +331,10 @@ def test_datasets_create_of_a_pinned_id_needs_the_pinned_contents(db):
 @pytest.mark.parametrize("edit, why", [
     (lambda t: t.replace('determinism = "none"\n', ""), "a bootstrap stage has determinism none"),
     (lambda t: t[:t.index("\n[[datasets.pinned]]")] + "\n" + t[t.index("[[operations]]"):], r"need \[\[datasets.pinned\]\]"),
-    (lambda t: t.replace('core = ">=2.4,<3"', 'core = ">=2.3,<3"'), "need requires.core >= 2.4"),
+    (lambda t: t.replace('core = ">=2.9,<3"', 'core = ">=2.3,<3"'), "need requires.core >= 2.4"),
 ])
 def test_install_refuses_a_bootstrap_stage_the_sdk_refuses(tmp_path, db, monkeypatch, edit, why):
-    from oarbank_sdk import bundle as B, manifest as mf
+    from oarbank_sdk import bundle as B, manifest as mf, settings as S
     src = tmp_path / "depot"
     shutil.copytree(DEPOT_DIR, src, ignore=shutil.ignore_patterns("__pycache__"))
     (src / "oarbank-module.toml").write_text(edit((src / "oarbank-module.toml").read_text(encoding="utf-8")))
@@ -343,6 +343,7 @@ def test_install_refuses_a_bootstrap_stage_the_sdk_refuses(tmp_path, db, monkeyp
     with monkeypatch.context() as m:                                    # a bundle made by a tool that skips the rules
         m.setattr(mf.Manifest, "_bootstrap_rules", lambda self, chain: None)
         m.setattr(mf.Manifest, "core_keys_used", lambda self: [])
+        m.setattr(S, "core_gate", lambda *a, **k: [])                   # depot's node setting needs core 2.9 too
         out, _ = B.build(src, tmp_path / "d.mfb")
     with pytest.raises(modstore.InstallError, match=why):
         modstore.install(db, out, actor="test", self_test=False)        # the core refuses to install it
