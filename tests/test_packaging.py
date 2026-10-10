@@ -99,28 +99,28 @@ def test_the_coordinator_installer_lists_every_option_and_refuses_unknown_ones()
     r = subprocess.run(["bash", str(script), "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.startswith("usage: install-oarbankd.sh")
     options = {o for pat in re.findall(r"^\s+(-[-\w|]+)\)", script.read_text(encoding="utf-8"), re.M) for o in pat.split("|")}
-    assert {"--build", "--checkout", "--agent-bind", "--dry-run", "--help", "-h"} <= options
+    assert {"--build", "--installed", "--agent-bind", "--owner", "--pair", "--refresh", "--uninstall", "--dry-run", "--help",
+            "-h"} <= options and "--checkout" not in options
     assert all(re.search(rf"^\s+(-h, )?{re.escape(o)}\b", r.stdout, re.M) for o in options), r.stdout
-    for argv in (["--bogus"], ["stray"], ["--build"], ["--checkout", "--build", "x.tar.gz", "--agent-bind", "127.0.0.1"]):
+    for argv in (["--bogus"], ["stray"], ["--build"],
+                 ["--installed", "x", "--build", "x.tar.gz", "--agent-bind", "127.0.0.1", "--dry-run"],
+                 ["--installed", "x", "--agent-bind", "127.0.0.1", "--pair", "code", "--dry-run"],
+                 ["--installed", "x", "--agent-bind", "127.0.0.1", "--from", "https://a", "--dry-run"],
+                 ["--installed", "x", "--agent-bind", "127.0.0.1", "--keep-programs", "--dry-run"],
+                 ["--refresh", "--agent-bind", "127.0.0.1", "--dry-run"],
+                 ["--prepare", "--installed", "x", "--dry-run"]):
         r = subprocess.run(["bash", str(script), *argv], capture_output=True, text=True)
         assert r.returncode == 2 and "install-oarbankd.sh: " in r.stderr and not r.stdout, (argv, r.stderr)
 
 
-UV_HOMEBREW = ("/opt/homebrew/bin/uv", "/usr/local/bin/uv", "/home/linuxbrew/.linuxbrew/bin/uv")
-
-
-def _installer(tmp_path, *argv, uv=True):
-    """install-oarbankd.sh in a scratch HOME, with only a fake uv (when `uv`) and the system tools on PATH."""
-    import os
+def _installer(tmp_path, *argv, env=None):
+    """install-oarbankd.sh with every system path under <tmp>/root (OARBANK_INSTALL_ROOT) and the system tools on PATH."""
     bin_dir = tmp_path / "tools"
     bin_dir.mkdir(exist_ok=True)
-    (bin_dir / "uv").unlink(missing_ok=True)
-    if uv:
-        (bin_dir / "uv").write_text("#!/bin/sh\nexit 0\n")
-        (bin_dir / "uv").chmod(0o755)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin", "XDG_BIN_HOME": str(tmp_path / "nobin")}
+    env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin", "OARBANK_INSTALL_ROOT": str(tmp_path / "root"),
+           **(env or {})}
     script = WXS.parents[1] / "oarbankd" / "install-oarbankd.sh"
     return subprocess.run(["bash", str(script), *argv], capture_output=True, text=True, env=env), bin_dir
 
@@ -139,53 +139,122 @@ def _coordinator_build(tmp_path, platform) -> Path:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
-def test_the_coordinator_installer_finds_uv_and_reads_builds_on_macos_and_linux(tmp_path):
-    # --checkout ran /opt/homebrew/bin/uv (macOS with Homebrew only) and the platform check spoke of "this Mac"
+def test_the_coordinator_installer_reads_builds_and_installs_them_root_owned(tmp_path):
     import hashlib
+    import os
     import platform as pf
-    r, bin_dir = _installer(tmp_path, "--checkout", "--agent-bind", "127.0.0.1", "--dry-run")
-    assert r.returncode == 0, r.stderr
-    assert f"{bin_dir}/uv sync -q --inexact" in r.stdout
-    assert f"{bin_dir}:" in r.stdout                                  # the services find the same uv
-    if not any(Path(p).is_file() for p in ("/usr/bin/uv", "/bin/uv", *UV_HOMEBREW)):     # else it finds that one
-        r, _ = _installer(tmp_path, "--checkout", "--agent-bind", "127.0.0.1", "--dry-run", uv=False)
-        assert r.returncode == 1 and "uv is not installed" in r.stderr, r.stderr
     want = {("Darwin", "arm64"): "darwin-arm64", ("Darwin", "x86_64"): "darwin-amd64",
             ("Linux", "aarch64"): "linux-arm64", ("Linux", "x86_64"): "linux-amd64"}[(pf.system(), pf.machine())]
-    r, _ = _installer(tmp_path, "--build", str(_coordinator_build(tmp_path, "plan9-mips")), "--agent-bind", "127.0.0.1")
+    r, _ = _installer(tmp_path, "--build", str(_coordinator_build(tmp_path, "plan9-mips")), "--agent-bind", "127.0.0.1", "--dry-run")
     assert r.returncode == 1 and f"the build is for plan9-mips, this machine is {want}" in r.stderr, r.stderr
     build = _coordinator_build(tmp_path, want)
+    if os.geteuid() != 0:                                  # system services are root's to create
+        r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "127.0.0.1")
+        assert r.returncode == 1 and "run as root" in r.stderr and not (tmp_path / "root").exists(), r.stderr
     r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "127.0.0.1", "--dry-run")
     assert r.returncode == 0, r.stderr
-    assert f"coordinator-app/1.2.3-{hashlib.sha256(build.read_bytes()).hexdigest()[:12]}" in r.stdout
+    programs = tmp_path / "root" / ("Library/Oarbank/Coordinator" if pf.system() == "Darwin" else "opt/oarbank/coordinator-builds")
+    assert f"install -d -m 0755 {programs} {programs}/1.2.3-{hashlib.sha256(build.read_bytes()).hexdigest()[:12]}" in r.stdout
     # a build brings its own uv, first on the services' PATH, so oarbankd installs module dependencies on a machine
     # without one (it reported "uv is not available on this coordinator")
-    r, bin_dir = _installer(tmp_path, "--build", str(build), "--agent-bind", "127.0.0.1", "--dry-run", uv=False)
-    assert r.returncode == 0, r.stderr
-    data = tmp_path / "home" / ("Library/Application Support/Oarbank" if pf.system() == "Darwin" else ".local/share/oarbank")
     svc_path = re.search(r"<key>PATH</key><string>([^<]*)</string>|\"PATH=([^\"]*)\"", r.stdout)
-    assert (svc_path.group(1) or svc_path.group(2)).split(":")[0] == f"{data}/coordinator-app/current/bin", r.stdout
-    assert str(bin_dir) not in r.stdout
+    assert (svc_path.group(1) or svc_path.group(2)).split(":")[0] == f"{programs}/current/bin", r.stdout
+    assert not (tmp_path / "root").exists()                 # a dry run writes nothing
+
+
+def _record(tmp_path, linux: bool):
+    path = tmp_path / "root" / ("etc/oarbank" if linux else "Library/Application Support/Oarbank") / "coordinator-service.json"
+    path.parent.mkdir(parents=True)
+    return path
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
-def test_the_coordinator_installer_writes_systemd_units_on_linux(tmp_path):
+def test_the_coordinator_installer_writes_system_units_on_linux(tmp_path):
+    import os
     # run as on a Linux machine (a fake uname) wherever the suite runs
     fake = tmp_path / "tools"
     fake.mkdir()
     (fake / "uname").write_text('#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n')
     (fake / "uname").chmod(0o755)
     build = _coordinator_build(tmp_path, "linux-amd64")
-    r, bin_dir = _installer(tmp_path, "--build", str(build), "--agent-bind", "10.0.0.1", "--dry-run")
+    r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "10.0.0.1", "--owner", "alice", "--dry-run")
     assert r.returncode == 0, r.stderr
-    home = tmp_path / "home"
-    assert f"# {home}/.config/systemd/user/dev.codonic.oarbank.oarbankd.service" in r.stdout
-    assert f'ExecStart="{home}/.local/share/oarbank/coordinator-app/current/bin/oarbankd" "--agent-bind" "10.0.0.1"' in r.stdout
-    assert f'"PATH={home}/.local/share/oarbank/coordinator-app/current/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"' in r.stdout
-    assert "systemctl --user enable --now" in r.stdout and "launchctl" not in r.stdout
+    root = tmp_path / "root"
+    units = r.stdout.split(f"# {root}/etc/systemd/system/")
+    oarbankd, console = units[1], units[2]
+    assert oarbankd.startswith("dev.codonic.oarbank.oarbankd.service") and console.startswith("dev.codonic.oarbank.console.service")
+    assert f'ExecStart="{root}/opt/oarbank/coordinator-builds/current/bin/oarbankd" "--agent-bind" "10.0.0.1"' in oarbankd
+    for line in ("User=oarbankd", "Group=oarbankd", "SupplementaryGroups=oarbank-admin", "StateDirectory=oarbank/coordinator",
+                 "StateDirectoryMode=0700", "UMask=0077", "NoNewPrivileges=yes", "Restart=on-failure", "WantedBy=multi-user.target",
+                 "RuntimeDirectory=oarbank-coordinator", "RuntimeDirectoryMode=0750"):
+        assert f"\n{line}\n" in oarbankd, line
+    assert "RuntimeDirectory" not in console and "\nRestart=always\n" in console
+    assert '"OARBANKD_ADMIN_SOCKET=/run/oarbank-coordinator/admin.sock" "OARBANKD_ADMIN_GROUP=oarbank-admin"' in oarbankd
+    assert '"OARBANK_SECRET_STORE=file"' in oarbankd
+    assert f'"PATH={root}/opt/oarbank/coordinator-builds/current/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"' in oarbankd
+    assert "useradd --system --user-group --no-create-home" in r.stdout and "usermod -aG oarbank-admin alice" in r.stdout
+    assert "systemctl enable dev.codonic.oarbank.oarbankd.service" in r.stdout
+    assert "launchctl" not in r.stdout and "systemctl --user" not in r.stdout and "linger" not in r.stdout
+    assert "next login (or run: newgrp oarbank-admin)" in r.stdout
+    # the record of the install, and an upgrade that writes the same units from it
+    rec = re.search(r'^\{"format": "1".*$', r.stdout, re.M).group(0)
+    _record(tmp_path, linux=True).write_text(rec + "\n")
+    assert '"agent_bind": "10.0.0.1"' in rec and '"pair": ""' in rec
+    current = root / "opt/oarbank/coordinator-builds/current"           # what the install would have unpacked
+    (current / "bin").mkdir(parents=True)
+    (current / "oarbank-coordinator.json").write_text('{"format": 1, "version": "1.2.3", "platform": "linux-amd64"}')
+    for name in ("oarbankd", "oarbank-console"):
+        (current / "bin" / name).write_text("#!/bin/sh\n")
+        (current / "bin" / name).chmod(0o755)
+    r, _ = _installer(tmp_path, "--refresh", "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert f'ExecStart="{os.path.realpath(current)}/bin/oarbankd" "--agent-bind" "10.0.0.1"' in r.stdout
+    assert "refreshed and restarted" in r.stdout
+    r, _ = _installer(tmp_path, "--uninstall", "--dry-run")
+    assert r.returncode == 0 and "systemctl disable --now dev.codonic.oarbank.oarbankd.service" in r.stdout
     (fake / "uname").write_text('#!/bin/sh\necho MINGW64_NT-10.0\n')
     r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "10.0.0.1", "--dry-run")
     assert r.returncode == 1 and "installs on macOS and Linux (install-oarbankd.ps1 on Windows), not MINGW64_NT-10.0" in r.stderr, r.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install-oarbankd.sh is for macOS and Linux (Windows has install-oarbankd.ps1)")
+def test_the_coordinator_installer_writes_launch_daemons_on_macos(tmp_path):
+    fake = tmp_path / "tools"
+    fake.mkdir()
+    (fake / "uname").write_text('#!/bin/sh\ncase "$1" in -s) echo Darwin ;; -m) echo arm64 ;; esac\n')
+    (fake / "uname").chmod(0o755)
+    build = _coordinator_build(tmp_path, "darwin-arm64")
+    r, _ = _installer(tmp_path, "--build", str(build), "--agent-bind", "100.64.0.1", "--owner", "alice", "--pair", "PAIR-1",
+                      "--from", "https://100.64.0.2:7443", "--from-ca", "pin", "--archive-home", "--dry-run")
+    assert r.returncode == 0, r.stderr
+    root = tmp_path / "root"
+    data = f"{root}/Library/Application Support/Oarbank"
+    plists = r.stdout.split(f"# {root}/Library/LaunchDaemons/")
+    oarbankd, console = plists[1], plists[2]
+    for plist in (oarbankd, console):
+        for want in ("<key>UserName</key><string>_oarbankd</string>", "<key>GroupName</key><string>_oarbankd</string>",
+                     "<key>RunAtLoad</key><true/>", "<key>Umask</key><integer>63</integer>",
+                     "<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.coordinator</string></array>",
+                     f"<key>OARBANKD_HOME</key><string>{data}/coordinator</string>",
+                     f"<key>OARBANKD_ADMIN_SOCKET</key><string>{data}/coordinator-run/admin.sock</string>",
+                     "<key>OARBANKD_ADMIN_GROUP</key><string>_oarbankadmin</string>",
+                     "<key>OARBANK_SECRET_STORE</key><string>file</string>"):
+            assert want in plist, want
+    assert "<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>" in oarbankd
+    assert "<key>KeepAlive</key><true/>" in console
+    assert ("<string>--standby</string><string>--pair</string><string>PAIR-1</string><string>--from</string>"
+            "<string>https://100.64.0.2:7443</string><string>--from-ca</string><string>pin</string><string>--archive-home</string>") in oarbankd
+    assert f"install -d -o _oarbankd -g _oarbankd -m 0700 {data}/coordinator" in r.stdout
+    assert f"install -d -o _oarbankd -g _oarbankadmin -m 0750 {data}/coordinator-run" in r.stdout
+    assert "/usr/sbin/dseditgroup -o edit -a alice -t user _oarbankadmin" in r.stdout
+    assert f"/bin/launchctl bootstrap system {root}/Library/LaunchDaemons/dev.codonic.oarbank.oarbankd.plist" in r.stdout
+    assert "gui/" not in r.stdout and "LaunchAgents" not in r.stdout
+    assert '"pair": "PAIR-1"' in r.stdout          # the record keeps the standby for --refresh (root's alone: 0600)
+    # a migration's first step: the account, the group and the directories, no service and no record
+    r, _ = _installer(tmp_path, "--prepare", "--owner", "alice", "--dry-run")
+    assert r.returncode == 0 and "dseditgroup -o edit -a alice -t user _oarbankadmin" in r.stdout, r.stderr
+    assert "launchctl" not in r.stdout and "coordinator-service.json" not in r.stdout
+    assert "chmod 0600" in (WXS.parents[1] / "oarbankd" / "install-oarbankd.sh").read_text()
 
 
 WINDOWS_INSTALLER = WXS.parents[1] / "oarbankd" / "install-oarbankd.ps1"

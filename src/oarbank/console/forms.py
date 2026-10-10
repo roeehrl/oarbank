@@ -54,6 +54,8 @@ def settings_changes(form) -> dict:
              "module": (form.get("module") or "").strip(), "key": f"tool.{form.get('tool').strip()}.path"}
         path = (form.get("path") or "").strip()
         return {"changes": [{**c, "value": path} if path else {**c, "reset": True}]}
+    if form.get("bulk"):
+        return bulk_changes(form)
     scope, sid = form.get("scope") or "node", form.get("scope_id") or ""
     base = {"scope": scope, "scope_id": sid, **({"module": form.get("module").strip()} if form.get("module") else {})}
     getlist = getattr(form, "getlist", None)
@@ -70,10 +72,13 @@ def settings_changes(form) -> dict:
             except FieldErrors as e:
                 errors += e.errors
                 continue
+            # a lock (fleet and group rows): ticked, the value set here holds below (`enf.<key>`; `had_enf`: it did)
+            enforce = scope in ("fleet", "group") and bool(form.get(f"enf.{key}"))
+            was_enforced = form.get(f"had_enf.{key}") == "1"
             cur = form.get(f"cur.{key}")
-            if had and cur is not None and json.dumps(v, sort_keys=True) == cur:
+            if had and cur is not None and json.dumps(v, sort_keys=True) == cur and enforce == was_enforced:
                 continue
-            changes.append({**base, "key": key, "value": v})
+            changes.append({**base, "key": key, "value": v, **({"enforce": True} if enforce else {})})
         elif had:
             changes.append({**base, "key": key, "reset": True})
     if errors:
@@ -82,6 +87,79 @@ def settings_changes(form) -> dict:
         raise FieldErrors([{"key": keys[0] if keys else "", "message": "nothing changed: tick Override to set a value here, "
                                                                      "or untick it to go back to the inherited one"}])
     return {"changes": changes}
+
+
+def bulk_changes(form) -> dict:
+    """The Bulk changes page: one setting (`bulk_key`, its input kind `t.<key>`, the value `v.<key>`) set or reset
+    (`bulk_action`) on every ticked node (`node`), as one change set."""
+    getlist = getattr(form, "getlist", None)
+    nodes = [x for x in (getlist("node") if getlist else [form.get("node")]) if x]
+    key = (form.get("bulk_key") or "").strip()
+    if not key:
+        raise FieldErrors([{"key": "", "message": "choose a setting"}])
+    if not nodes:
+        raise FieldErrors([{"key": key, "message": "tick at least one node"}])
+    if form.get("bulk_action") == "reset":
+        return {"changes": [{"scope": "node", "scope_id": n, "key": key, "reset": True} for n in nodes]}
+    from ..coordinator.settings import REGISTRY
+    from ..coordinator.settings.views import input_of
+    d = REGISTRY.get(key)
+    kind = input_of(d)["kind"] if d else "text"
+    raw = form.get("bulk_value") or ""
+    if kind == "checkbox":
+        v = raw.strip().lower() in ("1", "true", "on", "yes")
+    else:
+        v = _setting_value({f"v.{key}": raw}, key, kind if kind in ("number", "list", "json") else "text")
+    return {"changes": [{"scope": "node", "scope_id": n, "key": key, "value": v} for n in nodes]}
+
+
+def group_params(form) -> dict:
+    """The group form (the Groups page and a group's page): name, description, the selector's terms (any left empty
+    is not a term), explicit members, or the selector as JSON (`selector_json`, which wins when given)."""
+    getlist = getattr(form, "getlist", None)
+    split = lambda k: [x.strip() for x in (form.get(k) or "").replace("\n", ",").split(",") if x.strip()]
+    if (form.get("selector_json") or "").strip():
+        try:
+            sel = json.loads(form["selector_json"])
+        except ValueError:
+            raise ValueError("selector: not valid JSON")
+    else:
+        sel = {}
+        for k in ("os", "arch"):
+            if (form.get(f"sel.{k}") or "").strip():
+                sel[k] = form.get(f"sel.{k}").strip()
+        if split("sel.labels"):
+            sel["labels"] = split("sel.labels")
+        if split("sel.hostname"):
+            sel["hostname"] = split("sel.hostname")
+        if form.get("sel.battery") in ("yes", "no"):
+            sel["battery"] = form.get("sel.battery") == "yes"
+        for k in ("ram_gb_min", "ram_gb_max", "cores_min"):
+            raw = (form.get(f"sel.{k}") or "").strip()
+            if raw:
+                try:
+                    sel[k] = float(raw)
+                except ValueError:
+                    raise ValueError(f"{k.replace('_', ' ')}: a number")
+    out = {"selector": sel, "members": [x for x in (getlist("member") if getlist else []) if x],
+           "description": (form.get("description") or "").strip()}
+    if (form.get("name") or "").strip():
+        out["name"] = form.get("name").strip()
+    return out
+
+
+def node_labels(form) -> dict:
+    """Labels added to or removed from a node (`labels`, comma-separated; `label_action` add | remove), or from every
+    ticked node (`node`, the Bulk changes page). A `params` field (a label's Remove button) is the request itself."""
+    if form.get("params"):
+        return json.loads(form["params"])
+    getlist = getattr(form, "getlist", None)
+    labels = [x.strip() for x in (form.get("labels") or "").split(",") if x.strip()]
+    out = {"remove" if form.get("label_action") == "remove" else "add": labels}
+    nodes = [x for x in (getlist("node") if getlist else []) if x]
+    if nodes:
+        out["nodes"] = nodes
+    return out
 
 
 def _coerce(v: str):
@@ -160,6 +238,9 @@ MAPPERS = {
     # a device code stays a string (WDJB-MJHT); the coordinator folds case and dashes
     "nodes.admit_code": lambda f, ctx: {"user_code": (f.get("user_code") or "").strip()},
     "settings.apply": lambda f, ctx: settings_changes(f),
+    "groups.create": lambda f, ctx: group_params(f),
+    "groups.update": lambda f, ctx: group_params(f),
+    "nodes.label": lambda f, ctx: node_labels(f),
     # a core secret's value is the form's `secret` field, sent beside params
     "settings.secrets.set": lambda f, ctx: {},
     "settings.secrets.clear": lambda f, ctx: {},
@@ -175,8 +256,10 @@ MAPPERS = {
     "access.tokens.create": lambda f, ctx: {"label": f.get("p.label") or "", "role": f.get("p.role") or "viewer",
                                             "days": float(f.get("p.days") or 90)},
     # a secret's value is the form's `secret` field, sent beside params; never a parameter
-    "secrets.set": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {})},
-    "secrets.clear": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {})},
+    "secrets.set": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {}),
+                                   **({"group": f.get("p.group")} if f.get("p.group") else {})},
+    "secrets.clear": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {}),
+                                     **({"group": f.get("p.group")} if f.get("p.group") else {})},
     "jobs.set_priority": lambda f, ctx: {"priority": int(f.get("priority") or 0)},
 }
 

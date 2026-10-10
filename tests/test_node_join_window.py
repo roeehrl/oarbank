@@ -664,7 +664,9 @@ def test_main_prints_the_link_and_exits_when_idle(env, monkeypatch, capsys, tmp_
     launcher.write_text("")
     start = time.monotonic()
     assert jw.main(["--launcher", str(launcher), "--no-browser", "--link", f"oarbank://join?code={CODE}"]) == 0
-    assert time.monotonic() - start < 5
+    # well short of the 180 s default; a stray connection from another test worker can hold this one-request-at-a-time
+    # server for its 10 s socket timeout, which a loaded CI runner hit
+    assert time.monotonic() - start < 60
     out = capsys.readouterr().out
     assert out.startswith("Open this private link on this computer: http://127.0.0.1:") and "/#" in out
     assert CODE not in out

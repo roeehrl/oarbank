@@ -21,6 +21,12 @@ coordinator again. Running work continues through the move; dispatch pauses for 
   <div class="row"><span class="chip">{{ h.platform }}</span><span class="chip">{{ h.manager }}</span>
     <span class="chip {{ 'ok' if h.managed else 'warn' }}">pid {{ h.pid }}{% if not h.managed %} · not run by the service manager{% endif %}</span>
     <span class="chip {{ 'ok' if h.sandbox.backend else 'bad' }}">module sandbox {{ h.sandbox.backend or 'none' }}</span></div>
+  {% set acct = (h.services | selectattr('installed') | map(attribute='account') | select | first) if h.services else none %}
+  {% if h.form == 'system' %}<div class="small"><span class="chip ok">System service</span> runs from boot, as <span class="mono">{{ acct or 'its service account' }}</span>; it keeps running with nobody logged in.</div>
+  {% elif h.form == 'per-user' %}<div class="small" role="alert"><span class="chip warn">Per-user service</span> runs only while <span class="mono">{{ acct or 'its owner' }}</span> is logged in: after a restart the fleet has no coordinator until they log in.
+    Move it to a system service: open Oarbank Coordinator and choose <b>Move the coordinator to a system service…</b>, or run <span class="mono">oarbank coordinator migrate</span>.</div>
+  {% else %}<div class="small mut">Not installed as a service (run by hand).</div>{% endif %}
+  {% if h.migration and h.migration.state != 'done' %}<div class="small {{ 'mut' if h.migration.state == 'started' else '' }}">Migration to the system service: <b>{{ h.migration.state }}</b>{% if h.migration.steps %} — {{ h.migration.steps[-1].detail }}{% endif %}</div>{% endif %}
   <table class="small">
     <tr><th>service</th><th>state</th><th>start</th><th>account</th><th>process</th></tr>
     {% for v in h.services + ([h.sandbox.helper] if h.sandbox.helper else []) %}<tr>
@@ -65,7 +71,7 @@ coordinator again. Running work continues through the move; dispatch pauses for 
   {% if not p or p.state in ('done', 'cancelled') %}
   {% call m.op_form("coordinator.prepare", "", "Review plan…", cls="pri", inline=False) %}
   <label class="small">target machine <select name="target_input" aria-label="target machine">{% for n in nodes %}<option value="{{ n.hostname }}">{{ n.hostname }}</option>{% endfor %}</select></label>
-  <span class="small mut">an enrolled node's agent installs the standby coordinator; for another host, run <span class="mono">oarbank coordinator prepare --to http://host:7443</span></span>
+  <span class="small mut">an enrolled node's agent fetches and verifies the standby coordinator, then names the one command that installs it as a system service there (as root); for another host, run <span class="mono">oarbank coordinator prepare --to http://host:7443</span></span>
   {% endcall %}
   {% else %}
   <div class="row"><span class="chip">plan {{ p.plan_id }}</span><span class="chip">{{ p.state }}</span><span class="chip mono">{{ p.target_url }}</span></div>

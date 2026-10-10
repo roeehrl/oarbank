@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 89 operations, 2 explain kinds, 127 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 93 operations, 2 explain kinds, 127 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -44,7 +44,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `modules.check` | T0 | yes | `oarbank module check [name] [--deep]` | yes |
 | `modules.enable` | T1 | yes | `oarbank module enable <name>@<version>` | yes |
 | `modules.approve` | T2 | yes | `oarbank module approve <name>@<version>` | yes |
-| `modules.enable_canary` | T2 | yes | `oarbank module canary <name>@<version> --node <node>` | yes |
+| `modules.enable_canary` | T2 | yes | `oarbank module canary <name>@<version> --node <node>`<br>`oarbank module canary <name>@<version> --group <group>` | yes |
 | `modules.promote` | T2 | yes | `oarbank module promote <name>[@<canary version>]` | yes |
 | `modules.rollback` | T1 | yes | `oarbank module rollback <name>` | yes |
 | `modules.disable` | T1 | yes | `oarbank module disable <name>` | yes |
@@ -70,9 +70,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `coordinator.builds.sign` | T1 | yes | `oarbank coordinator-build sign <build>` | yes |
 | `releases.promote` | T2 | yes | `oarbank release promote <rid>` | yes |
 | `releases.pin_key` | T3 | yes | `oarbank release keygen` | yes |
-| `protection.rules.update` | T2 | yes | `oarbank protection set <nid> <file>`<br>`oarbank protection preview <nid> <file>` | yes |
-| `protection.rules.restore` | T2 | yes | `oarbank protection restore <nid> <version>` | yes |
-| `protection.rules.canary` | T2 | yes | `oarbank protection canary <nid> <file>`<br>`oarbank protection promote` | yes |
+| `protection.rules.update` | T2 | yes | `oarbank protection set <node> <file>`<br>`oarbank protection set fleet <file>`<br>`oarbank protection set group:<group> <file>`<br>`oarbank protection preview <node> <file>` | yes |
 | `protection.probe_now` | T0 | yes | `oarbank protection probe <nid>` | yes |
 | `alerts.ack` | T0 | yes | `oarbank alerts ack <id> [--useful|--noise]` | yes |
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
@@ -80,6 +78,12 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `settings.apply` | T0 | yes | `oarbank settings set <key> <value> [--node <node>] [--group <group>]`<br>`oarbank settings reset <key> [--node <node>] [--group <group>]` | yes |
 | `settings.secrets.set` | T1 | yes | `oarbank settings set-secret <name>` | yes |
 | `settings.secrets.clear` | T1 | yes | `oarbank settings clear-secret <name>` | yes |
+| `settings.promote` | T1 | yes | `oarbank settings promote <key> --group <group> [--to <group>]` | yes |
+| `groups.create` | T1 | yes | `oarbank groups create <name> [--os <os>] [--label <label>] [--member <node>]` | yes |
+| `groups.update` | T2 | yes | `oarbank groups update <group>` | yes |
+| `groups.rank` | T2 | yes | `oarbank groups rank <group> up|down|top|bottom` | yes |
+| `groups.delete` | T2 | yes | `oarbank groups delete <group>` | yes |
+| `nodes.label` | T1 | yes | `oarbank node label <node> <labels> [--remove]` | yes |
 | `tools.define` | T2 | yes | `oarbank tools define <id> --search <os>=<pattern>` | yes |
 | `tools.delete` | T2 | yes | `oarbank tools delete <id>` | yes |
 | `tools.detect` | T0 | yes | `oarbank tools detect <node>` | yes |
@@ -92,8 +96,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `access.tokens.create` | T2 | yes | `oarbank token create` | yes |
 | `access.tokens.revoke` | T1 | yes | `oarbank op access.tokens.revoke` | yes |
 | `access.login_link` | T1 | yes | `oarbank console login [--account <name>]` | yes |
-| `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]` | yes |
-| `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]` | yes |
+| `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]`<br>`oarbank secret set <module> <name> [--group G]` | yes |
+| `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]`<br>`oarbank secret clear <module> <name> [--group G]` | yes |
 | `modules.cli_token` | T1 | yes | `oarbank cli <module> [args...]` | yes |
 | `access.passkeys.remove` | T1 | yes | `oarbank op access.passkeys.remove` | yes |
 | `audit.verify` | T0 | yes | `oarbank audit verify` | yes |

@@ -1,18 +1,26 @@
 #!/bin/sh
-# Oarbank coordinator pkg: runs as root once the payload is in place. It puts the coordinator's commands on the PATH
-# and nothing else: no service is created, started or stopped here (the browser wizard and oarbank-setup do that, as
-# the user who owns the coordinator).
+# Oarbank coordinator pkg: runs as root once the payload is in place (docs/design/coordinator-system-service.md).
 #
-#   /usr/local/bin/oarbank       -> the app's bundled CLI
-#   /usr/local/bin/oarbank-setup -> the app's guided-setup helper
-#
-# Both are shell launchers that follow the link back to the app, so they run the same as by their full path. A link
-# (an earlier package's, or one made by hand) is replaced; a regular file of the same name is someone else's and stays.
-# Only the link is created: /usr/local/bin keeps its owner and mode when it exists (a payload entry would reset them).
-# Output lands in /var/log/install.log. It always exits 0: the programs are installed whatever happens here.
+#   - The coordinator's commands on the PATH: /usr/local/bin/oarbank -> the app's bundled CLI, /usr/local/bin/oarbank-setup
+#     -> the app's guided-setup helper. Both are shell launchers that follow the link back to the app, so they run the
+#     same as by their full path. A link (an earlier package's, or one made by hand) is replaced; a regular file of the
+#     same name is someone else's and stays. Only the link is created: /usr/local/bin keeps its owner and mode when it
+#     exists (a payload entry would reset them).
+#   - An upgrade of the system service (its record exists): the services are written again from the record and restart
+#     on the new build (install-oarbankd.sh --refresh). No wizard needed.
+#   - An upgrade of an earlier release's per-user coordinator (a LaunchAgent in someone's ~/Library/LaunchAgents): it
+#     moves to the system service (oarbank coordinator migrate). When its keys can only be exported by its owner (nobody
+#     logged in, a locked Keychain), it keeps running per-user, on its Keychain keys, and Oarbank Coordinator offers the
+#     move to that person.
+#   - A first install: nothing more. The services start from the setup wizard, which asks for an administrator once
+#     (the agent address is the person's choice).
+# Output lands in /var/log/install.log, which every account can read: nothing here prints a key or a code. It always
+# exits 0: the programs are installed whatever happens here.
 set -u
-BIN="/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin"
+ROOT="/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator"
+BIN="$ROOT/bin"
 LINKS="/usr/local/bin"
+RECORD="/Library/Application Support/Oarbank/coordinator-service.json"
 /bin/mkdir -p "$LINKS"
 for name in oarbank oarbank-setup; do
     link="$LINKS/$name"
@@ -22,4 +30,22 @@ for name in oarbank oarbank-setup; do
     fi
     /bin/ln -sfn "$BIN/$name" "$link" || echo "Oarbank: could not link $link to $BIN/$name"
 done
+
+if [ -f "$RECORD" ]; then
+    /bin/bash "$ROOT/install-oarbankd.sh" --refresh || echo "Oarbank: the coordinator's services could not be refreshed; run: sudo oarbank-setup"
+    exit 0
+fi
+per_user=
+for plist in /Users/*/Library/LaunchAgents/dev.codonic.oarbank.oarbankd.plist; do
+    [ -f "$plist" ] && per_user=yes
+done
+if [ -n "$per_user" ]; then
+    "$BIN/oarbank" coordinator migrate --run --from-installer --build "$ROOT"
+    case $? in
+        0) echo "Oarbank: the coordinator now runs as a system service" ;;
+        3) echo "Oarbank: the coordinator keeps running per-user until its owner moves it (Oarbank Coordinator offers it)" ;;
+        *) echo "Oarbank: the move to a system service did not complete; the per-user coordinator runs as before" \
+                "(/Library/Application Support/Oarbank/coordinator-migration.json says why)" ;;
+    esac
+fi
 exit 0

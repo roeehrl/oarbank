@@ -519,7 +519,11 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(403, "forbidden_role", "this needs the admin role")
 
     def console_only(request: Request):
-        """Sign-in ceremonies: only the console (its per-boot secret, loopback) may ask."""
+        """Sign-in ceremonies: only the console (its per-boot secret, loopback) may ask, or the owner on the local admin
+        channel (the setup wizard proves the new account's authenticator there: the channel is already the owner's
+        credential, so it grants nothing new)."""
+        if local_channel:
+            return
         cs = request.headers.get("x-oarbank-console-secret")
         if not (console_secret and cs and hmac.compare_digest(cs.encode(), console_secret.encode())
                 and peer(request) in LOOPBACK):
@@ -1022,6 +1026,43 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     def api_settings_overrides(key: str, module: str = "", scope: str = "", actor=Depends(who)):
         from .settings import views
         return _settings_doc(lambda: views.overrides_doc(db, key, module, scope))
+
+    # ---------------- node groups and labels (docs/design/settings.md, "Groups and labels")
+    @app.get("/api/v1/groups")
+    def api_groups(actor=Depends(who)):
+        from .settings import groups
+        return groups.view(db)
+
+    @app.get("/api/v1/groups/preview")
+    def api_group_preview(selector: str = "", members: str = "", actor=Depends(who)):
+        """Live member preview while a group is edited: which nodes a selector and members would take in, and why (a
+        read: nothing is written)."""
+        from .settings import groups, resolve as V
+        try:
+            sel = json.loads(selector) if selector.strip() else {}
+        except ValueError:
+            raise core.ApiError(400, "bad_selector", "selector: a JSON object")
+        try:
+            g = {"selector": groups.check_selector(sel),
+                 "members": groups.check_members(db, [x.strip() for x in members.split(",") if x.strip()])}
+        except groups.GroupError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+        snap = V.snapshot(db)
+        rows = db.q("SELECT node_id, hostname, os, arch, facts_json FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+        out = []
+        for n in rows:
+            m = groups.membership(g, n, snap.node_labels(n)["all"])
+            out.append({"node_id": n["node_id"], "hostname": n["hostname"], **m})
+        return {"rule": groups.describe(g, {n["node_id"]: n["hostname"] for n in rows}), "nodes": out,
+                "members": sum(1 for x in out if x["member"])}
+
+    @app.get("/api/v1/groups/{ident}")
+    def api_group(ident: str, actor=Depends(who)):
+        from .settings import groups
+        out = groups.view(db, ident)
+        if not out["groups"]:
+            raise core.ApiError(404, "unknown_group", f"no group {ident!r}")
+        return {"group": out["groups"][0], "labels": out["labels"]}
 
     @app.get("/api/v1/features")
     def api_features(actor=Depends(who)):

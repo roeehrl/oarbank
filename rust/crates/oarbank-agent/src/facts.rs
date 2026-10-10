@@ -281,6 +281,8 @@ pub fn collect(home: &std::path::Path) -> Value {
         "sandbox": sandbox_report(),
         "containers": containers(home),
         "disk_free_gb": disk_free_gb(home),
+        // a system battery (a laptop): groups select on it, and it derives the `laptop` label (settings groups)
+        "power": {"battery": crate::host::has_battery()},
     })
 }
 

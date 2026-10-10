@@ -25,7 +25,9 @@ def test_native_build_activation_is_dry_run_and_preserves_payload(tmp_path):
         p.chmod(0o755)
     home = tmp_path / 'private-home'
     home.mkdir()
-    env = {**os.environ, 'HOME': str(home), 'XDG_DATA_HOME': str(home / 'data'), 'XDG_CONFIG_HOME': str(home / 'config')}
+    system = tmp_path / 'system'
+    env = {**os.environ, 'HOME': str(home), 'XDG_DATA_HOME': str(home / 'data'), 'XDG_CONFIG_HOME': str(home / 'config'),
+           'OARBANK_INSTALL_ROOT': str(system)}
     cmd = ['bash', str(REPO / 'deploy/oarbankd/install-oarbankd.sh'), '--installed', str(root), '--agent-bind', '192.168.1.10', '--dry-run']
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -36,8 +38,9 @@ def test_native_build_activation_is_dry_run_and_preserves_payload(tmp_path):
         owner = '<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.coordinator</string></array>'
         assert result.stdout.count(owner) == 2
         assert "CFBundleIdentifier</key><string>dev.codonic.oarbank.coordinator<" in PACKAGER.read_text()
-        assert 'COORDINATOR_APP_BUNDLE: &str = "dev.codonic.oarbank.coordinator"' in (REPO / 'rust/crates/oarbank-agent/src/coordinstall.rs').read_text()
-    assert not list(home.iterdir())
+        # a move's standby is the same system service, installed by the build's own installer
+        assert 'root.join("install-oarbankd.sh")' in (REPO / 'rust/crates/oarbank-agent/src/coordinstall.rs').read_text()
+    assert not list(home.iterdir()) and not system.exists()
     assert manifest.exists()
     manifest.write_text(json.dumps({'format': 1, 'platform': 'windows-amd64'}))
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -64,8 +67,9 @@ def test_application_launcher_compiles(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# `oarbank` and `oarbank-setup` on the PATH: the pkg's postinstall links them in /usr/local/bin. Nothing here installs:
-# the postinstall runs with its system paths rewritten into pytest's temporary directory.
+# `oarbank` and `oarbank-setup` on the PATH: the pkg's postinstall links them in /usr/local/bin, refreshes an installed
+# system service and migrates an earlier release's per-user coordinator. Nothing here installs: the postinstall runs
+# with its system paths rewritten into pytest's temporary directory.
 
 POSTINSTALL = REPO / 'deploy/macos/coordinator/scripts/postinstall'
 PACKAGER = REPO / 'scripts/package-coordinator-macos.sh'
@@ -86,13 +90,16 @@ def test_the_coordinator_pkg_ships_the_postinstall_and_no_usr_local_payload():
         assert POSTINSTALL.stat().st_mode & 0o111 == 0o111
 
 
-def test_the_postinstall_only_links_the_commands():
+def test_the_postinstall_links_the_commands_and_only_refreshes_or_migrates():
     assert subprocess.run(['sh', '-n', str(POSTINSTALL)]).returncode == 0
     text = POSTINSTALL.read_text()
     code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
-    assert f'BIN="{APP_BIN}"' in code
+    assert f'ROOT="{APP_BIN[:-len("/bin")]}"' in code and 'BIN="$ROOT/bin"' in code
     assert 'for name in oarbank oarbank-setup; do' in code and '/bin/ln -sfn "$BIN/$name" "$link"' in code
-    for word in ('launchctl', 'oarbankd', 'install-oarbankd', 'chown', 'chmod', 'rm ', 'set -e'):
+    # a first install starts nothing (the wizard does, with the person's address); never a new fleet from here
+    assert '/bin/bash "$ROOT/install-oarbankd.sh" --refresh' in code
+    assert '"$BIN/oarbank" coordinator migrate --run --from-installer --build "$ROOT"' in code
+    for word in ('launchctl', '--installed', 'chown', 'chmod', 'rm ', 'set -e', 'account create', 'join-code'):
         assert word not in code, word
     assert text.rstrip().endswith('exit 0')
 
@@ -112,8 +119,11 @@ class Mac:
         self.app_bin = Path(str(self.root) + APP_BIN)
         text = POSTINSTALL.read_text()
         text = text.replace('/usr/local/bin', str(self.bin)).replace('/Applications/', str(self.root) + '/Applications/')
+        text = text.replace('/Library/Application Support', str(self.root) + '/Library/Application Support')
+        text = text.replace('/Users/*', f'"{self.root}/Users/"*')    # quoted: the scratch root has spaces
         code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
-        assert not re.search(rf'(?<!{re.escape(str(self.root))})(/usr/local|/Applications)', code)
+        assert not re.search(rf'(?<!{re.escape(str(self.root))})(?<!\*)(/usr/local|/Applications|/Library|/Users)', code)
+        self.record = self.root / 'Library/Application Support/Oarbank/coordinator-service.json'
         self.script = tmp / 'postinstall'
         self.script.write_text(text)
 
@@ -170,6 +180,33 @@ def test_the_postinstall_replaces_links_keeps_other_files_and_the_directory(tmp_
     assert 'oarbank-setup is not a link and stays as it is' in out.stdout
     assert mac.bin.stat().st_mode & 0o777 == 0o775
     assert mac.run().returncode == 0 and os.readlink(mac.bin / 'oarbank') == str(mac.app_bin / 'oarbank')  # idempotent
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX shell')
+def test_an_upgrade_refreshes_the_system_service_and_a_per_user_coordinator_is_migrated(tmp_path):
+    mac = Mac(tmp_path)
+    build = mac.build()
+    (build / 'install-oarbankd.sh').write_text('#!/bin/bash\necho "installer $*"\n')
+    # the system service is installed: the services are written again from its record, nothing is migrated
+    mac.record.parent.mkdir(parents=True)
+    mac.record.write_text('{"format": "1"}\n')
+    agents = mac.root / 'Users/owner/Library/LaunchAgents'
+    agents.mkdir(parents=True)
+    (agents / 'dev.codonic.oarbank.oarbankd.plist').write_text('<plist/>')
+    out = mac.run()
+    assert out.returncode == 0 and out.stdout.splitlines() == ['installer --refresh'], out
+    # an earlier release's per-user coordinator and no system service yet: the migration, from the app's build
+    mac.record.unlink()
+    out = mac.run()
+    lines = out.stdout.splitlines()
+    assert out.returncode == 0 and lines[0] == f'interpreter={build.resolve()}/python/bin/python3.12', out
+    assert [a for a in lines if a.startswith('arg=')][-6:] == [
+        'arg=coordinator', 'arg=migrate', 'arg=--run', 'arg=--from-installer', 'arg=--build', f'arg={build}']
+    assert lines[-1] == 'Oarbank: the coordinator now runs as a system service'
+    # a first install: links only, silently
+    (agents / 'dev.codonic.oarbank.oarbankd.plist').unlink()
+    out = mac.run()
+    assert out.returncode == 0 and out.stdout == '' and out.stderr == '', out
 
 
 # The coordinator's interpreter runs module code: it is signed with deploy/macos/python.entitlements (library validation

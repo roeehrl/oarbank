@@ -12,7 +12,7 @@ import tarfile
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, Coordinator, agent_env, free_port, venv_python  # noqa: E402
 from test_agent_move import LOCK, t3  # noqa: E402
-from test_agent_session import wait  # noqa: E402
+from test_agent_session import read_json, wait  # noqa: E402
 from helpers import stop_tree  # noqa: E402
 
 from oarbank import signing  # noqa: E402
@@ -58,7 +58,7 @@ def test_signed_build_and_owner_signed_move(agent_bin, tmp_path):
             pending = wait(lambda: [e for e in a.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"])
             a.admit(pending[0]["enrollment_id"])
             node_id = wait(lambda: next((n["node_id"] for n in a.api("GET", "/api/v1/fleet")["nodes"] if n.get("last_hello_at")), None), 60)
-            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text(encoding="utf-8"))
+            cfg = lambda: read_json(tmp_path / "agent" / "agent.json")
             wait(lambda: cfg()["coordinator_trust"].get("owner_keys") == [p_pub, b_pub], timeout=60)
             # a signed build for the node's platform
             pf = json.loads(subprocess.run([str(agent_bin), "facts"], capture_output=True, text=True).stdout)["platform"]

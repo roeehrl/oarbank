@@ -2,7 +2,8 @@
 # Wrap a compiled coordinator build in a native Installer package. No host installation.
 # scripts/package-coordinator-macos.sh [archive]
 # Its postinstall (deploy/macos/coordinator/scripts) links /usr/local/bin/oarbank and oarbank-setup to the app's
-# launchers; it touches no service.
+# launchers, refreshes an installed system service on the new build, and moves an earlier release's per-user
+# coordinator to the system service (docs/design/coordinator-system-service.md); a first install starts no service.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/pyproject.toml" | head -1)"

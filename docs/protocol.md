@@ -91,11 +91,14 @@ spec/platforms.md):
              "grants.bootstrap": "enforced"}},
  "containers": {"runtime": "colima", "state": "installed", "detail": "the agent's Colima VMs start when a job needs one",
                 "gpu": "virtio-gpu:venus"},
- "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
+ "disk_free_gb": 398.0, "power": {"battery": true}, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **CPU.** `perf_cores` and `eff_cores` are physical cores (a core running two hardware threads counts once), the
   same on every OS; a CPU without core classes reports all its cores as `perf_cores` and `eff_cores` 0; `logical` is
   the logical processors the agent may use. docs/design/protection.md, "Capacity", says how each OS is read.
+- **Power.** `battery` says the machine has a system battery (a laptop; a UPS or a device's battery does not count).
+  Node groups may select on it, and it gives the node the `laptop` label "from facts" (docs/design/settings.md,
+  "Groups and labels").
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
   re-certifies every module when the platform or OS version changes. A node of a platform the fleet has no
   release for gets one built when it enrolls.
@@ -747,8 +750,10 @@ lowest wins:
   the node (the fleet's, a group's or the node's value, else the key's default; a key with neither is absent). A module
   appears only when it has such a value, and never sees another module's keys. The agent rewrites a module's file only
   when its content changes, through a temporary file and a rename; a bootstrap job gets `{}`.
-- **`protection`** is owner-set host protection (schema 1), the node's own section (`nodes.protection_json`). The
-  console edits it with versions, restore and canary; see docs/design/protection.md.
+- **`protection`** is owner-set host protection (schema 1): the node's effective section, which the coordinator
+  assembles from the settings chain (`protection.mode`, `protection.rules` from every scope together, `protection.node`;
+  a rule the node's OS cannot run is left out). See docs/design/protection.md and docs/design/settings.md,
+  "Protection on the chain".
 - **`hard_limits`** (default `false`) turns each job's reservation (`resources.cpu`, `resources.mem_gb`) into hard
   limits where the OS has them: a cgroup v2 leaf on Linux (when systemd delegated the agent's cgroup), the Job
   Object on Windows; macOS has none. A job over its memory limit fails with `oom`, the job's fault.

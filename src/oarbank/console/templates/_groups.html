@@ -1,0 +1,43 @@
+{# The group form (docs/design/settings.md, "Groups and labels"): a name, a selector over node facts and labels, explicit
+   members, and a live member preview that updates as the rule is edited (/frag/groups/preview: a read). Used by the
+   Groups page (groups.create) and a group's page (groups.update). #}
+{% import "_macros.html" as m with context %}
+
+{% macro group_form(op, target, button, g=none, sel=none, nodes=[], all_labels=[], return_to="/groups") -%}
+{% if op == "groups.create" %}{% call m.op_form("groups.create", target, button, cls="pri", inline=False, return_to=return_to) %}{{ group_fields(target, g, sel, nodes, all_labels) }}{% endcall %}
+{% else %}{% call m.op_form("groups.update", target, button, cls="pri", inline=False, return_to=return_to) %}{{ group_fields(target, g, sel, nodes, all_labels) }}{% endcall %}{% endif %}
+{%- endmacro %}
+
+{% macro group_fields(target, g, sel, nodes, all_labels) -%}
+{% set sel = sel or {} %}{% set fid = 'gf-' ~ (target or 'new') %}
+<div class="group-form" id="{{ fid }}">
+  <div class="group-fields">
+    <label for="{{ fid }}-name">Name</label>
+    <input id="{{ fid }}-name" name="name" value="{{ g.name if g else '' }}"{% if not g %} required{% endif %} maxlength="64" placeholder="Laptops" autocomplete="off">
+    <label for="{{ fid }}-desc">Description <span class="mut">(optional)</span></label>
+    <input id="{{ fid }}-desc" name="description" value="{{ g.description or '' if g else '' }}" maxlength="280" placeholder="the portable Macs">
+  </div>
+  <fieldset class="group-selector">
+    <legend>Members: nodes matching <b>every</b> term below, plus any you tick</legend>
+    <div class="group-terms">
+      <label>System <select name="sel.os"><option value="">any</option>{% for v, t in [('darwin', 'macOS'), ('linux', 'Linux'), ('windows', 'Windows')] %}<option value="{{ v }}"{% if sel.os == v %} selected{% endif %}>{{ t }}</option>{% endfor %}</select></label>
+      <label>Architecture <select name="sel.arch"><option value="">any</option>{% for v in ['arm64', 'amd64'] %}<option{% if sel.arch == v %} selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
+      <label>Battery <select name="sel.battery"><option value="">any</option><option value="yes"{% if sel.battery == 'yes' %} selected{% endif %}>has a battery (laptops)</option><option value="no"{% if sel.battery == 'no' %} selected{% endif %}>no battery</option></select></label>
+      <label>Labels <span class="mut">(all of)</span> <input name="sel.labels" value="{{ sel.labels or '' }}" list="{{ fid }}-labels" placeholder="render, lab" autocomplete="off"></label>
+      <label>Name matches <input name="sel.hostname" value="{{ sel.hostname or '' }}" placeholder="mac-*, *.lab" autocomplete="off"></label>
+      <label>RAM at least <span class="nowrap"><input name="sel.ram_gb_min" value="{{ sel.ram_gb_min }}" inputmode="decimal" size="4"> GB</span></label>
+      <label>RAM at most <span class="nowrap"><input name="sel.ram_gb_max" value="{{ sel.ram_gb_max }}" inputmode="decimal" size="4"> GB</span></label>
+      <label>Cores at least <input name="sel.cores_min" value="{{ sel.cores_min }}" inputmode="numeric" size="4"></label>
+    </div>
+    <datalist id="{{ fid }}-labels">{% for l in all_labels %}<option value="{{ l }}">{% endfor %}</datalist>
+    <details class="small"><summary>Listed members{% if g and g.members %} · {{ g.members | length }}{% endif %}</summary>
+      <div class="group-members">{% for n in nodes %}<label class="small"><input type="checkbox" name="member" value="{{ n.node_id }}"{% if g and n.node_id in g.members %} checked{% endif %}> {{ n.hostname }}</label>{% else %}<span class="mut">no nodes yet</span>{% endfor %}</div></details>
+    <details class="small"><summary>The selector as JSON</summary>
+      <label class="small" for="{{ fid }}-json">Replaces the terms above when filled (os, arch, labels, hostname, battery, ram_gb_min, ram_gb_max, cores_min)</label>
+      <textarea id="{{ fid }}-json" name="selector_json" rows="2" class="mono" spellcheck="false" placeholder='{"battery": true}'></textarea></details>
+  </fieldset>
+  <div class="group-preview card" aria-live="polite" hx-get="/frag/groups/preview" hx-include="#{{ fid }}" hx-target="this"
+       hx-trigger="load, input changed delay:350ms from:#{{ fid }}, change from:#{{ fid }}" hx-sync="this:replace">
+    <p class="placeholder small"><span class="spin" aria-hidden="true"></span>Finding the members…</p></div>
+</div>
+{%- endmacro %}

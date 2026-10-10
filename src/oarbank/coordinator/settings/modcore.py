@@ -20,12 +20,10 @@ def check(db, key: str, module: str, value) -> str | None:
     return None
 
 
-def after_commit(db, changes: list[dict], diff: list[dict], actor: str) -> dict:
-    """Run the effects of a committed change set's module core keys (inside its transaction)."""
-    out = {"released": 0, "expanded": 0}
-    for x in diff:
-        if x["key"] == "enabled" and x["old"] and not x["new"]:
-            out["released"] += release(db, x["module"], x["node_id"])
+def after_commit(db, changes: list[dict], actor: str) -> dict:
+    """Run the fleet-wide effects of a committed change set's module core keys (inside its transaction); the per-node
+    ones (releasing a module's attempts where it turned off) run in apply.refresh, for group moves too."""
+    out = {"expanded": 0}
     snap = None
     for c in changes:
         if c["key"] == "enabled" and c["scope"] == "fleet":

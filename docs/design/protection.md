@@ -1,16 +1,31 @@
 # Host protection
 
 A node runs fleet jobs beside its owner's own work. Protection decides, every few seconds, how much fleet work the
-machine may run without harming that work (PLAN D3, D3a–D3d, D20). The owner sets it per node; modules can never
-declare or loosen it.
+machine may run without harming that work (PLAN D3, D3a–D3d, D20). The owner sets it for the fleet, a group of nodes or
+one node; modules can never declare or loosen it.
 
 - **The contract** is `oarbank.contracts.protection` (schema 1, `schemas/protection-config-1.schema.json`), with a
   worked example in `src/oarbank/contracts/fixtures/protection-example.toml`.
 - **The engine** is the agent's `oarbank-protection` crate: a pure decision core over process, meter and owner sources,
   with a native backend per OS (macOS, Linux and Windows).
-- **The central copy** is the node's protection section (`nodes.protection_json`, sent in its policy), edited in the console (versioned, with restore
-  and canary). **The local copy** is `protection.json` beside the agent's home on the node. The agent unions both, and
-  the stricter setting wins on every dimension, so the two never conflict.
+- **The central copy** is on the settings chain (docs/design/settings.md, "Protection on the chain"): three settings,
+  `protection.mode` (the most specific value wins; a fleet or group value may lock it), `protection.rules` (every
+  scope's rules apply together: a rule only ever protects more) and `protection.node` (the rest of the node section:
+  memory guard, timing, GPU jobs, longest pause). The coordinator assembles each node's effective section from the
+  fleet's, its groups' and its own values, leaves out a rule its OS cannot run (and names it), and sends the result in
+  the node's policy. **The local copy** is `protection.json` beside the agent's home on the node. The agent unions both,
+  and the stricter setting wins on every dimension, so the two never conflict.
+- **Editing**: the protection page of a node shows its effective rules with where each comes from and edits the node's
+  own section; the fleet's section is on Settings, a group's on its page (`protection.rules.update` with a node,
+  `fleet` or `group:<group>`; a T2 change with the per-node review and, for a node, the live matches). Rule ids are
+  unique on a node: a change that would meet the same id from two scopes is refused. **Rolling out**: add rules to a
+  small group first (a canary group), watch it, then promote them to the fleet (`settings.promote`: they join the
+  fleet's rules and leave the group's in one change, so the canary nodes see no change). This replaces the per-node
+  copy, canary and promote of earlier versions, which wrote the same section to every node.
+- **History**: each change of a node's effective section appends a row to `protection_versions` (with the settings
+  revision that made it); S18 judges a rule by the version in effect when it became active. A home whose nodes still
+  held their own sections is converted once: what every node had in common became the fleet's, the rest stayed on each
+  node (`protection.hoist`, the `protection_hoisted` event).
 
 ## Authority: only the fleet's own processes
 

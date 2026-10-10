@@ -190,3 +190,23 @@ header .main-nav { display:flex; gap:16px; min-width:0 }
 .error-summary h3 { margin:0 0 var(--s1); font-size:14px } .error-summary a { color:var(--bad); font-weight:600 }
 .explain-chain th, .explain-chain td { padding:3px 6px }
 .section-save { margin-top:var(--s2) } details.advanced { margin-top:var(--s2) } details.advanced > summary { font-weight:600 }
+/* Locks (a fleet or group value lower scopes cannot override): the toggle beside the value, and on a locked row a
+   disclosure naming who locked it. */
+.lock-toggle { white-space:nowrap } details.lock-pop { display:inline-block } details.lock-pop > summary { cursor:pointer; font-weight:600 }
+details.lock-pop[open] > span { display:block; max-width:32rem; margin-top:2px }
+/* Groups (templates/groups.html, group.html, _groups.html) and Bulk changes (nodes_bulk.html) */
+.small-h { font-size:13px; margin:var(--s2) 0 var(--s1) }
+.group-form { display:grid; gap:var(--s3); grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); align-items:start }
+.group-fields { display:grid; gap:2px var(--s2); grid-template-columns:minmax(0,1fr) } .group-fields input { width:100% }
+.group-selector { border:1px solid var(--line); border-radius:8px; padding:var(--s2) var(--s3); margin:0; min-width:0 }
+.group-selector legend { font-size:12px; padding:0 4px }
+.group-terms { display:grid; gap:var(--s2); grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)) }
+.group-terms label { display:flex; flex-direction:column; gap:2px; font-size:12px } .group-terms input:not([size]), .group-terms select { width:100% }
+.group-members { display:flex; flex-wrap:wrap; gap:4px 12px; margin:4px 0 }
+.group-selector textarea { width:100% }
+.group-preview { min-height:7em } .group-preview .placeholder { min-height:5em }
+.group-preview-list { list-style:none; padding:0; margin:var(--s1) 0 } .group-preview-list li { margin:2px 0 }
+.group-preview-list li.out { color:var(--mut) }
+.bulk-filter { margin:var(--s2) 0 } .bulk-settings, .bulk-labels { border:1px solid var(--line); min-width:0 }
+.bulk-settings legend h2, .bulk-labels legend h2 { margin:0; font-size:15px }
+.bulk-settings select, .bulk-labels input { width:100%; max-width:36rem } .bulk-settings input[name=bulk_value] { width:min(100%,14rem) }

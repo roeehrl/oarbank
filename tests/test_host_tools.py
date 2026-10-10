@@ -247,7 +247,7 @@ def test_a_detect_request_reaches_the_agent_once(db):
 
 # ------------------------------------------------------------------------------------------------ API, CLI and console
 
-def test_the_api_cli_and_console_show_the_matrix(db, tmp_path, capsys):
+def test_the_api_cli_and_console_show_the_matrix(db, tmp_path, capsys, monkeypatch):
     from fastapi.testclient import TestClient
     from oarbank.console.app import console_app
     from oarbank.console.state import ConsoleState
@@ -277,7 +277,8 @@ def test_the_api_cli_and_console_show_the_matrix(db, tmp_path, capsys):
     detail = api.get(f"/api/v1/nodes/{old['node_id']}", headers=admin_headers(db)).json()
     assert detail["tools"]["modules"][name][0]["code"] == "TOOL_VERSION_UNMET"
     import argparse
-    cli.api = lambda method, path, body=None, timeout=600: api.request(method, path, headers=admin_headers(db), json=body).json()
+    monkeypatch.setattr(cli, "api", lambda method, path, body=None, timeout=600:
+                        api.request(method, path, headers=admin_headers(db), json=body).json())
     cli.cmd_tools(argparse.Namespace(action="list", node=None, module=name, json=False, what=None))
     out = capsys.readouterr().out
     assert "old" in out and "version_unmet" in out and "Install on old: brew install openjdk@17" in out

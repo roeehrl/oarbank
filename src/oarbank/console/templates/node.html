@@ -18,6 +18,12 @@
     {% if n.ts_ip %}<span class="mut">address</span><span class="mono">{{ n.ts_ip }}</span>{% endif %}
   </div>
 </div>
+{% set st = d.settings or {} %}
+<div class="card">
+  <b>Groups and labels</b> <a class="small" href="/nodes/{{ n.node_id }}/settings#labels">change labels</a>
+  <div class="small" style="margin-top:6px">{% for l in (st.labels or {}).owner or [] %}<span class="chip acc">{{ l }}</span> {% endfor %}{% for l in (st.labels or {}).facts or [] %}<span class="chip" title="from the node's facts">{{ l }}</span> {% endfor %}{% if not (st.labels or {}).all %}<span class="mut">no labels</span>{% endif %}</div>
+  <ul class="small group-preview-list">{% for g in st.memberships or [] %}<li><a href="/groups/{{ g.id }}">{{ g.name }}</a> <span class="mut">because {{ g.why | join(', ') }}</span></li>{% endfor %}</ul>
+</div>
 <div class="card">
   <b>Now</b>
   <div class="kv small" style="margin-top:6px">

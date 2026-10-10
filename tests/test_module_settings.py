@@ -244,6 +244,56 @@ def test_pipeline_is_a_setting_and_split_needs_a_stage_chain(db):
     assert "modules.set_pipeline" not in ops.HANDLERS
 
 
+# ------------------------------------------------------------------ groups and locks hold for module keys
+
+def test_group_values_and_locks_hold_for_module_keys_against_node_overrides(db):
+    """A group's value of `[relay] enabled` and of relay's own node key reaches its members; a group lock on either, or
+    a fleet lock, refuses a member's override and wins over a value the member set before; leaving the group gives the
+    node the module back."""
+    from test_settings_groups import create, run_op as group_op
+    (_, a), (_, b) = enrolled_node(db, "a"), enrolled_node(db, "b")
+    set_node(db, a, "tile_size", 16, module="relay")                     # a's own choice, before any lock
+    create(db, "Render farm", members=["a", "b"])
+    settings_apply(db, {"scope": "group", "scope_id": "Render farm", "module": "relay", "key": "tile_size", "value": 64})
+    assert doc(db, b)["policy"]["module_settings"]["relay"]["tile_size"] == 64       # a group value reaches members
+    assert doc(db, a)["policy"]["module_settings"]["relay"]["tile_size"] == 16       # a's own value is more specific
+    group_op(db, "settings.apply", "Render farm", {"changes": [
+        {"scope": "group", "scope_id": "Render farm", "module": "relay", "key": "tile_size", "value": 64, "enforce": True},
+        {"scope": "group", "scope_id": "Render farm", "module": "relay", "key": "enabled", "value": False, "enforce": True}]})
+    snap = V.snapshot(db)
+    res = V.resolve(snap, fresh(db, a), "module.relay.tile_size", "relay")
+    assert res["value"] == 64 and res["locked_by"]["scope"] == "group"              # the lock wins over a's own value
+    assert doc(db, a)["policy"]["module_settings"]["relay"]["tile_size"] == 64
+    assert doc(db, a)["modules_disabled"] == doc(db, b)["modules_disabled"] == ["relay"]
+    for key, value in (("tile_size", 32), ("enabled", True)):                         # a member's override is refused
+        with pytest.raises(A.ApplyError) as e:
+            set_node(db, b, key, value, module="relay")
+        assert e.value.errors[0]["code"] == "locked" and "the group Render farm" in e.value.errors[0]["message"]
+    set_node(db, a, "tile_size", reset=True, module="relay")                          # resetting one's own value is fine
+    # a fleet lock holds over every node too, a module's fleet key included
+    group_op(db, "settings.apply", None, {"changes": [{"scope": "fleet", "module": "relay", "key": "vm_mem_gb", "value": 4,
+                                                       "enforce": True}]})
+    with pytest.raises(A.ApplyError) as e:
+        set_node(db, a, "vm_mem_gb", 8, module="relay")
+    assert "locked by Fleet settings" in e.value.errors[0]["message"]
+    with pytest.raises(A.ApplyError) as e:
+        settings_apply(db, {"scope": "group", "scope_id": "Render farm", "module": "relay", "key": "vm_mem_gb", "value": 8})
+    assert e.value.errors[0]["code"] == "locked"
+    # leaving the group gives b relay back, through the group's own membership change
+    group_op(db, "groups.update", "Render farm", {"members": ["a"]})
+    assert doc(db, b)["modules_disabled"] == [] and doc(db, a)["modules_disabled"] == ["relay"]
+
+
+def test_a_groups_page_has_its_module_sections(env):
+    from test_settings_groups import create
+    db = env["db"]
+    create(db, "Render farm", members=[env["node"]["hostname"]])
+    html, text = settings_html(env, path="/groups/" + db.one("SELECT id FROM node_groups WHERE name='Render farm'")["id"])
+    assert "Modules on its members" in text and 'id="module-relay"' in html and 'id="s-relay-module-relay-tile_size"' in html
+    f = section_fields(html, "module-relay")
+    assert f["module"] == ["relay"] and f["scope"] == ["group"]
+
+
 # ------------------------------------------------------------------ the conversion of the old stores
 
 def _reopen(db) -> DB:

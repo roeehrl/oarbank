@@ -350,7 +350,10 @@ def test_the_coordinator_app_shares_the_model_and_shows_this_macs_node():
     assert 'NSMenuItem.sectionHeader(title: "This Mac’s Node")' in swift
     assert 'Oarbank.open(Oarbank.nodeBundleID, arguments: ["--join"])' in swift and "Oarbank.open(Oarbank.nodeBundleID)" in swift
     assert 'CommandLine.arguments.contains("--open-web")' in swift
-    assert "Library/LaunchAgents/dev.codonic.oarbank.\\($0).plist" in swift and "switchedOffInLoginItems(coordinatorJobPlists)" in swift
+    # the coordinator's system daemons (coordinator-system-service.md); a 2.8 per-user coordinator is offered the move
+    assert '"/Library/LaunchDaemons/dev.codonic.oarbank.\\($0).plist"' in swift and "switchedOffInLoginItems(coordinatorJobPlists)" in swift
+    assert '"Move the Coordinator to a System Service…"' in swift and 'operation == "migrate" ? ["--migrate"]' in swift
+    assert "Runs as a system service — starts with the Mac, before anyone logs in, as _oarbankd" in swift
     for gone in ("Start automatically at sign-in", "Quit Oarbank Coordinator\", action:", "oarbank-symbolic\""):
         assert gone not in swift, gone
     # Oarbank Node's Open Console opens it

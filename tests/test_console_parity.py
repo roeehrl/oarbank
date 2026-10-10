@@ -203,28 +203,25 @@ def test_protection_commands_do_what_the_protection_page_does(fleet, capsys):
     assert f"protection.rules.update (T2) on {nid}:" in out and "rule zoom matches 1 process(es): 812 zoom.us" in out
     assert protection.current(db, nid)[0] == 0
     assert oarbank(capsys, "protection", "set", nid, rules, "--yes")[0] == 0
-    assert protection.current(db, nid) == (1, RULES)
+    effective = {"schema": 1, "node": {"mode": "moderate"}, "rule": RULES["rule"]}
+    assert protection.current(db, nid) == (1, effective)
     toml = tmp / "rules.toml"
     toml.write_text('schema = 1\n[node]\nmode = "fleet_first"\n[[rule]]\nid = "zoom"\nmatch = { path_contains = "zoom.us" }\n'
                     'reserve = { mem_gb = 3 }\n')
     assert oarbank(capsys, "protection", "set", nid, toml, "--yes")[0] == 0
     assert protection.current(db, nid)[1]["node"]["mode"] == "fleet_first"
-    assert oarbank(capsys, "protection", "restore", nid, "1", "--yes")[0] == 0
-    assert protection.current(db, nid) == (3, RULES)
-    assert oarbank(capsys, "protection", "canary", nid, rules, "--yes")[0] == 0
+    # the fleet's rules and a group's join the node's own: `show` names where each comes from
+    fleet_rules = tmp / "fleet.json"
+    fleet_rules.write_text(json.dumps({"schema": 1, "rule": [{"id": "slack", "match": {"path_contains": "Slack"},
+                                                              "reserve": {"mem_gb": 1}}]}))
+    assert oarbank(capsys, "protection", "set", "fleet", fleet_rules, "--yes")[0] == 0
     code, out = oarbank(capsys, "protection", "show", "mini")
-    assert code == 0 and f"protection on mini ({nid}): version 4, mode moderate" in out
-    assert re.search(r"zoom\s+not reported\s+- processes", out) and f"canary: {nid} version 4" in out and "soaking" in out
-    assert "rules.canary" in out and "rules.restore:1" in out
-    code, out = oarbank(capsys, "protection", "promote", "--yes")
-    assert code == 1 and "canary_not_promotable" in out                  # still soaking
-    code, out = oarbank(capsys, "protection", "promote", "--force", "--yes")
-    assert code == 0, out
-    assert db.get_state(protection.CANARY_KEY) is None
-    assert db.one("SELECT target_id FROM audit WHERE operation='protection.rules.canary' ORDER BY event_id DESC LIMIT 1")["target_id"] == nid
-    assert oarbank(capsys, "protection", "promote", "--yes")[1].count("no_canary") == 1
+    assert code == 0 and f"protection on mini ({nid}): mode fleet_first · This node; history version 3" in out
+    assert re.search(r"zoom\s+not reported\s+- processes\s+from This node", out) and re.search(r"slack .* from Fleet", out)
+    assert "this node's own section: 1 rules, mode fleet_first" in out
+    assert db.one("SELECT target_id FROM audit WHERE operation='protection.rules.update' ORDER BY event_id DESC LIMIT 1")["target_id"] == "fleet"
     assert oarbank(capsys, "protection", "probe", nid)[0] == 0 and fresh(db, fleet["node"])["want_probe"] == 1
-    assert oarbank(capsys, "protection", "set", nid)[1].endswith("oarbank protection set <node> <file>")
+    assert oarbank(capsys, "protection", "set", nid)[1].endswith("oarbank protection set <node|fleet|group:G> <file>")
 
 
 # ------------------------------------------------------------------ oarbank job show | retry | cancel
