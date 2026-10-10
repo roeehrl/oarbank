@@ -909,7 +909,8 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         pool_cap=_node_pools(node), pool_use=_pool_usage(db, nid),
         failed_here={r["job_id"] for r in db.q("SELECT DISTINCT job_id FROM attempts WHERE node_id=? AND state='failed'", (nid,))},
         pool_jobs_only=bool(body.get("pool_jobs_only")),
-        gpu_cap=None if body.get("gpu_jobs") is None else int(body["gpu_jobs"]), gpu_use=_gpu_usage(db, nid, node.get("platform")))
+        gpu_cap=None if body.get("gpu_jobs") is None else int(body["gpu_jobs"]), gpu_use=_gpu_usage(db, nid, node.get("platform")),
+        paused=frozenset(str(s) for s in body.get("paused") or ()), paused_by=body.get("paused_by"))
 
 
 def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = None) -> dict:

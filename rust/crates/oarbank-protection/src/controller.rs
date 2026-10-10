@@ -846,6 +846,9 @@ impl ProtectionController {
                     v.gpu_jobs = cf.gpu_jobs;
                     v.threads = cf.threads;
                 }
+                if let Some(sc) = d.pause_fleet {
+                    crate::evaluator::pause_vector(&mut v, sc);
+                }
                 extra.push(v);
                 if d.lower_fleet {
                     di.lower_rules.push(key.clone());

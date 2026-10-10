@@ -231,7 +231,8 @@ their process groups, deletes their workspaces, and does not report them.
 `POST /v1/agent/claim`
 ```json
 {"free_cpu": 3, "free_mem_gb": 6.0, "modules": ["example", "toy"], "release_id": "r_…",
- "ready_datasets": ["tool:example-1.0", "scene:atrium", …], "pool_jobs_only": false, "gpu_jobs": null}
+ "ready_datasets": ["tool:example-1.0", "scene:atrium", …], "pool_jobs_only": false, "gpu_jobs": null,
+ "paused": [], "paused_by": null}
 ```
 oarbankd grants jobs:
 
@@ -251,6 +252,10 @@ oarbankd grants jobs:
 With `pool_jobs_only`, only jobs reserving pools are granted. `gpu_jobs` is how many more GPU jobs the node
 may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`, or that reserves a pool
 of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while the node's live GPU jobs reach that number.
+`paused` is the work active host protection rules pause on the node (`pause_fleet` scopes: `all`, `cpu`, `gpu`, `io`) and
+`paused_by` the first such rule (`rule:<id>`): none of that work is granted there while they last (`PROTECTION_ACTIVE`;
+`all` and `io` every job, `gpu` GPU jobs, `cpu` the others), since a job granted now would be paused at once, released
+after the node's longest pause (`preempt_protection`, no charge) and granted to the same node again.
 
 → `{"grants": [Grant, …]}`, possibly empty. A **Grant** carries a SpecEnvelope:
 ```json
@@ -786,8 +791,10 @@ The agent computes `capacity` every tick and sends it in the heartbeat:
  "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|memory_in_use|user",
  "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_cpu": 0, "reserved_mem_gb": 6.1,
  "host_budget_gb": 14.5, "mem_binding": "reserve|in_use|cap", "mem_budget_reserve_gb": 44.0,
- "mem_budget_in_use_gb": 14.5, "mem_in_use_gb": 40.9, "mem_margin_gb": 8.68}
+ "mem_budget_in_use_gb": 14.5, "mem_in_use_gb": 40.9, "mem_margin_gb": 8.68, "paused": [], "paused_by": null}
 ```
+`paused` and `paused_by` are what the claim sends (see Work): a rule pausing `all` or `io` also stops admission
+(`admit` false, `why` and `binding_limit` the rule), one pausing `gpu` sets `gpu_jobs` to 0.
 `host_budget_gb` is the smaller of the reserve bound (RAM minus the OS and user reserves, the services' and protection's
 reservations) and the in-use bound (memory available now plus the fleet jobs' resident share of their reservations,
 minus the memory guard's soft floor and 1 GB), and of the owner's `mem_gb` cap; `mem_binding` names which.

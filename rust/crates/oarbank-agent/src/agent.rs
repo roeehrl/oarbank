@@ -1066,9 +1066,12 @@ impl Agent {
         }
         let rel = self.release.clone().expect("checked");
         let cap = self.prot.as_ref().and_then(|p| p.capacity.as_ref());
+        // the work an active rule pauses: the coordinator grants none of it (it would be paused at once, released after
+        // the longest pause and granted here again)
         let body = json!({"free_cpu": cpu, "free_mem_gb": mem, "modules": self.offered, "release_id": rel.id,
                           "ready_datasets": staging::ready(&self.layout), "pool_jobs_only": cap.is_some_and(|c| c.pool_jobs_only),
-                          "gpu_jobs": cap.and_then(|c| c.gpu_jobs)});
+                          "gpu_jobs": cap.and_then(|c| c.gpu_jobs), "paused": cap.map(|c| c.paused.clone()).unwrap_or_default(),
+                          "paused_by": cap.and_then(|c| c.paused_by.clone())});
         let r = self.api().map_err(io_err)?.post("/v1/agent/claim", &body).await?;
         let received = std::time::Instant::now();
         let grants = r["grants"].as_array().cloned().unwrap_or_default();

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::config::ProtectionScope;
 use crate::evaluator::CombinedConstraint;
 use crate::json::{
     bool_of, f64_of, get, int_of, is_null, opt_int, opt_num, opt_str, rounded, str_of,
@@ -399,6 +400,11 @@ pub struct CapacityResult {
     pub user_present: bool,
     /// The automatic CPU slots with nobody present (thermal and max_slots applied).
     pub idle_cpu_slots: i64,
+    /// The fleet work active rules pause (`all`, `cpu`, `gpu`, `io`): the coordinator grants none of it here while they
+    /// last (`PROTECTION_ACTIVE`); `all` and `io` stop admission altogether.
+    pub paused: Vec<String>,
+    /// The first rule pausing it (`rule:<id>`).
+    pub paused_by: Option<String>,
 }
 
 impl CapacityResult {
@@ -415,7 +421,7 @@ impl CapacityResult {
             "mem_budget_in_use_gb": self.mem_budget_in_use_gb.map_or(Value::Null, |v| rounded(v, 2)),
             "mem_in_use_gb": self.mem_in_use_gb.map_or(Value::Null, |v| rounded(v, 2)),
             "mem_margin_gb": rounded(self.mem_margin_gb, 2), "user_present": self.user_present,
-            "idle_cpu_slots": self.idle_cpu_slots,
+            "idle_cpu_slots": self.idle_cpu_slots, "paused": self.paused, "paused_by": opt_str(self.paused_by.as_deref()),
         })
     }
 }
@@ -453,7 +459,8 @@ impl CapacityModel {
     /// slots       = min(auto_cpu, floor(host_budget / job_mem), cap.jobs, cap.cpu_cores / threads, protection.slots)
     /// pools       = the services' tokens (only the rule's pool tokens while a rule allows pool jobs only)
     /// admit       = active, no local pause, in schedule, no protection brake (rule, memory floor, thermal,
-    ///               battery), protection slots ≠ 0, and fleet RSS + services ≤ cap.mem_gb
+    ///               battery), no rule pausing every job, protection slots ≠ 0, and fleet RSS + services ≤ cap.mem_gb
+    /// paused      = the scopes active rules pause (the coordinator grants no work in them)
     /// ```
     pub fn compute(i: &CapacityInputs) -> CapacityResult {
         let p = &i.policy;
@@ -591,6 +598,12 @@ impl CapacityModel {
             admit = false;
             binding = bind("admit");
             because = Some(binding.clone());
+        } else if c.paused.contains(&ProtectionScope::All) || c.paused.contains(&ProtectionScope::Io) {
+            // a rule pauses every fleet job: one admitted now would only be paused, then released after the longest
+            // pause and granted here again
+            admit = false;
+            binding = bind("pause");
+            because = Some(binding.clone());
         } else if c.slots == Some(0) || c.pool_jobs_only.is_some() {
             admit = false;
             binding = c
@@ -644,6 +657,8 @@ impl CapacityModel {
             mem_margin_gb: i.mem_margin_gb,
             user_present: i.user_present,
             idle_cpu_slots: max_slots.min(idle_cpu_whole).max(0),
+            paused: c.paused.iter().map(|s| s.as_str().to_string()).collect(),
+            paused_by: (!c.paused.is_empty()).then(|| bind("pause")),
         }
     }
 }

@@ -265,16 +265,17 @@ fn journal_records_transitions_rungs_and_constraints() {
         (rung.get("from"), rung.get("to")),
         (Some(&json!(0)), Some(&json!(5)))
     );
-    // a whole-fleet pause holds GPU jobs at zero too (gpu_jobs = when_no_gpu_protected)
+    // a whole-fleet pause admits nothing it pauses: the rule binds the paused scopes and holds GPU jobs at zero
     assert_eq!(
         recs[4].get("constraint").unwrap()["binding"],
-        json!({"gpu_jobs": "protection:gpu"})
+        json!({"gpu_jobs": "rule:calls", "pause": "rule:calls"})
     );
+    assert_eq!(recs[4].get("constraint").unwrap()["paused"], json!(["all"]));
     assert_eq!(recs[5].reason(), "MEMORY_SOFT");
     assert_eq!(recs[5].get("free_pct"), Some(&json!(9.4)));
     assert_eq!(
         recs[6].get("constraint").unwrap()["binding"],
-        json!({"admit": "guard:memory", "gpu_jobs": "protection:gpu"})
+        json!({"admit": "guard:memory", "gpu_jobs": "rule:calls", "pause": "rule:calls"})
     );
     // seq is per node and monotonic; the coordinator's _ingest_journal needs seq, t, kind, reason
     let seqs: Vec<i64> = recs.iter().map(JournalRecord::seq).collect();
@@ -1048,4 +1049,39 @@ fn a_process_that_execs_after_it_was_listed_matches_by_its_new_arguments() {
     // the process picker sees the same arguments
     let rows = t.summary(10, &HashSet::new(), 8.0).unwrap();
     assert_eq!(rows.iter().find(|r| r.pid == 20).unwrap().argv, Some(vec!["true".to_string()]));
+}
+
+/// An active pause rule holds back the work it pauses, not only the jobs already running: a job admitted while it lasts
+/// would be paused at once and released after the longest pause, only to be granted to the same node again. The
+/// combined constraint names the paused scopes and the rule; `all` (and `io`) stop admission altogether, `gpu` admits no
+/// GPU job whatever `gpu_jobs` says, `cpu` leaves GPU jobs to the coordinator's per-job check (capacity `paused`).
+#[test]
+fn an_active_pause_rule_admits_none_of_the_work_it_pauses() {
+    let cap = |r: &ProtectionTickResult| {
+        let mut i = CapacityInputs::new(64.0, 12, 4, Policy::default(), Limits::uncapped());
+        i.constraint = r.constraint.clone();
+        CapacityModel::compute(&i)
+    };
+    for (scope, admit, gpu_jobs) in [("all", false, Some(0)), ("io", false, Some(0)), ("gpu", true, Some(0)), ("cpu", true, None)] {
+        let mut ctl = controller(json!({"schema": 1, "node": {"mode": "fleet_first", "gpu_jobs": "always"},
+            "rule": [{"id": "app", "match": {"name": "app"}, "active_when": {"for_s": 0}, "pause_fleet": {"scope": scope}}]}));
+        let jobs = vec![FleetJobView { pausable: true, ..FleetJobView::new(1, Some(10), 1.0, 0.0, 1.0) }];
+        let mem = MemorySignals::new(64.0, 20.0, 0);
+        let idle = ctl.evaluate(&tick(0.0, mem, jobs.clone()), &[], &no_cpu());
+        let c = cap(&idle);
+        assert!(c.admit && c.paused.is_empty() && c.paused_by.is_none(), "{scope}: {c:?}");
+        let app = ProcessRecord { comm: "app".into(), ..ProcessRecord::new(50, 1, 1, "/Applications/App.app/Contents/MacOS/app") };
+        let r = ctl.evaluate(&tick(2.0, mem, jobs), &[app], &no_cpu());
+        assert_eq!(r.constraint.paused.iter().map(|s| s.as_str()).collect::<Vec<_>>(), [scope], "{scope}");
+        assert_eq!(r.constraint.binding.get("pause").map(String::as_str), Some("rule:app"));
+        assert_eq!(r.constraint.to_json()["paused"], json!([scope]));
+        let c = cap(&r);
+        assert_eq!((c.admit, c.gpu_jobs, c.paused.clone(), c.paused_by.as_deref()), (admit, gpu_jobs, vec![scope.to_string()], Some("rule:app")),
+                   "{scope}");
+        if !admit {
+            assert_eq!((c.binding_limit.as_str(), c.not_admitting_because.as_deref()), ("rule:app", Some("rule:app")));
+        }
+        assert_eq!(c.to_json()["paused"], json!([scope]));
+        assert_eq!(c.to_json()["paused_by"], json!("rule:app"));
+    }
 }

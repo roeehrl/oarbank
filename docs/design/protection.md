@@ -136,7 +136,12 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   jobs to background scheduling: macOS background QoS, low priority on the efficiency cores; on Linux a CPU quota of a
   tenth of a core on the job's cgroup, since the agent's cgroup and the owner's are scheduled apart and no class an
   unprivileged agent can set yields to the owner; on Windows the Job Object's idle priority class with EcoQoS; where it
-  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`, `cpu`, `gpu` or `io`), `protect` (keep a metric of the
+  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`,
+  `cpu`, `gpu` or `io`; while the rule is active the node also takes none of the work it pauses: capacity's `paused`
+  names the scopes and the claim carries them, so the coordinator grants no job there that the rule would pause at
+  once and release after the longest pause, only to grant it to the same node again; explain shows such a job, or the
+  node, as `PROTECTION_ACTIVE`; `all` and `io` stop admission altogether, and `gpu`, `all` and `io` hold GPU jobs at 0
+  whatever `gpu_jobs` says), `protect` (keep a metric of the
   protected group within a target: `cpu_stall`, `ipc_ratio`, `gpu_share`, `pageins_rate`, or `progress_rate` read from
   an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on.
   `ignore` only removes processes from the heuristic triggers.
@@ -182,6 +187,7 @@ in_use      = available + fleet resident − margin          margin = soft_free_
 host_budget = min(reserve, in_use, cap.mem_gb − services)  (mem_binding: reserve | in_use | cap)
 mem_gb_free = host_budget − Σ running jobs' resources.mem_gb
 slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap.cpu_cores / threads, protection.slots)
+paused      = the pause_fleet scopes of the active rules (no work of theirs is granted; all or io: admit = false)
 ```
 
 - **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with
