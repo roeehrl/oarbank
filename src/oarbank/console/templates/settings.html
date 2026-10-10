@@ -4,15 +4,27 @@
 {% block title %}Settings · Oarbank{% endblock %}
 {% block body %}
 <h1>Settings</h1>
-<nav class="row small mod-tabs-nav" aria-label="settings sections"><a href="#node-defaults">Node defaults</a><a href="#notifications">Notifications</a><a href="#access">Access</a><a href="#verification">Data and verification</a><a href="#tools">Host tools</a><a href="#folders">Folders</a><a href="#origins">Dataset origins</a><a href="#releases">Releases</a><a href="#job-modules">Job modules</a></nav>
+<nav class="row small mod-tabs-nav" aria-label="settings sections"><a href="#node-defaults">Node defaults</a><a href="#protection-rules">Protection rules</a><a href="/groups">Groups</a><a href="#notifications">Notifications</a><a href="#access">Access</a><a href="#verification">Data and verification</a><a href="#tools">Host tools</a><a href="#folders">Folders</a><a href="#origins">Dataset origins</a><a href="#releases">Releases</a><a href="#job-modules">Job modules</a></nav>
 
 <h2 id="node-defaults">Node defaults</h2>
-<p class="small mut">Every node ({{ fs.nodes }}) inherits these unless its group or the node itself sets its own; built-in groups
-({{ fs.groups | map(attribute='name') | join(', ') }}) apply by system and coordinator machine. Saving shows which nodes the
-change reaches and which keep their own value, before anything is written.</p>
+<p class="small mut">Every node ({{ fs.nodes }}) inherits these unless one of its <a href="/groups">groups</a> or the node itself sets its
+own; built-in groups ({{ fs.groups | selectattr('builtin') | map(attribute='name') | join(', ') }}) apply by system and coordinator
+machine. Tick <b>lock</b> beside a value so no group or node can override it. Saving shows which nodes the change reaches and which
+keep their own value, before anything is written.</p>
 <div class="settings-sections">
 {% for sec in fs.node_defaults %}{{ S.section_form(sec, "fleet", "", "fleet", "/settings", "the fleet", explain) }}{% endfor %}
 </div>
+
+<section class="card wide" id="protection-rules" aria-labelledby="h-fprot">
+<h2 id="h-fprot">Protection rules for every node</h2>
+<p class="small mut">The fleet's protected-process rules: every node applies them together with its groups' and its own (a rule a node's OS
+cannot run is skipped there, and named). Roll a new rule out by adding it to a canary group first, then promoting it from the group's page.
+The mode is in Node defaults above.</p>
+{% call m.op_form("protection.rules.update", "fleet", "Review and apply…", cls="pri", inline=False, return_to="/settings#protection-rules") %}
+  <label class="small" for="fprot">The fleet's own protection section (JSON)</label>
+  <textarea id="fprot" name="pj.config" rows="8" class="mono" spellcheck="false">{{ s.fleet_protection }}</textarea>
+{% endcall %}
+</section>
 
 <div class="settings-sections">
 {% for sec in fs.fleet %}{{ S.section_form(sec, "fleet", "", "fleet", "/settings", "the fleet", explain) }}

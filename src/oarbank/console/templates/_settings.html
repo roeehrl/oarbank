@@ -30,11 +30,12 @@
 {% set k = r.key %}{% set described = 'h-' ~ k ~ ' src-' ~ k ~ (' e-' ~ k if r.form_errors or r.errors else '') %}
 <div class="setting{{ ' changed' if r.overridden_here }}{{ ' invalid' if r.form_errors }}" id="s-{{ k }}">
   <input type="hidden" name="keys" value="{{ k }}"><input type="hidden" name="t.{{ k }}" value="{{ r.input.kind }}">
-  {% if r.overridden_here %}<input type="hidden" name="had.{{ k }}" value="1"><input type="hidden" name="cur.{{ k }}" value="{{ r.own.value | tojson | forceescape }}">{% endif %}
+  {% if r.overridden_here %}<input type="hidden" name="had.{{ k }}" value="1"><input type="hidden" name="cur.{{ k }}" value="{{ r.own.value | tojson | forceescape }}">{% if r.locked_here %}<input type="hidden" name="had_enf.{{ k }}" value="1">{% endif %}{% endif %}
   <div class="setting-head row">
     <label for="v-{{ k }}" class="setting-label"><b>{{ r.label }}</b>{% if r.unit %} <span class="mut">({{ r.unit }})</span>{% endif %}</label>
     <span class="chip{{ ' acc' if r.overridden_here }}" id="src-{{ k }}">{{ r.badge }}</span>
     {% if r.overridden_here %}<span class="chip acc">changed here</span>{% endif %}
+    {% if r.locked_here %}<span class="chip warn" title="Lower scopes cannot override it while the lock holds">locked here</span>{% endif %}
     <span class="sp"></span><code class="mono small" id="key-{{ r.scope }}-{{ k }}">{{ k }}</code><button type="button" class="small" data-copy="key-{{ r.scope }}-{{ k }}" aria-label="Copy the key {{ k }}">Copy</button>
   </div>
   <div class="small mut" id="h-{{ k }}">{{ r.help }}{% if r.note %} <b>{{ r.note }}</b>{% endif %}{% if r.merge_note %} ({{ r.merge_note }}){% endif %}{% if r.hw_note %} · {{ r.hw_note }}{% endif %}</div>
@@ -43,11 +44,16 @@
   <div class="setting-value row">
     {% if r.locked_by %}
     <span class="mono">{{ r.value_text }}</span>
-    <button type="button" class="small" aria-label="Locked by {{ r.locked_by.name }} settings. Change it there." title="Locked by {{ r.locked_by.name }} settings. Change it there.">Locked</button>
+    <details class="lock-pop small"><summary aria-label="{{ r.lock_text }}. Change it there.">Locked</summary>
+      <span>{{ r.lock_text }}. Change it there:
+      {% if r.locked_by.scope == 'fleet' %}<a href="/settings?explain={{ k }}#s-{{ k }}">Fleet settings</a>{% else %}<a href="/groups/{{ r.locked_by.id }}?explain={{ k }}#s-{{ k }}">{{ r.locked_by.name }}</a>{% endif %}.
+      {% if r.overridden_here %}This {{ 'node' if r.scope == 'node' else 'group' }}'s own value ({{ r.own_text }}) is kept and applies again when the lock goes.{% endif %}</span></details>
+    {% if r.overridden_here %}<button name="reset" value="{{ k }}" class="small" title="Delete this value (it is ignored while the lock holds)">Reset to inherited</button>{% endif %}
     {% else %}
     <span class="inh-text mono">{{ r.value_text if r.overridden_here else r.inherited.text }}</span>
     <label class="small ovr-toggle"><input type="checkbox" name="o.{{ k }}" value="1" data-override{% if r.overridden_here or r.typed %} checked{% endif %}> {{ 'Set here' if r.overridden_here else 'Override' }}</label>
-    <span class="ovr-input">{{ value_input(r, described) }}</span>
+    <span class="ovr-input">{{ value_input(r, described) }}{% if r.scope in ('fleet', 'group') and r.lockable %}
+      <label class="small lock-toggle" title="Lock: groups below and nodes cannot set their own value while it holds (a T3 change)"><input type="checkbox" name="enf.{{ k }}" value="1"{% if r.locked_here or r.typed_lock %} checked{% endif %}> lock</label>{% endif %}</span>
     {% if r.overridden_here %}<button name="reset" value="{{ k }}" class="small" title="Delete this value: {{ r.label | lower }} goes back to {{ r.inherited.text }} ({{ r.inherited.badge }})">Reset to inherited</button>
     <span class="small mut">inherits {{ r.inherited.text }} · {{ r.inherited.badge }}</span>{% endif %}
     {% endif %}
@@ -56,6 +62,7 @@
     {% if r.applied %}<span class="chip {{ r.applied.tone }}">{{ r.applied.text }}</span>{% endif %}
     {% if r.override_count is not none %}{% if r.override_count %}<a href="/settings/overrides?key={{ k }}">Overridden on {{ r.override_count }} node{{ 's' if r.override_count != 1 }}</a>{% else %}<span class="mut">no node overrides it</span>{% endif %}{% endif %}
     {% if r.scope == 'node' and not r.overridden_here and not r.locked_by %}<a href="/settings?explain={{ k }}#s-{{ k }}">Configure fleet default</a>{% endif %}
+    {% if r.scope == 'group' and r.overridden_here %}<button type="submit" form="promote-{{ r.scope_id }}-{{ k }}" class="small" title="Set this value at the fleet and delete it here, as one change (you see who it reaches first)">Promote to fleet…</button>{% endif %}
   </div>
   <details class="small explain"{% if explain == k %} open{% endif %}><summary>Explain</summary>
     <p class="small">In effect: <b class="mono">{{ r.value_text }}</b> from <b>{{ r.badge }}</b>{% if r.locked_by %}, locked by {{ r.locked_by.name }}{% endif %}.
@@ -64,6 +71,16 @@
     {{ explain_table(r) }}
   </details>
 </div>
+{%- endmacro %}
+
+{# A group row's "Promote to fleet…" button submits one of these (forms cannot nest; the button names it with form=). #}
+{% macro promote_forms(sections, gid, return_to) -%}
+{% for sec in sections %}{% for r in sec.rows + sec.advanced if r.overridden_here %}
+<form id="promote-{{ gid }}-{{ r.key }}" method="post" action="/do/settings.promote" hidden>
+<input type="hidden" name="target" value="{{ r.key }}"><input type="hidden" name="return_to" value="{{ return_to }}">
+<input type="hidden" name="idem" value="{{ new_key() }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="reason" value="">
+<input type="hidden" name="p.key" value="{{ r.key }}"><input type="hidden" name="p.group" value="{{ gid }}"></form>
+{% endfor %}{% endfor %}
 {%- endmacro %}
 
 {# One section: an explicit-save form. `page` lets a refused save come back here with its error summary. #}

@@ -10,7 +10,8 @@ once and deleted.
   a retired endpoint) is dropped.
 - `nodes.policy_json` and `nodes.limits_json` go: for each node, a value becomes a node value only where it differs from
   what the node now inherits (the computed default, the fleet, its groups), so copies of defaults disappear; caps become
-  node values; the protection section moves to `nodes.protection_json` (its versions stay in `protection_versions`).
+  node values; the protection sections are hoisted onto the chain (protection.hoist: what every node has in common
+  goes to the fleet, the rest stays per node; their versions stay in `protection_versions`).
 - Values the registry refuses are dropped and named in the `settings_migrated` event."""
 import json
 
@@ -124,13 +125,14 @@ def run(db) -> dict | None:
         cols = _cols(conn, "nodes")
         if "policy_json" in cols:
             snap = V.snapshot(db)
+            prot = {}
             for n in db.q("SELECT * FROM nodes"):
                 if n["lifecycle"] == "retired":
                     continue
                 pol = json.loads(n.get("policy_json") or "{}") or {}
                 lim = json.loads(n.get("limits_json") or "{}") or {}
                 if isinstance(pol.get("protection"), dict):
-                    db.x("UPDATE nodes SET protection_json=? WHERE node_id=?", (json.dumps(pol["protection"]), n["node_id"]))
+                    prot[n["node_id"]] = pol["protection"]
                     report["protection"] += 1
                 for m, ms in (pol.get("module_settings") or {}).items():
                     if ms:
@@ -161,6 +163,11 @@ def run(db) -> dict | None:
                         continue
                     store.put(db, "node", n["node_id"], "", k, v, ACTOR, rev, COMMENT)
                     report["node"].append(f"{n['hostname']}: {k}")
+            from .. import protection                    # common to every node: the fleet's; the rest per node
+            hoisted = protection.hoist(db, prot, rev, ACTOR)
+            report["fleet"] += hoisted["fleet"]
+            report["node"] += hoisted["node"]
+            report["dropped"] += hoisted["dropped"]
             conn.execute("ALTER TABLE nodes DROP COLUMN policy_json")
             conn.execute("ALTER TABLE nodes DROP COLUMN limits_json")
         from .apply import sync_nodes

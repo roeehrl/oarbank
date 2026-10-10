@@ -159,11 +159,12 @@ def node_settings(db, node) -> dict:
 
 
 def set_protection(db, node, config, actor="test"):
-    """A node's protection section, validated and versioned as the protection editor's operations write it."""
+    """A node's (or `fleet`'s, or `group:<g>`'s) own protection section, validated and written onto the settings chain
+    as the protection editor's operation writes it."""
     from oarbank.coordinator import protection
     nid = node if isinstance(node, str) else node["node_id"]
     with db.tx():
-        return protection.write_version(db, nid, config, actor, None)
+        return protection.write(db, nid, config, actor, None)
 
 
 def node_key_and_csr():

@@ -269,7 +269,7 @@ def make_old_home(tmp_path) -> Path:
         CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT);
         INSERT INTO settings SELECT key, value_json FROM system_state WHERE key != 'settings_rev';
         DELETE FROM system_state; DELETE FROM setting_values;
-        UPDATE nodes SET settings_json=NULL, settings_digest=NULL, settings_rev=NULL, protection_json=NULL;""")
+        UPDATE nodes SET settings_json=NULL, settings_digest=NULL, settings_rev=NULL;""")
     owner = {"ntfy": {"url": "https://ntfy.sh/topic", "token": None, "click_base": None}, "replica_rate": 0.05,
              "console_hosts": "oarbank.example.ts.net", "default_worker_disabled_services": ["relay/scorer"],
              "tool_registry": {"java17": {"trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"]}}},
@@ -299,7 +299,8 @@ def test_an_earlier_home_is_converted_once_keeping_only_choices(tmp_path):
     # a's policy was a copy of what it inherits: nothing of it remains; b keeps its two choices and its caps
     assert {(s, k) for (s, m, k), r in rows.items() if s == "node" and r["scope_id"] == nid["a"]} == set()
     assert {k: r["value"] for (s, m, k), r in rows.items() if s == "node" and r["scope_id"] == nid["b"]} == {
-        "job_mem_gb": 3, "jobs": 2, "enforce": "hard", "module.node_settings": {"vm_mem_gb": 12}}
+        "job_mem_gb": 3, "jobs": 2, "enforce": "hard", "module.node_settings": {"vm_mem_gb": 12},
+        "protection.mode": "strict_yield"}                          # the modes differed: b keeps its own
     assert {(m, k): r["value"] for (s, m, k), r in rows.items() if s == "fleet"} == {
         ("", "ntfy.url"): "https://ntfy.sh/topic", ("", "replica_rate"): 0.05, ("", "console_hosts"): ["oarbank.example.ts.net"],
         ("", "disabled_services"): ["relay/scorer"],
@@ -307,7 +308,8 @@ def test_an_earlier_home_is_converted_once_keeping_only_choices(tmp_path):
     assert db.get_state("release_pubkey") == "abc" and db.get_state("fleet_id")
     from oarbank.coordinator import tools                             # the tool registry became a host tool definition
     assert tools.definitions(db)["java17"]["search"] == {"darwin": ["/opt/homebrew/opt/openjdk@17"]}
-    assert json.loads(node_row(db, nid["b"])["protection_json"])["node"]["mode"] == "strict_yield"
+    assert json.loads(node_row(db, nid["b"])["settings_json"])["policy"]["protection"]["node"]["mode"] == "strict_yield"
+    assert json.loads(node_row(db, nid["a"])["settings_json"])["policy"]["protection"]["node"]["mode"] == "moderate"
     ev = db.one("SELECT payload_json FROM events WHERE kind='settings_migrated'")
     report = json.loads(ev["payload_json"])
     assert "b: nice: expected integer, got str 'high'" in report["dropped"] and any("dataset_groups" in x for x in report["dropped"])

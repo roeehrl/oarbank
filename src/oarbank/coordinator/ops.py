@@ -428,92 +428,83 @@ def _retire(db, req):
     return {"lifecycle": "retired", "pinned_jobs_cancelled": len(pinned)}
 
 
-# ------------------------------------------------------------------ protection
+# ------------------------------------------------------------------ protection (on the settings chain)
 
-def _prot_keys(db, r):
-    nid = _nid(db, r)
-    return [protection.resource_key(nid), f"node:{nid}:policy"]
+def _prot_scope(db, req) -> tuple[str, str]:
+    try:
+        return protection.scope_of(db, req.target)
+    except protection.ProtectionError as e:
+        raise core.ApiError(404, "not_found", str(e))
 
 
 def _prot_config(db, req) -> dict:
     cfg = req.params.get("config")
     if cfg is None:
-        raise core.ApiError(400, "missing_config", "params.config: the full protection section")
+        raise core.ApiError(400, "missing_config", "params.config: the scope's own protection section")
+    scope, sid = _prot_scope(db, req)
     try:
-        return protection.validate(cfg, protection.node_os(db, _nid(db, req)))
+        return protection.validate(cfg, protection.node_os(db, sid) if scope == "node" else None)
     except protection.ProtectionError as e:
         raise core.ApiError(422, "bad_protection", str(e))
 
 
-def _prot_version(db, req) -> dict:
-    nid = _nid(db, req)
+def _prot_changes(db, req) -> list:
+    from .settings import resolve as V
+    scope, sid = _prot_scope(db, req)
+    changes = protection.changes_for(V.snapshot(db), scope, sid, _prot_config(db, req))
+    if not changes:
+        raise core.ApiError(409, "no_change", "the section is what this scope already sets")
+    return changes
+
+
+def _prot_impact(db, req) -> dict:
+    out = _settings(lambda: settings.apply.plan(db, _prot_changes(db, req)))
+    scope, sid = _prot_scope(db, req)
+    if scope == "node":
+        try:
+            out.update({k: v for k, v in protection.preview(db, sid, _prot_config(db, req)).items() if k != "node_id"})
+        except protection.ProtectionError as e:
+            raise core.ApiError(422, "bad_protection", str(e))
+    return out
+
+
+def _prot_snap(db, req):
+    from .settings import resolve as V
     try:
-        v = int(req.params.get("version"))
-    except (TypeError, ValueError):
-        raise core.ApiError(400, "missing_version", "params.version")
-    r = db.one("SELECT config_json FROM protection_versions WHERE node_id=? AND version=?", (nid, v))
-    if not r:
-        raise core.ApiError(404, "not_found", f"protection version {v} of {nid}")
-    return json.loads(r["config_json"])
+        scope, sid = protection.scope_of(db, req.target)
+    except protection.ProtectionError:
+        return None
+    return {"scope": scope, "scope_id": sid, "own": protection.own(V.snapshot(db), scope, sid)}
 
 
-@handler("protection.rules.update", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: protection.preview(db, _nid(db, r), _prot_config(db, r)))
+@handler("protection.rules.update", target_type="protection", snapshot=_prot_snap, versions=lambda db, r: ["settings"],
+         impact=_prot_impact, name=lambda db, r: str(r.target))
 def _prot_update(db, req):
-    v = protection.write_version(db, _nid(db, req), _prot_config(db, req), req.actor, req.reason)
-    return {"version": v}
+    """A scope's own protection section (a node, `fleet` or `group:<group>`): its rules, node section and mode, as one
+    settings change set; the node's effective section is every scope's rules together (docs/design/settings.md,
+    "Protection on the chain")."""
+    scope, _ = _prot_scope(db, req)
+    if scope != "node" and req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"fleet or group protection needs the admin role; {req.actor} is {req.role}")
+    return _settings(lambda: settings.apply.commit(db, _prot_changes(db, req), req.actor, req.reason))
 
 
-@handler("protection.rules.restore", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: {**protection.preview(db, _nid(db, r), _prot_version(db, r)), "restores": r.params.get("version")})
-def _prot_restore(db, req):
-    v = protection.write_version(db, _nid(db, req), _prot_version(db, req), req.actor, req.reason,
-                                 source=f"rules.restore:{req.params.get('version')}")
-    return {"version": v, "restored": int(req.params["version"])}
+def _mode_impact(db, r):
+    from .settings import resolve as V
+    nid = _nid(db, r)
+    res = V.resolve(V.snapshot(db), _node(db, nid), "protection.mode")
+    return {"mode": {"from": res["value"], "to": r.params.get("mode"), "now_from": V.badge(res)},
+            "live_attempts": _live_on(db, nid)}
 
 
-def _canary_impact(db, r):
-    if r.params.get("promote"):
-        h = protection.canary_health(db)
-        c = db.get_state(protection.CANARY_KEY)
-        targets, skipped = protection.promote_targets(db, c) if c else ([], {})
-        return {**h, "targets": targets, "skipped": skipped}
-    return {**protection.preview(db, _nid(db, r), _prot_config(db, r)), "canary": True,
-            "then": "promote after a clean soak of %d s" % protection.CANARY_MIN_SOAK_S}
-
-
-def _canary_target(db, req):
-    """Promoting names no node: the running canary's node is the target."""
-    if req.params.get("promote"):
-        c = db.get_state(protection.CANARY_KEY)
-        if not c:
-            raise OpError(409, "no_canary", "no protection canary is running: oarbank protection canary <node> <file>")
-        req.target = c["node_id"]
-
-
-@handler("protection.rules.canary", target_type="node", impact=_canary_impact, target=_canary_target,
-         snapshot=lambda db, r: {"canary": db.get_state(protection.CANARY_KEY)})
-def _prot_canary(db, req):
-    try:
-        if req.params.get("promote"):
-            return protection.promote(db, req.actor, req.reason, force=bool(req.params.get("force")))
-        c = protection.start_canary(db, _nid(db, req), _prot_config(db, req), req.actor, req.reason)
-        return {k: v for k, v in c.items() if k != "config"}
-    except protection.ProtectionError as e:
-        raise core.ApiError(409, "canary_not_promotable", str(e))
-
-
-@handler("nodes.set_mode", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: {"mode": {"from": ((protection.current(db, _nid(db, r))[1].get("node") or {}).get("mode")),
-                                        "to": r.params.get("mode")}, "live_attempts": _live_on(db, _nid(db, r))})
+@handler("nodes.set_mode", target_type="node", snapshot=lambda db, r: _prot_snap(db, r), versions=lambda db, r: ["settings"],
+         impact=_mode_impact)
 def _set_mode(db, req):
+    """This node's own protection mode (protection.mode at node scope; a lock above refuses it)."""
     mode = req.params.get("mode")
     if mode not in ("fleet_first", "moderate", "strict_yield"):
         raise core.ApiError(400, "bad_mode", f"{mode!r}: fleet_first | moderate | strict_yield")
-    try:
-        return {"version": protection.set_mode(db, _nid(db, req), mode, req.actor, req.reason)}
-    except protection.ProtectionError as e:
-        raise core.ApiError(422, "bad_protection", str(e))
+    return _settings(lambda: protection.set_mode(db, _nid(db, req), mode, req.actor, req.reason))
 
 
 @handler("protection.probe_now", target_type="node", snapshot=_node_snap)
@@ -908,18 +899,34 @@ def _enable(db, req):
     return _lifecycle(fn)(db, req)
 
 
+def _canary_nodes(db, req) -> list[str]:
+    """The canary's nodes: `nodes` by name or id, and the members of `group` now (a group canary takes the group's
+    members when it starts; docs/design/settings.md, "Canary to a group")."""
+    nodes = [core_node_id(db, x) for x in (req.params.get("nodes") or [])]
+    if req.params.get("group"):
+        from .settings import bulk
+        nodes += [n["node_id"] for n in _groups(lambda: bulk.select_nodes(db, group=req.params["group"]))]
+        if not nodes:
+            raise OpError(409, "empty_group", f"the group {req.params['group']} has no members to canary on")
+    return list(dict.fromkeys(nodes))
+
+
 @handler("modules.enable_canary", target_type="module", target=_module_version, atomic=False, snapshot=_channel_snap,
-         impact=lambda db, r: {"canary": _name_ver(r), "nodes": r.params.get("nodes") or [],
+         impact=lambda db, r: {"canary": _name_ver(r), "group": r.params.get("group"),
+                               "nodes": [_names(db).get(x, x) for x in _canary_nodes(db, r)],
                                "then": "the canary nodes install it, re-doctor and re-certify on its goldens; promote when they pass"})
 def _canary(db, req):
     def fn(db, req):
         from . import modstore
         n, v = _name_ver(req)
-        nodes = [core_node_id(db, x) for x in (req.params.get("nodes") or [])]
+        nodes = _canary_nodes(db, req)
         ch = modstore.canary(db, n, v, nodes)
-        db.event("module_canary", actor=req.actor, reason=f"{n} {v} on {', '.join(nodes)}", module=n)
+        names = _names(db)
+        on = (f"the group {req.params['group']} ({', '.join(names.get(x, x) for x in nodes)})" if req.params.get("group")
+              else ", ".join(names.get(x, x) for x in nodes))
+        db.event("module_canary", actor=req.actor, reason=f"{n} {v} on {on}", module=n)
         req.target = n
-        return {"channel": ch}
+        return {"channel": ch, "group": req.params.get("group")}
     return _lifecycle(fn)(db, req)
 
 
@@ -1457,7 +1464,7 @@ def _settings_confirm(db, req) -> str:
 
 @handler("settings.apply", target_type="setting", snapshot=_settings_snap, versions=lambda db, r: ["settings"],
          impact=lambda db, r: _settings(lambda: settings.apply.plan(db, _settings_changes(r))),
-         tier=lambda r: settings.change_tier(r.params.get("changes") if isinstance(r.params.get("changes"), list) else []),
+         tier=lambda r: settings.bulk.tier(r.params.get("changes") if isinstance(r.params.get("changes"), list) else []),
          name=_settings_confirm)
 def _settings_apply(db, req):
     """A change set of owner settings (docs/design/settings.md): values set or reset at the fleet, a group or a node,
@@ -1465,6 +1472,262 @@ def _settings_apply(db, req):
     follows the keys and scopes it changes."""
     changes = _settings_changes(req)
     return _settings(lambda: settings.apply.commit(db, changes, req.actor, req.params.get("comment") or req.reason))
+
+
+# ------------------------------------------------------------------ groups, labels, bulk and canary (settings)
+
+def _groups(fn):
+    from .settings.bulk import BulkError
+    from .settings.groups import GroupError
+    try:
+        return fn()
+    except (GroupError, BulkError) as e:
+        raise OpError(e.status, e.code, e.detail)
+
+
+def _admin_only(req, what: str):
+    if req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"{what} changes what every member node gets: it needs the admin role; "
+                                             f"{req.actor} is {req.role}")
+
+
+def _snap_as(db, groups=None, labels=None, drop_group: str | None = None):
+    """The settings snapshot with groups, labels or a deleted group's values swapped in (a group change's preview)."""
+    from .settings import resolve as V
+    s = V.snapshot(db)
+    if groups is not None:
+        s.groups = sorted(groups, key=lambda g: g["rank"])
+    if labels is not None:
+        s.labels = labels
+    if drop_group:
+        s.rows = {k: x for k, x in s.rows.items() if not (k[0] == "group" and k[1] == drop_group)}
+    return s
+
+
+def _group_after(db, req) -> tuple:
+    """(before, after, extra) for a group operation's preview and apply: the snapshots around the change."""
+    from .settings import groups as G, store as S
+    from .settings import resolve as V
+    before = V.snapshot(db)
+    gs = [dict(g) for g in S.groups(db)]
+    extra = {}
+    if req.op == "groups.create":
+        sp = G.spec(db, {**req.params, "name": req.params.get("name") or req.target})
+        gs.append({**sp, "rank": G.top_rank(db), "builtin": 0})
+        extra["group"] = f"{sp['name']} ({G.describe(sp, _names(db))}), ranked above every other owner group"
+        return before, _snap_as(db, groups=gs), extra
+    g = G.get_owner(db, req.target or "")
+    if req.op == "groups.update":
+        sp = G.spec(db, req.params, g)
+        gs = [{**x, **sp} if x["id"] == g["id"] else x for x in gs]
+        extra["group"] = f"{sp['name']}: {G.describe(sp, _names(db))}"
+        return before, _snap_as(db, groups=gs), extra
+    if req.op == "groups.rank":
+        order = G.reorder(db, g["id"], req.params.get("move"), req.params.get("order"))
+        ranks = {gid: S.OWNER_RANK_MIN + 10 * (len(order) - 1 - k) for k, gid in enumerate(order)}
+        gs = [{**x, "rank": ranks.get(x["id"], x["rank"])} for x in gs]
+        names = {x["id"]: x["name"] for x in gs}
+        extra["order"] = " > ".join(names[x] for x in order) + " (highest rank first: it wins where groups disagree)"
+        return before, _snap_as(db, groups=gs), extra
+    # groups.delete
+    vals = [k + (f" [{m}]" if m else "") for (sc, sid, m, k) in before.rows if sc == "group" and sid == g["id"]]
+    extra["values_deleted"] = vals or ["none"]
+    from . import modsecrets
+    extra["secrets_deleted"] = modsecrets.group_secret_names(db, g["id"]) or ["none"]
+    return before, _snap_as(db, groups=[x for x in gs if x["id"] != g["id"]], drop_group=g["id"]), extra
+
+
+def _names(db) -> dict:
+    return {n["node_id"]: n["hostname"] for n in db.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired'")}
+
+
+def _group_impact(db, req) -> dict:
+    from .settings import groups as G
+    before, after, extra = _group_after(db, req)
+    return G.impact(db, before, after, extra)
+
+
+def _group_snap(db, req):
+    from .settings import groups as G
+    g = G.find(db, req.target or "") if req.target else None
+    return {k: g[k] for k in ("id", "name", "rank", "selector", "members", "description")} if g else None
+
+
+def _group_commit(db, req, write) -> dict:
+    """Write a group change, then refresh every node whose effective settings moved (effects, statements, a new
+    settings revision for each)."""
+    from .settings import apply as A, groups as G, store as S
+    from .settings import resolve as V
+    before = V.snapshot(db)
+    out = write()
+    rev = S.next_rev(db)
+    imp = G.impact(db, before, V.snapshot(db))
+    touched = A.refresh(db, imp["_diff"], rev, statements=True)
+    db.event("groups_changed", actor=req.actor, reason=f"{req.op} {req.target}: {imp['summary']}"[:400], rev=rev,
+             joins=imp["joins"], leaves=imp["leaves"])
+    return {**(out or {}), "rev": rev, "nodes": touched, "joins": imp["joins"], "leaves": imp["leaves"],
+            "message": f"{req.op.split('.')[1].capitalize()} · rev {rev} · {imp['summary']}"}
+
+
+@handler("groups.create", target_type="group", snapshot=_group_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)))
+def _groups_create(db, req):
+    """An owner group: a name, a selector over node facts and labels, explicit members; it ranks above every other
+    owner group (move it with groups.rank)."""
+    from .settings import groups as G
+    _admin_only(req, "a group")
+    sp = _groups(lambda: G.spec(db, {**req.params, "name": req.params.get("name") or req.target}))
+    req.target = sp["id"]
+    return _group_commit(db, req, lambda: {"group": G.create(db, sp, req.actor)})
+
+
+@handler("groups.update", target_type="group", snapshot=_group_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)))
+def _groups_update(db, req):
+    from .settings import groups as G
+    _admin_only(req, "a group")
+    g = _groups(lambda: G.get_owner(db, req.target or ""))
+    sp = _groups(lambda: G.spec(db, req.params, g))
+    req.target = g["id"]
+    return _group_commit(db, req, lambda: G.update(db, g["id"], sp, req.actor))
+
+
+def _rank_snap(db, req):
+    from .settings import store as S
+    return {"order": [g["id"] for g in S.groups(db) if not g["builtin"]][::-1]}
+
+
+@handler("groups.rank", target_type="group", snapshot=_rank_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)))
+def _groups_rank(db, req):
+    """Move an owner group up or down the ranking (`move`: up, down, top, bottom), or give the whole order
+    (`order`: every owner group, highest first). Where groups set the same key, the higher rank wins."""
+    from .settings import groups as G
+    _admin_only(req, "a group's rank")
+    g = _groups(lambda: G.get_owner(db, req.target or ""))
+    order = _groups(lambda: G.reorder(db, g["id"], req.params.get("move"), req.params.get("order")))
+    req.target = g["id"]
+    return _group_commit(db, req, lambda: (G.write_order(db, order), {"order": order})[1])
+
+
+@handler("groups.delete", target_type="group", snapshot=_group_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)), name=lambda db, r: str(r.target))
+def _groups_delete(db, req):
+    """Delete an owner group, its values and its secrets' values; its members fall back to the next layer down."""
+    from .settings import groups as G
+    _admin_only(req, "a group")
+    g = _groups(lambda: G.get_owner(db, req.target or ""))
+    req.target = g["id"]
+    return _group_commit(db, req, lambda: G.delete(db, g["id"]))
+
+
+def _label_nodes(db, req) -> list[str]:
+    """The target node and `nodes` (the target may be `nodes` when only the list names them: the bulk page)."""
+    first = [] if (req.target or "nodes") == "nodes" else [_nid(db, req)]
+    ids = list(dict.fromkeys(first + [core_node_id(db, x) for x in (req.params.get("nodes") or [])]))
+    if not ids:
+        raise OpError(400, "bad_params", "nodes.label: name a node (the target) or nodes")
+    return ids
+
+
+def _label_impact(db, req) -> dict:
+    from .settings import groups as G, store as S
+    from .settings import resolve as V
+    extra = set(req.params) - {"add", "remove", "nodes"}
+    if extra:
+        raise OpError(400, "bad_params", f"nodes.label takes add, remove and nodes, not {sorted(extra)}")
+    labels = {k: list(v) for k, v in S.labels(db).items()}
+    add = [_groups(lambda: G.check_label(x)) for x in req.params.get("add") or []]
+    remove = [_groups(lambda: G.check_label(x)) for x in req.params.get("remove") or []]
+    if not add and not remove:
+        raise OpError(400, "bad_params", "give labels to add or remove")
+    for nid in _label_nodes(db, req):
+        cur = [x for x in labels.get(nid, []) if x not in remove]
+        labels[nid] = sorted({*cur, *add})
+    names = _names(db)
+    return G.impact(db, V.snapshot(db), _snap_as(db, labels=labels),
+                    {"labels": [f"{names.get(n, n)}: {', '.join(labels[n]) or 'none'}" for n in _label_nodes(db, req)]})
+
+
+def _no_lock_escape(db, ids: list, remove: list, actor: str, role: str) -> None:
+    """Only an admin may take a node out of a group whose locked value then stops applying to it: removing a label
+    must not be a way around a lock."""
+    from .settings import resolve as V, store as S
+    labels = {k: list(v) for k, v in S.labels(db).items()}
+    for nid in ids:
+        labels[nid] = [x for x in labels.get(nid, []) if x not in remove]
+    before, after = V.snapshot(db), _snap_as(db, labels=labels)
+    locked = {sid for (sc, sid, _m, _k), x in before.rows.items() if sc == "group" and x.get("enforced")}
+    for nid in ids:
+        node = db.one("SELECT node_id, hostname, os, arch, facts_json FROM nodes WHERE node_id=?", (nid,))
+        now = {g["id"] for g in V.node_groups(after, node)}
+        for g in V.node_groups(before, node):
+            if g["id"] in locked and g["id"] not in now:
+                raise OpError(403, "forbidden_role", f"{node['hostname']} would leave the group {g['name']}, whose locked "
+                                                     f"values then stop applying to it: that needs the admin role; {actor} is {role}")
+
+
+def _label_snap(db, req):
+    from .settings import store as S
+    have = S.labels(db)
+    try:
+        return {n: have.get(n, []) for n in _label_nodes(db, req)}
+    except (OpError, core.ApiError):
+        return None
+
+
+@handler("nodes.label", target_type="node", snapshot=_label_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _label_impact(db, r)))
+def _nodes_label(db, req):
+    """Add and remove a node's labels (`nodes`: more nodes to label the same way). A label can move a node into or
+    out of a group, so the result names the groups joined and left, and the nodes refresh their settings."""
+    from .settings import groups as G
+    _label_impact(db, req)                                  # checks the request
+    ids = _label_nodes(db, req)
+    if req.role not in (None, "admin"):
+        _no_lock_escape(db, ids, req.params.get("remove") or [], req.actor, req.role)
+    req.target = ids[0]
+    return _group_commit(db, req, lambda: {"labels": {n: _groups(lambda: G.set_labels(
+        db, n, req.params.get("add") or [], req.params.get("remove") or [], req.actor))["labels"] for n in ids}})
+
+
+def _promote_changes(db, req) -> list:
+    from .settings import bulk
+    extra = set(req.params) - {"key", "module", "group", "to", "comment"}
+    if extra:
+        raise OpError(400, "bad_params", f"settings.promote takes key, module, group, to and comment, not {sorted(extra)}")
+    return _groups(lambda: bulk.promote_changes(db, req.params.get("key") or req.target or "", req.params.get("group") or "",
+                                                req.params.get("module") or "", req.params.get("to") or "fleet"))
+
+
+def _promote_tier(req) -> str:
+    from .settings import registry as R
+    to = req.params.get("to") or "fleet"
+    return R.change_tier([{"scope": "fleet" if to == "fleet" else "group", "key": req.params.get("key") or req.target or ""}])
+
+
+def _promote_snap(db, req):
+    """The group's row and the target's row (the audit's before and after)."""
+    from .settings import groups as G
+    g = G.find(db, req.params.get("group") or "")
+    to = req.params.get("to") or "fleet"
+    t = None if to == "fleet" else G.find(db, to)
+    key, m = req.params.get("key") or req.target or "", req.params.get("module") or ""
+    changes = [{"scope": "group", "scope_id": g["id"] if g else "", "module": m, "key": key},
+               {"scope": "fleet" if to == "fleet" else "group", "scope_id": t["id"] if t else "", "module": m, "key": key}]
+    return _settings_snap(db, OpRequest(op="settings.apply", actor="", params={"changes": changes}))
+
+
+@handler("settings.promote", target_type="setting", versions=lambda db, r: ["settings"], snapshot=_promote_snap,
+         impact=lambda db, r: _settings(lambda: settings.apply.plan(db, _promote_changes(db, r))), tier=_promote_tier,
+         name=lambda db, r: str(r.params.get("key") or r.target or ""))
+def _settings_promote(db, req):
+    """Canary, then promote: a group's value of a key (the canary) moves to the fleet or a wider group in one change
+    set: set there, deleted from the group (docs/design/settings.md, "Canary to a group")."""
+    _admin_only(req, "promoting a setting")
+    changes = _promote_changes(db, req)
+    out = _settings(lambda: settings.apply.commit(db, changes, req.actor, req.params.get("comment") or req.reason))
+    return {**out, "message": out["message"].replace("Saved", "Promoted", 1)}
 
 
 def _core_secret(fn):
@@ -1883,17 +2146,18 @@ SECRET_OPS = (SECRET_OP, "settings.secrets.set")      # the operations that take
 
 
 def _secret_scope(db, req) -> tuple[str, str, str]:
-    """(module, secret name, node id or '') from target (the module) and params {name, node?}; nothing else."""
+    """(module, secret name, scope) from target (the module) and params {name, node? | group?}; nothing else. The scope
+    is '' (the module), a node id or `group:<id>` (modsecrets.scope_ref)."""
     from . import modsecrets
-    extra = set(req.params) - {"name", "node"}
+    extra = set(req.params) - {"name", "node", "group"}
     if extra:
-        raise OpError(400, "bad_params", f"{req.op} takes params name and node only (the value goes beside params, as "
-                      f"`secret`), not {sorted(extra)}")
+        raise OpError(400, "bad_params", f"{req.op} takes params name, node and group only (the value goes beside params, "
+                      f"as `secret`), not {sorted(extra)}")
     name = req.params.get("name")
     if not req.target or not isinstance(name, str) or not name:
         raise OpError(400, "bad_params", f"{req.op}: target is the module, params.name the secret")
     try:
-        return req.target, name, modsecrets.node_id(db, req.params.get("node"))
+        return req.target, name, modsecrets.scope_ref(db, req.params.get("node"), req.params.get("group"))
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
 
@@ -1902,6 +2166,13 @@ def _secret_snap(db, req):
     from . import modsecrets
     module, name, node = _secret_scope(db, req)
     return {"secret": name, "scope": node or "module", **modsecrets.state(db, module, name, node)}
+
+
+def _secret_scope_fields(db, scope: str) -> dict:
+    from . import modsecrets
+    if scope.startswith(modsecrets.GROUP_PREFIX):
+        return {"node": None, "group": scope[len(modsecrets.GROUP_PREFIX):], "scope": modsecrets.scope_text(db, scope)}
+    return {"node": scope or None, "group": None, "scope": modsecrets.scope_text(db, scope)}
 
 
 @handler(SECRET_OP, target_type="module", target=_module_name, snapshot=_secret_snap)
@@ -1914,8 +2185,10 @@ def _secret_set(db, req):
         out = modsecrets.put(db, module, name, node, req.secret, req.actor)
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
-    db.event("secret_set", actor=req.actor, node_id=node or None, reason=f"{module}/{name} {out['fingerprint']}", module=module)
-    return {"module": module, "name": name, "node": node or None, **out}
+    f = _secret_scope_fields(db, node)
+    db.event("secret_set", actor=req.actor, node_id=f["node"], reason=f"{module}/{name} for {f['scope']} {out['fingerprint']}",
+             module=module)
+    return {"module": module, "name": name, **f, **out}
 
 
 @handler("secrets.clear", target_type="module", target=_module_name, snapshot=_secret_snap)
@@ -1926,8 +2199,9 @@ def _secret_clear(db, req):
         out = modsecrets.clear(db, module, name, node)
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
-    db.event("secret_cleared", actor=req.actor, node_id=node or None, reason=f"{module}/{name}", module=module)
-    return {"module": module, "name": name, "node": node or None, **out}
+    f = _secret_scope_fields(db, node)
+    db.event("secret_cleared", actor=req.actor, node_id=f["node"], reason=f"{module}/{name} for {f['scope']}", module=module)
+    return {"module": module, "name": name, **f, **out}
 
 
 @handler("audit.verify", target_type="audit")

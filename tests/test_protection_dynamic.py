@@ -1,6 +1,6 @@
-"""Protection on the coordinator: the preview matcher's shared vectors (D20), protection operations (versioned
-rules, restore, canary/promote, mode, probe), the process summary, GPU admission, paused-as-progress, S18
-from the decision journal, and the flapping / probe-harm alerts."""
+"""Protection on the coordinator: the preview matcher's shared vectors (D20), protection on the settings chain (a
+scope's own section, the effective union, history, a canary group then promote, mode, probe), the process summary, GPU
+admission, paused-as-progress, S18 from the decision journal, and the flapping / probe-harm alerts."""
 import json
 import time
 import uuid
@@ -80,43 +80,97 @@ def test_process_summary_is_stored_and_requested_by_a_preview(db):
     assert p["diff"]["rules_added"] == ["studio"]
 
 
-def test_rules_update_is_versioned_previewed_and_restorable(db):
+def effective(rules=(), mode="moderate", **node):
+    return {"schema": 1, "node": {**node, "mode": mode}, "rule": list(rules)}
+
+
+def test_rules_update_is_previewed_written_on_the_chain_and_kept_in_history(db):
     node = certify(db, enrolled_node(db)[1])
     nid = node["node_id"]
     core.heartbeat(db, fresh(db, node), {"processes": PROCS})
     with pytest.raises(core.ApiError) as e:                                   # T2: no apply without a plan
-        op(db, "protection.rules.update", nid, params={"config": {"schema": 1, "rule": [RULE]}}, reason="x", if_match=0)
+        op(db, "protection.rules.update", nid, params={"config": {"schema": 1, "rule": [RULE]}}, reason="x")
     assert e.value.code == "plan_required"
     with pytest.raises(core.ApiError) as e:
         op(db, "protection.rules.update", nid, params={"config": {"schema": 1, "rule": [{"id": "x", "match": {}}]}}, dry_run=True)
     assert e.value.code == "bad_protection"
     plan, r = planned(db, "protection.rules.update", nid, {"config": {"schema": 1, "rule": [RULE]}})
-    assert [m["rule"] for m in plan["impact"]["matches"]] == ["studio"] and r["result"]["version"] == 1
-    assert json.loads(fresh(db, node)["protection_json"])["rule"] == [RULE]
-    two = {"schema": 1, "node": {"mode": "fleet_first"}, "rule": []}
+    assert [m["rule"] for m in plan["impact"]["matches"]] == ["studio"]
+    assert plan["impact"]["changes"] == ["Protected-process rules at mini: not set → studio"]
+    assert protection.current(db, nid) == (1, effective([RULE]))
+    assert json.loads(fresh(db, node)["settings_json"])["policy"]["protection"] == effective([RULE])
+    two = {"schema": 1, "node": {"mode": "fleet_first"}, "rule": []}                     # its own rules go: reset
     planned(db, "protection.rules.update", nid, {"config": two})
+    assert protection.current(db, nid) == (2, effective(mode="fleet_first"))
     stale = op(db, "protection.rules.update", nid, params={"config": {"schema": 1, "rule": [RULE]}}, dry_run=True)["plan"]
-    op(db, "nodes.set_mode", nid, params={"mode": "strict_yield"}, reason="owner away")          # T1, versioned
-    with pytest.raises(core.ApiError) as e:                                   # the rules moved since that preview
+    op(db, "nodes.set_mode", nid, params={"mode": "strict_yield"}, reason="owner away")          # T1, on the chain
+    with pytest.raises(core.ApiError) as e:                                   # the settings moved since that preview
         op(db, "protection.rules.update", plan_id=stale["plan_id"], reason="late")
     assert e.value.code == "plan_drift"
-    _, r = planned(db, "protection.rules.restore", nid, {"version": 1})
-    assert r["result"] == {"version": 4, "restored": 1}
     hist = protection.history(db, nid)
-    assert [h["version"] for h in hist] == [4, 3, 2, 1] and hist[0]["config"] == hist[-1]["config"]
-    assert hist[1]["config"]["node"]["mode"] == "strict_yield" and hist[1]["source"] == "mode.set"
-    assert json.loads(fresh(db, node)["protection_json"])["rule"] == [RULE]
+    assert [h["version"] for h in hist] == [3, 2, 1] and hist[0]["config"]["node"]["mode"] == "strict_yield"
+    assert hist[0]["source"].startswith("settings rev ") and hist[0]["actor"] == "test"
     with pytest.raises(core.ApiError):
         op(db, "nodes.set_mode", nid, params={"mode": "yolo"})
 
 
-def test_every_protection_write_is_versioned_and_reaches_the_agents_policy(db):
+def test_every_protection_write_reaches_the_agents_policy(db):
     nid = enrolled_node(db)[1]["node_id"]
     with db.tx():
-        protection.write_version(db, nid, {"schema": 1, "rule": [RULE]}, "oarbank", None)
-    assert protection.current(db, nid) == (1, {"schema": 1, "rule": [RULE]})
+        protection.write(db, nid, {"schema": 1, "rule": [RULE]}, "oarbank", None)
+    assert protection.current(db, nid) == (1, effective([RULE]))
     assert json.loads(db.one("SELECT settings_json FROM nodes WHERE node_id=?", (nid,))["settings_json"])["policy"]["protection"] \
-        == {"schema": 1, "rule": [RULE]}
+        == effective([RULE])
+
+
+def test_rules_from_every_scope_apply_together_and_a_mode_lock_holds(db):
+    """Protection on the chain (docs/design/settings.md, "Protection on the chain"): fleet, group and node rules are
+    one union on each node, each rule naming where it comes from; the mode is the most specific value, unless locked."""
+    from helpers import settings_apply
+    a, b = (certify(db, enrolled_node(db, n)[1]) for n in ("desk", "mini"))
+    zoom = {"id": "zoom", "match": {"bundle_id": "us.zoom.xos"}, "cap_fleet": {"slots": 0}}
+    trainer = {"id": "trainer", "match": {"path_contains": "trainer"}, "pause_fleet": {}}
+    op(db, "groups.create", "Studio", params={"members": ["desk"]})
+    planned(db, "protection.rules.update", "fleet", {"config": {"schema": 1, "rule": [zoom]}})
+    planned(db, "protection.rules.update", "group:Studio", {"config": {"schema": 1, "rule": [RULE]}})
+    planned(db, "protection.rules.update", a["node_id"], {"config": {"schema": 1, "rule": [trainer]}})
+    st = protection.status(db, a["node_id"])
+    assert [r["id"] for r in st["config"]["rule"]] == ["zoom", "studio", "trainer"]
+    assert st["sources"] == {"zoom": "Fleet", "studio": "Group: Studio", "trainer": "This node"}
+    assert st["own"] == {"schema": 1, "rule": [trainer]}
+    assert [r["id"] for r in protection.current(db, b["node_id"])[1]["rule"]] == ["zoom"]
+    # a rule id set at two scopes is refused where it would meet on a node
+    with pytest.raises(core.ApiError) as e:
+        op(db, "protection.rules.update", a["node_id"], params={"config": {"schema": 1, "rule": [{**zoom, "pause_fleet": {}}]}},
+           dry_run=True)
+    assert "rule zoom is set at both Fleet and This node" in str(e.value.extra.get("errors") or e.value)
+    # the mode: a group's lock beats the node's own value, which is refused while it holds
+    op(db, "nodes.set_mode", a["node_id"], params={"mode": "fleet_first"}, reason="x")
+    settings_apply(db, {"scope": "group", "scope_id": "Studio", "key": "protection.mode", "value": "strict_yield", "enforce": True})
+    st = protection.status(db, a["node_id"])
+    assert st["mode"] == "strict_yield" and st["mode_locked_by"] == "Group: Studio"
+    with pytest.raises(core.ApiError) as e:
+        op(db, "nodes.set_mode", a["node_id"], params={"mode": "moderate"}, reason="x")
+    assert e.value.code == "invalid_settings" and "locked by the group Studio" in str(e.value)
+
+
+def test_rules_roll_out_through_a_canary_group_then_promote_to_the_fleet(db):
+    """Canary-then-promote is a group's rules moved to the fleet: the canary group's members get them first; promoting
+    adds them to the fleet's rules and removes them from the group, so the canary nodes see no change."""
+    a, b, c = (certify(db, enrolled_node(db, n)[1]) for n in ("desk", "mini", "laptop"))
+    keep = {"id": "trainer", "match": {"path_contains": "trainer"}, "pause_fleet": {}}
+    planned(db, "protection.rules.update", "fleet", {"config": {"schema": 1, "rule": [keep]}})
+    op(db, "groups.create", "Canary", params={"members": ["desk"]})
+    planned(db, "protection.rules.update", "group:canary", {"config": {"schema": 1, "rule": [RULE]}})
+    assert [[r["id"] for r in protection.current(db, n["node_id"])[1]["rule"]] for n in (a, b, c)] == \
+        [["trainer", "studio"], ["trainer"], ["trainer"]]
+    plan, r = planned(db, "settings.promote", "protection.rules", {"key": "protection.rules", "group": "Canary"})
+    assert plan["impact"]["changes"][0] == "Protected-process rules at Fleet: trainer → trainer, studio"
+    assert sorted(x["hostname"] for x in plan["impact"]["_diff"]) == ["laptop", "mini"]
+    for n in (a, b, c):
+        assert [x["id"] for x in protection.current(db, n["node_id"])[1]["rule"]] == ["trainer", "studio"]
+    assert protection.status(db, a["node_id"])["sources"]["studio"] == "Fleet"
+    assert protection.history(db, b["node_id"])[0]["source"].startswith("settings rev ")
 
 
 def test_probe_now_is_sent_once(db):
@@ -124,28 +178,6 @@ def test_probe_now_is_sent_once(db):
     op(db, "protection.probe_now", node["node_id"])
     assert core.heartbeat(db, fresh(db, node), {})["run_probe"] is True
     assert core.heartbeat(db, fresh(db, node), {})["run_probe"] is False
-
-
-def test_canary_then_promote_after_a_clean_soak(db):
-    a, b, c = (certify(db, enrolled_node(db, n)[1]) for n in ("desk", "mini", "laptop"))
-    cfg = {"schema": 1, "rule": [RULE]}
-    plan, r = planned(db, "protection.rules.canary", a["node_id"], {"config": cfg})
-    assert plan["impact"]["canary"] and r["result"]["node_id"] == a["node_id"]
-    assert protection.current(db, b["node_id"])[0] == 0
-    plan = op(db, "protection.rules.canary", a["node_id"], params={"promote": True}, dry_run=True)["plan"]
-    assert not plan["impact"]["promotable"] and any("soaking" in w for w in plan["impact"]["why"])
-    with pytest.raises(core.ApiError) as e:
-        op(db, "protection.rules.canary", plan_id=plan["plan_id"], reason="too early")
-    assert e.value.code == "canary_not_promotable"
-    s = db.get_state(protection.CANARY_KEY)
-    db.set_state(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
-    core.heartbeat(db, fresh(db, a), {})
-    _, r = planned(db, "protection.rules.canary", a["node_id"], {"promote": True})
-    assert sorted(r["result"]["promoted"]) == sorted([b["node_id"], c["node_id"]])
-    for n in (b, c):
-        assert protection.current(db, n["node_id"])[1] == cfg
-        assert protection.history(db, n["node_id"])[0]["source"] == "rules.promote"
-    assert db.get_state(protection.CANARY_KEY) is None
 
 
 def test_shared_support_vectors_hold_for_the_python_refusals():
@@ -158,7 +190,7 @@ def test_shared_support_vectors_hold_for_the_python_refusals():
         assert len(got) == len(c["refused"]) and all(w in g for w, g in zip(c["refused"], got)), (c["name"], got)
 
 
-def test_a_rule_a_node_s_os_cannot_run_is_refused_there_and_skipped_by_promotion(db):
+def test_a_rule_a_node_s_os_cannot_run_is_refused_there_and_skipped_from_the_fleet(db):
     from helpers import facts_for
     mac = certify(db, enrolled_node(db, "desk")[1])
     linux = certify(db, enrolled_node(db, "box", facts=facts_for("linux-amd64", os_version="7.0"))[1])
@@ -167,21 +199,20 @@ def test_a_rule_a_node_s_os_cannot_run_is_refused_there_and_skipped_by_promotion
     with pytest.raises(core.ApiError) as e:
         op(db, "protection.rules.update", linux["node_id"], params={"config": cfg}, dry_run=True)
     assert e.value.code == "bad_protection" and "on linux: rule studio: match.bundle_id" in str(e.value)
-    with pytest.raises(protection.ProtectionError) as e:            # every route that writes the section
-        protection.write_version(db, win["node_id"], cfg, "test", None)
+    with pytest.raises(protection.ProtectionError) as e:            # every route that writes a node's section
+        protection.write(db, win["node_id"], cfg, "test", None)
     assert "on windows:" in str(e.value)
     portable = {"schema": 1, "rule": [{"id": "trainer", "match": {"path_contains": "trainer"}, "pause_fleet": {}}]}
     planned(db, "protection.rules.update", linux["node_id"], {"config": portable})
-    assert protection.current(db, linux["node_id"])[1] == portable
-    # a canary on the Mac promotes to every node that can run it, and says which it skipped and why
-    protection.start_canary(db, mac["node_id"], cfg, "t", "try")
-    s = db.get_state(protection.CANARY_KEY)
-    db.set_state(protection.CANARY_KEY, {**s, "started_at": time.time() - protection.CANARY_MIN_SOAK_S - 1})
-    core.heartbeat(db, fresh(db, mac), {})
-    plan, r = planned(db, "protection.rules.canary", mac["node_id"], {"promote": True})
-    assert plan["impact"]["targets"] == [] and sorted(plan["impact"]["skipped"]) == sorted([linux["node_id"], win["node_id"]])
-    assert r["result"]["promoted"] == {} and "match.bundle_id" in r["result"]["skipped"][win["node_id"]]
-    assert protection.current(db, linux["node_id"])[1] == portable
+    assert protection.current(db, linux["node_id"])[1] == effective(portable["rule"])
+    # at the fleet, it applies where it can and is skipped (named) where the OS cannot run it
+    plan, _ = planned(db, "protection.rules.update", "fleet", {"config": cfg})
+    assert sorted(plan["impact"]["protection_notes"]) == [
+        x for x in sorted(plan["impact"]["protection_notes"]) if "is skipped on" in x] and len(plan["impact"]["protection_notes"]) == 2
+    assert [r["id"] for r in protection.current(db, mac["node_id"])[1]["rule"]] == ["studio"]
+    assert protection.current(db, linux["node_id"])[1] == effective(portable["rule"])
+    st = protection.status(db, win["node_id"])
+    assert st["skipped"][0]["rule"] == "studio" and "match.bundle_id" in st["skipped"][0]["why"]
 
 
 def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain(db):
@@ -204,16 +235,6 @@ def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain
     rows = {r.code: r.detail for r in doc.summary}
     assert rows["PROTECTION_UNREADABLE"] == {"rule": "trainer", "n": 2} and "PROTECTION_NO_LOWERING" in rows
     assert rows["PROTECTION_NO_IPC_COUNTERS"] == {"rule": "build"}
-
-
-def test_a_refused_actuation_blocks_promotion(db):
-    a = certify(db, enrolled_node(db, "desk")[1])
-    protection.start_canary(db, a["node_id"], {"schema": 1, "rule": [RULE]}, "t", "try")
-    s = db.get_state(protection.CANARY_KEY)
-    db.set_state(protection.CANARY_KEY, {**s, "started_at": time.time() - 4000})
-    core.heartbeat(db, fresh(db, a), {"journal": [{"t": time.time(), "seq": 1, "kind": "actuation_refused", "reason": "S16_GUARD"}]})
-    h = protection.canary_health(db)
-    assert not h["promotable"] and "refused actuation" in h["why"][0]
 
 
 def test_paused_attempts_keep_their_lease(db):
@@ -274,8 +295,8 @@ def test_s18_checks_rules_are_enforced_in_time(db):
     node = certify(db, enrolled_node(db)[1])
     nid = node["node_id"]
     with db.tx():
-        protection.write_version(db, nid, {"schema": 1, "rule": [{"id": "zoom", "match": {"bundle_id": "us.zoom.xos"},
-                                                                 "cap_fleet": {"slots": 0}}]}, "t", None)
+        protection.write(db, nid, {"schema": 1, "rule": [{"id": "zoom", "match": {"bundle_id": "us.zoom.xos"},
+                                                          "cap_fleet": {"slots": 0}}]}, "t", None)
     t = time.time()
     db.x("UPDATE protection_versions SET created_at=? WHERE node_id=?", (t - 7200, nid))
     _journal(db, node, [{"t": t - 3000, "kind": "rule_active", "reason": "PROTECTION_ACTIVE", "rule": "zoom"},
@@ -343,3 +364,40 @@ def test_timeline_reconstructs_every_transition_of_a_72h_journal(db):
     assert {r["rule"]: len(r["spans"]) for r in tl["rows"]} == want["bands"]
     assert tl["rung"].count("L") == 2 * want["rung"] + 1                 # two segments per step, one tail
     assert len(tl["probes"]) == want["probes"] and len(tl["guards"]) == want["guards"]
+
+
+def test_per_node_sections_are_hoisted_onto_the_chain_once(tmp_path):
+    """A home whose nodes each hold a protection section (the old copy-and-promote store): what every node has in
+    common goes to the fleet, the rest stays on each node, and each node's effective section is what it had."""
+    import sqlite3
+    from oarbank.coordinator.db import DB
+    from oarbank.coordinator.settings import store
+    path = tmp_path / "home" / "oarbank.sqlite3"
+    db = make_db(path)
+    ids = {n: enrolled_node(db, n)[1]["node_id"] for n in ("a", "b", "c")}
+    zoom = {"id": "zoom", "match": {"bundle_id": "us.zoom.xos"}, "cap_fleet": {"slots": 0}}
+    trainer = {"id": "trainer", "match": {"path_contains": "trainer"}, "pause_fleet": {}}
+    had = {"a": {"schema": 1, "node": {"mode": "strict_yield"}, "rule": [zoom, RULE]},
+           "b": {"schema": 1, "node": {"mode": "strict_yield"}, "rule": [zoom]},
+           "c": {"schema": 1, "node": {"mode": "strict_yield", "max_pause_s": 300}, "rule": [zoom, trainer]}}
+    db.conn.close()
+    c = sqlite3.connect(path)
+    c.execute("ALTER TABLE nodes ADD COLUMN protection_json TEXT")
+    for n, cfg in had.items():
+        c.execute("UPDATE nodes SET protection_json=? WHERE node_id=?", (json.dumps(cfg), ids[n]))
+    c.commit()
+    c.close()
+    db = DB(path)
+    assert "protection_json" not in {r[1] for r in db.conn.execute("PRAGMA table_info(nodes)")}
+    rows = {(r["scope"], r["scope_id"], r["key"]): r["value"] for r in store.rows(db) if r["key"].startswith("protection.")}
+    assert rows == {("fleet", "", "protection.mode"): "strict_yield", ("fleet", "", "protection.rules"): [zoom],
+                    ("node", ids["a"], "protection.rules"): [RULE], ("node", ids["c"], "protection.rules"): [trainer],
+                    ("node", ids["c"], "protection.node"): {"max_pause_s": 300}}
+    for n, cfg in had.items():
+        got = protection.current(db, ids[n])[1]
+        assert got["node"] == cfg["node"] and [r["id"] for r in got["rule"]] == [r["id"] for r in cfg["rule"]]
+    assert db.one("SELECT reason FROM events WHERE kind='protection_hoisted'")["reason"] == \
+        "2 fleet values, 3 node values, 0 dropped"
+    db.conn.close()
+    again = DB(path)                                                  # once: opening it again changes nothing
+    assert again.q("SELECT COUNT(*) n FROM events WHERE kind='protection_hoisted'")[0]["n"] == 1

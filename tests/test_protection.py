@@ -24,7 +24,8 @@ def test_protection_policy_is_validated(db):
         set_protection(db, n, {"schema": 1, "rule": [{"id": "x", "match": {}}]})
     rev = fresh(db, n)["settings_rev"]
     set_protection(db, n, {"schema": 1, "node": {"mode": "fleet_first"}, "rule": []})
-    assert json.loads(fresh(db, n)["protection_json"])["node"]["mode"] == "fleet_first"
+    assert db.one("SELECT value_json FROM setting_values WHERE scope='node' AND key='protection.mode'")["value_json"] \
+        == '"fleet_first"'                                            # a node value on the settings chain
     # the agent gets it in its policy, under a new settings revision
     assert json.loads(fresh(db, n)["settings_json"])["policy"]["protection"]["node"]["mode"] == "fleet_first"
     assert fresh(db, n)["settings_rev"] > rev
@@ -206,7 +207,8 @@ def test_node_page_shows_protection_and_conditions(db, tmp_path):
                                             "rules": [{"id": "gpu-trainer", "active": True, "processes": 3, "cpu_cores": 0.5,
                                                        "footprint_gb": 4.1, "reason": "active"}],
                                             "constraint": {"reserved_mem_gb": 6.1, "reserved_cpu": 0, "binding": {"reserve_mem": "rule:gpu-trainer"}}}}
-    db.x("UPDATE nodes SET protection_json=?, telemetry_json=? WHERE node_id=?", (json.dumps(prot), json.dumps(tel), node["node_id"]))
+    set_protection(db, node, prot)
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (json.dumps(tel), node["node_id"]))
     d = views.node_page(db, node["node_id"], time.time(), lambda m: modcalls.info(m).manifest)
     assert [c["code"] for c in d["conditions"]] == ["PROTECTION_RESERVED"]
 

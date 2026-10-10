@@ -55,6 +55,8 @@ The keys, by section:
   module beats a plain value at any scope (the registry's `qualifier = "optional"`).
 - **Per module on a node**: `module.node_settings`, handed to the module's runners and services there
   (`OARBANK_SETTINGS_FILE`).
+- **Protection** ([Protection on the chain](#protection-on-the-chain)): `protection.mode` (lockable), `protection.rules`
+  (merge `union`), `protection.node` (advanced).
 
 `GET /api/v1/settings/schema` returns the registry as data; `oarbank settings schema` prints it.
 
@@ -71,9 +73,10 @@ Python `DEFAULT_POLICY`, the Rust `Policy::default()` literals and the console's
 ```sql
 setting_values (scope fleet|group|node|campaign, scope_id, module, key, value_json, enforced, rev, comment,
                 updated_by, updated_at; PRIMARY KEY (scope, scope_id, module, key))
-node_groups (id, name, rank UNIQUE, selector_json, builtin)
+node_groups (id, name, rank UNIQUE, selector_json, builtin, members_json, description, updated_by, updated_at)
+node_labels (node_id, label, set_by, set_at)
 system_state (key, value_json)          -- machine state: fleet id, coordinator key, move phase, alive_at, ...
-nodes: protection_json, settings_json, settings_digest, settings_rev, settings_applied_rev, settings_rejected_json
+nodes: settings_json, settings_digest, settings_rev, settings_applied_rev, settings_rejected_json
 ```
 
 - **Absence means inherit.** A row exists only where an owner set a value. Reset deletes the row and never writes the
@@ -86,8 +89,7 @@ nodes: protection_json, settings_json, settings_digest, settings_rev, settings_a
   machine, rank 4, above the OS groups). The coordinator-host group sets `disabled_services = []` by itself ("the
   coordinator's own machine runs every service"), replacing the old special case that gave that machine every
   service at enrolment. Membership is evaluated when values are resolved, so a node whose facts change moves at once.
-  Owner groups (rank 100 and up), labels and their console come later; values can already be set on a built-in group
-  (`oarbank settings set … --group macOS`).
+  Owner groups rank 100 and up ([Groups and labels](#groups-and-labels)).
 - **System state** is not settings: it is written only by the code that owns it, never by an operation that takes a raw
   key. The raw `settings.update` operation is gone.
 
@@ -163,6 +165,106 @@ heartbeat", "Pending: node offline", "Refused by the node: …", or, for an agen
 "Pending: this agent does not report what it applied (update it)". Services still get only the caps that are set in
 `OARBANK_LIMITS_FILE`, as before.
 
+## Groups and labels
+
+An owner group (`settings/groups.py`) is a name, a **selector** over node facts and labels, optional **explicit
+members** and a unique **rank**. A node is a member when it is listed, or when the selector is not empty and every term
+holds:
+
+| Term | Holds when |
+|---|---|
+| `os` | the node's OS is this one (or one of these): `darwin` (macOS), `linux`, `windows` |
+| `arch` | its architecture: `arm64`, `amd64` |
+| `labels` | it carries every one of these labels |
+| `hostname` | its name matches this glob (or one of these), ignoring case: `mac-*` |
+| `battery` | it has a system battery (`true`: a laptop) or not, from the agent's facts (`power.battery`) |
+| `ram_gb_min`, `ram_gb_max`, `cores_min` | its RAM is at least / at most, its cores at least |
+
+Membership is evaluated whenever values are resolved; a node that stops matching falls back to the next layer down,
+with no stale copy. Every resolution can say why: the explain view, `oarbank node show`, the node page and the group
+page name each group a node is in and the terms that put it there ("Laptops because has a battery"), and the member
+preview names the terms a node misses. Where several groups set the same key, the **highest rank wins** (a new group
+goes on top; `groups.rank` moves one up, down, to the top or the bottom) and the explain chain shows the groups that
+lost. Built-in groups keep their system membership and the lowest ranks; values can be set on them.
+
+**Labels** are short owner words on a node (`node_labels`: 1 to 63 of `a-z 0-9 _ . : -`), set with `nodes.label` from a
+node's page, Bulk changes or `oarbank node label`. The coordinator adds labels from facts (`laptop` for a node with a
+battery), shown "from facts": they can be matched, not removed. Facts come from the node itself, so a group that locks
+a safety value should select on owner labels, listed members or the OS. Removing a label that takes a node out of a
+group holding a lock needs the admin role, so a label is never a way around a lock.
+
+Operations: `groups.create` (T1, previewed in the console: who joins), `groups.update`, `groups.rank`,
+`groups.delete` (T2: the preview names who joins or leaves and every node whose effective settings change, key by key;
+deleting a group deletes its values and its secrets' values) and `nodes.label` (T1). Each writes one settings revision
+for the nodes it moved, runs the effect hooks (a services change re-doctors) and rebuilds node statements. Reads:
+`GET /api/v1/groups`, `GET /api/v1/groups/{id}`, `GET /api/v1/groups/preview?selector=&members=` (the live preview).
+
+## Locks
+
+A lock is an enforced value at the fleet or a group (`enforce` on a change; a T3 change, typed confirmation). The
+resolver finds it first: the fleet's before any group's, the highest-ranked group's first. It wins outright; values
+below it are kept but ignored (and apply again when the lock goes), and the preview of a new lock lists them ("mini
+sets its own value (on): ignored while the lock holds"). A node value, or a group value under a fleet lock, is refused
+while it holds: "locked by the group Laptops: change it there". A node may still reset its own value. In the console a
+fleet or group row has a **lock** toggle beside its value, and a locked row on a node shows the value read-only with a
+"Locked" disclosure naming who locked it and linking there.
+
+**Campaigns** come under locks too. A campaign override (phase 5) goes through `apply.campaign_refusals(db, campaign,
+key)`, which refuses a value where the fleet or a group any of the campaign's nodes belongs to locks it, naming the
+lock, and then a key not declared campaign-overridable (`Setting.campaign`). The resolver already takes a campaign
+layer on top of the node (`resolve(..., campaign=)`), for campaign-overridable keys only, and a lock ignores it.
+
+The phase-4 exit test (`tests/test_settings_groups.py`): a Laptops group (selector `battery: true`) with a locked
+`run_on_battery = false` holds on a laptop that had chosen `true`, refuses the node's override with the group named,
+refuses a campaign override the same way, ignores a campaign value written anyway, and gives the node back its own
+choice when the lock goes.
+
+## Bulk changes
+
+One key set or reset on many nodes is one `settings.apply` change set with one change per node: one revision, and one
+preview that lists every node's old and new value and the nodes that keep theirs (a lock above, or the same value).
+Over ten nodes' own values it is one tier up (operations.BULK_ESCALATE_ITEMS). The console's **Bulk changes** page
+(`/nodes/bulk`, filtered by group or label) ticks nodes, then sets an override or (the safer default) resets to
+inherited, or adds or removes labels; a change across several nodes always opens its review first. The CLI: `oarbank
+settings set <key> <value> --nodes a,b` or `--label <label>`, and the same for `reset`.
+
+## Canary to a group
+
+A change goes to a small group first (an ordinary group value, or a group's protection rules), and **`settings.promote
+{key, group, to}`** moves it up in one change set: set at the fleet (or a wider group), deleted from the group, so the
+canary nodes see no change and the rest get it. A `union` list (protection rules) joins the target's entries instead of
+replacing them, an entry with the same id being the group's version; a lock moves with its value. The group page has
+"Promote to fleet…" on each value set there; the CLI is `oarbank settings promote <key> --group <group> [--to <group>]`.
+A module version's canary may target a group too (`modules.enable_canary {group}`, `oarbank module canary <m>@<v> --group
+<g>`): the group's members when the canary starts.
+
+## Secrets on the chain
+
+Module secrets resolve like a setting: a node's own value, else the value of the highest-ranked group it belongs to that
+sets one, else the module's (fleet-wide). The encrypted table keeps its shape: the `node_id` column is the scope, `''`
+for the module, a node id, or `group:<group id>`; the associated data binds each value to it, and a coordinator move
+seals group values like the others. `secrets.set` and `secrets.clear` take `group` beside `node`; values stay
+write-only, shown as fingerprints per scope (the module's Secrets page lists module, group and node values). Deleting a
+group deletes its values. The ntfy token stays a fleet-only core secret.
+
+## Protection on the chain
+
+Protection is three settings at fleet, group or node scope, assembled into the agent's `policy.protection`:
+
+- `protection.mode` (`fleet_first`, `moderate`, `strict_yield`; default `moderate`): replace, lockable;
+- `protection.rules`: merge `union`, so the fleet's, each group's and the node's rules all apply (a rule only ever
+  protects more); rule ids are unique on a node, and a change that would meet the same id from two scopes is refused;
+- `protection.node`: the node section's other fields (memory guard, timing, GPU jobs, longest pause), replace.
+
+A rule the node's OS cannot run (a code-signing matcher on Linux) is refused when set on that node, and skipped (named,
+in the preview and on the protection page) when it comes from the fleet or a group. `protection.rules.update` writes
+one scope's own section (a node, `fleet` or `group:<group>`) as one change set; `nodes.set_mode` writes a node's own
+mode. Each change of a node's effective section appends a history row (`protection_versions`). The node's protection
+page shows its effective rules with their source, the rules skipped there, and edits its own section; the per-node
+canary, promote and restore are gone, replaced by a canary group and `settings.promote`. A home whose nodes held their
+own sections is hoisted once: the mode, rules and node section every node had in common became the fleet's, the rest
+stayed per node.
+
 ## The console
 
 - **The node's Settings tab** (`/nodes/<node>/settings`): one explicit-save section per area (Memory, When someone is
@@ -178,8 +280,15 @@ heartbeat", "Pending: node offline", "Refused by the node: …", or, for an agen
   nodes" linking to the reverse view `/settings/overrides?key=…`), Notifications (the two URLs and the write-only token),
   Access (`console_hosts`), Data and verification (`replica_rate`), then host tool definitions and search paths
   ([host-tools.md](host-tools.md)), folders, dataset origins, releases.
-- **Apply-then-Save**: a fleet or group change always opens the preview first (`plan.html`): the summary, the per-node
-  old/new table, the nodes that keep their value and why, and a button that says what it does ("Save for 4 nodes"). A
+- **Groups** (`/groups`): your groups in rank order (Up and Down move one), the built-in groups, every node's labels,
+  and the new-group form: name, selector terms, listed members, the selector as JSON, and a live member preview that
+  says for each node why it is in or not. A group's page (`/groups/<id>`) has its members and why, the rule's edit form
+  with the same preview, its settings at group scope (lock toggles, "Promote to fleet…" on a value set there), its own
+  protection rules and the secrets set for it.
+- **Bulk changes** (`/nodes/bulk`) and **labels** on a node's Settings tab (add, remove) and overview.
+- **Apply-then-Save**: a fleet or group change, a change across several nodes, a promotion, a label or a new group
+  always opens the preview first (`plan.html`): the summary, the per-node old/new table, the nodes that keep their
+  value and why, the values a new lock overrides, and a button that says what it does ("Save for 4 nodes"). A single
   node change saves at once (T1 keys confirm in the browser).
 - **A refused save** comes back to its page with a GOV.UK-style error summary at the top of the section (it takes focus
   and links to each field), each message beside its field (`aria-invalid`), and what was typed kept. Forms are
@@ -192,9 +301,13 @@ heartbeat", "Pending: node offline", "Refused by the node: …", or, for an agen
 ```text
 oarbank settings get [<key>] [--node N] [--module M] [--json]     effective values with their source, or one key's chain
 oarbank settings explain <key> [--node N]                         the whole chain
-oarbank settings set <key> <value> [--node N | --group G] [--module M] [--enforce] [--dry-run]
-oarbank settings reset <key> [--node N | --group G] [--module M]
+oarbank settings set <key> <value> [--node N | --group G | --nodes A,B | --label L] [--module M] [--enforce] [--dry-run]
+oarbank settings reset <key> [--node N | --group G | --nodes A,B | --label L] [--module M]
+oarbank settings promote <key> --group G [--to <group>]           a group's value (a canary) to the fleet
 oarbank settings overrides <key>                                  who overrides the fleet value, with what
+oarbank groups list|show [G] | create <name> [--os --arch --label --hostname --battery --ram-min --member ...]
+oarbank groups update <G> ... | rank <G> up|down|top|bottom | delete <G>
+oarbank node label <node> <a,b> [--remove]
 oarbank settings schema                                           the registry
 oarbank settings set-secret ntfy_token / clear-secret ntfy_token  the write-only ntfy token
 ```
@@ -214,9 +327,10 @@ the command that resets each.
   owner control, no reader); every other key is machine state and moves to `system_state`. The table is dropped.
 - For each node, a policy value becomes a node row only where it differs from what the node now inherits (its computed
   default, the fleet's and its groups' values), so copies disappear and choices stay; caps become node rows (`enforce`
-  only when hard, beside a cap); each module's node settings become `module.node_settings` rows; the protection section
-  moves to `nodes.protection_json` (its history stays in `protection_versions`). Then `policy_json` and `limits_json`
-  are dropped.
+  only when hard, beside a cap); each module's node settings become `module.node_settings` rows; the protection
+  sections are hoisted onto the chain ([Protection on the chain](#protection-on-the-chain); their history stays in
+  `protection_versions`). Then `policy_json` and `limits_json` are dropped. A home whose nodes held
+  `nodes.protection_json` is hoisted the same way once, and the column dropped.
 - Values the registry refuses are dropped and named, with the counts, in the `settings_migrated` event.
 
 On the owner's fleet (six nodes whose policies differed only in the RAM-computed `os_reserve_gb`, no caps, no owner keys)
@@ -229,7 +343,5 @@ this yields no node rows at all: the old model stored copies, not choices.
 - **Module settings**: manifest key annotations validated on write, a module Settings tab, module-qualified core keys
   (`enabled`, `services.disabled`, `replica_rate`, `pipeline`); both old module-settings stores (`module.settings`,
   `module.node_settings`) replaced by per-key values.
-- **Groups and locks in the console**: owner groups with rank and selectors, labels, bulk set and reset, canary to a
-  group, secrets on the same chain, protection on the chain (mode replace and lockable, rules union).
 - **Campaigns, settings as code, drift**: campaign-overridable keys (tighten-only for safety keys), per-scope YAML
   export and import, shadowed-override and applied-drift reports.

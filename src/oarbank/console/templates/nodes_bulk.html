@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Bulk changes · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/">← Fleet</a></p>
+<h1>Bulk changes</h1>
+<p class="small mut">Tick nodes, then set one setting on each of them (its own value, as an override), reset it (each goes back to what
+it inherits: the safer change), or add or remove labels. A settings change is one change set: the review lists every node's old and new
+value, and the nodes that keep theirs (a lock above holds, or the value is the same), before anything is saved.</p>
+
+<form class="row small bulk-filter" method="get" action="/nodes/bulk" aria-label="Show nodes">
+  <label>Members of <select name="group"><option value="">every group</option>{% for x in groups %}<option{% if x == group %} selected{% endif %}>{{ x }}</option>{% endfor %}</select></label>
+  <label>with label <select name="label"><option value="">any label</option>{% for x in all_labels %}<option{% if x == label %} selected{% endif %}>{{ x }}</option>{% endfor %}</select></label>
+  <button>Show</button>{% if group or label %}<a href="/nodes/bulk">every node</a>{% endif %}
+</form>
+
+<form method="post" action="/do/settings.apply" novalidate class="bulk-form">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="idem" value="{{ new_key() }}">
+<input type="hidden" name="target" value="nodes"><input type="hidden" name="return_to" value="/nodes/bulk">
+<input type="hidden" name="reason" value=""><input type="hidden" name="bulk" value="1"><input type="hidden" name="page" value="bulk">
+{% if errors %}<div class="error-summary" role="alert" tabindex="-1" data-focus-on-load aria-labelledby="bulk-es"><h3 id="bulk-es">There is a problem</h3>
+  <ul>{% for e in errors %}<li>{{ e.key ~ ': ' if e.key }}{{ e.message }}</li>{% endfor %}</ul></div>{% endif %}
+<section class="card wide" aria-labelledby="h-nodes">
+<h2 id="h-nodes">Nodes <span class="small mut">({{ nodes | length }})</span></h2>
+<table class="small"><caption class="sr-only">Nodes to change</caption>
+<tr><th scope="col"><span class="sr-only">select</span></th><th scope="col">node</th><th scope="col">groups</th><th scope="col">labels</th></tr>
+{% set picked = ticked or [] %}
+{% for n in nodes %}<tr><td><input type="checkbox" name="node" value="{{ n.node_id }}" id="bn-{{ loop.index }}" aria-label="select {{ n.hostname }}"{% if n.node_id in picked %} checked{% endif %}></td>
+  <td><label for="bn-{{ loop.index }}"><b>{{ n.hostname }}</b></label>{% if not n.online %} <span class="chip bad">offline</span>{% endif %}</td>
+  <td>{{ n.groups | join(', ') }}</td>
+  <td>{% for l in n.labels.owner %}<span class="chip acc">{{ l }}</span> {% endfor %}{% for l in n.labels.facts %}<span class="chip" title="from facts">{{ l }}</span> {% endfor %}</td></tr>
+{% else %}<tr><td colspan="4" class="mut">No node matches.</td></tr>{% endfor %}
+</table>
+</section>
+
+<div class="grid">
+<fieldset class="card bulk-settings"><legend><h2>A setting on each ticked node</h2></legend>
+  {% set t = typed or {} %}
+  <label for="bulk-key">Setting</label>
+  <select id="bulk-key" name="bulk_key">{% for k in keys %}<option value="{{ k.key }}"{% if t.bulk_key == k.key %} selected{% endif %}>{{ k.section }} · {{ k.label }}{{ ' (' ~ k.unit ~ ')' if k.unit }}</option>{% endfor %}</select>
+  <div class="row small" role="radiogroup" aria-label="what to do">
+    <label><input type="radio" name="bulk_action" value="reset"{% if t.bulk_action != 'set' %} checked{% endif %}> Reset to inherited</label>
+    <label><input type="radio" name="bulk_action" value="set"{% if t.bulk_action == 'set' %} checked{% endif %}> Set override to</label>
+    <input name="bulk_value" value="{{ t.bulk_value or '' }}" aria-label="value to set" placeholder="value" autocomplete="off">
+  </div>
+  <p class="small mut">A value as you would type it in the setting's own field: a number, on or off (1 or 0), a list one per comma,
+  JSON for an object. A node under a lock is refused, naming the lock.</p>
+  <div class="row"><span class="sp"></span><button class="pri" data-busy-label="Preparing review…">Review the change…</button></div>
+</fieldset>
+<fieldset class="card bulk-labels"><legend><h2>Labels on each ticked node</h2></legend>
+  <label for="bulk-labels">Labels <span class="mut">(comma-separated)</span></label>
+  <input id="bulk-labels" name="labels" placeholder="render, lab" autocomplete="off">
+  <p class="small mut">A label can move nodes into or out of groups; the review names who joins or leaves and whose settings change.</p>
+  <div class="row"><span class="sp"></span>
+    <button formaction="/do/nodes.label" name="label_action" value="add" data-busy-label="Preparing review…">Add labels…</button>
+    <button formaction="/do/nodes.label" name="label_action" value="remove" data-busy-label="Preparing review…">Remove labels…</button></div>
+</fieldset>
+</div>
+</form>
+{% endblock %}

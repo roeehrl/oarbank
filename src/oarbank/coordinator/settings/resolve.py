@@ -16,16 +16,22 @@ SOURCE_NAMES = {"default": "Default", "fleet": "Fleet", "node": "This node"}
 
 
 class Snap:
-    """Every value row and group, read once for a batch of resolutions."""
+    """Every value row, group and label, read once for a batch of resolutions."""
 
     def __init__(self, r):
         self.groups = store.groups(r)
+        self.labels = store.labels(r)
         self.rows: dict[tuple, dict] = {}
         for x in store.rows(r):
             self.rows[(x["scope"], x["scope_id"], x["module"], x["key"])] = x
 
     def get(self, scope, scope_id, module, key):
         return self.rows.get((scope, scope_id, module, key))
+
+    def node_labels(self, node: dict) -> dict:
+        """{"owner", "facts", "all"}: the owner's labels on the node and those derived from its facts (groups.py)."""
+        from .groups import labels_of
+        return labels_of(self.labels, node)
 
 
 def snapshot(r) -> Snap:
@@ -41,34 +47,16 @@ def facts_of(node: dict) -> dict:
         return {}
 
 
-def _matches(sel: dict, node: dict, facts: dict) -> bool:
-    from ..config import is_coordinator_host
-    from ..platforms import memory_gb
-    for k, want in (sel or {}).items():
-        if k == "os":
-            if (node.get("os") or ((facts.get("platform") or {}).get("os"))) != want:
-                return False
-        elif k == "arch":
-            if (node.get("arch") or ((facts.get("platform") or {}).get("arch"))) != want:
-                return False
-        elif k == "coordinator_host":
-            if bool(is_coordinator_host(facts)) != bool(want):
-                return False
-        elif k == "ram_gb_min":
-            if memory_gb(facts) < float(want):
-                return False
-        elif k == "nodes":
-            if node.get("node_id") not in (want or []):
-                return False
-        else:
-            return False                      # a selector this coordinator cannot evaluate matches nothing
-    return True
+def memberships(snap: Snap, node: dict) -> list[dict]:
+    """Every group with whether the node belongs to it and why (groups.membership), lowest rank first."""
+    from .groups import membership
+    labels = snap.node_labels(node)["all"]
+    return [{**g, **membership(g, node, labels)} for g in snap.groups]
 
 
 def node_groups(snap: Snap, node: dict) -> list[dict]:
-    """The groups a node belongs to, lowest rank first (membership is evaluated now, from its facts)."""
-    facts = facts_of(node)
-    return [g for g in snap.groups if _matches(g["selector"], node, facts)]
+    """The groups a node belongs to, lowest rank first (membership is evaluated now, from its facts and labels)."""
+    return [g for g in memberships(snap, node) if g["member"]]
 
 
 def _layer(scope, sid, name, module, row=None, value=None, reason=None, builtin=False) -> dict:
@@ -80,9 +68,10 @@ def _layer(scope, sid, name, module, row=None, value=None, reason=None, builtin=
     return out
 
 
-def chain(snap: Snap, node: dict | None, d: R.Setting, module: str = "") -> list[dict]:
+def chain(snap: Snap, node: dict | None, d: R.Setting, module: str = "", campaign: str | None = None) -> list[dict]:
     """Every layer for the key, most general first. `node` None: the default and the fleet only (a fleet-wide key, or
-    what a node with no group or value of its own would get)."""
+    what a node with no group or value of its own would get). `campaign`: a campaign's value on top, for a key a
+    campaign may override (a lock above still wins)."""
     if d.qualifier == "required" and not module:
         raise R.SettingError("module_required", f"{d.key} is a module's own setting: name the module", d.key)
     m = module if d.qualifier == "required" else ""
@@ -110,6 +99,8 @@ def chain(snap: Snap, node: dict | None, d: R.Setting, module: str = "") -> list
                 out[-1]["rank"] = g["rank"]
         if "node" in d.scopes:
             out.append(_layer("node", node["node_id"], "This node" + tag, mm, snap.get("node", node["node_id"], mm, d.key)))
+    if campaign and d.campaign:
+        out.append(_layer("campaign", campaign, f"Campaign {campaign}", m, snap.get("campaign", campaign, m, d.key)))
     return out
 
 
@@ -127,10 +118,10 @@ def _fold(d: R.Setting, layers: list[dict]) -> dict:
     return best or layers[-1]
 
 
-def resolve(snap: Snap, node: dict | None, key: str, module: str = "") -> dict:
+def resolve(snap: Snap, node: dict | None, key: str, module: str = "", campaign: str | None = None) -> dict:
     """One key's effective value for a node (None: fleet-wide), with its provenance."""
     d = R.get(key)
-    layers = chain(snap, node, d, module)
+    layers = chain(snap, node, d, module, campaign)
     set_ = [x for x in layers if x["set"]]
     lock = next((x for x in layers if x["scope"] == "fleet" and x["enforced"]), None) or next(
         (x for x in sorted((x for x in layers if x["scope"] == "group" and x["enforced"]), key=lambda x: -x.get("rank", 0))),
