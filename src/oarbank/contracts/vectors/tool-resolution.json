@@ -1,0 +1,648 @@
+{
+ "cases": [
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/usr/lib/jvm/java-11-openjdk-arm64",
+     "source": "detected",
+     "status": "ok",
+     "version": "11.0.2"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "the highest version that satisfies",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "21.0.4 at /Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home",
+    "installation": {
+     "arch": "aarch64",
+     "path": "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    {
+     "arch": "x86_64",
+     "path": "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "the native arch before a newer foreign one",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "17.0.12 at /opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+    "installation": {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    {
+     "arch": "x86_64",
+     "path": "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "only an x86_64 JDK on an Intel Mac is native there",
+   "native": "amd64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "21.0.4 at /usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+    "installation": {
+     "arch": "x86_64",
+     "path": "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/usr/lib/jvm/java-11-openjdk-arm64",
+     "source": "detected",
+     "status": "ok",
+     "version": "11.0.2"
+    }
+   ],
+   "name": "found only an older one",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17, <22"
+   },
+   "resolved": {
+    "code": "TOOL_VERSION_UNMET",
+    "detail": "found 11.0.2 at /usr/lib/jvm/java-11-openjdk-arm64; needs >=17, <22",
+    "installation": null,
+    "source": null,
+    "status": "version_unmet"
+   }
+  },
+  {
+   "installations": [],
+   "name": "nothing found",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_NOT_FOUND",
+    "detail": "no jdk found on this node",
+    "installation": null,
+    "source": null,
+    "status": "not_found"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": null,
+     "given": "/",
+     "path": "/",
+     "source": "override",
+     "status": "refused: a filesystem root",
+     "version": null
+    }
+   ],
+   "name": "only a refused path",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_REFUSED",
+    "detail": "/: a filesystem root",
+    "installation": {
+     "arch": null,
+     "given": "/",
+     "path": "/",
+     "source": "override",
+     "status": "refused: a filesystem root",
+     "version": null
+    },
+    "source": null,
+    "status": "refused"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "a pin among what was found",
+   "native": "arm64",
+   "pin": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "17.0.12 at /opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home (set for this node)",
+    "installation": {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    "source": "pinned",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    }
+   ],
+   "name": "a pin that names nothing found",
+   "native": "arm64",
+   "pin": "/opt/elsewhere",
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_REFUSED",
+    "detail": "the path set for jdk here, /opt/elsewhere, is not an installation this node found (Re-detect, or set a path the node can verify)",
+    "installation": null,
+    "source": null,
+    "status": "refused"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": null,
+     "given": "/",
+     "path": "/",
+     "source": "override",
+     "status": "refused: a filesystem root",
+     "version": null
+    },
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    }
+   ],
+   "name": "a pin on a refused path",
+   "native": "arm64",
+   "pin": "/",
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_REFUSED",
+    "detail": "the path set for jdk here, /, was refused: a filesystem root",
+    "installation": {
+     "arch": null,
+     "given": "/",
+     "path": "/",
+     "source": "override",
+     "status": "refused: a filesystem root",
+     "version": null
+    },
+    "source": null,
+    "status": "refused"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/usr/lib/jvm/java-11-openjdk-arm64",
+     "source": "detected",
+     "status": "ok",
+     "version": "11.0.2"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    }
+   ],
+   "name": "a pin too old for the request",
+   "native": "arm64",
+   "pin": "/usr/lib/jvm/java-11-openjdk-arm64",
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_VERSION_UNMET",
+    "detail": "the path set for jdk here is 11.0.2 at /usr/lib/jvm/java-11-openjdk-arm64; needs >=17",
+    "installation": {
+     "arch": "aarch64",
+     "path": "/usr/lib/jvm/java-11-openjdk-arm64",
+     "source": "detected",
+     "status": "ok",
+     "version": "11.0.2"
+    },
+    "source": null,
+    "status": "version_unmet"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "given": "/opt/tools/current-jdk",
+     "path": "/opt/tools/jdk-17.0.9",
+     "source": "override",
+     "status": "ok",
+     "version": "17.0.9"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "a pin by the path the operator gave",
+   "native": "arm64",
+   "pin": "/opt/tools/current-jdk",
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "17.0.9 at /opt/tools/jdk-17.0.9 (set for this node)",
+    "installation": {
+     "arch": "aarch64",
+     "given": "/opt/tools/current-jdk",
+     "path": "/opt/tools/jdk-17.0.9",
+     "source": "override",
+     "status": "ok",
+     "version": "17.0.9"
+    },
+    "source": "pinned",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "x86_64",
+     "path": "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "native only, none native",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "native",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_VERSION_UNMET",
+    "detail": "found 21.0.4 (x86_64) at /usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home; needs >=17, native arm64",
+    "installation": null,
+    "source": null,
+    "status": "version_unmet"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    {
+     "arch": "x86_64",
+     "path": "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    }
+   ],
+   "name": "an exact arch",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "amd64",
+    "id": "jdk",
+    "version": null
+   },
+   "resolved": {
+    "code": null,
+    "detail": "21.0.4 at /usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+    "installation": {
+     "arch": "x86_64",
+     "path": "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": null,
+     "path": "/opt/jdk-odd",
+     "source": "detected",
+     "status": "ok",
+     "version": ""
+    }
+   ],
+   "name": "an unknown version satisfies no constraint",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_VERSION_UNMET",
+    "detail": "found an unknown version at /opt/jdk-odd; needs >=17",
+    "installation": null,
+    "source": null,
+    "status": "version_unmet"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": null,
+     "path": "/opt/jdk-odd",
+     "source": "detected",
+     "status": "ok",
+     "version": ""
+    }
+   ],
+   "name": "with no constraint an unknown version is fine",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": null
+   },
+   "resolved": {
+    "code": null,
+    "detail": "an unknown version at /opt/jdk-odd",
+    "installation": {
+     "arch": null,
+     "path": "/opt/jdk-odd",
+     "source": "detected",
+     "status": "ok",
+     "version": ""
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home",
+     "source": "detected",
+     "status": "ok",
+     "version": "21.0.4"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/opt/jdk-22-ea",
+     "source": "detected",
+     "status": "ok",
+     "version": "22-ea"
+    }
+   ],
+   "name": "a pre-release sorts below its release",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": "<22"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "22-ea at /opt/jdk-22-ea",
+    "installation": {
+     "arch": "aarch64",
+     "path": "/opt/jdk-22-ea",
+     "source": "detected",
+     "status": "ok",
+     "version": "22-ea"
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/b/jdk",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/a/jdk",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    }
+   ],
+   "name": "equal versions: the first path",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": null,
+    "detail": "17.0.12 at /a/jdk",
+    "installation": {
+     "arch": "aarch64",
+     "path": "/a/jdk",
+     "source": "detected",
+     "status": "ok",
+     "version": "17.0.12"
+    },
+    "source": "detected",
+    "status": "ok"
+   }
+  },
+  {
+   "installations": [
+    {
+     "arch": "aarch64",
+     "path": "/j/8.0.392",
+     "source": "detected",
+     "status": "ok",
+     "version": "8.0.392"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/j/11.0.2",
+     "source": "detected",
+     "status": "ok",
+     "version": "11.0.2"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/j/11.0.21",
+     "source": "detected",
+     "status": "ok",
+     "version": "11.0.21"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/j/15.0.1",
+     "source": "detected",
+     "status": "ok",
+     "version": "15.0.1"
+    },
+    {
+     "arch": "aarch64",
+     "path": "/j/16.0.2",
+     "source": "detected",
+     "status": "ok",
+     "version": "16.0.2"
+    }
+   ],
+   "name": "many found, none accepted",
+   "native": "arm64",
+   "pin": null,
+   "request": {
+    "arch": "any",
+    "id": "jdk",
+    "version": ">=17"
+   },
+   "resolved": {
+    "code": "TOOL_VERSION_UNMET",
+    "detail": "found 16.0.2 at /j/16.0.2, 15.0.1 at /j/15.0.1, 11.0.21 at /j/11.0.21 and 2 more; needs >=17",
+    "installation": null,
+    "source": null,
+    "status": "version_unmet"
+   }
+  }
+ ],
+ "comment": "Host tool resolution vectors shared by oarbank.coordinator.tools.resolve and oarbank_core::tools::resolve (docs/design/host-tools.md)"
+}

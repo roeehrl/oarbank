@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 89 operations, 2 explain kinds, 124 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 92 operations, 2 explain kinds, 126 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -81,9 +81,12 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
 | `settings.notifications.update` | T2 | yes | `oarbank op settings.notifications.update` | yes |
-| `settings.tools.update` | T2 | yes | `oarbank op settings.tools.update` | yes |
+| `tools.define` | T2 | yes | `oarbank tools define <id> --search <os>=<pattern>` | yes |
+| `tools.delete` | T2 | yes | `oarbank tools delete <id>` | yes |
+| `tools.detect` | T0 | yes | `oarbank tools detect <node>` | yes |
+| `tools.set_path` | T1 | yes | `oarbank tools set-path <node> <tool> <path>` | yes |
 | `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
-| `folders.sign` | T1 | yes | `oarbank folders sign <node>` | yes |
+| `nodes.sign_statement` | T1 | yes | `oarbank node sign <node>` | yes |
 | `access.accounts.create` | T2 | yes | `oarbank account create <name>` | yes |
 | `access.accounts.update` | T2 | yes | `oarbank op access.accounts.update` | yes |
 | `access.accounts.reset_totp` | T2 | yes | `oarbank op access.accounts.reset_totp` | yes |
@@ -124,7 +127,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `GPU_API_MISSING` | `nodes.run_doctor` |
 | `SECRETS_NOT_SET` | `secrets.set` |
 | `DATASET_PLATFORM_MISMATCH` | `jobs.cancel` |
-| `TOOL_UNAVAILABLE` | `settings.tools.update` |
+| `TOOL_NOT_FOUND` | `tools.detect`, `tools.set_path`, `tools.define` |
+| `TOOL_VERSION_UNMET` | `tools.detect`, `tools.set_path` |
+| `TOOL_REFUSED` | `tools.set_path`, `tools.detect` |
 | `FOLDER_UNAVAILABLE` | `settings.folders.update` |
 | `AGENT_TOO_OLD` | `agent.promote` |
 | `RETRIES_EXHAUSTED` | `jobs.cancel` |

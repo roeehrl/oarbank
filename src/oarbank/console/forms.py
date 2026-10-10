@@ -74,6 +74,18 @@ def generic(form) -> dict:
     return out
 
 
+def tool_definition(form) -> dict:
+    """Settings → Tools: a definition's extra search patterns, one per line, for every OS (`search_fleet`) or one
+    platform group (`search_darwin`, ...), and an executable's version command (`version_args`, `version_regex`)."""
+    out = {"search": {scope: [x.strip() for x in (form.get(f"search_{scope}") or "").splitlines() if x.strip()]
+                      for scope in ("fleet", "darwin", "linux", "windows")}}
+    if form.get("kind"):
+        out["kind"] = form.get("kind")
+    if (form.get("version_regex") or "").strip():
+        out["version"] = {"args": (form.get("version_args") or "--version").split(), "regex": form.get("version_regex").strip()}
+    return out
+
+
 JOIN_TTLS = {3600, 4 * 3600, 86400, 7 * 86400, 30 * 86400}     # the Add machine form's lifetimes, in seconds
 MANY_MIN, MANY_MAX, ONE_MAX_TTL = 2, 10000, 7 * 86400
 
@@ -113,9 +125,10 @@ MAPPERS = {
     "nodes.set_policy": lambda f, ctx: policy(f),
     "settings.notifications.update": lambda f, ctx: {"url": f.get("ntfy_url"), "token": f.get("ntfy_token"),
                                                       "click_base": f.get("click_base")},
-    "settings.tools.update": lambda f, ctx: {"trust": f.get("trust") or "read",
-                                              "paths": {os_: [x.strip() for x in (f.get(f"paths_{os_}") or "").splitlines() if x.strip()]
-                                                        for os_ in ("darwin", "linux", "windows")}},
+    "tools.define": lambda f, ctx: tool_definition(f),
+    # a tool's path on one node (optionally for one module); an empty path resets it to inherited
+    "tools.set_path": lambda f, ctx: {"tool": (f.get("tool") or "").strip(), "path": (f.get("path") or "").strip() or None,
+                                      **({"module": f.get("module").strip()} if (f.get("module") or "").strip() else {})},
     # a folder's path per node, one "<node>=<path>" per line; a node with an empty path is removed
     "settings.folders.update": lambda f, ctx: {"access": f.get("access") or "read", "nodes": {
         k.strip(): v.strip() or None for k, _, v in (x.partition("=") for x in (f.get("nodes") or "").splitlines()) if k.strip()}},

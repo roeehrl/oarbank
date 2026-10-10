@@ -92,6 +92,52 @@
   <td class="mut">{% if f.statement_seq %}seq {{ f.statement_seq }} · {{ 'signed' if f.signed else 'unsigned' }}{% endif %}</td></tr>
 {% else %}<tr><td colspan="5" class="mut">no folder is mapped to this node (Settings, folders)</td></tr>{% endfor %}</table>
 
+{# coordinator/tools.py node_view: what the node found, each module's resolution per tool request, and the paths set here #}
+{% set T = d.tools %}
+<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported yet){% endif %}</span></h2>
+<div class="card wide">
+  <div class="row"><span class="small mut">The node finds its tools itself, verifies each (a JDK by its <span class="mono">release</span> file) and
+    reports it; a module gets the one installation that satisfies what it asks for.</span><span class="sp"></span>
+    {{ m.op_form("tools.detect", n.node_id, "Re-detect") }}</div>
+  <table class="small"><caption class="sr-only">Installations this node found</caption>
+  <tr><th>tool</th><th>path</th><th>version</th><th>arch</th><th>vendor</th><th>found by</th><th>status</th></tr>
+  {% for tid, insts in T.tools.items() %}{% for i in insts %}<tr><td class="mono nowrap">{{ tid }}</td><td class="mono" title="{{ i.given or i.path }}">{{ i.path }}</td>
+    <td class="nowrap">{{ i.version or '?' }}</td><td class="nowrap">{{ i.arch or '?' }}</td><td>{{ i.vendor or '' }}</td>
+    <td class="nowrap">{{ {'detected': 'built-in search', 'search': 'fleet search path', 'override': 'path set here', 'local-hint': 'on this machine'}.get(i.source, i.source) }}</td>
+    <td><span class="chip {{ 'ok' if i.status == 'ok' else 'bad' }}">{{ i.status }}</span></td></tr>{% endfor %}
+  {% else %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported yet: the agent reports its tools after it connects' }}</td></tr>{% endfor %}
+  </table>
+  <h3 class="small">What each module gets here</h3>
+  <table class="small"><caption class="sr-only">Each module's host tool requests on this node</caption>
+  <tr><th>module</th><th>asks for</th><th>effective</th><th>source</th><th>status</th><th class="actions">fix</th></tr>
+  {% for mod, rows in T.modules.items() %}{% for r in rows %}<tr><td class="nowrap"><a href="/modules/{{ mod }}/nodes">{{ mod }}</a></td>
+    <td class="mono nowrap">{{ r.need }}</td>
+    <td class="mono">{% if r.installation %}{{ r.installation.version }} at {{ r.installation.path }}{% else %}–{% endif %}</td>
+    <td class="nowrap">{% if r.override %}path set ({{ 'this node' if r.override.scope == 'node' else r.override.scope }}{% if r.override.module %}, {{ r.override.module }}{% endif %}){% elif r.source == 'detected' %}detected{% else %}–{% endif %}</td>
+    <td>{% if r.status == 'ok' %}<span class="chip ok">ok</span>{% else %}<span class="chip bad">{{ r.code }}</span> {{ r.detail }}{% endif %}</td>
+    <td class="actions">{% for f in r.fixes %}{% if f.op %}{{ m.op_form(f.op, f.target, f.label) }}{% elif f.command %}<div><span class="mut">{{ f.label }}:</span> <code class="small">{{ f.command }}</code></div>{% endif %}{% endfor %}</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="6" class="mut">no enabled module asks for a host tool</td></tr>{% endfor %}
+  </table>
+  <h3 class="small">Paths set on this node</h3>
+  <table class="small"><caption class="sr-only">Tool paths set on this node</caption>
+  <tr><th>tool</th><th>for</th><th>path</th><th>kind</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for o in T.overrides %}<tr><td class="mono nowrap">{{ o.tool }}</td><td>{{ o.module or 'every module' }}</td><td class="mono">{{ o.path }}</td>
+    <td>{{ 'chosen among what it found' if o.kind == 'choose' else 'added (signed statement; verified by the node)' }}</td>
+    <td class="actions">{% call m.op_form("tools.set_path", n.node_id, "Reset to inherited") %}<input type="hidden" name="tool" value="{{ o.tool }}"><input type="hidden" name="module" value="{{ o.module }}"><input type="hidden" name="path" value="">{% endcall %}</td></tr>
+  {% else %}<tr><td colspan="5" class="mut">none: every tool resolves from what the node found</td></tr>{% endfor %}
+  </table>
+  <details class="small"><summary>Set path on this node…</summary>
+  {% call m.op_form("tools.set_path", n.node_id, "Set path", inline=False) %}
+    <label>tool <select name="tool">{% for tid in T.definitions %}<option>{{ tid }}</option>{% endfor %}</select></label>
+    <label>only for module (empty: every module) <input name="module" class="mono" placeholder="minos-gatk"></label>
+    <label>path <input name="path" class="mono" style="width:100%" required list="tool-paths-{{ n.node_id }}"
+      placeholder="{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}{% if loop.first %}{{ i.path }}{% endif %}{% endfor %}{% endfor %}"></label>
+    <datalist id="tool-paths-{{ n.node_id }}">{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}<option value="{{ i.path }}">{{ tid }} {{ i.version }}</option>{% endfor %}{% endfor %}</datalist>
+    <span class="mut">An installation the node found is chosen as it is; any other path goes into the node's signed statement, and the node
+      grants it only once it passes the folder rules (no roots, homes, data or system directories) and the tool's detector.</span>
+  {% endcall %}</details>
+</div>
+
 <h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
 {% set P = n.policy.protection or {} %}{% set T = n.tel.protection or {} %}
 <div class="card">

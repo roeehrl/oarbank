@@ -19,42 +19,61 @@
   <div class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page. Host names the console and the
   admin API answer to besides localhost (the remote mode): setting <span class="mono">console_hosts</span>, a JSON list.</div>
 </div>
-<div class="card" id="tools">
+<div class="card wide" id="tools">
   <b>Host tools</b>
-  <div class="small mut">Modules ask for host tools by id (<span class="mono">[sandbox].tools</span>); this registry says where each
-  tool lives on each OS. An approved module's runners may read and execute exactly these paths.</div>
-  <table class="small">{% for id, t in (s.tool_registry or {}).items() %}<tr><td class="mono">{{ id }}</td>
-    <td>{% if t.trust == 'code-exec' %}<span class="chip warn">runs code</span>{% endif %}</td>
-    <td class="mono">{% for os_, ps in t.paths.items() %}{{ os_ }}: {{ ps | join(', ') }}<br>{% endfor %}</td></tr>
-  {% else %}<tr><td class="mut">No tools registered.</td></tr>{% endfor %}</table>
-  <details class="small"{% if prefill_tool %} open{% endif %}><summary>Add or change a tool…</summary>
-  {% if prefill_tool %}<div class="mut">A module asks for <span class="mono">{{ prefill_tool }}</span>: give its path on each OS your nodes run (and install it on those nodes).</div>{% endif %}
-  {% call m.op_form("settings.tools.update", "", "Review…", inline=False) %}
-    <label>tool id <input name="target_input" class="mono" required placeholder="java17" value="{{ prefill_tool or '' }}"></label>
-    <label>trust <select name="trust"><option value="read">read</option><option value="code-exec"{% if prefill_trust == 'code-exec' %} selected{% endif %}>code-exec (a JVM, an interpreter, a shell)</option></select></label>
-    <label>macOS paths (one per line) <textarea name="paths_darwin" rows="2" class="mono" style="width:100%" placeholder="/opt/homebrew/opt/openjdk@17"></textarea></label>
-    <label>Linux paths <textarea name="paths_linux" rows="2" class="mono" style="width:100%" placeholder="/usr/lib/jvm/java-17-openjdk-amd64"></textarea></label>
-    <label>Windows paths <textarea name="paths_windows" rows="2" class="mono" style="width:100%" placeholder="C:\Program Files\Eclipse Adoptium\jdk-17"></textarea></label>
-    <span class="mut">No paths removes the tool.</span>
+  <div class="small mut">Modules ask for a host tool by id with the versions they accept (<span class="mono">[sandbox].tools =
+  [{id = "jdk", version = "&gt;=17"}]</span>). Each node finds the installations itself and the agent grants one per module:
+  these definitions say how to find a tool. <span class="mono">jdk</span> and <span class="mono">python</span> are built in; add
+  search paths where your nodes keep a tool elsewhere, or define another tool. What each node found is on its page; a module's
+  Nodes tab shows every node's resolution.</div>
+  <table class="small"><tr><th>tool</th><th>kind</th><th>searched on each OS</th><th>asked for by</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for id, d in s.tool_defs.items() %}<tr><td class="mono nowrap">{{ id }}</td>
+    <td class="nowrap">{{ d.kind }}{% if d.builtin %} <span class="chip">built in</span>{% endif %}</td>
+    <td>{% for scope, ps in d.search.items() %}<div><b>{{ {'fleet': 'every OS', 'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}[scope] }}</b>: <span class="mono">{{ ps | join(', ') }}</span></div>{% endfor %}
+      {% if d.builtin_search %}<details class="small"><summary>built-in patterns</summary>{% for os_, ps in d.builtin_search.items() %}<div><b>{{ {'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}[os_] }}</b>: <span class="mono">{{ ps | join(', ') }}</span></div>{% endfor %}</details>{% endif %}
+      {% if d.kind == 'executable' and d.version %}<div class="mut">version: <span class="mono">{{ d.version.args | join(' ') }}</span> → <span class="mono">{{ d.version.regex }}</span></div>{% endif %}</td>
+    <td>{{ (s.tool_users.get(id) or []) | join(', ') or '–' }}</td>
+    <td class="actions">{% if not d.builtin or d.search %}{{ m.op_form("tools.delete", id, "Remove extra paths…" if d.builtin else "Delete…", cls="danger" if not d.builtin else "") }}{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5" class="mut">No tools defined.</td></tr>{% endfor %}</table>
+  {% set unknown = s.tool_users.keys() | reject('in', s.tool_defs) | list %}
+  {% if unknown %}<div class="flash warn small" role="status">Approved module versions ask for tools this fleet does not define:
+    <span class="mono">{{ unknown | join(', ') }}</span>. They never run until you define the tool here or publish a new module version
+    that asks for a defined tool (such as <span class="mono">jdk</span> with a version constraint).</div>{% endif %}
+  <details class="small"{% if prefill_tool %} open{% endif %}><summary>Add search paths, or define a tool…</summary>
+  {% if prefill_tool %}<div class="mut">A module asks for <span class="mono">{{ prefill_tool }}</span>.{% if prefill_tool not in s.tool_defs %} Define it (a
+    generic executable with its version command), or publish a module version that asks for a built-in tool.{% else %} Give extra
+    search patterns where your nodes keep it.{% endif %}</div>{% endif %}
+  {% call m.op_form("tools.define", "", "Review…", inline=False) %}
+    <label>tool id <input name="target_input" class="mono" required placeholder="jdk" value="{{ prefill_tool or '' }}"></label>
+    <label>kind <select name="kind"><option value="">(built in: jdk, python; otherwise executable)</option><option value="executable">executable (a version command)</option></select></label>
+    <div class="mut">Search patterns, one per line: an absolute path whose parts may hold <span class="mono">*</span> and <span class="mono">?</span>, or
+      <span class="mono">$VARIABLE/sub/path</span>. The node verifies every candidate (a JDK by its <span class="mono">release</span> file).</div>
+    <label>every OS <textarea name="search_fleet" rows="1" class="mono" style="width:100%" placeholder="$TOOLS_HOME/jdk-*"></textarea></label>
+    <label>macOS <textarea name="search_darwin" rows="2" class="mono" style="width:100%" placeholder="/opt/java/*/Contents/Home"></textarea></label>
+    <label>Linux <textarea name="search_linux" rows="2" class="mono" style="width:100%" placeholder="/opt/tools/jdk-*"></textarea></label>
+    <label>Windows <textarea name="search_windows" rows="2" class="mono" style="width:100%" placeholder="D:\Tools\jdk-*"></textarea></label>
+    <label>executable: version arguments <input name="version_args" class="mono" placeholder="--version"></label>
+    <label>executable: version regex (its first group is the version) <input name="version_regex" class="mono" placeholder="samtools (\d+(?:\.\d+)*)"></label>
+    <span class="mut">Saving replaces the tool's extra patterns; releases are rebuilt with the definitions.</span>
   {% endcall %}</details>
 </div>
 <div class="card">
   <b>Folders</b>
   <div class="small mut">Modules ask for folders by id (<span class="mono">[sandbox].folders</span>): an input folder their runners
   may read, or an outbox they may only write new files into. This registry says where each folder is on each node; the node checks
-  the path (no homes, roots, data or system directories) and reports it.{% if s.folder_statements %} In signing mode a node applies a
-  changed mapping only once the owner signed its statement: <span class="mono">oarbank folders sign &lt;node&gt;</span>.{% endif %}</div>
+  the path (no homes, roots, data or system directories) and reports it.{% if s.node_statements %} In signing mode a node applies a
+  changed mapping only once the owner signed its statement: <span class="mono">oarbank node sign &lt;node&gt;</span>.{% endif %}</div>
   <table class="small">{% for id, f in (s.folder_registry or {}).items() %}<tr><td class="mono">{{ id }}</td>
     <td><span class="chip {{ 'warn' if f.access == 'write' else '' }}">{{ 'outbox (write)' if f.access == 'write' else 'read' }}</span></td>
     <td class="mono">{% for nid, path in f.nodes.items() %}{% set n = s.nodes.get(nid) %}{{ n.hostname if n else nid }}: {{ path }}
       {% set st = (n.folders.get(id) if n else none) %}{% if st %} <span class="chip {{ 'ok' if st.status == 'ok' else 'bad' }}" title="{{ st.status }}">{{ 'ok' if st.status == 'ok' else 'refused' }}</span>{% else %} <span class="chip">not applied yet</span>{% endif %}
-      {% set stmt = (s.folder_statements or {}).get(nid) %}{% if stmt and not stmt.signature %} <span class="chip warn" title="statement seq {{ stmt.seq }}">unsigned</span>{% endif %}<br>{% endfor %}</td></tr>
+      {% set stmt = (s.node_statements or {}).get(nid) %}{% if stmt and not stmt.signature %} <span class="chip warn" title="statement seq {{ stmt.seq }}">unsigned</span>{% endif %}<br>{% endfor %}</td></tr>
   {% else %}<tr><td class="mut">No folders mapped.</td></tr>{% endfor %}</table>
-  {% for nid, stmt in (s.folder_statements or {}).items() if not stmt.signature %}
-  <details class="small"><summary>Attach the owner's signature to {{ s.nodes[nid].hostname if s.nodes.get(nid) else nid }}'s statement (seq {{ stmt.seq }})</summary>
-  {% call m.op_form("folders.sign", nid, "Attach", inline=False) %}
+  {% for nid, stmt in (s.node_statements or {}).items() if not stmt.signature %}
+  <details class="small"><summary>Attach the owner's signature to {{ s.nodes[nid].hostname if s.nodes.get(nid) else nid }}'s statement (seq {{ stmt.seq }}: folders and added tool paths)</summary>
+  {% call m.op_form("nodes.sign_statement", nid, "Attach", inline=False) %}
     <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" readonly>{{ stmt.statement }}</textarea></label>
-    <label>signature <input name="p.signature" class="mono" style="width:100%" placeholder="from: oarbank folders sign {{ nid }}"></label>
+    <label>signature <input name="p.signature" class="mono" style="width:100%" placeholder="from: oarbank node sign {{ nid }}"></label>
   {% endcall %}</details>{% endfor %}
   <details class="small"><summary>Map a folder…</summary>
   {% call m.op_form("settings.folders.update", "", "Review…", inline=False) %}

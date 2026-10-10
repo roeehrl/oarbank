@@ -762,10 +762,24 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     @app.get("/api/v1/folders")
     def api_folders(actor=Depends(who)):
         """The folder registry, each node's statement (and whether it is signed) and what each node reports."""
-        from . import folders
-        return {"registry": folders.registry(db), "statements": folders.statements(db), "signing": C.RELEASE_SIGNING,
+        from . import folders, statements
+        return {"registry": folders.registry(db), "statements": statements.statements(db), "signing": C.RELEASE_SIGNING,
                 "nodes": {n["node_id"]: {"hostname": n["hostname"], "folders": folders.report(n)}
                           for n in db.q("SELECT node_id, hostname, folders_json FROM nodes WHERE lifecycle!='retired'")}}
+
+    @app.get("/api/v1/statements")
+    def api_statements(actor=Depends(who)):
+        """Each node's signed statement (statements.py: its folders and added tool paths) and whether it is signed."""
+        from . import statements
+        return {"statements": statements.statements(db), "signing": C.RELEASE_SIGNING}
+
+    @app.get("/api/v1/tools")
+    def api_tools(node: str | None = None, module: str | None = None, actor=Depends(who)):
+        """Host tools (docs/design/host-tools.md): the definitions, the paths set where nodes inherit them, and the
+        detection and resolution matrix: every node (or `node`) with what it found and each enabled module's resolution
+        per tool request, or, with `module`, that module's Nodes matrix."""
+        from . import tools
+        return tools.api(db, node, module)
 
     @app.get("/api/v1/campaigns/{cid}/artifacts")
     def api_campaign_artifacts(cid: str, actor=Depends(who)):

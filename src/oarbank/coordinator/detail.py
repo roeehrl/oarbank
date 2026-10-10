@@ -9,7 +9,7 @@ has the catalogue it fetched.
 """
 from collections.abc import Callable
 
-from . import checkpoints, folders, nodepolicy, nodeservices, platforms
+from . import checkpoints, folders, nodepolicy, nodeservices, platforms, tools
 from . import config as C
 from .db import jl
 
@@ -47,9 +47,10 @@ def enforcement(facts: dict, mods: list[str], manifest_for: Callable) -> dict:
 
 def folder_grants(r, n: dict) -> list[dict]:
     """The folders mapped to the node (the folder registry), each with what the node's agent last reported applying,
-    and whether the node's current folder statement carries the owner's signature."""
+    and whether the node's current statement carries the owner's signature."""
+    from . import statements
     nid, rep = n["node_id"], folders.report(n)
-    stmt = folders.statements(r).get(nid) or {}
+    stmt = statements.statements(r).get(nid) or {}
     out = []
     for fid, e in sorted(folders.registry(r).items()):
         if nid in (e.get("nodes") or {}):
@@ -74,7 +75,7 @@ def doctor(doc: dict | None) -> dict | None:
 
 def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict | None:
     """The node's detail document, by node id or hostname: `oarbank node show` prints it (GET /api/v1/nodes/{id}) and the
-    console's node page renders its GPU API, enforcement and folder sections. `services` are the agent's per-service
+    console's node page renders its GPU API, enforcement, folder and host tool sections. `services` are the agent's per-service
     report (nodeservices.rows), the rows of the node page's Services table; `why` explains its slots and memory and
     `policy` is its Policy table (nodepolicy.py)."""
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
@@ -90,6 +91,8 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "modules": {m: {"state": st.get("state"), "reason": st.get("reason")} for m, st in sorted(mods.items())},
         "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),
         "services": nodeservices.rows(n), "services_at": n.get("services_at"), "folders": folder_grants(r, n),
+        # host tools: what the node found, and each enabled module's resolution per tool request (tools.py)
+        "tools": tools.node_view(r, n),
         "sandbox": enforcement(facts, sorted(mods), manifest_for),
         # why it has the slots and memory it has, and its settings with this node's defaults (nodepolicy.py)
         "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os")),

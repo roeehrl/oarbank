@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ name }} nodes · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>{{ name }}</h1><span class="chip">{{ man.module.id }} {{ man.module.version }}</span></div>
+<nav class="row small mod-tabs-nav" aria-label="module sections">
+  {% for d in man.ui.pages %}<a href="{{ '/modules/' ~ name if d.slot == 'module.overview' else '/m/' ~ name ~ '/' ~ d.id }}">{{ d.title }}</a>{% endfor %}
+  <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a><a href="/modules/{{ name }}/nodes" aria-current="page">Nodes</a>{% if man.secrets %}<a href="/modules/{{ name }}/secrets">Secrets</a>{% endif %}
+</nav>
+<h2>Host tools on each node</h2>
+<p class="small mut">It asks for {% for q in (matrix.requests if matrix else []) %}<span class="mono">{{ q.id }}{% if q.version %} {{ q.version }}{% endif %}{% if q.arch != 'any' %} ({{ q.arch }}){% endif %}</span>{{ ', ' if not loop.last }}{% else %}no host tools{% endfor %}.
+Each node finds its installations; the effective one is a path set for this module on the node, else for the node, its platform
+group or the fleet, else the node's best match (its own architecture first, then the highest version it accepts). Edit one row at
+a time: an empty path resets the row to inherited.</p>
+{% if error %}<div class="flash bad" role="alert">The host tool matrix is unavailable: {{ error }}</div>{% endif %}
+<div class="card wide">
+<table class="small"><caption class="sr-only">Host tools of {{ name }} on each node</caption>
+<tr><th>node</th><th>asks for</th><th>detected</th><th>override</th><th>effective</th><th>status</th></tr>
+{% for r in (matrix.rows if matrix else []) %}<tr>
+  <td class="nowrap"><a href="/nodes/{{ r.node_id }}#tools">{{ r.hostname or r.node_id }}</a> <span class="mut mono">{{ r.platform }}</span></td>
+  <td class="mono nowrap">{{ r.need }}</td>
+  <td>{% if r.detected %}<span class="mono">{{ r.detected.version }} {{ r.detected.arch or '' }}</span><div class="mono" title="{{ r.detected.path }}">{{ r.detected.path }}</div>{% elif r.found %}<span class="mut">{{ r.found | length }} found, none accepted</span>{% else %}<span class="mut">none</span>{% endif %}
+    <div>{{ m.op_form("tools.detect", r.node_id, "Re-detect") }}</div></td>
+  <td><details name="tool-row-edit"><summary>{% if r.override and r.override.scope == 'node' %}<span class="mono">{{ r.override.path }}</span>{% if not r.override.module %} <span class="mut">(every module)</span>{% endif %}{% else %}<span class="mut">use detected</span>{% endif %}</summary>
+    {% call m.op_form("tools.set_path", r.node_id, "Save", inline=False) %}<input type="hidden" name="tool" value="{{ r.request.id }}"><input type="hidden" name="module" value="{{ name }}">
+      <label class="small">path on {{ r.hostname or r.node_id }} for {{ name }} <input name="path" class="mono" style="width:100%" value="{{ r.override.path if r.override and r.override.scope == 'node' and r.override.module == name else '' }}"
+        placeholder="{{ (r.detected or {}).path or 'no installation found: a path the node can verify' }}" list="found-{{ loop.index }}"></label>
+      <datalist id="found-{{ loop.index }}">{% for i in r.found if i.status == 'ok' %}<option value="{{ i.path }}">{{ i.version }} {{ i.arch or '' }}</option>{% endfor %}</datalist>
+      <span class="mut small">Empty: use what the node detected. A path it did not find goes into its signed statement.</span>
+    {% endcall %}</details></td>
+  <td>{% if r.installation %}<span class="mono">{{ r.installation.version }}</span> <span class="chip">{% if r.override %}set: {{ 'this node' if r.override.scope == 'node' else r.override.scope }}{% else %}detected{% endif %}</span><div class="mono">{{ r.installation.path }}</div>{% else %}–{% endif %}</td>
+  <td>{% if r.status == 'ok' %}<span class="chip ok">ok</span>{% else %}<span class="chip bad">{{ r.code }}</span> {{ r.detail }}
+    {% for f in r.fixes %}{% if f.command and not f.op %}<div><span class="mut">{{ f.label }}:</span> <code class="small">{{ f.command }}</code></div>{% elif f.href %}<div><a href="{{ f.href }}">{{ f.label }}</a></div>{% endif %}{% endfor %}{% endif %}</td>
+</tr>{% else %}<tr><td colspan="6" class="mut">{{ 'no node runs a platform it supports yet' if matrix and matrix.requests else 'it asks for no host tools' }}</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

@@ -1,13 +1,14 @@
 """A module's readiness checklist: "Getting this module running", computed from the fleet's real state.
 
 An owner who installed, approved and enabled a module sees it "ready" while nothing can run: its releases wait for
-the owner's signature, a host tool it asks for has no path in the tool registry, no node reports a capability or a
+the owner's signature, no node has a host tool it asks for in a version it accepts, no node reports a capability or a
 pool its stages need. This walks the whole path, one step after another, each with its status, the reason and the
 exact action (an operation the console offers as a button or a link, and the command):
 
   installed -> sandbox grants approved -> enabled -> where it runs (the fleet's platforms it supports) -> release
-  built per platform -> release signed and current per platform -> host tools mapped per OS -> nodes that can run
-  each stage (and why the others cannot) -> certified nodes -> next: the module's own operations.
+  built per platform -> release signed and current per platform -> host tools on the nodes (per request, how many
+  nodes resolve it and why the others do not) -> nodes that can run each stage (and why the others cannot) ->
+  certified nodes -> next: the module's own operations.
 
 Statuses: `done`; `blocked` (the owner must act); `waiting` (the fleet is working on it, or an earlier step must be
 done first); `next` (the operations to start work with). The console renders it on the module's page and, compact, on
@@ -25,14 +26,13 @@ from . import modsandbox, modstore, platforms, predicates, releases
 from .db import DB, jl
 
 OS_NAMES = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
-# a tool's path on each OS, as an example for the mapping command (the Settings form shows the same placeholders)
-TOOL_EXAMPLE = {"darwin": "/opt/homebrew/opt/openjdk@17", "linux": "/usr/lib/jvm/java-17-openjdk-amd64",
-                "windows": "C:\\Program Files\\Eclipse Adoptium\\jdk-17"}
 CONTAINER_FIX = {"darwin": "install Colima and Docker on it (`brew install colima docker`); the agent runs its own Colima profile",
                  "linux": "install rootless Podman (or Docker Engine) on it",
                  "windows": "enable WSL containers on it (the agent's WSL containers session)"}
 EXCLUSION_WORDS = {
-    "TOOL_UNAVAILABLE": "the tool registry has no {os} path for {tools}",
+    "TOOL_NOT_FOUND": "{tools}",
+    "TOOL_VERSION_UNMET": "{tools}",
+    "TOOL_REFUSED": "{tools}",
     "OS_VERSION_UNSUPPORTED": "{os} {os_version} is not a version it supports",
     "FOLDER_UNAVAILABLE": "it does not provide a folder the module asks for",
     "SANDBOX_BACKEND_MISSING": "its agent cannot sandbox module processes",
@@ -72,20 +72,21 @@ def _containers_why(facts: dict) -> str:
     return "no container runtime reported"
 
 
-def _module_reasons(db: DB, man, node: dict, tool_ids: set) -> list[str]:
+def _module_reasons(db: DB, man, node: dict, name: str) -> list[str]:
     """Why no stage of this module may run on this node (its exclusion, modsandbox.exclusion), with the fix; the node's
     platform is supported."""
-    code = modsandbox.exclusion(db, man, node)
+    from . import tools
+    code = modsandbox.exclusion(db, man, node, name)
     if not code:
         return []
     plat = platforms.node_platform(node)
     os_ = portable.split_platform(plat)[0] if plat else None
     facts = json.loads(node.get("facts_json") or "{}")
-    _, missing = platforms.tool_paths(db, sorted(tool_ids), os_) if os_ else ([], [])
+    miss = tools.unmet(db, man, node, name) if code in tools.CODES.values() else None
     return [EXCLUSION_WORDS.get(code, code).format(
-        os=OS_NAMES.get(os_, os_), tools=", ".join(missing) or "a tool", os_version=platforms.os_version(facts) or "?",
+        os=OS_NAMES.get(os_, os_), tools=miss[1] if miss else "a host tool", os_version=platforms.os_version(facts) or "?",
         gaps=", ".join(platforms.sandbox_gaps(man, facts)), have=node.get("agent_version") or "?", need=man.requires.agent or "?")
-        + (": map it in Settings → Tools" if code == "TOOL_UNAVAILABLE" else "")]
+        + (" (stages that need no certification still run)" if code in tools.CODES.values() else "")]
 
 
 def _stage_reasons(name: str, stage, node: dict, tool_ids: set, has_release: bool) -> list[str]:
@@ -100,7 +101,7 @@ def _stage_reasons(name: str, stage, node: dict, tool_ids: set, has_release: boo
     for cap in stage.requires.capabilities:
         if cap in have:
             continue
-        hint = f"; install {cap} on the node (the host tool {cap}, mapped in Settings → Tools)" if cap in tool_ids else ""
+        hint = f"; install {cap} on the node (the host tool {cap})" if cap in tool_ids else ""
         if not has_release:
             out.append(f"{cap} not reported yet (a node checks it once it runs the release with this module){hint}")
         else:
@@ -265,41 +266,52 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
         steps.append(_step("signed", "Release signed and current per platform", "done", "nodes install it on their next "
                            "heartbeat", items=signed))
 
-    # 7. host tools
-    tools = list(man.sandbox.tools)
-    tool_ids = {t.id for t in tools}
-    oses = sorted({portable.split_platform(p)[0] for p in supported})
-    titems, unmapped = [], []
-    for t in tools:
-        for os_ in oses:
-            paths, missing = platforms.tool_paths(db, [t.id], os_)
-            if missing:
-                unmapped.append(t.id)
-                cmd = ("oarbank op settings.tools.update " + t.id + " --json '" +
-                       json.dumps({"trust": t.trust, "paths": {os_: [TOOL_EXAMPLE.get(os_, "/path/to/" + t.id)]}}) + "'")
-                titems.append({"status": "blocked", "text": f"{t.id} ({t.trust}): no {OS_NAMES.get(os_, os_)} path in the tool "
-                               f"registry, so no {OS_NAMES.get(os_, os_)} node can be granted it",
-                               "href": f"/settings?tool={t.id}&trust={t.trust}#tools", "command": cmd})
-            else:
-                titems.append({"status": "done", "text": f"{t.id} on {OS_NAMES.get(os_, os_)}: {', '.join(paths)}"})
-    if not tools:
-        steps.append(_step("tools", "Host tools mapped", "done", "it asks for no host tools"))
-    elif unmapped:
-        ids = sorted(set(unmapped))
-        needs.append(f"map {', '.join(ids)}")
-        steps.append(_step("tools", "Host tools mapped", "blocked",
-                           "it asks for host tools by id; the tool registry says where each lives on each OS (install the tool on "
-                           "the nodes too)", [_act(f"Map {i} in Settings → Tools", href=f"/settings?tool={i}&trust="
-                                                   f"{next(t.trust for t in tools if t.id == i)}#tools") for i in ids], titems))
+    # 7. host tools: per request, the nodes of a supported platform that resolve it, and why the others do not
+    from . import tools as T
+    tool_ids = {t.id for t in man.sandbox.tools}
+    mine = [n for n in nodes if platforms.node_platform(n) in supported]
+    titems, short, unknown = [], [], []
+    for row in T.resolution(db, name, man, mine):
+        need = row["need"]
+        if row["unknown"]:
+            unknown.append(row["request"]["id"])
+            titems.append({"status": "blocked", "text": f"{need}: this fleet defines no tool {row['request']['id']!r}: the module "
+                           "asks for an unknown tool id and needs a new module version (or an admin defines the tool)",
+                           "href": f"/settings?tool={row['request']['id']}#tools"})
+            continue
+        ok_n = len(row["ok"])
+        text = f"{need}: {ok_n} of {_plural(len(mine), 'node')}" + (f" ({', '.join(row['ok'])})" if row["ok"] else "")
+        titems.append({"status": "done" if ok_n else "blocked", "text": text,
+                       "groups": _group([(h, [why]) for h, why, _ in row["failed"]]),
+                       "counts": {c: sum(1 for _, _, x in row["failed"] if x == c) for c in sorted({x for _, _, x in row["failed"]})}})
+        if not ok_n:
+            short.append(row["request"]["id"])
+    if not man.sandbox.tools:
+        steps.append(_step("tools", "Host tools on the nodes", "done", "it asks for no host tools"))
+    elif unknown:
+        needs.append(f"a new version (unknown tool {', '.join(unknown)})")
+        steps.append(_step("tools", "Host tools on the nodes", "blocked",
+                           f"it asks for {', '.join(repr(u) for u in unknown)}, which this fleet does not define: tool ids name "
+                           "the fleet's tool definitions (jdk, python, or one an admin defines), not paths; publish a new "
+                           "module version that asks for a defined tool with a version constraint",
+                           [_act(f"Define {u} in Settings → Tools", href=f"/settings?tool={u}#tools") for u in unknown], titems))
+    elif short and mine:
+        needs.append(f"{', '.join(short)} on a node")
+        steps.append(_step("tools", "Host tools on the nodes", "blocked",
+                           "no node has an installation it accepts: install one (the command per node), set a path on a node, "
+                           "or add a search path for its OS", [_act("Host tools per node", href=f"/modules/{name}/nodes")], titems))
+    elif not mine:
+        steps.append(_step("tools", "Host tools on the nodes", "waiting", "after the fleet has a node of a platform it supports",
+                           items=titems))
     else:
-        steps.append(_step("tools", "Host tools mapped", "done", "every host tool it asks for has a path on each OS", items=titems))
+        steps.append(_step("tools", "Host tools on the nodes", "done",
+                           "every host tool it asks for resolves on at least one node", items=titems))
 
     # 8. nodes that can run each stage, and 9. certified
     comp_of = {r["release_id"]: r for r in db.q("SELECT release_id, composition_json FROM releases")}
     capable_by_stage, sitems, citems = {}, [], []
     online = {n["node_id"]: bool(n["last_heartbeat_at"] and now - n["last_heartbeat_at"] < C.OFFLINE_AFTER) for n in nodes}
-    mine = [n for n in nodes if platforms.node_platform(n) in supported]
-    excluded = {n["node_id"]: _module_reasons(db, man, n, tool_ids) for n in mine}
+    excluded = {n["node_id"]: _module_reasons(db, man, n, name) for n in mine}
     if any(excluded.values()):
         sitems.append({"status": "blocked", "stage": "", "needs": "", "text": "every stage: these nodes may run none of it",
                        "groups": _group([(n["hostname"], excluded[n["node_id"]]) for n in mine if excluded[n["node_id"]]])})
@@ -339,7 +351,7 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
         needs.append("a node for every stage" if len(lacking) == len(man.stages) > 1 else f"a node for {', '.join(lacking)}")
         steps.append(_step("nodes", "Nodes that can run it", "blocked",
                            f"no node meets what {_plural(len(lacking), 'stage')} ({', '.join(lacking)}) require{'s' if len(lacking) == 1 else ''}: "
-                           "the reasons per node say what to install or map", items=sitems))
+                           "the reasons per node say what to install or set", items=sitems))
     else:
         steps.append(_step("nodes", "Nodes that can run it", "done", "every stage has a node that meets its requirements",
                            items=sitems))

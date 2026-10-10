@@ -635,10 +635,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     async def settings(request: Request):
         actor = who(request)
         d = await drill(views.settings_page) or {"s": {}, "releases": [], "dscount": []}
-        # a readiness checklist's "Map <tool> in Settings → Tools" link opens the tool form with the tool filled in
+        # a readiness checklist's or a node's "Define <tool>" / "Add a search path" link opens the tool form with the id
         tool = request.query_params.get("tool") or ""
         d["prefill_tool"] = tool if tool and len(tool) <= 64 and tool.replace("_", "").replace(".", "").replace("-", "").isalnum() else ""
-        d["prefill_trust"] = "code-exec" if request.query_params.get("trust") == "code-exec" else "read"
         mods = await coordinator_json("GET", "/api/v1/modules", actor)
         d["modules"] = mods.json() if mods.status_code == 200 else []
         return render(request, "settings.html", {**d, "actor": actor})
@@ -884,6 +883,20 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         return render(request, "module_secrets.html", {"name": name, "man": man, "tab": "secrets", "nodes": nodes,
                                                         "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
                                                         "actor": actor})
+
+    @app.get("/modules/{name}/nodes", response_class=HTMLResponse)
+    async def module_nodes(name: str, request: Request):
+        """The module's Nodes matrix (docs/design/host-tools.md): per node and host tool request, what the node found, the
+        path set for it, the effective installation with its source, and the status with its fix."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        if man is None:
+            return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
+        r = await coordinator_json("GET", f"/api/v1/tools?module={name}", actor)
+        doc = r.json() if r.status_code == 200 else None
+        return render(request, "module_nodes.html", {"name": name, "man": man, "tab": "nodes", "actor": actor,
+                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200]})
 
     @app.get("/modules/{name}/health", response_class=HTMLResponse)
     async def module_page(name: str, request: Request):

@@ -283,7 +283,9 @@ def node_conditions(n: dict) -> list[dict]:
 # one value inline
 REMEDY_FORMS = {"nodes.set_caps": ("/nodes/{node}#limits", "/"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
                 "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
-                "settings.tools.update": ("/settings", "/settings"), "settings.folders.update": ("/settings", "/settings"),
+                "tools.set_path": ("/nodes/{node}#tools", "/"), "tools.detect": ("/nodes/{node}#tools", "/"),
+                "tools.define": ("/settings#tools", "/settings"),
+                "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
                 "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
@@ -493,8 +495,15 @@ def audit_page(r, op: str, target: str, before: int | None) -> dict:
 
 
 def settings_page(r) -> dict:
-    s = {k: r.get_setting(k) for k in ("ntfy", "console_hosts", "dataset_groups", "tool_registry", "folder_registry",
-                                       "folder_statements", "dataset_origins")}
+    from ..coordinator import tools
+    s = {k: r.get_setting(k) for k in ("ntfy", "console_hosts", "dataset_groups", "folder_registry", "node_statements",
+                                       "dataset_origins")}
+    # host tools: the definitions (built-in patterns and extras) and who asks for each (Settings → Tools)
+    s["tool_defs"] = tools.definitions(r)
+    s["tool_users"] = {}
+    for m in r.q("SELECT name, version, requests_json FROM module_grants"):
+        for t in (jl(m["requests_json"], {}) or {}).get("tools") or []:
+            s["tool_users"].setdefault(t.get("id"), []).append(f"{m['name']} {m['version']}")
     s["nodes"] = {n["node_id"]: n for n in r.q("SELECT node_id, hostname, platform, folders_json FROM nodes WHERE lifecycle!='retired' "
                                                 "ORDER BY hostname")}
     for n in s["nodes"].values():

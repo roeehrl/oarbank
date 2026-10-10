@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases
+from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -290,7 +290,11 @@ def _node_directives(db: DB, node: dict) -> dict:
             "coordinator": {"fleet_id": identity.fleet_id(db), "cik": identity.key(Path(db.path).parent).public_b64,
                             "epoch": identity.epoch(db)},
             "install_coordinator": jl(node.get("install_coordinator_json")),
-            "folders": folders.directive(db, node["node_id"]),
+            # the node's signed statement (folders and added tool paths), the tool paths chosen among what it found, and a
+            # request to detect its host tools again (docs/design/host-tools.md)
+            "statement": statements.directive(db, node["node_id"]),
+            "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
+            "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
             # the kill switch: a disabled module's services stop on every node (its attempts are revoked)
             "modules_disabled": sorted(modstore.disabled_names(db)),
@@ -349,6 +353,7 @@ def hello(db: DB, node: dict, body: dict) -> dict:
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         agentbuilds.observe(db, node, body)
         _observe_identity(db, node, body)
+        _observe_tools(db, node, body)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         _lifecycle_step(db, node, facts)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
@@ -376,6 +381,18 @@ def _observe_identity(db: DB, node: dict, body: dict):
     if fp and fp != node.get("cik_pinned"):
         db.x("UPDATE nodes SET cik_pinned=? WHERE node_id=?", (fp, node["node_id"]))
         db.event("node_identity_pinned", node_id=node["node_id"], actor=node["hostname"], reason=fp[:16])
+
+
+def _observe_tools(db: DB, node: dict, body: dict):
+    """The host tools the agent detected (docs/design/host-tools.md): kept as the node's `tools_json`."""
+    rep = body.get("tools")
+    if not isinstance(rep, dict) or not isinstance(rep.get("tools"), dict):
+        return
+    keep = {"detected_at": rep.get("detected_at"), "native_arch": rep.get("native_arch"),
+            "tools": {str(k)[:64]: [i for i in (v or [])[:64] if isinstance(i, dict)] for k, v in list(rep["tools"].items())[:64]}}
+    text = json.dumps(keep)[:400_000]
+    if text != node.get("tools_json"):
+        db.x("UPDATE nodes SET tools_json=? WHERE node_id=?", (text, node["node_id"]))
 
 
 def heartbeat(db: DB, node: dict, body: dict) -> dict:
@@ -417,6 +434,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
                  (json.dumps(body["doctor"]), t, nid))
         if isinstance(body.get("folders"), dict):           # the folders of the statement the agent applied (folders.py)
             db.x("UPDATE nodes SET folders_json=? WHERE node_id=?", (json.dumps(body["folders"])[:100_000], nid))
+        _observe_tools(db, node, body)
         if isinstance(body.get("services"), list):          # the agent's service report (protocol.md, "Services")
             rep = {"services": [x for x in body["services"][:200] if isinstance(x, dict)],
                    "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
@@ -432,6 +450,8 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             db.x("UPDATE nodes SET want_recertify=0 WHERE node_id=?", (nid,))
         if node.get("want_probe"):
             db.x("UPDATE nodes SET want_probe=0 WHERE node_id=?", (nid,))     # sent once, in this reply
+        if node.get("want_detect"):
+            db.x("UPDATE nodes SET want_detect=0 WHERE node_id=?", (nid,))    # sent once, in this reply
     if was_offline:
         db.event("node_online", node_id=nid, actor=node["hostname"])
     run_pending_goldens(db, nid)

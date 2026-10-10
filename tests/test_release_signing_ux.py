@@ -198,7 +198,8 @@ def test_hello_event_says_where_the_node_stands_with_its_release(db):
 # ------------------------------------------------------------------ 4. the readiness checklist
 
 def javatoy(tmp_path) -> Path:
-    """toy, asking for a host JDK (tool java17), a java17 capability and a container per job, on macOS and Linux only."""
+    """toy, asking for a host JDK 17 or newer (tool jdk), a java17 capability and a container per job, on macOS and Linux
+    only."""
     src = tmp_path / "javatoy"
     shutil.copytree(TOY_DIR, src)
     t = (src / "oarbank-module.toml").read_text(encoding="utf-8")
@@ -209,7 +210,7 @@ def javatoy(tmp_path) -> Path:
     t = t.replace("[coordinator]\n", '[requires.unsupported]\nrunner = { windows = "no JVM build for Windows" }\n\n[coordinator]\n', 1)
     t = t.replace('requires.resources = { cpu = 1, mem_gb = 0.1 }',
                   'requires = { capabilities = ["java17"], pools = { containers = 1 }, resources = { cpu = 1, mem_gb = 0.1 } }\n\n'
-                  '[sandbox]\ncontract = 1\ntools = [{ id = "java17", trust = "code-exec" }]\n'
+                  '[sandbox]\ncontract = 1\ntools = [{ id = "jdk", version = ">=17", trust = "code-exec" }]\n'
                   'containers = [{ image = "quay.io/biocontainers/bcftools:1.20--h8b25389_0@sha256:' + "b" * 64 + '", '
                   'platform = "linux/amd64" }]\n\n[[probes]]\nname = "java17"\nexec = ["python", "-I", "{bundle}/toy_runner.py"]\n')
     t = t.replace("runner_protocol = [1]\n", "runner_protocol = [1]\nservice_protocol = [1]\n", 1)
@@ -248,16 +249,18 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     sign_items = [i for i in s["signed"]["items"] if i.get("sign")]
     assert s["signed"]["status"] == "blocked" and {i["command"] for i in sign_items} == {
         f"oarbank release sign {wait['darwin-arm64']} --promote", f"oarbank release sign {wait['windows-amd64']} --promote"}
-    assert s["tools"]["status"] == "blocked" and s["tools"]["actions"][0]["href"] == "/settings?tool=java17&trust=code-exec#tools"
-    assert "settings.tools.update java17" in s["tools"]["items"][0]["command"]
+    # host tools: per request, how many nodes resolve it and why the others do not (tools.resolution)
+    assert s["tools"]["status"] == "blocked" and s["tools"]["actions"][0]["href"] == f"/modules/{name}/nodes"
+    item = s["tools"]["items"][0]
+    assert item["text"] == "jdk >=17: 0 of 1 node" and item["groups"][0]["nodes"] == ["mac"]
+    assert "jdk not reported yet" in item["groups"][0]["reasons"][0]
     nodes = s["nodes"]
     assert nodes["status"] == "blocked"
     every = nodes["items"][0]
-    assert every["groups"] == [{"reasons": ["the tool registry has no macOS path for java17: map it in Settings → Tools"],
-                                "nodes": ["mac"]}]
+    assert every["groups"][0]["nodes"] == ["mac"] and every["groups"][0]["reasons"][0].startswith("jdk >=17: jdk not reported yet")
     run = next(i for i in nodes["items"] if i.get("stage") == "run")
     reasons = run["groups"][0]["reasons"]
-    assert any(x.startswith("java17 not reported") and "install java17 on the node" in x for x in reasons)
+    assert any(x.startswith("java17 not reported") for x in reasons)
     assert any("no container runtime reported: install Colima and Docker" in x for x in reasons)
     assert "pc" not in json.dumps(nodes["items"])                  # the unsupported PC is never a reason
     assert steps(rd)["certified"]["status"] == "waiting"
@@ -265,15 +268,26 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     assert nxt["status"] == "next" and [o["verb"] for o in nxt["items"]][:2] == ["set_favorite", "queue_sums"]
     assert nxt["items"][0]["op"] == "mod.javatoy.set_favorite"
     assert rd["state"] == "blocked"
-    assert rd["summary"] == "needs: sign 2 releases, map java17, a node for run"
+    assert rd["summary"] == "needs: sign 2 releases, jdk on a node, a node for run"
 
-    # the owner fixes it: signs, maps the tool, the Mac installs the release and reports java17 and a container runtime
+    # the Mac reports the JDK 11 it has: too old, with the command that installs one the module accepts
+    core.heartbeat(db, fresh(db, mac), {"attempts": [], "tools": {"detected_at": 1.0, "native_arch": "arm64", "tools": {"jdk": [
+        {"path": "/usr/local/opt/openjdk@11/libexec/openjdk.jdk/Contents/Home", "version": "11.0.2", "arch": "x86_64",
+         "source": "detected", "status": "ok"}]}}})
+    item = steps(readiness.module(db, name))["tools"]["items"][0]
+    assert item["groups"] == [{"reasons": ["found 11.0.2 (x86_64) at /usr/local/opt/openjdk@11/libexec/openjdk.jdk/Contents/Home; "
+                                           "needs >=17 → brew install openjdk@17"], "nodes": ["mac"]}]
+    assert item["counts"] == {"TOOL_VERSION_UNMET": 1}
+
+    # the owner fixes it: signs, the Mac installs a JDK 17 and the release, and reports java17 and a container runtime
     for rid in wait.values():
         sign(db, rid)
-    db.set_setting("tool_registry", {"java17": {"trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"]}}})
     hello(db, mac, wait["darwin-arm64"])
     core.heartbeat(db, fresh(db, mac), {"doctor": {"capabilities": ["java17"], "modules": {name: {"health": "healthy", "checks": []}}},
-                                        "attempts": [], "capacity": {"cpu_slots": 4, "pools": {"containers": 2}}})
+                                        "attempts": [], "capacity": {"cpu_slots": 4, "pools": {"containers": 2}},
+                                        "tools": {"detected_at": 2.0, "native_arch": "arm64", "tools": {"jdk": [
+                                            {"path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home",
+                                             "version": "17.0.12", "arch": "aarch64", "source": "detected", "status": "ok"}]}}})
     rd = readiness.module(db, name)
     s = steps(rd)
     assert [s[k]["status"] for k in ("signed", "tools", "nodes")] == ["done", "done", "done"]
@@ -339,16 +353,16 @@ def test_console_names_waiting_releases_and_the_readiness_checklist(db, tmp_path
             assert "release needs your signature" in fleet                   # the enrolled nodes' chip
             mods = c.get("/modules").text
             assert "2 releases waiting for your signature." in mods
-            assert "needs: sign 2 releases, map java17, a node for run" in mods and "Getting it running" in mods
+            assert "needs: sign 2 releases, jdk on a node, a node for run" in mods and "Getting it running" in mods
             page = c.get(f"/modules/{r['name']}")
             assert page.status_code == 200 and "script-src 'self'" in page.headers["content-security-policy"]
             html = page.text
-            assert "Getting this module running" in html and "/settings?tool=java17&amp;trust=code-exec#tools" in html
+            assert "Getting this module running" in html and f"/modules/{r['name']}/nodes" in html
             assert "not a platform it supports (pc): no JVM build for Windows" in html
             assert "no container runtime reported: install Colima and Docker" in html
             assert 'action="/do/mod.javatoy.set_favorite"' in html and "oarbank op mod.javatoy.queue_sums" in html
-            settings = c.get("/settings", params={"tool": "java17", "trust": "code-exec"}).text
-            assert 'value="java17"' in settings and '<option value="code-exec" selected>' in settings
+            settings = c.get("/settings", params={"tool": "samtools"}).text
+            assert 'value="samtools"' in settings and "Define it" in settings
             assert "needs your signature" in settings and "Build releases" in settings
             assert f"{r['name']}@{r['version']}" in settings and "(no module)" in settings      # each release's contents
             assert 'value="x&lt;y"' not in c.get("/settings", params={"tool": "x<y"}).text   # only a tool id is prefilled
