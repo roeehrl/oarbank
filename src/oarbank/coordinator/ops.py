@@ -1354,9 +1354,26 @@ def core_node_id(db, x: str) -> str:
 
 @handler("releases.build", target_type="release", atomic=False)
 def _build(db, req):
-    out = releases.build(db)
-    req.target = out.get("release_id")
-    return out
+    """Build every fleet platform's release (and the canary and pinned nodes' own), as a module change does. Nothing
+    to build while no module is enabled: a release is the bundle of the enabled modules."""
+    if not releases.any_module_enabled(db):
+        raise core.ApiError(409, "no_module_enabled", "No module is enabled, so there is no release to build. Install a "
+                            "module and enable it (Modules page, or `oarbank module enable <name>@<version>`): its release "
+                            "is then built for every platform in the fleet.")
+    out = releases.sync(db)
+    need = releases.signature_required(db)
+    rows = {r["release_id"]: r for r in db.q("SELECT release_id, status, sha256, signature, composition_json FROM releases "
+                                             "WHERE release_id IN "
+                                             f"({','.join('?' * len(out['defaults']))})", tuple(out["defaults"].values()))}
+    built = []
+    for plat, rid in out["defaults"].items():
+        r = rows[rid]
+        unsigned = need and not r["signature"]
+        built.append({"platform": plat, "release_id": rid, "status": r["status"], "sha256": r["sha256"], "needs_signature": unsigned,
+                      "modules": releases.contents(r["composition_json"]),
+                      **({"next": f"oarbank release sign {rid} --promote"} if unsigned or r["status"] != "current" else {})})
+    req.target = ",".join(out["defaults"].values())
+    return {"releases": built, "assigned": out["assigned"], "awaiting": releases.awaiting(db)}
 
 
 @handler("releases.attach_signature", target_type="release")

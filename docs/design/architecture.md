@@ -53,7 +53,10 @@ This page describes how the pieces fit and how each works on each operating syst
   and resources per platform: jobs store the overrides and claim, explain and the grant's envelope resolve them for the
   node. Goldens may be limited to some platforms and expect a value per platform; each node gets its own.
 - **Releases are per platform**: a composition filtered by platform, the platform bound into the release id, one
-  current release per platform, a release built when a node of a new platform enrolls. A release holds only the bundle
+  current release per platform, a release built when a node of a new platform enrolls or the composition changes, and
+  only then (a candidate waiting for the owner's signature is not rebuilt on hellos). The candidates the owner must sign
+  are named on the console, in an alert and by `oarbank release list` (releases.awaiting); a module's readiness
+  checklist (coordinator/readiness.py) walks from install to its first operation. A release holds only the bundle
   files its platform receives (`[bundle.platform_files]`) and the wheels that install there.
 - **Agent builds are keyed by platform**: the coordinator reads the Mach-O, ELF or PE header and an embedded version
   marker and never executes an upload; one channel per platform.

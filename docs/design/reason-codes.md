@@ -53,6 +53,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `NODE_QUARANTINED` | Quarantined: {reason} | P3 | – | `nodes.clear_quarantine` | `node_quarantined` |
 | `NODE_RETIRED` | Retired | P1 | – | – | `node_retired` |
 | `RELEASE_PENDING` | Installing release {release} | P1 | – | – | – |
+| `NO_RELEASE` | No release yet: install and enable a module | P1 | – | `modules.install`, `modules.enable` | – |
+| `RELEASE_UNSIGNED` | Release {release} for {platform} is waiting for the owner's signature: oarbank release sign {release} --promote | P1 | – | `releases.attach_signature` | – |
 | `NOT_ADMITTING` | The agent admits no new work: {why} | P1 | – | – | – |
 | `CLOCK_SKEW` | The node's clock is {offset_s} s off the coordinator's: jobs and moves use the coordinator's time, but certificates and update metadata need a correct clock; set the node's time | P3 | – | – | – |
 

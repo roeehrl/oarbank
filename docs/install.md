@@ -178,7 +178,8 @@ For Intune, deploy the MSI as a Win32 app with that command and the detection ru
 `printf '%s' "{{ oarbank_join_code }}" | oarbank-node join --code-stdin --no-input --wait 600` with `no_log: true`
 and `creates: /var/lib/oarbank/status/joined`.
 
-The node enrolls with its own key (it never leaves the node), gets a client certificate, installs its release,
+The node enrolls with its own key (it never leaves the node), gets a client certificate, installs its release (there is
+none until a module is enabled: its card says "waiting for a release: install and enable a module"),
 runs each module's doctor and golden jobs, and then takes work. Host protection starts in `moderate` with no
 rules; add rules on the node's Protection page. `oarbank-agent discover` lists coordinators announcing themselves
 on the local network, a hint for the URL only.
@@ -190,6 +191,30 @@ launchd daemon) is exempt. If macOS refuses, `oarbank-agent discover` says so; a
 Privacy & Security, Local Network. On Macs no one is at, macOS 15.5 and later accept an administrator's exemption for
 whole networks (`sudo defaults write com.apple.network.local-network AllowedEthernetLocalNetworkAddresses -array
 "<cidr>"`, then restart), and the system scope avoids the question.
+
+## 3. Modules
+
+The core runs no work of its own: a module brings it. From the console's **Modules** page or the CLI:
+
+1. **Install** the module's bundle (`oarbank module install <bundle>.mfb`). Installing enables nothing.
+2. **Approve its sandbox grants** if it asks for any: network hosts, host tools, containers
+   (`oarbank module approve <name>@<version>`, previewed first).
+3. **Enable** it (`oarbank module enable <name>@<version>`). Oarbank builds a release for every platform of the
+   fleet: the module's bundle (or none, where it does not run) for the nodes of that platform.
+4. **Sign each platform's release.** With release signing on (the default) nothing reaches a node until the owner
+   signs its release offline, on the machine that holds the owner key:
+   ```bash
+   oarbank release list                          # each release's platform, status and contents; the waiting ones
+   oarbank release sign <release> --promote      # once per platform it names
+   ```
+   Until then the Fleet and Modules pages show a banner naming every waiting release with its command, an alert
+   (`release_awaiting_owner`) opens after five minutes, and the nodes stay "release needs your signature".
+   [release-signing.md](release-signing.md) has the details.
+5. **Finish what the module's checklist asks.** The module's page opens with **Getting this module running**
+   (`oarbank module ready <name>` prints the same): every step with its status, why and the fix, among them host
+   tools to map in Settings → Tools (and install on the nodes), the nodes each stage can run on and why the others
+   cannot (a capability not reported, no container runtime, a platform the module does not support), certification,
+   and the module's first operations.
 
 ## Updating
 

@@ -95,6 +95,9 @@ CODES: list[ReasonCode] = [
       wire=["node_quarantined"]),
     C("NODE_RETIRED", "node_admission", "Retired", wire=["node_retired"]),
     C("RELEASE_PENDING", "node_admission", "Installing release {release}"),
+    C("NO_RELEASE", "node_admission", "No release yet: install and enable a module", remedies=["modules.install", "modules.enable"]),
+    C("RELEASE_UNSIGNED", "node_admission", "Release {release} for {platform} is waiting for the owner's signature: "
+      "oarbank release sign {release} --promote", remedies=["releases.attach_signature"]),
     C("NOT_ADMITTING", "node_admission", "The agent admits no new work: {why}"),
     C("CLOCK_SKEW", "node_admission", "The node's clock is {offset_s} s off the coordinator's: jobs and moves use the "
       "coordinator's time, but certificates and update metadata need a correct clock; set the node's time", "P3"),

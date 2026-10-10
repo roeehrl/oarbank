@@ -20,8 +20,9 @@ The release key is the owner set's primary key. Keep the backup offline (another
 ## Setting it up
 
 The native coordinator installer's first-run wizard creates and pins the primary and backup keys before it
-finishes. Keep that backup offline. If you used the wizard, proceed to signing your module releases and agent builds
-below; do not create a second key set. For manual/archive setup or keys held on another trusted machine:
+finishes. Keep that backup offline. If you used the wizard, proceed to signing your module releases (after enabling a
+module, [sign each platform's release](#after-enabling-a-module-sign-each-platforms-release)) and agent builds below;
+do not create a second key set. For manual/archive setup or keys held on another trusted machine:
 
 1. Make the keys on a machine you trust, not necessarily the coordinator:
    `oarbank release keygen` writes the primary to `keys/release-ed25519.key` (0600) in the config directory
@@ -29,8 +30,33 @@ below; do not create a second key set. For manual/archive setup or keys held on 
    another file; `oarbank release --help` prints it); make the backup the same way with `--key <path>`.
 2. Pin the owner key set: `oarbank owner set --key <primary> --backup-key <backup>`. The primary becomes the
    release key the coordinator advertises.
-3. Sign each release before it can be promoted (`oarbank release sign <id> --promote`), each agent build before a
-   canary, each coordinator build before a move can install it.
+3. Sign each release before it can be promoted (`oarbank release sign <id> --promote`, once per platform after every
+   module change: see below), each agent build before a canary, each coordinator build before a move can install it.
+
+## After enabling a module: sign each platform's release
+
+Enabling, upgrading, canarying, pinning or rolling back a module changes what nodes run, so oarbankd builds a new
+release for every platform of the fleet (a macOS and a Windows node: two releases, one of them perhaps without the
+module, where it does not run). With signing on, each one stays a **candidate** and no node gets anything until the
+owner signs it, on the machine that holds the owner key:
+
+```bash
+oarbank release list                         # RELEASE, PLATFORM, STATUS, SIGNED, CONTENTS (module@version), and
+                                             # the releases waiting for your signature, each with its command
+oarbank release sign <release> --promote     # once per waiting platform release
+oarbank release sign <release>               # a canary or pinned node's own release (never --promote it)
+```
+
+`oarbank release build` builds every platform's release from the enabled modules (it refuses while none is enabled)
+and, when the owner key is on that machine, signs and promotes each one. oarbankd builds a platform's release once
+per composition: hellos while a candidate waits change nothing.
+
+Until a release is signed it is named everywhere the owner looks: a banner on the Fleet, Modules and Settings pages
+with each release's platform, contents and command; the `release_awaiting_owner:<release>` alert (after five
+minutes; it clears when the release is signed and current, or a newer build replaces it); each waiting node's card
+("release needs your signature"); the node's explain (`RELEASE_UNSIGNED`, with the command); and the module's
+readiness checklist. A node with no release at all says why: `NO_RELEASE` (no module enabled yet),
+`RELEASE_UNSIGNED` (its release waits for the owner), `RELEASE_PENDING` (it is installing it).
 
 ## What nodes do
 
@@ -70,6 +96,8 @@ targets, each version, hash and expiry checked, with versions remembered against
 ## Testing
 
 `tests/test_signing.py` and `tests/test_coordinator_move.py` cover the statements and the owner rules;
+`tests/test_release_signing_ux.py` the waiting releases (one build per platform and composition, the banner, alert,
+reason codes and `oarbank release list`) and the module readiness checklist;
 `tests/rust/test_agent_tuf.py` installs a vendor-listed agent build and refuses an unlisted one;
 `tests/rust/test_agent_coordinator_install_signed.py` runs a whole signed move against real processes: the owner key
 set pinned by the agent, a signed coordinator build installed by it, and an owner-signed move it follows.

@@ -352,8 +352,10 @@ def hello(db: DB, node: dict, body: dict) -> dict:
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         _lifecycle_step(db, node, facts)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
+    # the release in words: the id it runs, or why it runs none ("none yet (no module enabled)", "waiting for signature: r_…")
+    rel = releases.node_release(db, node)
     db.event("hello", actor=node["hostname"], node_id=node["node_id"], reason=body.get("boot_id"),
-             agent_version=body.get("agent_version"), release_id=body.get("release_id"))
+             agent_version=body.get("agent_version"), release=rel["text"])
     run_pending_goldens(db, node["node_id"])
     d = _node_directives(db, node)
     d.update(node_id=node["node_id"], kill=kill)
@@ -859,7 +861,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
         live=db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"],
         limits=jl(node["limits_json"], {}) or {}, fleet_state=db.get_setting("fleet_state", "active"),
-        current_release=releases.assigned(db, node),
+        current_release=releases.assigned(db, node), release_of=lambda: releases.node_release(db, node),
         pool_cap=_node_pools(node), pool_use=_pool_usage(db, nid),
         failed_here={r["job_id"] for r in db.q("SELECT DISTINCT job_id FROM attempts WHERE node_id=? AND state='failed'", (nid,))},
         pool_jobs_only=bool(body.get("pool_jobs_only")),
@@ -1786,6 +1788,7 @@ def reap(db: DB):
             _resolve_alert(db, "node_offline", n["node_id"])
     from . import alerting, protection
     protection.check_alerts(db, t)
+    releases.note_awaiting(db)          # releases waiting for the owner's signature (a key pinned, a node gone, ...)
     alerting.promote_pending(db, t)
 
 

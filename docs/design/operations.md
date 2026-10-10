@@ -87,7 +87,7 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `releases.build` — Build a release bundle from the installed modules (not deployed until promoted) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=releases.build)<br>`POST /do/{op}` (op=releases.build) | oarbank release build |
+| `releases.build` — Build each fleet platform's release from the enabled modules (nodes get it once it is signed and promoted) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=releases.build)<br>`POST /do/{op}` (op=releases.build) | oarbank release build |
 | `releases.attach_signature` — Attach an offline signature to a release (signing builds only) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=releases.attach_signature)<br>`POST /do/{op}` (op=releases.attach_signature) | oarbank release sign |
 | `releases.promote` — Make a release current; agents install it on their next heartbeat | T2 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=releases.promote)<br>`POST /do/{op}` (op=releases.promote) | oarbank release promote <rid> |
 | `releases.pin_key` — Pin or rotate the release public key (signing builds only) | T3 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=releases.pin_key)<br>`POST /do/{op}` (op=releases.pin_key) | oarbank release keygen |

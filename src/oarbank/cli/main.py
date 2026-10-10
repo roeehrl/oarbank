@@ -165,6 +165,32 @@ def cmd_secret(a):
     print(f"{a.module}/{a.name} set for {res['node'] or 'the module'}: fingerprint {res['fingerprint']}")
 
 
+MARK = {"done": "[done]   ", "blocked": "[BLOCKED]", "waiting": "[waiting]", "next": "[next]   ", "skipped": "[n/a]    "}
+
+
+def print_readiness(r: dict) -> None:
+    """A module's readiness checklist (GET /api/v1/modules/<name>/readiness): each step, why, and the command that fixes it."""
+    print(f"{r['name']} {r['version']}: {r['summary']}")
+    for s in r["steps"]:
+        print(f"  {MARK.get(s['status'], s['status'])} {s['title']}: {s['reason']}")
+        for i in s["items"]:
+            if s["id"] == "next":
+                print(f"      {i['title']} ({i['verb']}, {i['tier']}): {i['command']}")
+                continue
+            print(f"      {MARK.get(i.get('status') or '', '')} {i['text']}" + (f"  (needs {i['needs']})" if i.get("needs") else ""))
+            if i.get("command"):
+                print(f"          {i['command']}")
+            for g in i.get("groups") or []:
+                if any(g["reasons"]):
+                    print(f"          {', '.join(g['nodes'])}: {'; '.join(x for x in g['reasons'] if x)}")
+        for act in s["actions"]:
+            if act.get("command"):
+                print(f"      -> {act['command']}")
+            elif act.get("href") and s["id"] != "next":
+                print(f"      -> console: {act['label']} ({act['href']})")
+    print()
+
+
 def cmd_module(a):
     """oarbank module <list|show|install|verify|enable|canary|promote|rollback|disable|pin|unpin|uninstall>."""
     ask = dict(reason=a.reason, yes=a.yes, dry_run=a.dry_run)
@@ -179,6 +205,10 @@ def cmd_module(a):
         for p in s["pins"]:
             print(f"  pin {p['name']}@{p['version']} on {p['node_id']}")
         return
+    if a.action == "ready":
+        for r in ([api("GET", f"/api/v1/modules/{a.what}/readiness")] if a.what else api("GET", "/api/v1/modules/readiness")):
+            print_readiness(r)
+        return
     if a.action == "show":
         m = next((m for m in api("GET", "/api/v1/modules") if m["name"] == a.what), None)
         if m is None:
@@ -192,6 +222,7 @@ def cmd_module(a):
             print(f"  {p['platform'] + (' *' if p['here'] else ''):<16} {'yes' if p['runner'] else 'no':<6} "
                   f"{'yes' if p['coordinator'] else 'no':<11} {p['nodes']:>5} {p['certified']:>9}" + (f"  {why}" if why else ""))
         print("  * this coordinator's platform")
+        print(f"  getting it running: oarbank module ready {m['name']}")
         return
     if a.action == "install":
         data = Path(a.what).read_bytes()
@@ -831,37 +862,68 @@ def cmd_release(a):
         key = None
     if a.action == "build":
         out = run_op("releases.build", None, **ask)["result"]
-        print(json.dumps(out, indent=1))
-        if out.get("needs_signature"):
+        for r in out["releases"]:
+            print(f"{r['platform']:<15} {r['release_id']:<16} {r['status']:<9} {', '.join(r.get('modules') or []) or '(no module)'}"
+                  + ("  waiting for your signature" if r["needs_signature"] else ""))
+        unsigned = [r for r in out["releases"] if r["needs_signature"]]
+        if unsigned:
             from .. import signing
             key = key or signing.DEFAULT_KEY
-        if out.get("needs_signature") and key.exists():
-            a.target, a.promote = out["release_id"], True
-            a.action = "sign"
-        else:
+        if not unsigned or not key.exists():
+            _print_awaiting(out.get("awaiting") or [], key)
             return
+        for r in unsigned:                       # the owner key is here: sign and promote each platform's release
+            a.target, a.promote = r["release_id"], True
+            _sign_release(a, key, ask)
+        return
     if a.action == "keygen":
         pub = signing.keygen(key, overwrite=a.rotate)
         run_op("releases.pin_key", "release-key", {"pubkey": pub, "rotate": a.rotate}, confirm="release-key", **ask)
         print(f"signing key: {key} (0600; keep a backup offline)\npublic key pinned in oarbankd: {pub}")
         print("agents pin it on their next heartbeat; from then on they refuse unsigned or rolled-back releases")
     elif a.action == "sign":
-        rels = {r["release_id"]: r for r in api("GET", "/api/v1/releases")}
-        r = rels.get(a.target) or sys.exit(f"unknown release {a.target}")
-        seq = max([x["seq"] or 0 for x in rels.values() if x["signed"]] + [0]) + 1
-        if r["signed"] and r["seq"]:
-            seq = max(seq, r["seq"] + 1)
-        stmt = signing.statement(r["release_id"], r["sha256"], seq)
-        print(json.dumps(run_op("releases.attach_signature", r["release_id"],
-                                {"statement": stmt, "signature": signing.sign(stmt, key)}, **ask), indent=1, default=str))
-        if a.promote:
-            print(json.dumps(run_op("releases.promote", r["release_id"], **ask), indent=1, default=str))
+        if not a.target:
+            sys.exit("name the release to sign: `oarbank release list` shows the ones waiting for your signature")
+        _sign_release(a, key, ask)
     elif a.action == "promote":
         print(json.dumps(run_op("releases.promote", a.target, **ask), indent=1, default=str))
     elif a.action == "list":
-        for r in api("GET", "/api/v1/releases"):
-            print(f"{r['release_id']:<16} {r['status']:<9} seq={r['seq'] or '-':<4} {'signed' if r['signed'] else 'UNSIGNED'} "
-                  f"{time.strftime('%m-%d %H:%M', time.localtime(r['created_at']))}")
+        rels = api("GET", "/api/v1/releases")
+        print(f"{'RELEASE':<16} {'PLATFORM':<15} {'STATUS':<9} {'SEQ':<4} {'SIGNED':<8} {'BUILT':<11} CONTENTS")
+        for r in rels:
+            print(f"{r['release_id']:<16} {r.get('platform') or '-':<15} {r['status']:<9} {r['seq'] or '-':<4} "
+                  f"{'signed' if r['signed'] else 'UNSIGNED':<8} {time.strftime('%m-%d %H:%M', time.localtime(r['created_at'])):<11} "
+                  f"{', '.join(r.get('modules') or []) or '(no module)'}"
+                  + ("  <- waiting for your signature" if r.get("awaiting") else ""))
+        _print_awaiting([r["awaiting"] for r in rels if r.get("awaiting")], key)
+
+
+def _sign_release(a, key, ask):
+    """Sign a release offline with the owner key (a seq above every signed one) and, with --promote, make it current."""
+    from .. import signing
+    rels = {r["release_id"]: r for r in api("GET", "/api/v1/releases")}
+    r = rels.get(a.target) or sys.exit(f"unknown release {a.target}")
+    seq = max([x["seq"] or 0 for x in rels.values() if x["signed"]] + [0]) + 1
+    if r["signed"] and r["seq"]:
+        seq = max(seq, r["seq"] + 1)
+    stmt = signing.statement(r["release_id"], r["sha256"], seq)
+    print(json.dumps(run_op("releases.attach_signature", r["release_id"],
+                            {"statement": stmt, "signature": signing.sign(stmt, key)}, **ask), indent=1, default=str))
+    if a.promote:
+        print(json.dumps(run_op("releases.promote", r["release_id"], **ask), indent=1, default=str))
+
+
+def _print_awaiting(items: list, key) -> None:
+    """The releases only the owner can let through, each with the command that does it."""
+    if not items:
+        return
+    print(f"\n{len(items)} release{'s' if len(items) != 1 else ''} waiting for your signature (nodes get nothing new until then):")
+    for w in items:
+        who = f"nodes {', '.join(w['nodes'])}" if w["kind"] == "node" else f"{len(w['nodes'])} {w['platform']} node(s)"
+        holds = ", ".join(w.get("modules") or []) or "no module"
+        print(f"  {w['platform']:<15} {w['release_id']:<16} {holds}, for {who}\n    {w['command']}")
+    if key is not None and not Path(key).exists():
+        print(f"  (run these on the machine that holds the owner key; there is none at {key})")
 
 
 def cmd_campaign(a):
@@ -1126,12 +1188,13 @@ def parser() -> argparse.ArgumentParser:
     al.add_argument("--reason")
     al.set_defaults(fn=cmd_alerts)
     mo = sub.add_parser("module", help="module lifecycle: install a bundle, enable, canary, promote, rollback, disable, pin")
-    mo.add_argument("action", choices=["list", "show", "install", "verify", "check", "approve", "enable", "canary", "promote", "rollback", "disable",
+    mo.add_argument("action", choices=["list", "show", "ready", "install", "verify", "check", "approve", "enable", "canary", "promote", "rollback", "disable",
                                        "pin", "unpin", "uninstall"])
     mo.add_argument("--deep", action="store_true", help="check: also re-hash every module file")
     mo.add_argument("what", nargs="?", help="a bundle file (install); <name>@<version> (canary, pin, uninstall, approve; enable "
                                             "takes either form); <name> or <name>@<its canary version> (promote); <name> "
-                                            "(rollback, disable, verify, check, show: where it runs, per platform)")
+                                            "(rollback, disable, verify, check, show: where it runs, per platform; ready: what stands between it and "
+                                            "running work, every module without a name)")
     mo.add_argument("--node", action="append", help="canary or pin node (repeat for several canary nodes)")
     mo.add_argument("--reason")
     mo.add_argument("--yes", action="store_true")

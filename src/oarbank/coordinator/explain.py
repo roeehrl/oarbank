@@ -50,6 +50,7 @@ def _job_on_node(db: DB, j: dict, nv: predicates.NodeView, now: float) -> list:
 
 
 REMEDY_TARGET = {"nodes": "node", "jobs": "job_id", "campaigns": "campaign_id"}      # operation area -> the subject id it targets
+RELEASE_CODES = ("RELEASE_PENDING", "NO_RELEASE", "RELEASE_UNSIGNED")                 # node codes whose message names its release
 
 
 def _remedies(codes, params) -> list[X.Remedy]:
@@ -173,6 +174,10 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
     summary += [X.SummaryRow(code=c["code"], detail=c["values"]) for c in protection.runtime_conditions(jl(n["telemetry_json"], {}) or {})]
     head = X.Headline(code="OK", text="Admitting work") if ff is None else \
         X.Headline(code=ff.code, text=f"Not admitting: {ff.predicate} (observed {ff.observed}, required {ff.required})")
+    if ff is not None and ff.code in RELEASE_CODES:      # say which release, and what lets it through
+        rel = nv.release_of() if nv.release_of else {}
+        head = X.Headline(code=ff.code, text="Not admitting: " + RC.REGISTRY[ff.code].render(
+            release=rel.get("release") or "?", platform=rel.get("platform") or "?"))
     return X.ExplainDocument(
         subject=X.Subject(kind="node", id=n["node_id"]),
         as_of=X.AsOf(snapshot_version=db.one("SELECT COALESCE(MAX(event_id),0) m FROM events")["m"], evaluated_at=now),

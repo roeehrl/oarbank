@@ -146,10 +146,35 @@ def fleet_data(r, now: float | None = None) -> dict:
     events = r.q("SELECT * FROM events ORDER BY event_id DESC LIMIT 25")
     from ..coordinator import joincodes
     codes = [c for c in joincodes.listing(r) if c["state"] == "active"]
+    rel = release_state(r)
+    for n in nodes:
+        n["release_wait"] = release_wait(n, rel)
     return {"nodes": nodes, "enrollments": enr, "campaigns": camps, "alerts": alerts, "alerts_pending": pending, "discovered": discovered,
             "events": events, "now": now, "fleet_state": r.get_setting("fleet_state", "active"),
             "modules_disabled": r.get_setting("modules_disabled", []) or [], "join_codes": codes,
-            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None))}
+            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None)), "releases_awaiting": rel["awaiting"]}
+
+
+def release_state(r) -> dict:
+    """What the release banners and the node cards need: the releases waiting for the owner's signature (oarbankd keeps
+    them in the `releases_awaiting` setting: releases.note_awaiting) and whether any module is enabled."""
+    return {"awaiting": r.get_setting("releases_awaiting", []) or [],
+            "modules_enabled": bool(r.one("SELECT COUNT(*) n FROM module_channels WHERE current IS NOT NULL")["n"])}
+
+
+def release_wait(n: dict, rel: dict) -> dict | None:
+    """Why a node waits for a release, for its card: {text, title}, or None when it does not. An enrolled node waits
+    for its first release (none while no module is enabled, or one the owner has not signed); a canary or pinned node
+    waits when its own release is unsigned."""
+    for a in rel["awaiting"]:
+        if n["node_id"] in (a.get("node_ids") or []) and (a["kind"] == "node" or n["lifecycle"] == "enrolled"):
+            return {"text": "release needs your signature", "title": f"release {a['release_id']}: {a['command']}"}
+    if n["lifecycle"] == "enrolled" and not rel["modules_enabled"]:
+        return {"text": "waiting for a release: install and enable a module",
+                "title": "a release is the bundle of the enabled modules; there is none until a module is enabled"}
+    if n["lifecycle"] == "enrolled" and n.get("assigned_release") is None and not n.get("release_id"):
+        return {"text": "waiting for its release", "title": "installing the release for its platform"}
+    return None
 
 
 def ca_fingerprint(home) -> str:
@@ -255,7 +280,8 @@ def node_conditions(n: dict) -> list[dict]:
 REMEDY_FORMS = {"nodes.set_caps": ("/nodes/{node}#limits", "/"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
                 "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
                 "settings.tools.update": ("/settings", "/settings"), "settings.folders.update": ("/settings", "/settings"),
-                "agent.promote": ("/agent", "/agent")}
+                "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
+                "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 
@@ -469,7 +495,13 @@ def settings_page(r) -> dict:
                                                 "ORDER BY hostname")}
     for n in s["nodes"].values():
         n["folders"] = jl(n.pop("folders_json"), {}) or {}
-    return {"s": s, "releases": r.q("SELECT release_id, platform, created_at, status, sha256 FROM releases ORDER BY created_at DESC LIMIT 10"),
+    rel = release_state(r)
+    wait = {a["release_id"]: a for a in rel["awaiting"]}
+    from ..coordinator.releases import contents
+    releases = [{**x, "awaiting": wait.get(x["release_id"]), "modules": contents(x.pop("composition_json"))} for x in r.q(
+        "SELECT release_id, platform, created_at, status, sha256, signature IS NOT NULL AS signed, composition_json FROM releases "
+        "ORDER BY created_at DESC LIMIT 10")]
+    return {"s": s, "releases": releases, "releases_awaiting": rel["awaiting"], "modules_enabled": rel["modules_enabled"],
             "dscount": r.q("SELECT kind, COUNT(*) n FROM datasets GROUP BY kind")}
 
 

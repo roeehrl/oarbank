@@ -823,6 +823,20 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
                 "channels": modstore.channels(db), "pins": [{"name": n, "node_id": nd, "version": v}
                                                             for (n, nd), v in modstore.pins(db).items()]}
 
+    @app.get("/api/v1/modules/readiness")
+    def api_modules_readiness(actor=Depends(who)):
+        """Every installed module's readiness checklist (readiness.py): what stands between it and running work."""
+        from . import readiness
+        return readiness.all_modules(db)
+
+    @app.get("/api/v1/modules/{name}/readiness")
+    def api_module_readiness(name: str, actor=Depends(who)):
+        from . import readiness
+        r = readiness.module(db, name)
+        if r is None:
+            raise core.ApiError(404, "not_found", f"no module {name} is installed")
+        return r
+
     @app.get("/api/v1/modules/{name}/secrets")
     def api_module_secrets(name: str, actor=Depends(who)):
         """The module's declared secrets: set or not, fingerprints, when and by whom, per scope. Never a value."""
@@ -957,8 +971,14 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
 
     @app.get("/api/v1/releases")
     def api_releases(actor=Depends(who)):
-        return db.q("SELECT release_id, created_at, sha256, status, seq, signature IS NOT NULL AS signed FROM releases "
-                    "ORDER BY created_at DESC LIMIT 50")
+        """The latest releases; `awaiting` names, for one the owner must sign before nodes get it, the command that
+        lets it through (releases.awaiting)."""
+        from . import releases
+        wait = {a["release_id"]: a for a in releases.awaiting(db)}
+        return [{**{k: v for k, v in r.items() if k != "composition_json"}, "modules": releases.contents(r["composition_json"]),
+                 "awaiting": wait.get(r["release_id"])} for r in db.q(
+            "SELECT release_id, platform, created_at, sha256, status, seq, signature IS NOT NULL AS signed, composition_json "
+            "FROM releases ORDER BY created_at DESC LIMIT 50")]
 
     @app.get("/api/v1/events")
     def api_events(after: int = 0, actor=Depends(who)):
@@ -1079,6 +1099,8 @@ def background(db: DB, stop: threading.Event):
                 last_views = t
             if t - last_inv > 60:
                 _check_invariants(db)
+                from . import releases
+                releases.ensure_fleet(db)       # each platform's release (and which one waits for the owner)
                 last_inv = t
             if t - last_audit > 3600:
                 _audit_hourly(db)

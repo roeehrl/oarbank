@@ -19,7 +19,7 @@
   <div class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page. Host names the console and the
   admin API answer to besides localhost (the remote mode): setting <span class="mono">console_hosts</span>, a JSON list.</div>
 </div>
-<div class="card">
+<div class="card" id="tools">
   <b>Host tools</b>
   <div class="small mut">Modules ask for host tools by id (<span class="mono">[sandbox].tools</span>); this registry says where each
   tool lives on each OS. An approved module's runners may read and execute exactly these paths.</div>
@@ -27,10 +27,11 @@
     <td>{% if t.trust == 'code-exec' %}<span class="chip warn">runs code</span>{% endif %}</td>
     <td class="mono">{% for os_, ps in t.paths.items() %}{{ os_ }}: {{ ps | join(', ') }}<br>{% endfor %}</td></tr>
   {% else %}<tr><td class="mut">No tools registered.</td></tr>{% endfor %}</table>
-  <details class="small"><summary>Add or change a tool…</summary>
+  <details class="small"{% if prefill_tool %} open{% endif %}><summary>Add or change a tool…</summary>
+  {% if prefill_tool %}<div class="mut">A module asks for <span class="mono">{{ prefill_tool }}</span>: give its path on each OS your nodes run (and install it on those nodes).</div>{% endif %}
   {% call m.op_form("settings.tools.update", "", "Review…", inline=False) %}
-    <label>tool id <input name="target_input" class="mono" required placeholder="java17"></label>
-    <label>trust <select name="trust"><option value="read">read</option><option value="code-exec">code-exec (a JVM, an interpreter, a shell)</option></select></label>
+    <label>tool id <input name="target_input" class="mono" required placeholder="java17" value="{{ prefill_tool or '' }}"></label>
+    <label>trust <select name="trust"><option value="read">read</option><option value="code-exec"{% if prefill_trust == 'code-exec' %} selected{% endif %}>code-exec (a JVM, an interpreter, a shell)</option></select></label>
     <label>macOS paths (one per line) <textarea name="paths_darwin" rows="2" class="mono" style="width:100%" placeholder="/opt/homebrew/opt/openjdk@17"></textarea></label>
     <label>Linux paths <textarea name="paths_linux" rows="2" class="mono" style="width:100%" placeholder="/usr/lib/jvm/java-17-openjdk-amd64"></textarea></label>
     <label>Windows paths <textarea name="paths_windows" rows="2" class="mono" style="width:100%" placeholder="C:\Program Files\Eclipse Adoptium\jdk-17"></textarea></label>
@@ -75,10 +76,16 @@
     <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ ((s.dataset_origins or {}).get('hosts') or []) | join('\n') }}</textarea></label>
   {% endcall %}</details>
 </div>
-<div class="card">
-  <b>Releases</b> {{ m.op_form("releases.build", "release", "Build release", confirm="Build a release bundle from the installed modules? It is not deployed until promoted.") }}
-  <table class="small">{% for r in releases %}<tr><td class="mono">{{ r.release_id }}</td><td class="mono">{{ r.platform }}</td><td>{{ r.status }}</td><td class="mut">{{ r.created_at | ago }}</td>
-  <td>{% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
+<div class="card" id="releases">
+  <b>Releases</b> {% if modules_enabled %}{{ m.op_form("releases.build", "release", "Build releases", confirm="Build each fleet platform's release from the enabled modules? Nodes get a release once it is signed and promoted.") }}{% else %}<span class="small mut">none yet: a release is the bundle of the enabled modules; <a href="/modules">install and enable a module</a> first</span>{% endif %}
+  <div class="small mut">After a module is enabled or changed, each platform's release waits for your signature:
+    <span class="mono">oarbank release sign &lt;release&gt; --promote</span>, run where the owner key is.</div>
+  {{ m.release_banner(releases_awaiting) }}
+  <table class="small"><tr><th>release</th><th>platform</th><th>status</th><th>contents</th><th>built</th><th><span class="sr-only">actions</span></th></tr>
+  {% for r in releases %}<tr><td class="mono">{{ r.release_id }}</td><td class="mono">{{ r.platform }}</td><td>{{ r.status }}
+    {% if r.awaiting %}<span class="chip warn" title="{{ r.awaiting.command }}">needs your signature</span>{% elif not r.signed and r.status != 'current' %}<span class="chip">unsigned</span>{% endif %}</td><td class="mono">{{ r.modules | join(', ') if r.modules else '(no module)' }}</td><td class="mut">{{ r.created_at | ago }}</td>
+  <td>{% if r.awaiting %}<code class="small">{{ r.awaiting.command }}</code>{% endif %}
+    {% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
     <details class="small"><summary>signature</summary>
     {% call m.op_form("releases.attach_signature", r.release_id, "Attach", inline=False) %}
       <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" placeholder="from: oarbank release sign {{ r.release_id }}"></textarea></label>
