@@ -117,6 +117,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `TIMEOUT` | Hit the {timeout_s} s limit | P1 | yes / yes | – | `timeout` |
 | `LEASE_EXPIRED` | Lease expired (no heartbeat for {seconds} s) | P1 | yes / no | – | `lease_expired` |
 | `AGENT_RESTARTED` | The agent restarted without the attempt | P1 | no / no | – | `agent_restart` |
+| `AGENT_STOPPED` | The agent on the node was stopped (its service stopped or restarted); released and requeued | P1 | no / no | – | `agent_stop` |
 | `RELEASE_INVALID` | Granted under a release the node no longer runs | P1 | no / no | – | `release_invalid` |
 | `STALE_GENERATION` | The job was requeued after this attempt was granted | P1 | no / no | – | `stale_generation` |
 | `LOST_RACE` | Another attempt finished first | P1 | no / no | – | `lost_race` |

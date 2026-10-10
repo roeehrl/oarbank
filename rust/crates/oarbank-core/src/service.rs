@@ -20,7 +20,16 @@ pub struct ServiceSpec {
     /// Settings, Login Items, "Allow in the Background" then lists the job under that app's name and icon (Oarbank Node,
     /// Oarbank Coordinator) instead of the signing team's name, so whoever switches it off sees what stops.
     pub associated_bundle: Option<String>,
+    /// How long the service manager waits for the service to stop after asking it to (SIGTERM) before it kills it:
+    /// launchd `ExitTimeOut`, systemd `TimeoutStopSec` (their defaults, 20 s and 90 s, otherwise).
+    pub stop_timeout_s: Option<u32>,
 }
+
+/// The agent's stop timeout: on a stop the agent stops its jobs' runners (checkpointing first where they can), releases
+/// their attempts and stops what it must of the services (agent.rs `stop_jobs`, at most about 25 s for the runners and
+/// their reports), and must not be killed meanwhile, or a runner outlives it until its watchdog or its next start ends
+/// it. The Windows launcher waits as long for the agent before it ends it.
+pub const AGENT_STOP_TIMEOUT_S: u32 = 60;
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
@@ -73,6 +82,9 @@ fn launchd_plist_with(s: &ServiceSpec, extra: &str) -> String {
     out += &format!("  <key>KeepAlive</key>{}\n", if s.keep_alive { "<true/>" } else if s.restart_on_failure {
         "<dict><key>SuccessfulExit</key><false/></dict>" } else { "<false/>" });
     out += "  <key>ThrottleInterval</key><integer>10</integer>\n";
+    if let Some(t) = s.stop_timeout_s {
+        out += &format!("  <key>ExitTimeOut</key><integer>{t}</integer>\n");
+    }
     out += "  <key>ProcessType</key><string>Standard</string>\n";
     if let Some(b) = &s.associated_bundle {
         out += &format!("  <key>AssociatedBundleIdentifiers</key><array><string>{}</string></array>\n", esc(b));
@@ -103,7 +115,11 @@ pub fn systemd_unit(s: &ServiceSpec, description: &str, system: bool) -> String 
         out += &format!("User={u}\nGroup={u}\nRuntimeDirectory=oarbank\nRuntimeDirectoryMode=0755\n");
     }
     out += if s.keep_alive { "Restart=always\n" } else if s.restart_on_failure { "Restart=on-failure\n" } else { "Restart=no\n" };
-    out += "RestartSec=10\nKillMode=mixed\nDelegate=yes\n\n[Install]\n";
+    out += "RestartSec=10\nKillMode=mixed\nDelegate=yes\n";
+    if let Some(t) = s.stop_timeout_s {
+        out += &format!("TimeoutStopSec={t}\n");
+    }
+    out += "\n[Install]\n";
     out += if system { "WantedBy=multi-user.target\n" } else { "WantedBy=default.target\n" };
     out
 }
@@ -151,7 +167,10 @@ mod tests {
             env: vec![("OARBANK_LOG".into(), "info".into())], keep_alive: true, ..Default::default() });
         assert!(p.contains("<string>/a b/&lt;home&gt;</string>") && p.contains("<key>KeepAlive</key><true/>"));
         assert!(p.contains("<key>ProcessType</key><string>Standard</string>") && !p.contains("UserName"));
-        assert!(!p.contains("AssociatedBundleIdentifiers"));
+        assert!(!p.contains("AssociatedBundleIdentifiers") && !p.contains("ExitTimeOut"));
+        let stops = launchd_plist(&ServiceSpec { label: "x".into(), program: vec!["/x".into()], stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S),
+                                                 ..Default::default() });
+        assert!(stops.contains("<key>ExitTimeOut</key><integer>60</integer>\n"));
         let owned = launchd_plist(&ServiceSpec { label: "dev.codonic.oarbank.agent".into(), program: vec!["/x".into()],
             associated_bundle: Some("dev.codonic.oarbank.node".into()), ..Default::default() });
         assert!(owned.contains("<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>\n"));
@@ -172,6 +191,9 @@ mod tests {
         assert!(u.contains("ExecStart=\"/opt/oarbank/oarbank-launcher\" \"--home\" \"/var/lib/oarbank/a b\" \"run\"\n"));
         assert!(u.contains("User=oarbank\n") && u.contains("Restart=always") && u.contains("WantedBy=multi-user.target"));
         assert!(u.contains("RuntimeDirectory=oarbank\nRuntimeDirectoryMode=0755\n"));
+        assert!(!u.contains("TimeoutStopSec"));
+        let stops = systemd_unit(&ServiceSpec { stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S), ..spec.clone() }, "Oarbank agent", true);
+        assert!(stops.contains("KillMode=mixed\nDelegate=yes\nTimeoutStopSec=60\n\n[Install]\n"));
         let personal = systemd_unit(&spec, "x", false);
         assert!(!personal.contains("User=") && !personal.contains("RuntimeDirectory"));
         let h = session_helper_unit("/usr/lib/oarbank/oarbank-agent", "oarbank");

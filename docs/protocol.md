@@ -337,8 +337,10 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   - `artifact_missing`, `input_missing` and `input_mismatch`;
   - `pin_mismatch`: a bootstrap job's result is not exactly the module's pinned datasets. For a bootstrap job the host
     checks the pins instead of calling `result.evaluate`, and registers the datasets when the result is accepted.
-- `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel"}`;
-  a release without a reason is refused (400 `reason_required`). These are not failures.
+- `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel|agent_stop"}`;
+  a release without a reason is refused (400 `reason_required`). These are not failures. `agent_stop`: the agent was
+  asked to stop (its service stopped or restarted) and stopped the runner first (docs/design/architecture.md,
+  "Stopping the agent").
 - `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient", "images"?: [{"set", "image"}]}`.
   `fault` comes from the runner's `failure.json`: `transient` is no failure at all (the attempt is released and
   the job retried), `host` implicates this node, `job` never trips its breaker. `doctor`, `mode_mismatch`, `oom` and

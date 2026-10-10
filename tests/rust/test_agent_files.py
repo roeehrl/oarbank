@@ -275,6 +275,20 @@ def test_a_render_paused_past_the_limit_moves_to_another_node_and_finishes_from_
         first = wait(lambda: [r for r in db_rows(coordinator, "SELECT * FROM attempts WHERE node_id=?", (nid_a,))
                               if r["state"] != "live" and r["attempt_id"] == ckpt["attempt_id"]], timeout=120)[0]
         assert first["attempt_id"] == render["attempt_id"] and first["end_reason"] == "preempt_protection", first
+        # while the rule is active A takes none of the work it pauses: its claims name the paused scope, so the released
+        # job is not granted back to A only to be paused and released again
+        def node_a():
+            return next(n for n in coordinator.api("GET", "/api/v1/fleet")["nodes"] if n["node_id"] == nid_a)
+        cap = wait(lambda: (lambda c: c if c.get("paused") == ["all"] else None)(json.loads(node_a().get("capacity_json") or "{}")),
+                   timeout=60)
+        assert cap["paused_by"] == "rule:e2e-app" and not cap["admit"], cap
+        beat = node_a()["last_heartbeat_at"]
+        wait(lambda: (node_a()["last_heartbeat_at"] or 0) > beat, timeout=60)      # a claim round has passed
+        beat = node_a()["last_heartbeat_at"]
+        wait(lambda: (node_a()["last_heartbeat_at"] or 0) > beat, timeout=60)
+        again = db_rows(coordinator, "SELECT t.attempt_id FROM attempts t JOIN jobs j ON j.job_id=t.job_id WHERE t.node_id=? AND "
+                                     "j.campaign_id='c_move'", (nid_a,))
+        assert [r["attempt_id"] for r in again] == [first["attempt_id"]], again
         # the rule came on only once the app ran
         on = wait(lambda: db_rows(coordinator, "SELECT min(t) AS t FROM protection_decisions WHERE node_id=? AND "
                                                "kind='rule_active' AND rule='e2e-app'", (nid_a,))[0]["t"])

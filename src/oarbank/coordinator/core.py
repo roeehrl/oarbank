@@ -34,7 +34,7 @@ AWAIT_MODULE_TTL = 600.0     # lease held for a completion waiting on a module f
 
 
 NON_FAILURE_RELEASES = {"preempt_memory", "preempt_protection", "user_cancel", "limit_mem", "limit_cpu", "limit_schedule",
-                        "transient"}
+                        "transient", "agent_stop"}
 HOST_FAILURES = {"doctor", "mode_mismatch", "oom", "no_metrics"}   # failures that implicate the host first
 
 

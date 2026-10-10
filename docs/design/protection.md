@@ -30,7 +30,9 @@ one node; modules can never declare or loosen it.
 ## Authority: only the fleet's own processes
 
 The agent signals, lowers or pauses only processes in its spawn registry (a pid plus its start time, or a descendant of
-one). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
+one). Ending its own runners when it stops, or those an agent that was killed left behind, goes by the agent's
+runner records, which hold the same identity (a pid and its start time) for every process of a runner
+([architecture.md](architecture.md), "Stopping the agent"). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
 one (S16). Unknown processes are never signalled; their memory always counts.
 
 ## Whose processes

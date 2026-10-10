@@ -161,7 +161,8 @@ fn report(state: u32, exit: u32) {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS, dwCurrentState: state,
         dwControlsAccepted: if state == SERVICE_RUNNING { SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN } else { 0 },
         dwWin32ExitCode: if exit == 0 { NO_ERROR } else { ERROR_SERVICE_SPECIFIC_ERROR }, dwServiceSpecificExitCode: exit,
-        dwCheckPoint: 0, dwWaitHint: if state == SERVICE_STOP_PENDING { 30_000 } else { 0 },
+        // a stop waits for the agent to stop its jobs (the launcher's stop_now): up to AGENT_STOP_TIMEOUT_S
+        dwCheckPoint: 0, dwWaitHint: if state == SERVICE_STOP_PENDING { oarbank_core::service::AGENT_STOP_TIMEOUT_S * 1000 } else { 0 },
     };
     unsafe { SetServiceStatus(*h as SERVICE_STATUS_HANDLE, &st) };
 }

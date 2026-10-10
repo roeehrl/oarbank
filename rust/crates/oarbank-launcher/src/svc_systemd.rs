@@ -55,6 +55,7 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 label: label.clone(), program, env: vec![("OARBANK_LOG".into(), "info".into())],
                 working_dir: Some(home_dir.display().to_string()), stdout: None, stderr: None,
                 user: account.clone(), keep_alive: true, restart_on_failure: false, associated_bundle: None,
+                stop_timeout_s: Some(oarbank_core::service::AGENT_STOP_TIMEOUT_S),
             };
             let text = oarbank_core::service::systemd_unit(&spec, "Oarbank agent", system);
             if dry {

@@ -167,6 +167,8 @@ CODES: list[ReasonCode] = [
     C("TIMEOUT", "attempt_end", "Hit the {timeout_s} s limit", wire=["timeout"], node=True, job=True),
     C("LEASE_EXPIRED", "attempt_end", "Lease expired (no heartbeat for {seconds} s)", wire=["lease_expired"], node=True, job=False),
     C("AGENT_RESTARTED", "attempt_end", "The agent restarted without the attempt", wire=["agent_restart"], node=False, job=False),
+    C("AGENT_STOPPED", "attempt_end", "The agent on the node was stopped (its service stopped or restarted); released and "
+      "requeued", wire=["agent_stop"], node=False, job=False),
     C("RELEASE_INVALID", "attempt_end", "Granted under a release the node no longer runs", wire=["release_invalid"], node=False, job=False),
     C("STALE_GENERATION", "attempt_end", "The job was requeued after this attempt was granted", wire=["stale_generation"],
       node=False, job=False),
