@@ -519,7 +519,11 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(403, "forbidden_role", "this needs the admin role")
 
     def console_only(request: Request):
-        """Sign-in ceremonies: only the console (its per-boot secret, loopback) may ask."""
+        """Sign-in ceremonies: only the console (its per-boot secret, loopback) may ask, or the owner on the local admin
+        channel (the setup wizard proves the new account's authenticator there: the channel is already the owner's
+        credential, so it grants nothing new)."""
+        if local_channel:
+            return
         cs = request.headers.get("x-oarbank-console-secret")
         if not (console_secret and cs and hmac.compare_digest(cs.encode(), console_secret.encode())
                 and peer(request) in LOOPBACK):

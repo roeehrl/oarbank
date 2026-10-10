@@ -38,7 +38,7 @@ def http_request(method, url, **kw):
 
 def auth_headers() -> dict:
     """The caller's credential: OARBANK_TOKEN (a personal access token, or the admin token), else the local owner's
-    admin token from the coordinator's home (readable only by the account that runs oarbankd)."""
+    admin token from the coordinator's home (readable only by the account that runs oarbankd, and root)."""
     tok = os.environ.get("OARBANK_TOKEN")
     if not tok and _local_channel():
         return {}
@@ -48,7 +48,11 @@ def auth_headers() -> dict:
         try:
             tok = p.read_text(encoding="utf-8").strip()
         except OSError:
-            sys.exit(f"no credential: set OARBANK_TOKEN, or run this as the account that runs oarbankd ({p})")
+            from ..platform import localchannel
+            why = localchannel.unreachable_reason(C.HOME)
+            sys.exit(f"no credential: {why}" if why else
+                     f"no credential: set OARBANK_TOKEN, use the local admin channel as one of the coordinator's owners, "
+                     f"or run this as the account that runs oarbankd ({p})")
     return {"authorization": f"Bearer {tok}"}
 
 
@@ -266,12 +270,18 @@ def _duration(s: str) -> int:
 def cmd_coordinator(a):
     """oarbank coordinator <status|prepare|move|cancel|finalize>: move the coordinator to another machine (no ssh)."""
     ask = dict(reason=a.reason, yes=a.yes, dry_run=a.dry_run, confirm=a.confirm)
+    if a.action == "migrate":
+        sys.exit(_migrate(a))
     if a.action == "status":
         s = api("GET", "/api/v1/coordinator")
         print(f"role {s['role']}  epoch {s['epoch']}  phase {s['phase']}  fleet {s['fleet_id']}  key {s['cik_fingerprint'][:16]}")
         h = s["host"]
         print(f"platform {h['platform']}  {h['manager']}  pid {h['pid']}" + ("" if h["managed"] else " (not run by the service manager)")
               + f"  sandbox {h['sandbox']['backend'] or 'none'}")
+        print(f"form  {form_words(h)}")
+        if h.get("migration"):
+            m = h["migration"]
+            print(f"migration  {m.get('state')}" + (f": {m['steps'][-1]['detail']}" if m.get("steps") else ""))
         for v in h["services"]:
             print(f"  {v['name']:<30} " + (f"{v['state']}  start {v['start']}  as {v['account']}" + (f"  pid {v['pid']}" if v["pid"] else "")
                                            if v["installed"] else "not installed"))
@@ -309,6 +319,45 @@ def cmd_coordinator(a):
     else:
         res = run_op(f"coordinator.{a.action}", None, {}, **ask)
     print(json.dumps(res, indent=1, default=str))
+
+
+def form_words(h: dict) -> str:
+    """The coordinator's service form in plain words (coordinator-system-service.md, decision 12)."""
+    form = h.get("form")
+    account = next((v.get("account") for v in h.get("services") or [] if v.get("installed") and v.get("account")), None)
+    if form == "system":
+        return f"system service — runs from boot, as {account or 'its service account'}"
+    if form == "per-user":
+        return (f"per-user service — runs only while {account or 'its owner'} is logged in; move it to a system service: "
+                "open Oarbank Coordinator, or run `oarbank coordinator migrate`")
+    return "not installed as a service (run by hand)"
+
+
+def _migrate(a) -> int:
+    """oarbank coordinator migrate: move a per-user coordinator to the system service (sysmigrate.py)."""
+    from .. import sysmigrate
+    try:
+        if a.status:
+            print(json.dumps(sysmigrate.status(), indent=1, default=str))
+            return 0
+        if a.export_keys:
+            home = Path(a.home) if a.home else None
+            if not home:
+                import getpass
+                found = sysmigrate.find_installs(sysmigrate.Layout(), [(getpass.getuser(), os.getuid(), os.getgid(), Path.home())])
+                if not found:
+                    sys.exit("this account has no per-user coordinator")
+                home = found[0].old_home
+            names = sysmigrate.export_keys(home)
+            print("keys in the file store: " + (", ".join(names) or "none in the Keychain"))
+            sysmigrate.check_keys(home)          # the database's keys must all be there now (NeedsPerson otherwise)
+            return 0
+        if a.run:
+            return sysmigrate.run_as_root(a.user, Path(a.build) if a.build else None, a.from_installer, a.dry_run)
+        return sysmigrate.run_as_person(a.dry_run)
+    except sysmigrate.MigrationError as e:
+        print(f"oarbank coordinator migrate: {e}", file=sys.stderr)
+        return 1
 
 
 def _sign_move(a, ask):
@@ -1410,8 +1459,17 @@ def parser() -> argparse.ArgumentParser:
     se.add_argument("--reason")
     se.add_argument("--yes", action="store_true")
     se.set_defaults(fn=cmd_secret)
-    co = sub.add_parser("coordinator", help="move the coordinator to another machine: status, prepare, move, cancel, finalize")
-    co.add_argument("action", choices=["status", "prepare", "move", "sign", "cancel", "finalize"])
+    co = sub.add_parser("coordinator", help="move the coordinator to another machine: status, prepare, move, cancel, finalize; "
+                        "migrate: move a per-user coordinator to the system service")
+    co.add_argument("action", choices=["status", "prepare", "move", "sign", "cancel", "finalize", "migrate"])
+    co.add_argument("--export-keys", action="store_true", help="migrate: only export this person's Keychain keys into the "
+                    "coordinator's file store (macOS)")
+    co.add_argument("--home", help="migrate --export-keys: the per-user coordinator's home (default: from its LaunchAgent)")
+    co.add_argument("--run", action="store_true", help="migrate: the root half (stop, copy, install, verify, retire)")
+    co.add_argument("--user", help="migrate --run: whose per-user coordinator (when there are several)")
+    co.add_argument("--build", help="migrate --run: the coordinator build the system services run (default: this one)")
+    co.add_argument("--from-installer", action="store_true", help=argparse.SUPPRESS)
+    co.add_argument("--status", action="store_true", help="migrate: what is installed and the migration record")
     co.add_argument("--owner-key", help="move/sign: the owner key file that signs the move (signing mode)")
     co.add_argument("--to", help="prepare: an enrolled node (hostname or node id) or http://host:port of a standby")
     co.add_argument("--timelock", help="move: wait before the cutover (default 24h; at least 15m, with --reason)")

@@ -143,7 +143,9 @@ def prepare(db: DB, target: str, actor: str) -> dict:
     out = {"plan_id": pid, "target_url": url, "target_stable_id": stable, "target_node": nid, "target_platform": plat,
            "blocking_modules": modlife.platform_blockers(db, plat), "pair_code": code,
            "expires_at": now() + PAIR_TTL_S, "from_url": from_url, "from_ca": from_ca,
-           "install_command": f"oarbankd --standby --pair {code} --from {from_url}" + (f" --from-ca {from_ca}" if from_ca else "")}
+           # on the target, as root, from its coordinator build: the system service (coordinator-system-service.md)
+           "install_command": f"sudo bash install-oarbankd.sh --build <coordinator build> --agent-bind <this machine's address> "
+                              f"--pair {code} --from {from_url}" + (f" --from-ca {from_ca}" if from_ca else "")}
     if nid:
         from . import coordbuilds
         try:

@@ -314,8 +314,8 @@ shows **Turned off in Login Items…**.
 
 **Allow in the Background names the app.** Every launchd job the node installs carries `AssociatedBundleIdentifiers`
 = `dev.codonic.oarbank.node` (the policy and helper daemons in the pkg, the agent's LaunchDaemon or LaunchAgent and the
-session helper the launcher writes, `svc_launchd.rs`), and the coordinator's oarbankd and console LaunchAgents carry
-`dev.codonic.oarbank.coordinator` (`install-oarbankd.sh`, and `coordinstall.rs` for a coordinator move). System
+session helper the launcher writes, `svc_launchd.rs`), and the coordinator's oarbankd and console daemons carry
+`dev.codonic.oarbank.coordinator` (`install-oarbankd.sh`, which a coordinator move's standby also uses). System
 Settings then lists them under the app's name and icon instead of the signing team's ("BlueGuru LLC"), so switching
 that entry off visibly means switching off the node. Apple requires the job's program and the app to be signed by the
 same team for the association to hold (Developer ID builds are; ad-hoc test builds fall back to the old listing). The
