@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The node's root helper (docs/design/node-enrollment.md, "macOS elevation"): launchd starts
+  /Library/Oarbank/bin/oarbank-node-helper (deploy/macos/node/NodeHelper.swift) as root when a message arrives on its
+  Mach service, and the helper leaves after a minute with no client. It serves one client, Oarbank Node.app (its code
+  signature, checked by XPC), and does two things only after an administrator authenticated for them: join this Mac's
+  system service to a fleet and make it leave, by running /Library/Oarbank/bin/oarbank-launcher.
+
+  The pkg installs this plist root:wheel 0644 and its postinstall loads it (and registers the authorization rights the
+  helper asks for); oarbank-uninstall unloads it. No RunAtLoad and no KeepAlive: nothing runs until the app asks.
+  Logs go to the unified log (subsystem dev.codonic.oarbank, category helper); stdout and stderr go nowhere. launchd's
+  default umask (022) stays: the launcher writes the status document everyone reads, as when it runs from a terminal.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.codonic.oarbank.agent.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Oarbank/bin/oarbank-node-helper</string>
+        <string>serve</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>dev.codonic.oarbank.agent.helper</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

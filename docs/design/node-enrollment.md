@@ -207,21 +207,27 @@ package's bundled runtime). Installed at:
 | Linux | `/usr/lib/oarbank/join/` | `/usr/lib/oarbank/runtime/bin/python3` | `/usr/lib/oarbank/oarbank-launcher` (symlink `/usr/bin/oarbank-node`) |
 | Windows | `[INSTALLFOLDER]join\` | `[INSTALLFOLDER]runtime\python.exe` (`pythonw.exe` from the tray) | `[INSTALLFOLDER]oarbank-node.exe` |
 
-`python -I join-window.py [--launcher PATH] [--link URL | --code-file PATH] [--no-browser]` serves the page on
+`python -I join-window.py [--launcher PATH] [--elevator PATH] [--link URL | --code-file PATH] [--no-browser]` serves the page on
 127.0.0.1 (a random port), prints `Open this private link on this computer: http://127.0.0.1:<port>/#<capability>` on
 stdout and opens it in the default browser unless `--no-browser`. A second launch while one is open reopens the open
 one (a private `join.active.json` in the user's temporary directory, as the coordinator setup wizard does).
 `--link oarbank://join?code=…` and `--code-file` prefill the code and show the confirmation screen first. The page
-checks the code unprivileged (`oarbank-node check --code-stdin --json`), then runs `oarbank-node join --code-file F
---no-input --no-wait --progress-file P` with the OS's own elevation (macOS: personal scope unelevated, system scope via
-the administrator prompt; Linux: `pkexec`; Windows: UAC) and follows the status document.
+checks the code unprivileged (`oarbank-node check --code-stdin --json`), then runs `oarbank-node join --no-input
+--no-wait --progress-file P` with the code on standard input (macOS, `--code-stdin`) or in a file (`--code-file F`:
+Linux, Windows) and the OS's own elevation (macOS: personal scope unelevated, system scope through Oarbank Node.app's
+`--elevate`, below; Linux: `pkexec` with the polkit actions `dev.codonic.oarbank.node.join` and `.leave`
+(`/usr/share/polkit-1/actions/dev.codonic.oarbank.node.policy`), whose messages and icon replace pkexec's generic
+prompt; Windows: UAC) and follows the status document. `--elevator` names the app's executable (the app passes its
+own; default `/Applications/Oarbank Node.app/Contents/MacOS/Oarbank Node`).
 
 A bare or empty `--link` means no link (the desktop entry's `--link %u` opened from the menu); a second launch with a
 link hands its code to the open window. An explicit `--launcher` must exist; without one the window looks at
 `OARBANK_NODE_LAUNCHER`, the package layout beside the script, then `oarbank-node` on PATH. The code file and the
 progress file live in a 0700 directory of the user's (`oarbank-join-<uid>` in the temporary directory, with the lock and
 `join.active.json`); the code file goes as soon as the launcher exits, and the window stays open until it has. Without
-`pkexec` Linux asks for `sudo oarbank-node join` in a terminal. The page's API (all `POST`, JSON, with the capability
+`pkexec` Linux asks for `sudo oarbank-node join` in a terminal, and without Oarbank Node.app so does macOS (there is no
+`osascript` fallback). A dismissed prompt is exit 126 on macOS and Linux, 1223 on Windows: the page says nothing
+changed. The page's API (all `POST`, JSON, with the capability
 in `X-Oarbank-Join`): `/state`, `/check {code}`, `/join {code, scope, containers, name}`, `/progress {offset}`, `/leave`,
 `/prefill {code, source}`, `/ping`, `/close`. Policy reaches the page only as `AllowUserJoin` and
 `ManagedByOrganizationName`, and `AllowUserJoin: false` refuses `/join` and `/leave`.
@@ -231,3 +237,54 @@ Node** tray app (`[INSTALLFOLDER]Oarbank Node.exe`, Start menu, registers `oarba
 `dev.codonic.oarbank.node.desktop` (registers `x-scheme-handler/oarbank`). Each shows the status document (state,
 coordinator, errors), offers **Join this machine…** while not joined (hidden when policy `AllowUserJoin` is false) and
 **Status…** once joining started, and runs the join window for both (a node does not know its console's address).
+
+### macOS elevation
+
+The system-service join and leave need root. `osascript -e 'do shell script … with administrator privileges'`, which
+2.8.0 used, is out: macOS 27 words its prompt "Allow administrator access for a script started by python3.12? … Apple
+could not verify this script is free of malware", the very prompt a person should refuse, and it runs a shell command
+line as root for whoever asked. `AuthorizationExecuteWithPrivileges` is deprecated since 10.7 and checks nothing about
+what it runs; a setuid tool is ruled out the same way (Apple DTS, "BSD Privilege Escalation on macOS",
+developer.apple.com/forums/thread/708765). `SMAppService.daemon` (macOS 13) does not bootstrap a daemon "until an admin
+approves the LaunchDaemon in System Preferences" (`SMAppService.register()`): a detour through Login Items in the
+middle of joining, while the pkg already runs as root and can install a daemon outright (the installer-package route
+the same DTS note calls "by far the easiest"). So:
+
+- **The helper** `/Library/Oarbank/bin/oarbank-node-helper` (Swift, `deploy/macos/node/NodeHelper.swift` with
+  `Elevation.swift`), the LaunchDaemon `dev.codonic.oarbank.agent.helper` (Mach service of the same name, no RunAtLoad,
+  exits after a minute idle). It lives with the programs in `/Library/Oarbank` (root's alone), not in the app bundle,
+  which any administrator can move or replace in `/Applications` without a prompt. It accepts an XPC connection only
+  from a process whose code signature satisfies a requirement compiled in at package time
+  (`xpc_connection_set_peer_code_signing_requirement`, macOS 12+, checked on the peer's audit token): `anchor apple
+  generic and identifier "dev.codonic.oarbank.node" and` the Developer ID intermediate and leaf markers `and certificate
+  leaf[subject.OU] = "MKNM96EU7J"` (`OARBANK_TEAM_ID`); an ad-hoc test package pins its own app's cdhash instead
+  (`identifier "dev.codonic.oarbank.node" and cdhash H"…"`), which only that build satisfies, but an ad-hoc app has no
+  hardened runtime, so a local process able to start it with an injected library passes too (the administrator still
+  authenticates). `package-macos.sh` checks the app it ships satisfies the requirement (`codesign -R`).
+- **Two authorization rights**, registered by the postinstall (`oarbank-node-helper register-rights`, i.e.
+  `AuthorizationRightSet` as root) and removed by `oarbank-uninstall`: `dev.codonic.oarbank.node.join` ("Oarbank Node
+  wants to join this Mac to an Oarbank fleet.") and `dev.codonic.oarbank.node.leave` ("Oarbank Node wants to make this
+  Mac leave its Oarbank fleet."): class user, group admin, timeout 0, not shared, so an administrator authenticates for
+  each request and no credential cached by another prompt serves. One right per operation, so the prompt says which,
+  and a site can allow or deny each with `security authorizationdb`.
+- **The request.** The join window runs `Oarbank Node --elevate join --code-stdin --no-input --no-wait --progress-file P
+  --scope system [--name N]` (or `--elevate leave --progress-file P`) with the code on standard input. The app opens P
+  itself, as the person (`O_NOFOLLOW`, a regular file of theirs), makes an empty AuthorizationRef, and sends `{op, auth:
+  its external form, progress: the open descriptor, code, name}`. The helper checks every field again (exactly the
+  operation's keys, the name rule, a printable code of at most 4096 bytes, the descriptor a regular single-link file of
+  the caller's uid open for writing, the launcher root's and not writable by others), then asks for the operation's
+  right on the client's AuthorizationRef with interaction (`AuthorizationCopyRights`, extend rights, the prompt and the
+  app's icon in the environment). The system prompt names the AuthorizationRef's creator, Oarbank Node, with its icon,
+  and shows no unverified-script warning. Only then it runs `oarbank-launcher join --scope system --code-stdin
+  --no-input --no-wait --progress-file /dev/fd/3 [--containers] [--name N]` (or `leave --progress-file /dev/fd/3`)
+  with an argv it builds itself, the code on the launcher's standard input, the app's descriptor as fd 3, nothing else
+  inherited, launchd's kind of environment, an hour at most. Root never opens a path a request named, and nothing a
+  request sends reaches an argv but a checked name.
+- **The answer.** The helper replies `ok` with the launcher's exit code, `cancelled`, `denied` or `refused`; the app
+  exits with the launcher's code, 126 for a dismissed prompt, 8 (`E_PRIVILEGE`) for someone who is not an administrator,
+  1 when the helper is missing or refused, and writes a `result` line to the progress file for those so the page shows
+  why. Progress itself keeps flowing through the file the launcher writes.
+
+The menu bar app never handles a code; `--elevate` relays the one on its standard input and exits. What can only be
+seen on a Mac with the package installed: the XPC round trip, the prompt's wording and icon, and the code signature
+check of a notarized build.

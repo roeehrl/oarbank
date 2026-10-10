@@ -7,6 +7,9 @@
 #   - `oarbank-node` on PATH: /usr/local/bin/oarbank-node -> /Library/Oarbank/bin/oarbank-launcher.
 #   - The managed-policy job (dev.codonic.oarbank.agent.policy, /Library/LaunchDaemons) is (re)loaded: it joins with an
 #     MDM profile's JoinCode or Coordinator, whether the profile came before this pkg or comes after it.
+#   - The root helper (dev.codonic.oarbank.agent.helper) through which Oarbank Node.app asks for an administrator to
+#     join or leave (docs/design/node-enrollment.md, "macOS elevation"): its authorization rights, with the prompts the
+#     system shows, are registered, and its job is (re)loaded; it runs on demand, when the app asks.
 #   - An upgrade (a node set up in either scope) restarts the service on the new launcher, and a system install's
 #     session helpers on the new agent binary; the agent's own version is the coordinator's to change (self-update).
 #   - Otherwise a double-click install (Installer.app: COMMAND_LINE_INSTALL unset; `installer` and MDM set it to 1)
@@ -18,6 +21,7 @@ set -u
 BIN=/Library/Oarbank/bin
 LABEL=dev.codonic.oarbank.agent
 POLICY=dev.codonic.oarbank.agent.policy
+HELPER=dev.codonic.oarbank.agent.helper
 APP="/Applications/Oarbank Node.app"
 MANAGED="/Library/Managed Preferences/$LABEL.plist"
 user=$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || echo root)
@@ -38,6 +42,13 @@ log=/var/log/oarbank-policy.log
 /bin/launchctl bootstrap system "/Library/LaunchDaemons/$POLICY.plist" 2>/dev/null \
     || { /bin/sleep 1; /bin/launchctl bootstrap system "/Library/LaunchDaemons/$POLICY.plist" 2>/dev/null; } \
     || echo "Oarbank: the managed-policy job starts at the next restart"
+# the helper's rights first (root writes the authorization database without a prompt), then its job, as above
+"$BIN/oarbank-node-helper" register-rights >/dev/null 2>&1 \
+    || echo "Oarbank: Oarbank Node's administrator rights could not be registered; join with: sudo oarbank-node join"
+/bin/launchctl bootout "system/$HELPER" 2>/dev/null
+/bin/launchctl bootstrap system "/Library/LaunchDaemons/$HELPER.plist" 2>/dev/null \
+    || { /bin/sleep 1; /bin/launchctl bootstrap system "/Library/LaunchDaemons/$HELPER.plist" 2>/dev/null; } \
+    || echo "Oarbank: Oarbank Node's helper starts at the next restart"
 
 upgraded=
 if [ -f "/Library/LaunchDaemons/$LABEL.plist" ]; then

@@ -120,7 +120,11 @@ one (machines that already joined stay).
 finishes; on Windows the installer's join page takes the code (or leave it empty and use **Oarbank Node** from Start
 afterwards); on a Linux desktop open **Oarbank Node** from your applications. Paste the code: the window shows the
 coordinator it names and checks the network (DNS, the port, the coordinator's identity and certificate authority, the
-clock) before joining, then follows the node until it is approved and connected. A console's **Open in Oarbank Node**
+clock) before joining, then follows the node until it is approved and connected. Joining as the system service (and
+leaving it) asks for an administrator with the system's own prompt: on macOS "Oarbank Node wants to join this Mac to an
+Oarbank fleet." with the app's icon (the package's root helper, `dev.codonic.oarbank.agent.helper`, runs the join once
+an administrator has authenticated), on Linux "Oarbank Node wants to join this computer to an Oarbank fleet." (polkit),
+on Windows the UAC prompt. A console's **Open in Oarbank Node**
 link (`oarbank://join?code=…`) fills the code in and asks you to confirm the coordinator first.
 
 **Join from a terminal or SSH** (the code is read hidden, from standard input or from a file):

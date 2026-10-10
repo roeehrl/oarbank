@@ -1,7 +1,7 @@
 """The node's join window: a private loopback page that joins this machine to a fleet (docs/design/node-enrollment.md,
 "Join window" and "Join window: files and launch contract").
 
-    python -I join-window.py [--launcher PATH] [--link URL | --code-file PATH] [--no-browser]
+    python -I join-window.py [--launcher PATH] [--elevator PATH] [--link URL | --code-file PATH] [--no-browser]
 
 It runs on the node package's bundled CPython with the standard library only (the coordinator is not installed on a
 node, so nothing here imports oarbank), and it follows the coordinator setup wizard's hardened pattern
@@ -11,11 +11,13 @@ JSON bodies of bounded size, an idle timeout kept alive by /ping, and a private 
 reopens the open window instead of starting another.
 
 The window never joins anything itself. It checks a code unprivileged (`oarbank-node check --code-stdin --json`), then
-runs `oarbank-node join --code-file F --no-input --no-wait --progress-file P` with the operating system's own
-elevation (macOS: the administrator prompt for the system service, none for "only while I'm logged in"; Linux:
-pkexec; Windows: UAC) and follows the status document the agent writes. The code reaches the launcher on standard
-input or in a 0600 file inside a 0700 private directory, never on a command line, and the file is deleted as soon as
-the launcher exits. A code that arrived by link or file is shown with its coordinator and fingerprint first and joins
+runs `oarbank-node join … --no-input --no-wait --progress-file P` with the operating system's own elevation and
+follows the status document the agent writes. macOS: the code on standard input (`--code-stdin`), unelevated for "only
+while I'm logged in", and for the system service through Oarbank Node.app's `--elevate` mode, whose root helper asks
+for an administrator under the app's own name (docs/design/node-enrollment.md, "macOS elevation"). Linux: pkexec, with
+the polkit action deploy/linux/dev.codonic.oarbank.node.policy. Windows: UAC. There the code goes in a 0600 file inside
+a 0700 private directory (UAC passes no standard input), deleted as soon as the launcher exits. Never on a command
+line. A code that arrived by link or file is shown with its coordinator and fingerprint first and joins
 only after the person confirms it (a code merely arriving must not hand the machine to whoever sent it).
 """
 import argparse
@@ -26,7 +28,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import shutil
 import stat
 import subprocess
@@ -233,8 +234,11 @@ def is_root():
 
 
 # ---------------------------------------------------------------- elevation
-def applescript_string(text):
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+# Oarbank Node.app's executable, whose `--elevate` mode asks its root helper (docs/design/node-enrollment.md, "macOS
+# elevation"); the app passes its own with --elevator, and this is where the pkg installs it.
+MACOS_ELEVATOR = "/Applications/Oarbank Node.app/Contents/MacOS/Oarbank Node"
+# what `--elevate` exits with when the person dismissed the prompt, as pkexec does (Elevation.exitCancelled)
+CANCELLED_EXIT = 126
 
 
 def powershell_string(text):
@@ -244,17 +248,23 @@ def powershell_string(text):
     return "'" + text + "'"
 
 
-def elevated_command(argv, platform, elevate, pkexec=None):
+def elevated_command(argv, platform, elevate, pkexec=None, elevator=None):
     """The command that runs `argv` (the launcher and its arguments) with the operating system's own elevation:
-    `argv` unchanged when nothing needs to be elevated, the macOS administrator prompt, pkexec, or UAC. A pure function
-    of its inputs (tested with string asserts); nothing a request sent reaches it except the validated options."""
+    `argv` unchanged when nothing needs to be elevated, Oarbank Node.app's `--elevate` with the launcher's arguments
+    (macOS), pkexec, or UAC. A pure function of its inputs (tested with string asserts); nothing a request sent reaches
+    it except the validated options.
+
+    macOS has no fallback to `osascript … with administrator privileges`: macOS words that prompt as a script started
+    by python3.12 that Apple could not verify, which is what a person should refuse. Without the app (a broken install,
+    a checkout) the system-service join is a terminal's `sudo oarbank-node join`."""
     if not elevate:
         return list(argv)
     if platform == "macos":
-        script = (f"do shell script {applescript_string(shlex.join(argv))} with prompt "
-                  f"{applescript_string('Oarbank Node needs an administrator to change how this Mac runs jobs.')} "
-                  "with administrator privileges")
-        return ["/usr/bin/osascript", "-e", script]
+        if not elevator:
+            raise WindowError("Oarbank Node.app is missing, so this Mac can't ask for an administrator here. Install the "
+                              "Oarbank node package again, or open Terminal and run: sudo oarbank-node join", 409,
+                              code="E_PRIVILEGE")
+        return [elevator, "--elevate", *argv[1:]]
     if platform == "linux":
         if not pkexec:
             raise WindowError("This computer has no graphical administrator prompt (pkexec). Open a terminal and run: "
@@ -267,27 +277,38 @@ def elevated_command(argv, platform, elevate, pkexec=None):
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
 
 
-def cancelled(platform, exit_code, stderr):
-    """Whether the person dismissed the administrator prompt (osascript -128, pkexec 126, UAC 1223)."""
-    if platform == "macos":
-        return exit_code != 0 and b"-128" in (stderr or b"")
-    if platform == "linux":
-        return exit_code == 126
+def cancelled(platform, exit_code, stderr=None):
+    """Whether the person dismissed the administrator prompt (Oarbank Node --elevate and pkexec 126, UAC 1223)."""
+    if platform in ("macos", "linux"):
+        return exit_code == CANCELLED_EXIT
     return exit_code == 1223
+
+
+def find_elevator(platform, env=None, given=None):
+    """Oarbank Node.app's executable on macOS (--elevator, OARBANK_NODE_ELEVATOR, the pkg's path), or None."""
+    if platform != "macos":
+        return None
+    env = os.environ if env is None else env
+    for p in (given, env.get("OARBANK_NODE_ELEVATOR"), MACOS_ELEVATOR):
+        if p and Path(p).is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
 
 
 # ---------------------------------------------------------------- one launcher run at a time
 class Job:
-    """One elevated launcher run (join or leave) in a background thread. The code file and the progress file live in
-    a private directory; the code file goes as soon as the launcher exits."""
+    """One elevated launcher run (join or leave) in a background thread. The progress file lives in a private
+    directory; the code goes to the launcher's standard input (`stdin_code`, macOS) or in a code file there, which
+    goes as soon as the launcher exits."""
 
-    def __init__(self, kind, scope, workdir, code=None):
+    def __init__(self, kind, scope, workdir, code=None, code_on_stdin=False):
         self.kind, self.scope = kind, scope
         self.dir = Path(tempfile.mkdtemp(prefix=f"oarbank-{kind}-", dir=workdir))
         if os.name == "posix":
             os.chmod(self.dir, 0o700)
         self.code_file = None
-        if code is not None:
+        self.stdin_code = code if code_on_stdin else None
+        if code is not None and not code_on_stdin:
             self.code_file = self.dir / "code"
             fd = os.open(self.code_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -304,8 +325,9 @@ class Job:
     def start(self, command, platform):
         def run():
             try:
-                r = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.PIPE, timeout=3600, check=False, creationflags=NO_WINDOW)
+                feed = {"input": self.stdin_code.encode()} if self.stdin_code is not None else {"stdin": subprocess.DEVNULL}
+                r = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=3600, check=False,
+                                   creationflags=NO_WINDOW, **feed)
                 self.cancelled = cancelled(platform, r.returncode, r.stderr)
                 self.exit = r.returncode
             except subprocess.TimeoutExpired:
@@ -324,6 +346,7 @@ class Job:
         return self.thread is not None and self.thread.is_alive()
 
     def forget_code(self):
+        self.stdin_code = None
         if self.code_file:
             with contextlib.suppress(OSError):
                 self.code_file.unlink()
@@ -387,7 +410,8 @@ def code_secrets(code):
 class Window:
     """What the page can ask for. The launcher (an argv prefix) and the platform are trusted command-line inputs."""
 
-    def __init__(self, launcher, platform=None, prefill=None, env=None, workdir=None, home=None, elevate_root=None):
+    def __init__(self, launcher, platform=None, prefill=None, env=None, workdir=None, home=None, elevate_root=None,
+                 elevator=None):
         self.launcher = [launcher] if isinstance(launcher, (str, Path)) else list(launcher)
         self.launcher = [str(x) for x in self.launcher]
         self.platform = platform or platform_name()
@@ -398,6 +422,7 @@ class Window:
         self.capability = secrets.token_urlsafe(32)
         self.job = None
         self.root = is_root() if elevate_root is None else elevate_root
+        self.elevator = elevator    # macOS: Oarbank Node.app's executable (find_elevator), a trusted input like launcher
         self.lock = threading.Lock()
 
     # ---- facts
@@ -446,8 +471,12 @@ class Window:
         return not (self.platform == "macos" and scope == "personal")
 
     def command(self, args, scope):
-        return elevated_command([*self.launcher, *args], self.platform, self.needs_elevation(scope),
-                                pkexec=shutil.which("pkexec") if self.platform == "linux" else None)
+        elevate = self.needs_elevation(scope)
+        # macOS: Oarbank Node's helper runs the installed launcher itself; only the arguments go to the app
+        launcher = self.launcher[-1:] if self.platform == "macos" and elevate else self.launcher
+        return elevated_command([*launcher, *args], self.platform, elevate,
+                                pkexec=shutil.which("pkexec") if self.platform == "linux" else None,
+                                elevator=self.elevator)
 
     def joined_scope(self):
         """The scope whose status document says the node joined (or is pending, joining, or failed with a
@@ -510,8 +539,12 @@ class Window:
         if not isinstance(name, str) or (name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", name)):
             raise WindowError("Name: up to 63 letters, digits, '.', '_' or '-', starting with a letter or digit.")
         args = ["join"]
-        return self._start("join", scope, args, code=code, extra=lambda job: [
-            "--code-file", str(job.code_file), "--no-input", "--no-wait", "--progress-file", str(job.progress),
+        # macOS: the code on standard input (Oarbank Node --elevate relays it to its helper, which hands it to the
+        # launcher the same way); elsewhere UAC passes no standard input, and pkexec stays with what Windows does
+        stdin = self.platform == "macos"
+        return self._start("join", scope, args, code=code, code_on_stdin=stdin, extra=lambda job: [
+            *(["--code-stdin"] if stdin else ["--code-file", str(job.code_file)]),
+            "--no-input", "--no-wait", "--progress-file", str(job.progress),
             *(["--scope", scope] if self.platform == "macos" else []),
             *(["--containers"] if body["containers"] and self.platform == "windows" else []),
             *(["--name", name] if name else [])])
@@ -524,12 +557,12 @@ class Window:
         scope = self.joined_scope() or "system"
         return self._start("leave", scope, ["leave"], extra=lambda job: ["--progress-file", str(job.progress)])
 
-    def _start(self, kind, scope, args, code=None, extra=lambda job: []):
+    def _start(self, kind, scope, args, code=None, code_on_stdin=False, extra=lambda job: []):
         with self.lock:
             if self.job and self.job.running:
                 raise WindowError("Oarbank Node is already working on this machine. Wait for it to finish.", 409)
             command = None
-            job = Job(kind, scope, self.workdir, code=code)
+            job = Job(kind, scope, self.workdir, code=code, code_on_stdin=code_on_stdin)
             try:
                 command = self.command([*args, *extra(job)], scope)
             except WindowError:
@@ -829,6 +862,7 @@ def say(text):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Join this machine to an Oarbank fleet in a private browser window.")
     parser.add_argument("--launcher", help="oarbank-node (the launcher); found automatically when left out")
+    parser.add_argument("--elevator", help="macOS: Oarbank Node.app's executable, which asks for an administrator")
     source = parser.add_mutually_exclusive_group()
     # The Linux desktop entry ends in `--link %u`: opened from the menu there is no URL, so a bare `--link` (or an
     # empty one) means no link.
@@ -862,7 +896,8 @@ def main(argv=None):
             for leftover in directory.glob("oarbank-*-*"):
                 if leftover.is_dir() and not leftover.is_symlink():
                     shutil.rmtree(leftover, ignore_errors=True)
-            window = Window(launcher, prefill=prefill, workdir=str(directory))
+            window = Window(launcher, prefill=prefill, workdir=str(directory),
+                            elevator=find_elevator(platform_name(), given=args.elevator))
             active = directory / "join.active.json"
             try:
                 with WindowServer(window, args.port) as server:

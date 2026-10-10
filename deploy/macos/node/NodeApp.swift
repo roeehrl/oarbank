@@ -1,5 +1,7 @@
 import AppKit
+import Security
 import ServiceManagement
+import XPC
 
 // Oarbank Node: the node's menu bar front end (docs/design/node-enrollment.md, "Join window: files and launch
 // contract"). It shows the status document the agent writes and runs the join window for joining and for status; it
@@ -9,6 +11,12 @@ import ServiceManagement
 // Launch contract: `--join` opens the join window at once (the pkg's postinstall after a double-click install); an
 // `oarbank://join?code=…` link (CFBundleURLTypes) runs it with `--link`, which shows the coordinator and asks before
 // anything joins; reopening the app (Finder, `open -a` while it runs) opens the join window too.
+//
+// `--elevate join|leave …` is the join window's, not a person's: it is how a system-service join or leave gets an
+// administrator on macOS (docs/design/node-enrollment.md, "macOS elevation"). This signed app asks the root helper
+// (oarbank-node-helper, the LaunchDaemon dev.codonic.oarbank.agent.helper) over XPC, the helper asks the authorization
+// database, and the system's prompt names Oarbank Node with its icon. The menu bar app itself never handles a code;
+// `--elevate` relays the one on its standard input to the helper and exits with the launcher's exit code.
 
 let installRoot = "/Library/Oarbank"
 let runtimePython = "\(installRoot)/bin/runtime/bin/python3"
@@ -188,7 +196,9 @@ final class NodeDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWin
             return
         }
         let task = Process(); task.executableURL = URL(fileURLWithPath: runtimePython)
-        task.arguments = ["-I", joinWindow, "--launcher", launcher] + (link.map { ["--link", $0] } ?? [])
+        // --elevator: this app's own executable, whose --elevate mode the window runs for a system-service join or leave
+        task.arguments = ["-I", joinWindow, "--launcher", launcher] + (Bundle.main.executablePath.map { ["--elevator", $0] } ?? [])
+            + (link.map { ["--link", $0] } ?? [])
         task.standardError = FileHandle.nullDevice
         let output = Pipe(); task.standardOutput = output
         output.fileHandleForReading.readabilityHandler = { handle in
@@ -254,8 +264,97 @@ final class NodeDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWin
     private func alert(_ title: String, _ detail: String) { NSApp.activate(ignoringOtherApps: true); let alert = NSAlert(); alert.messageText = title; alert.informativeText = detail; alert.runModal() }
     func applicationWillTerminate(_ notification: Notification) { timer?.invalidate(); openTimer?.invalidate(); if let item = statusItem { NSStatusBar.system.removeStatusItem(item) } }
 }
-let application = NSApplication.shared
-let delegate = NodeDelegate()
-application.delegate = delegate
-application.setActivationPolicy(.accessory)
-application.run()
+
+// ---------------------------------------------------------------- --elevate: the join window's administrator step
+/// One line the join window reads from its progress file (join-window.py `Job.lines`), for the failures that happen
+/// before the launcher runs and writes its own: the page shows the message and code like the launcher's.
+func writeResult(_ fd: Int32, exit: Int32, code: String, message: String) {
+    guard fd >= 0, let line = try? JSONSerialization.data(withJSONObject: ["type": "result", "ok": false, "exit": exit, "code": code, "message": message]) else { return }
+    let data = line + Data("\n".utf8)
+    _ = data.withUnsafeBytes { write(fd, $0.baseAddress, data.count) }
+}
+
+/// `Oarbank Node --elevate …` (Elevation.command has the grammar): open the progress file as the person, read the code
+/// from standard input, make an empty AuthorizationRef, and hand all three to the helper, which asks for the
+/// administrator and runs the launcher. Exits with the launcher's exit code, or Elevation's own when it never ran.
+func elevate(_ args: [String]) -> Int32 {
+    guard let command = Elevation.command(args) else {
+        FileHandle.standardError.write(Data("usage: Oarbank Node --elevate join --code-stdin --no-input --no-wait --progress-file PATH --scope system [--name NAME] [--containers] | --elevate leave --progress-file PATH\n".utf8))
+        return Elevation.exitUsage
+    }
+    // opened here, as the person, never by root: the helper writes through this descriptor only
+    let progress = open(command.progress, O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC)
+    var st = stat()
+    guard progress >= 0, fstat(progress, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_uid == getuid() else {
+        FileHandle.standardError.write(Data("Oarbank Node: \(command.progress) is not this user's progress file\n".utf8))
+        return Elevation.exitUsage
+    }
+    defer { close(progress) }
+    var code: String?
+    if command.op == .join {
+        let data = FileHandle.standardInput.readData(ofLength: Elevation.maxCode + 1)
+        guard data.count <= Elevation.maxCode, let text = String(data: data, encoding: .utf8), let clean = Elevation.cleanCode(text) else {
+            writeResult(progress, exit: 2, code: "E_CODE_FORMAT", message: "Paste the join code from your Oarbank console.")
+            return Elevation.exitUsage
+        }
+        code = clean
+    }
+    // the right must be in the authorization database (the pkg's postinstall registers it): without it the system
+    // would fall back to a generic rule and prompt
+    guard AuthorizationRightGet(command.op.right, nil) == errAuthorizationSuccess else {
+        writeResult(progress, exit: 1, code: "E_LOCAL", message: "Oarbank Node's administrator right is missing. Install the Oarbank node package again.")
+        return Elevation.exitUnavailable
+    }
+    // empty: the helper asks for the right on it, with interaction, so the prompt is shown once and names this app
+    var auth: AuthorizationRef?
+    var external = AuthorizationExternalForm()
+    guard AuthorizationCreate(nil, nil, [], &auth) == errAuthorizationSuccess, let ref = auth,
+          AuthorizationMakeExternalForm(ref, &external) == errAuthorizationSuccess else {
+        writeResult(progress, exit: 1, code: "E_LOCAL", message: "Oarbank Node could not ask for an administrator.")
+        return Elevation.exitUnavailable
+    }
+    defer { AuthorizationFree(ref, [.destroyRights]) }
+    let message = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(message, "op", command.op.rawValue)
+    withUnsafeBytes(of: &external) { xpc_dictionary_set_data(message, "auth", $0.baseAddress!, $0.count) }
+    xpc_dictionary_set_fd(message, "progress", progress)
+    if let code { xpc_dictionary_set_string(message, "code", code) }
+    if let name = command.name { xpc_dictionary_set_string(message, "name", name) }
+    if command.containers { xpc_dictionary_set_bool(message, "containers", true) }
+    // the system domain's service: only a LaunchDaemon root installed can hold the name
+    let connection = xpc_connection_create_mach_service(Elevation.machService, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_PRIVILEGED))
+    xpc_connection_set_event_handler(connection) { _ in }
+    xpc_connection_activate(connection)
+    defer { xpc_connection_cancel(connection) }
+    // the reply comes once the person answered the prompt and the launcher exited (join --no-wait: the checks and the
+    // service's setup, progress meanwhile in the file the window follows)
+    let reply = xpc_connection_send_message_with_reply_sync(connection, message)
+    guard xpc_get_type(reply) == XPC_TYPE_DICTIONARY, let status = xpc_dictionary_get_string(reply, "status").map({ String(cString: $0) }) else {
+        writeResult(progress, exit: 1, code: "E_LOCAL", message: "Oarbank Node's helper did not answer. Install the Oarbank node package again, or run: sudo oarbank-node \(command.op.rawValue)")
+        return Elevation.exitUnavailable
+    }
+    switch status {
+    case "ok": return Int32(clamping: xpc_dictionary_get_int64(reply, "exit"))
+    case "cancelled": return Elevation.exitCancelled
+    case "denied":
+        writeResult(progress, exit: 8, code: "E_PRIVILEGE", message: "Only an administrator of this Mac can do this.")
+        return Elevation.exitNotAdministrator
+    default:
+        let detail = xpc_dictionary_get_string(reply, "detail").map { String(cString: $0) } ?? status
+        writeResult(progress, exit: 1, code: "E_LOCAL", message: "Oarbank Node's helper refused: \(detail)")
+        return Elevation.exitUnavailable
+    }
+}
+
+@main
+struct NodeMain {
+    static func main() {
+        let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "--elevate" { exit(elevate(Array(args.dropFirst()))) }
+        let application = NSApplication.shared
+        let delegate = NodeDelegate()
+        application.delegate = delegate     // a weak reference: the delegate lives as long as the run loop below
+        application.setActivationPolicy(.accessory)
+        withExtendedLifetime(delegate) { application.run() }
+    }
+}
