@@ -30,7 +30,9 @@
 </header>
 <main>
 {% if flash %}<div class="flash {{ flash_kind }}" role="{{ 'alert' if flash_kind == 'bad' else 'status' }}">{{ flash }}</div>{% endif %}
-{% if coord %}<div class="flash warn" role="status">{% if coord.role == 'handed_off' %}This coordinator handed off; it only redirects agents now.
+{% if coord and coord.state == 'per_user' %}<div class="flash warn" role="status">This coordinator runs as a per-user service: it stops when {{ coord.account or 'its owner' }} logs out and does not start after a restart.
+<a href="/coordinator">Move it to a system service</a></div>
+{% elif coord %}<div class="flash warn" role="status">{% if coord.role == 'handed_off' %}This coordinator handed off; it only redirects agents now.
 {% elif coord.role == 'standby' %}This coordinator is a standby move target.
 {% else %}Coordinator move {{ coord.state | replace('_', ' ') }}{% if coord.to %} to <span class="mono">{{ coord.to }}</span>{% endif %}{% if coord.not_before and coord.state == 'pending' %}, starts {{ coord.not_before | ts }}{% endif %}{% if coord.phase not in ('idle',) %} ({{ coord.phase }}){% endif %}.{% endif %}
 <a href="/coordinator">Review{% if coord.state in ('pending', 'awaiting_owner') %} or cancel{% endif %}</a></div>{% endif %}

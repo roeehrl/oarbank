@@ -298,8 +298,10 @@ def test_the_cli_reads_the_value_from_stdin_never_argv(db):
 
 
 def test_the_secrets_key_stays_in_the_secret_store(tmp_path, monkeypatch):
-    """The key that encrypts module secrets is never in the database: an owner-only file here (Linux, and tests), the
-    Keychain on macOS, a DPAPI-wrapped file on Windows (checked on the Windows VM: docs/design/secrets-and-signed-images.md)."""
+    """The key that encrypts module secrets is never in the database: an owner-only file in the system service's home on
+    macOS and Linux (coordinator-system-service.md, decision 5), a DPAPI-wrapped file on Windows (checked on the Windows
+    VM: docs/design/secrets-and-signed-images.md). The login Keychain is used only when named (a per-user coordinator
+    waiting for its migration)."""
     import os
     from oarbank.platform import files, secrets as store
     monkeypatch.setenv("OARBANK_SECRET_STORE", "file")
@@ -308,4 +310,6 @@ def test_the_secrets_key_stays_in_the_secret_store(tmp_path, monkeypatch):
     f = tmp_path / "keys" / f"{modsecrets.KEY_NAME}.key"
     assert files.owner_only(f) and files.owner_only(f.parent)
     monkeypatch.delenv("OARBANK_SECRET_STORE")
-    assert store.backend() == {"darwin": "keychain", "win32": "dpapi"}.get(os.sys.platform, "file")
+    assert store.backend() == ("dpapi" if os.sys.platform == "win32" else "file")
+    monkeypatch.setenv("OARBANK_SECRET_STORE", "keychain")
+    assert store.backend() == "keychain"

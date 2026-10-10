@@ -748,14 +748,19 @@ def coordinator(r) -> dict:
 
 
 def coordinator_banner(r) -> dict | None:
-    """The fleet-wide banner: a coordinator move waiting, pending or cutting over, or this console reading a
-    coordinator that handed off (or is a standby)."""
+    """The fleet-wide banner: a coordinator move waiting, pending or cutting over, this console reading a coordinator
+    that handed off (or is a standby), or a coordinator that still runs as a per-user service (it stops when its owner
+    logs out and does not start after a restart: coordinator-system-service.md)."""
     st = {row["key"]: jl(row["value_json"]) for row in r.q(
-        "SELECT key, value_json FROM system_state WHERE key IN ('coordinator_role','move_phase')")}
+        "SELECT key, value_json FROM system_state WHERE key IN ('coordinator_role','move_phase','coordinator_host')")}
     mv = (r.q("SELECT move_id, statement, state, not_before FROM coordinator_moves WHERE state IN ('awaiting_owner','pending','cutover') "
               "ORDER BY created_at DESC LIMIT 1") or [None])[0]
     role = st.get("coordinator_role") or "active"
+    host = st.get("coordinator_host") or {}
     if not mv and role == "active":
+        if host.get("form") == "per-user":
+            account = next((v.get("account") for v in host.get("services") or [] if v.get("installed")), None)
+            return {"state": "per_user", "role": role, "account": account, "to": None, "not_before": None, "phase": "idle"}
         return None
     to = (jl(mv["statement"], {}) or {}).get("to", {}).get("url") if mv else None
     return {"state": mv["state"] if mv else role, "to": to, "not_before": mv["not_before"] if mv else None, "role": role,
