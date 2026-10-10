@@ -26,6 +26,8 @@ use tracing::{error, info, warn};
 
 pub const COORDINATOR_LABEL: &str = "dev.codonic.oarbank.oarbankd";
 pub const CONSOLE_LABEL: &str = "dev.codonic.oarbank.console";
+/// The coordinator's menu bar app (scripts/package-coordinator-macos.sh): the owner of its launchd jobs in Login Items.
+pub const COORDINATOR_APP_BUNDLE: &str = "dev.codonic.oarbank.coordinator";
 const MAX_BUNDLE: u64 = 1024 * 1024 * 1024;
 
 #[derive(Default)]
@@ -315,6 +317,9 @@ fn start_services(root: &Path, args: Vec<String>, console: Option<Vec<String>>, 
             label: label.into(), program, env: env.clone(), working_dir: Some(root.display().to_string()),
             stdout: Some(logs.join(log).display().to_string()), stderr: Some(logs.join(log).display().to_string()),
             user: None, keep_alive: keep, restart_on_failure: true,
+            // Login Items lists both jobs as Oarbank Coordinator (the app of the coordinator's package), not as the
+            // signing team: switching that off visibly stops the coordinator
+            associated_bundle: Some(COORDINATOR_APP_BUNDLE.into()),
         };
         let plist = la.join(format!("{label}.plist"));
         crate::fsutil::write_private(&plist, oarbank_core::service::launchd_plist(&spec).as_bytes())?;
@@ -349,7 +354,7 @@ fn systemd_units(root: &Path, args: &[String], console: Option<&[String]>, env: 
         let spec = oarbank_core::service::ServiceSpec {
             label: name.into(), program, env: env.to_vec(), working_dir: Some(root.display().to_string()),
             stdout: Some(logs.join(format!("{name}.log")).display().to_string()), stderr: None, user: None,
-            keep_alive: keep, restart_on_failure: true,
+            keep_alive: keep, restart_on_failure: true, associated_bundle: None,
         };
         let unit = format!("dev.codonic.oarbank.{name}.service");
         crate::fsutil::write_private(&base.join(&unit), oarbank_core::service::systemd_unit(&spec, &format!("Oarbank {name}"), false).as_bytes())?;

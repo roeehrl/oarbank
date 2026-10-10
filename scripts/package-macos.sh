@@ -70,6 +70,9 @@ done
 mkdir -p "$WORK/root/Library/LaunchDaemons"
 for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper; do
     plutil -lint -s "$REPO/deploy/macos/$job.plist"
+    # Login Items, Allow in the Background lists the job under Oarbank Node (the app below), not the signing team
+    [[ "$(plutil -extract AssociatedBundleIdentifiers.0 raw -o - "$REPO/deploy/macos/$job.plist")" == dev.codonic.oarbank.node ]] \
+        || { echo "$job.plist does not name Oarbank Node.app (dev.codonic.oarbank.node) in AssociatedBundleIdentifiers" >&2; exit 1; }
     install -m 644 "$REPO/deploy/macos/$job.plist" "$WORK/root/Library/LaunchDaemons/"
 done
 # Oarbank Node.app, the menu bar app (the coordinator's app is built the same way: scripts/package-coordinator-macos.sh).

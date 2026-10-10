@@ -231,6 +231,21 @@ def test_the_helper_job_is_an_on_demand_mach_service_of_root():
     assert 'static let machService = "dev.codonic.oarbank.agent.helper"' in ELEVATION.read_text(encoding="utf-8")
 
 
+def test_every_node_job_belongs_to_oarbank_node_in_login_items():
+    # System Settings, Login Items, Allow in the Background groups launchd jobs by AssociatedBundleIdentifiers: without
+    # it they show under the signing team's name, and switching that off silently stops the node
+    for path in (POLICY, HELPER_JOB):
+        with open(path, "rb") as f:
+            assert plistlib.load(f)["AssociatedBundleIdentifiers"] == ["dev.codonic.oarbank.node"], path.name
+    assert _info_plist()["CFBundleIdentifier"] == "dev.codonic.oarbank.node"
+    text = PACKAGE.read_text(encoding="utf-8")
+    assert 'plutil -extract AssociatedBundleIdentifiers.0 raw -o - "$REPO/deploy/macos/$job.plist")" == dev.codonic.oarbank.node' in text
+    # the agent's own job and the session helper the launcher writes (svc_launchd.rs)
+    launchd = (REPO / "rust/crates/oarbank-launcher/src/svc_launchd.rs").read_text(encoding="utf-8")
+    assert 'const NODE_APP_BUNDLE: &str = "dev.codonic.oarbank.node";' in launchd
+    assert "associated_bundle: Some(NODE_APP_BUNDLE.into())" in launchd and "Some(NODE_APP_BUNDLE));" in launchd
+
+
 @pytest.mark.skipif(not shutil.which("plutil"), reason="macOS plutil")
 def test_the_policy_job_lints():
     for job in (POLICY, HELPER_JOB):

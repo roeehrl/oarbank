@@ -31,6 +31,12 @@ def test_native_build_activation_is_dry_run_and_preserves_payload(tmp_path):
     assert result.returncode == 0, result.stderr
     assert str(root / 'bin/oarbankd') in result.stdout
     assert '192.168.1.10' in result.stdout
+    if platform.system() == 'Darwin':
+        # Login Items lists both jobs as Oarbank Coordinator (the package's app), not as the signing team
+        owner = '<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.coordinator</string></array>'
+        assert result.stdout.count(owner) == 2
+        assert "CFBundleIdentifier</key><string>dev.codonic.oarbank.coordinator<" in PACKAGER.read_text()
+        assert 'COORDINATOR_APP_BUNDLE: &str = "dev.codonic.oarbank.coordinator"' in (REPO / 'rust/crates/oarbank-agent/src/coordinstall.rs').read_text()
     assert not list(home.iterdir())
     assert manifest.exists()
     manifest.write_text(json.dumps({'format': 1, 'platform': 'windows-amd64'}))

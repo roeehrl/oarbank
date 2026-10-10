@@ -111,6 +111,8 @@ else
 fi
 
 xml() { local s="$1"; s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; printf '%s' "$s"; }
+# AssociatedBundleIdentifiers: Login Items, Allow in the Background lists both jobs as Oarbank Coordinator (the app of
+# the coordinator's package), not as the signing team, so switching that off visibly stops the coordinator
 plist() {   # label keepalive-xml log args...
     local label="$1" keep="$2" log="$3"; shift 3
     local args=""
@@ -129,6 +131,7 @@ plist() {   # label keepalive-xml log args...
   <key>KeepAlive</key>$keep
   <key>ThrottleInterval</key><integer>10</integer>
   <key>ProcessType</key><string>Standard</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.coordinator</string></array>
   <key>StandardOutPath</key><string>$(xml "$HOME_DIR/logs/$log")</string>
   <key>StandardErrorPath</key><string>$(xml "$HOME_DIR/logs/$log")</string>
 </dict></plist>

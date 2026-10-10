@@ -16,6 +16,10 @@ pub struct ServiceSpec {
     pub keep_alive: bool,
     /// Without `keep_alive`: restart only after a failed exit (a clean exit 0 stays stopped).
     pub restart_on_failure: bool,
+    /// macOS: the bundle identifier of the app this job belongs to (launchd `AssociatedBundleIdentifiers`). System
+    /// Settings, Login Items, "Allow in the Background" then lists the job under that app's name and icon (Oarbank Node,
+    /// Oarbank Coordinator) instead of the signing team's name, so whoever switches it off sees what stops.
+    pub associated_bundle: Option<String>,
 }
 
 fn esc(s: &str) -> String {
@@ -30,9 +34,10 @@ pub fn launchd_plist(s: &ServiceSpec) -> String {
 
 /// The LaunchAgent that runs the session helper in every GUI login (`LimitLoadToSessionType` Aqua), installed in
 /// /Library/LaunchAgents by a system install: `agent` is the agent binary installed beside the launcher (root's,
-/// never the service account's current version).
-pub fn session_helper_plist(label: &str, agent: &str) -> String {
-    let spec = ServiceSpec { label: label.into(), program: vec![agent.into(), "session-helper".into()], keep_alive: true, ..Default::default() };
+/// never the service account's current version). `associated_bundle`: the app it belongs to in Login Items.
+pub fn session_helper_plist(label: &str, agent: &str, associated_bundle: Option<&str>) -> String {
+    let spec = ServiceSpec { label: label.into(), program: vec![agent.into(), "session-helper".into()], keep_alive: true,
+                             associated_bundle: associated_bundle.map(str::to_string), ..Default::default() };
     launchd_plist_with(&spec, "  <key>LimitLoadToSessionType</key><string>Aqua</string>\n")
 }
 
@@ -69,6 +74,9 @@ fn launchd_plist_with(s: &ServiceSpec, extra: &str) -> String {
         "<dict><key>SuccessfulExit</key><false/></dict>" } else { "<false/>" });
     out += "  <key>ThrottleInterval</key><integer>10</integer>\n";
     out += "  <key>ProcessType</key><string>Standard</string>\n";
+    if let Some(b) = &s.associated_bundle {
+        out += &format!("  <key>AssociatedBundleIdentifiers</key><array><string>{}</string></array>\n", esc(b));
+    }
     out += extra;
     out += "</dict></plist>\n";
     out
@@ -143,11 +151,16 @@ mod tests {
             env: vec![("OARBANK_LOG".into(), "info".into())], keep_alive: true, ..Default::default() });
         assert!(p.contains("<string>/a b/&lt;home&gt;</string>") && p.contains("<key>KeepAlive</key><true/>"));
         assert!(p.contains("<key>ProcessType</key><string>Standard</string>") && !p.contains("UserName"));
-        let h = session_helper_plist("dev.codonic.oarbank.agent.session", "/Library/Oarbank/bin/oarbank-agent");
+        assert!(!p.contains("AssociatedBundleIdentifiers"));
+        let owned = launchd_plist(&ServiceSpec { label: "dev.codonic.oarbank.agent".into(), program: vec!["/x".into()],
+            associated_bundle: Some("dev.codonic.oarbank.node".into()), ..Default::default() });
+        assert!(owned.contains("<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>\n"));
+        let h = session_helper_plist("dev.codonic.oarbank.agent.session", "/Library/Oarbank/bin/oarbank-agent", Some("dev.codonic.oarbank.node"));
         assert!(h.contains("<key>Label</key><string>dev.codonic.oarbank.agent.session</string>"));
         assert!(h.contains("<array>\n    <string>/Library/Oarbank/bin/oarbank-agent</string>\n    <string>session-helper</string>\n  </array>"));
         assert!(h.contains("<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>") && h.contains("<key>KeepAlive</key><true/>"));
         assert!(!h.contains("UserName") && !h.contains("StandardOutPath"));
+        assert!(h.contains("<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>"));
     }
 
     #[test]
