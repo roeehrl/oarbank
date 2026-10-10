@@ -91,11 +91,14 @@ spec/platforms.md):
              "grants.bootstrap": "enforced"}},
  "containers": {"runtime": "colima", "state": "installed", "detail": "the agent's Colima VMs start when a job needs one",
                 "gpu": "virtio-gpu:venus"},
- "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
+ "disk_free_gb": 398.0, "power": {"battery": true}, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
 - **CPU.** `perf_cores` and `eff_cores` are physical cores (a core running two hardware threads counts once), the
   same on every OS; a CPU without core classes reports all its cores as `perf_cores` and `eff_cores` 0; `logical` is
   the logical processors the agent may use. docs/design/protection.md, "Capacity", says how each OS is read.
+- **Power.** `battery` says the machine has a system battery (a laptop; a UPS or a device's battery does not count).
+  Node groups may select on it, and it gives the node the `laptop` label "from facts" (docs/design/settings.md,
+  "Groups and labels").
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
   re-certifies every module when the platform or OS version changes. A node of a platform the fleet has no
   release for gets one built when it enrolls.

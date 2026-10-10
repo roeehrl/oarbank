@@ -101,6 +101,30 @@ mod mac {
         }
     }
 
+    /// Whether the Mac has an internal battery (a laptop): IOKit's AppleSmartBattery service exists only there. A UPS
+    /// on a desktop is a power source but not this service.
+    pub fn has_battery() -> bool {
+        #[link(name = "IOKit", kind = "framework")]
+        unsafe extern "C" {
+            fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+            fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
+            fn IOObjectRelease(object: u32) -> i32;
+        }
+        unsafe {
+            let matching = IOServiceMatching(c"AppleSmartBattery".as_ptr());
+            if matching.is_null() {
+                return false;
+            }
+            // consumes `matching`; 0 is kIOMainPortDefault
+            let svc = IOServiceGetMatchingService(0, matching);
+            if svc == 0 {
+                return false;
+            }
+            IOObjectRelease(svc);
+            true
+        }
+    }
+
     /// NSProcessInfo.thermalState through the Objective-C runtime: 0 nominal, 1 fair, 2 serious, 3 critical.
     pub fn thermal_state() -> i32 {
         #[link(name = "objc")]
@@ -207,6 +231,16 @@ mod linux {
         }
         battery_discharging && !mains_online
     }
+
+    /// A system battery (a laptop): a power supply of type Battery that powers the system, not a device's (a mouse's
+    /// battery has scope Device).
+    pub fn has_battery() -> bool {
+        let Ok(rd) = std::fs::read_dir("/sys/class/power_supply") else { return false };
+        rd.filter_map(|e| e.ok()).map(|e| e.path()).any(|d| {
+            let read = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default().trim().to_string();
+            read("type") == "Battery" && read("scope") != "Device"
+        })
+    }
 }
 
 #[cfg(windows)]
@@ -267,6 +301,14 @@ mod win {
         let ok = unsafe { GetSystemPowerStatus(&mut st) } != 0;
         ok && st.ACLineStatus == 0 && st.BatteryFlag != 128
     }
+
+    /// A system battery (a laptop): BatteryFlag 128 is "no system battery", 255 "unknown status".
+    pub fn has_battery() -> bool {
+        use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+        let mut st: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetSystemPowerStatus(&mut st) } != 0;
+        ok && st.BatteryFlag != 128 && st.BatteryFlag != 255
+    }
 }
 
 pub fn memory() -> Memory {
@@ -296,6 +338,19 @@ pub fn on_battery() -> bool {
     return linux::on_battery();
     #[cfg(windows)]
     return win::on_battery();
+    #[allow(unreachable_code)]
+    false
+}
+
+/// Whether this machine has a system battery (a laptop), for the facts' `power.battery`: groups select laptops on it
+/// (docs/design/settings.md, "Groups and labels").
+pub fn has_battery() -> bool {
+    #[cfg(target_os = "macos")]
+    return mac::has_battery();
+    #[cfg(target_os = "linux")]
+    return linux::has_battery();
+    #[cfg(windows)]
+    return win::has_battery();
     #[allow(unreachable_code)]
     false
 }
@@ -354,6 +409,10 @@ mod tests {
         assert!([0, 1, 3].contains(&m.pressure));
         assert!((0..=3).contains(&super::thermal()));
         let _ = super::on_battery();
+        // a Mac without a battery never reports running on one
+        if !super::has_battery() {
+            assert!(!super::on_battery());
+        }
     }
 }
 
