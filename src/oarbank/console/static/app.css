@@ -73,3 +73,55 @@ main.login form.card input { width: 100%; }
 #tab-mac:checked ~ .panel-mac, #tab-linux:checked ~ .panel-linux, #tab-win:checked ~ .panel-win,
 #tab-mdm:checked ~ .panel-mdm { display:block }
 .enrollment { margin:6px 0 } .approve-code { margin:6px 0 10px } .approve-code input { text-transform:uppercase }
+
+/* Loading, busy and connection states (docs/design/console-loading-states.md). Indicators appear after 300 ms
+   (animation-delay with fill), so a quick answer never flickers one; reduced motion keeps them, static. */
+@keyframes ob-reveal { from { opacity:0 } to { opacity:1 } }
+@keyframes ob-spin { to { transform:rotate(360deg) } }
+@keyframes ob-trickle { from { transform:scaleX(0) } 8% { transform:scaleX(.3) } 40% { transform:scaleX(.7) } to { transform:scaleX(.92) } }
+@keyframes ob-pulse { 50% { opacity:.35 } }
+.topbar { position:fixed; top:0; left:0; right:0; height:3px; z-index:50; pointer-events:none; opacity:0 }
+.topbar > i { display:block; height:100%; background:var(--acc); transform-origin:0 50%; transform:scaleX(0) }
+.topbar.is-active { animation:ob-reveal 0s linear 300ms both }
+.topbar.is-active > i { animation:ob-trickle 25s cubic-bezier(.1,.6,.3,1) 300ms both }
+.topbar.is-done { opacity:0; transition:opacity 250ms ease 200ms }
+.topbar.is-done > i { transform:scaleX(1); transition:transform 200ms ease-out }
+.spin { display:inline-block; flex:none; width:.95em; height:.95em; border:2px solid currentColor; border-right-color:transparent;
+  border-radius:50%; vertical-align:-.15em; animation:ob-spin .75s linear infinite, ob-reveal 0s linear 300ms both }
+button.is-busy, .btn.is-busy { display:inline-flex; align-items:center; justify-content:center; gap:6px; cursor:progress; white-space:nowrap }
+button.is-busy:disabled { opacity:1 }
+button:disabled:not(.is-busy) { cursor:not-allowed; opacity:.6 }
+.busy-elapsed { font-variant-numeric:tabular-nums; opacity:.85 } .busy-elapsed:empty { display:none }
+form[aria-busy="true"] input, form[aria-busy="true"] select, form[aria-busy="true"] textarea { cursor:progress }
+/* user-started refreshes: the region keeps its old content, dimmed after the delay, until the new one lands */
+.is-refreshing { position:relative }
+.is-refreshing > * { animation:ob-dim 0s linear 300ms both }
+@keyframes ob-dim { from, to { opacity:.55 } }
+.is-refreshing::after { content:"Updating…"; position:absolute; top:-1.6em; right:0; font-size:12px; color:var(--mut);
+  animation:ob-reveal 0s linear 300ms both }
+.placeholder { display:flex; align-items:center; gap:8px; min-height:7em; margin:0; color:var(--mut) }
+#prot-preview { min-height:7em }
+.req-error { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 8px; padding:6px 10px; font-size:13px;
+  background:var(--card); color:var(--fg); border:1px solid var(--line); border-left:4px solid var(--bad); border-radius:7px }
+.req-error-msg { flex:1 1 16em }
+.upload-progress { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:8px 0 0; font-size:12px; color:var(--mut) }
+.upload-progress[hidden] { display:none }
+.upload-progress progress, #up-progress { flex:1 1 12em; height:8px; accent-color:var(--acc) }
+.upload-pct { font-variant-numeric:tabular-nums; min-width:9em }
+/* the live stream (header) */
+.live { display:inline-flex; align-items:center; gap:5px; white-space:nowrap }
+.live .dot { width:8px; height:8px; border-radius:50%; background:var(--mut); flex:none }
+.live[data-state="connecting"] { animation:ob-reveal 0s linear 1s both }
+.live[data-state="live"] .dot { background:var(--okf) }
+.live[data-state="reconnecting"] { color:var(--warn) } .live[data-state="reconnecting"] .dot { background:var(--warnf); animation:ob-pulse 1.2s ease-in-out infinite }
+.live[data-state="offline"] { color:var(--bad) } .live[data-state="offline"] .dot { background:var(--badf) }
+#stale-banner button { margin-left:6px; background:transparent; color:#fff; border-color:rgba(255,255,255,.7); padding:1px 8px }
+/* a live list waiting for something (the join code's machines): a quiet pulse, no spinner */
+.waiting::before { content:""; display:inline-block; width:7px; height:7px; margin-right:7px; border-radius:50%;
+  background:var(--acc); vertical-align:.1em; animation:ob-pulse 1.6s ease-in-out infinite }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation:ob-reveal 0s linear 300ms both; border-right-color:transparent }
+  .topbar.is-active > i { animation:none; transform:scaleX(1); opacity:.7 }
+  .topbar.is-done, .topbar.is-done > i { transition:none }
+  .live[data-state="reconnecting"] .dot, .waiting::before { animation:none }
+}

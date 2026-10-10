@@ -57,6 +57,7 @@ function page({state, routes = {}, token = 'synthetic'}) {
     setTimeout: (fn, ms) => { const id = nextTimer++; timers.set(id, fn); return id; },
     clearTimeout: id => timers.delete(id),
     setInterval: () => 0,
+    clearInterval: () => {},
     fetch: async (path, request) => {
       const body = JSON.parse(request.body);
       assert.equal(request.headers['X-Oarbank-Join'], token);
@@ -284,5 +285,29 @@ const CHECK_OK = {rows: [{row: 'code', ok: true, detail: 'coordinator coord.exam
   await flush();
   assert.deepEqual(q.requests, []);
   assert.match(q.node('error').textContent, /Open Oarbank Node/);
+}
+// ---------------------------------------------------------------- work in progress shows, and always stops
+{
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const p = page({state: MAC, routes: {'/check': async () => { await held; return {rows: [{row: 'tcp', ok: false, detail: 'no answer'}],
+    result: {ok: false, code: 'E_TCP', exit: 6, message: 'No answer.'}}; }}});
+  await flush();
+  assert.match(tagOf('loading-text'), /class="working"/, 'loading has a spinner beside its words');
+  await p.type(FRESH);
+  const submitted = p.submit();
+  await flush();
+  assert.deepEqual(p.visible(), ['progress-screen']);
+  assert.equal(p.node('progress-text').className, 'working', 'a spinner while the checks run');
+  assert.equal(p.node('rows').attrs['aria-busy'], 'true');
+  assert.equal(p.node('progress-elapsed').hidden, true, 'no elapsed time in the first 10 s');
+  release();
+  await submitted; await flush();
+  assert.equal(p.node('failure').hidden, false);
+  assert.equal(p.node('progress-text').className, '', 'the spinner stops on failure');
+  assert.equal(p.node('rows').attrs['aria-busy'], 'false');
+  assert.equal(p.context.elapsedText(9), '');
+  assert.equal(p.context.elapsedText(25), 'Running for 25 seconds');
+  assert.equal(p.context.elapsedText(125), 'Running for 2 min 5 s');
 }
 console.log('join window UI: ok');

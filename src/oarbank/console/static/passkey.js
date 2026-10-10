@@ -27,6 +27,9 @@
     var el = document.querySelector("[data-passkey-status]");
     if (el) el.textContent = msg;
   }
+  // the button stays busy (app.js) while the ceremony runs, and comes back if it fails or is cancelled
+  function busy(b, label) { if (window.OarbankUI) window.OarbankUI.busy(b, label); }
+  function idle(b) { if (window.OarbankUI) window.OarbankUI.idle(b); }
   function cred(c) {
     var r = c.response, out = {id: c.id, rawId: bufToB64u(c.rawId), type: c.type, response: {
       clientDataJSON: bufToB64u(r.clientDataJSON)}, clientExtensionResults: c.getClientExtensionResults ? c.getClientExtensionResults() : {}};
@@ -39,13 +42,14 @@
     return out;
   }
   document.addEventListener("click", function (ev) {
-    var t = ev.target;
-    if (!(t instanceof HTMLElement)) return;
+    var t = ev.target instanceof Element ? ev.target.closest("[data-passkey-login], [data-passkey-register]") : null;
+    if (!(t instanceof HTMLElement) || t.disabled) return;
     if (!window.PublicKeyCredential && (t.dataset.passkeyLogin !== undefined || t.dataset.passkeyRegister !== undefined)) {
       status("This browser has no passkey support here (passkeys need https or http://localhost)."); return;
     }
     if (t.dataset.passkeyLogin !== undefined) {
       status("Waiting for your passkey…");
+      busy(t, "Signing in…");
       post("/login/passkey/options").then(function (o) {
         var pk = o.options;
         pk.challenge = b64uToBuf(pk.challenge);
@@ -53,11 +57,16 @@
         return navigator.credentials.get({publicKey: pk}).then(function (c) {
           return post("/login/passkey", {challenge_id: o.challenge_id, credential: cred(c), next: t.dataset.next || "/"});
         });
-      }).then(function (r) { window.location = r.next || "/"; }).catch(function (e) { status("Not signed in: " + e.message); });
+      }).then(function (r) {
+        status("Signed in. Opening the console…");
+        if (window.OarbankUI) window.OarbankUI.navigate();
+        window.location = r.next || "/";
+      }).catch(function (e) { idle(t); status("Not signed in: " + e.message); });
     }
     if (t.dataset.passkeyRegister !== undefined) {
       var label = (document.querySelector("[data-passkey-label]") || {}).value || "passkey";
       status("Follow your browser's prompt…");
+      busy(t, "Adding a passkey…");
       post("/account/passkey/options").then(function (o) {
         var pk = o.options;
         pk.challenge = b64uToBuf(pk.challenge);
@@ -67,7 +76,7 @@
           return post("/account/passkey", {challenge_id: o.challenge_id, credential: cred(c), label: label});
         });
       }).then(function () { status("Passkey added."); window.location.reload(); })
-        .catch(function (e) { status("Not added: " + e.message); });
+        .catch(function (e) { idle(t); status("Not added: " + e.message); });
     }
   });
 })();
