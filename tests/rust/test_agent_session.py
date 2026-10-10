@@ -13,6 +13,19 @@ def run_agent(agent_bin, home, *args, timeout=60, **kw):
                             stderr=subprocess.STDOUT, text=True, **kw)
 
 
+def read_json(path, timeout=5):
+    """A JSON file the agent replaces while it is read: Windows refuses the open during the rename, and a read can see
+    it half written nowhere else, so retry briefly."""
+    end = time.time() + timeout
+    while True:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (PermissionError, json.JSONDecodeError):
+            if time.time() > end:
+                raise
+            time.sleep(0.05)
+
+
 def wait(pred, timeout=30, step=0.2):
     end = time.time() + timeout
     while time.time() < end:
