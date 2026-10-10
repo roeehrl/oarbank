@@ -8,8 +8,8 @@ use crate::{host, procs};
 use oarbank_protection as P;
 use oarbank_protection::settings_table as T;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 pub struct Protection {
     pub ctrl: P::ProtectionController,
@@ -19,7 +19,14 @@ pub struct Protection {
     local: std::path::PathBuf,
     policy_seen: Value,
     lowered: BTreeSet<i64>,
-    frozen: BTreeSet<i64>,
+    /// Attempts frozen (SIGSTOP or the container's freeze) by protection: by a tick or by the event path.
+    frozen: Arc<Mutex<BTreeSet<i64>>>,
+    /// Attempts the event path paused between ticks, and when (a tick that read its phases before that keeps them
+    /// paused; the next one decides).
+    fast_paused: Arc<Mutex<HashMap<i64, f64>>>,
+    /// The certificates in force (the coordinator's `certificates` directive, as last applied).
+    certs_seen: Value,
+    fast_attached: bool,
     pub last: Option<P::ProtectionTickResult>,
     pub capacity: Option<P::CapacityResult>,
     pub telemetry: Value,
@@ -51,9 +58,67 @@ impl Protection {
         let ctrl = P::ProtectionController::new(Some(journal.clone()), P::platform::native_host(hub.clone()));
         // the owner's local protection file sits beside the agent's home (docs/protocol.md, "Agent config")
         let local = l.home.parent().unwrap_or(&l.home).join("protection.json");
-        Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
+        Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(),
+                     frozen: Default::default(), fast_paused: Default::default(), certs_seen: Value::Null, fast_attached: false,
                      last: None, capacity: None, telemetry: json!({}),
                      service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![] }
+    }
+
+    /// Give the controller the event path's fast pause over the agent's job table (D51): an immediate rule's phase
+    /// pauses the fleet work it covers between ticks, through the spawn registry only (S16).
+    pub fn attach_fast_path(&mut self, table: &Table) {
+        if std::mem::replace(&mut self.fast_attached, true) {
+            return;
+        }
+        let f = FastPause { table: table.clone(), registry: self.registry.clone(), journal: self.journal.clone(),
+                            frozen: self.frozen.clone(), fast_paused: self.fast_paused.clone() };
+        self.ctrl.set_fast_path(Arc::new(f));
+    }
+
+    /// The harness and certificate directives (D52, D50): start or abort a run, forget a run the coordinator stored,
+    /// and the certificates in force with what this node is.
+    fn directives(&mut self, d: &Value, facts: &Value, now: f64) {
+        if let Some(spec) = d.get("ab_run").filter(|v| v.is_object()) {
+            let id = spec["run_id"].as_str().unwrap_or("");
+            let known = self.ctrl.harness().is_some_and(|h| h.spec.run_id == id);
+            if !known {
+                match serde_json::from_value::<P::AbSpec>(spec.clone()) {
+                    Ok(s) => {
+                        if let Err(e) = self.ctrl.start_ab(s, now) {
+                            tracing::warn!(run = id, error = %e, "harness run refused");
+                            self.journal.record("ab_refused", "AB_REFUSED", spec["rule"].as_str(),
+                                                serde_json::Map::from_iter([("run_id".into(), json!(id)), ("why".into(), json!(e))]));
+                        }
+                    }
+                    Err(e) => tracing::warn!(run = id, error = %e, "harness run spec not understood"),
+                }
+            }
+        }
+        for id in d["ab_abort"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+            self.ctrl.abort_ab(id, now, "aborted by the owner");
+        }
+        if let Some(id) = d["ab_ack"].as_str() {
+            self.ctrl.ab_ack(id);
+        }
+        if d.get("certificates").is_some() && d["certificates"] != self.certs_seen {
+            let certs: Vec<P::Certificate> = d["certificates"].as_array().into_iter().flatten()
+                .filter_map(|c| serde_json::from_value(c.clone()).ok()).collect();
+            self.ctrl.set_certificates(certs, cert_context(facts));
+            self.certs_seen = d["certificates"].clone();
+        }
+    }
+
+    /// The current or last harness run (the heartbeat's `ab_runs`), with what a certificate would be bound to.
+    pub fn ab_report(&self) -> Value {
+        let now = crate::doctor::now();
+        match self.ctrl.ab_report(now) {
+            Some(mut r) => {
+                let rule = r["rule"].as_str().unwrap_or("").to_string();
+                r["identity"] = json!(self.ctrl.identity(&rule));
+                json!([r])
+            }
+            None => json!([]),
+        }
     }
 
     pub fn tick(&mut self, d: &Value, table: &Table, facts: &Value) {
@@ -69,6 +134,9 @@ impl Protection {
         if d["send_processes"].as_bool() == Some(true) {
             self.ctrl.processes_requested = true;
         }
+        self.attach_fast_path(table);
+        self.directives(d, facts, now);
+        let tick_started = crate::doctor::now();
         let m = host::memory();
         let mut mem = P::MemorySignals::new(m.ram_gb, m.used_gb, m.pressure);
         mem.swap_used_gb = m.swap_used_gb;
@@ -89,6 +157,8 @@ impl Protection {
                 v.cooperative = j.caps.iter().any(|c| c == "cooperative_pause" || c == "cooperative_throttle");
                 v.gpu = j.gpu;
                 v.bandwidth = j.bandwidth.clone();
+                v.module = j.module.clone();
+                v.duty = j.caps.iter().any(|c| c == "cooperative_throttle");
                 views.push(v);
             }
             // services are fleet work too: never the owner's, and stoppable when yieldable (their users go with them)
@@ -126,7 +196,7 @@ impl Protection {
         inputs.allocatable_cores = perf as f64 + eff as f64 / 2.0;
         inputs.lowering = can_lower();
         let r = self.ctrl.tick(&inputs);
-        self.actuate(&r, table);
+        self.actuate(&r, table, tick_started);
         let limits = P::Limits::from_json(d.get("limits"));
         let at = now as i64;
         let in_schedule = limits.schedule.as_ref().is_none_or(|s| s.contains_unix(at, crate::sys::utc_offset_s(at)));
@@ -158,15 +228,19 @@ impl Protection {
             "user_idle_s": if idle.is_finite() { json!(round1(idle)) } else { Value::Null }, "presence": presence.source,
             "fleet_rss_gb": round1(fleet_rss), "disk_free_gb": facts["disk_free_gb"].clone(), "guard": r.guard_level.as_str(),
             "protection": serde_json::to_value(self.ctrl.telemetry(&r)).unwrap_or(Value::Null),
+            "cert_context": serde_json::to_value(cert_context(facts)).unwrap_or(Value::Null),
         });
         self.capacity = Some(cap);
         self.last = Some(r);
         let _ = fleet_pids;
     }
 
-    /// Apply this tick's plan to the agent's own process groups, only through the registry.
-    fn actuate(&mut self, r: &P::ProtectionTickResult, table: &Table) {
+    /// Apply this tick's plan to the agent's own process groups, only through the registry. `tick_started`: when
+    /// the tick began reading its sources; a pause the event path made after that stands until the next tick.
+    fn actuate(&mut self, r: &P::ProtectionTickResult, table: &Table, tick_started: f64) {
         let mut t = table.lock().unwrap();
+        let mut fast = self.fast_paused.lock().unwrap();
+        let mut frozen = self.frozen.lock().unwrap();
         for (aid, j) in t.iter_mut() {
             let Some(pg) = j.pgid else { continue };
             let lower = r.lowered.contains(aid);
@@ -174,20 +248,26 @@ impl Protection {
                 let _ = self.registry.set_background(pg, lower, if lower { "PROTECTION_LOWER" } else { "PROTECTION_RESTORE" });
                 if lower { self.lowered.insert(*aid); } else { self.lowered.remove(aid); }
             }
-            let pause = r.paused.contains(aid);
+            // a fast pause newer than this tick's reading of the sources: this tick did not see its phase
+            let fresh_fast = fast.get(aid).is_some_and(|at| *at >= tick_started);
+            let pause = r.paused.contains(aid) || fresh_fast;
+            if !fresh_fast {
+                fast.remove(aid);
+            }
             let freeze = j.caps.iter().any(|c| c == "freeze_ok");
-            if pause != (self.frozen.contains(aid) || j.pause) {
+            if pause != (frozen.contains(aid) || j.pause) {
                 if freeze {
                     let sig = if pause { P::Signal::Stop } else { P::Signal::Cont };
                     let _ = self.registry.signal(pg, sig, if pause { "PROTECTION_PAUSE" } else { "PROTECTION_RESUME" });
-                    if pause { self.frozen.insert(*aid); } else { self.frozen.remove(aid); }
+                    if pause { frozen.insert(*aid); } else { frozen.remove(aid); }
                 } else {
                     j.pause = pause;                        // cooperative: the job monitor writes control.json
                     j.wake.notify_one();
                 }
             }
-            if let Some(doc) = r.throttle.get(aid).filter(|d| d.threads != j.threads) {
+            if let Some(doc) = r.throttle.get(aid).filter(|d| d.threads != j.threads || d.gpu_duty != j.gpu_duty) {
                 j.threads = doc.threads;
+                j.gpu_duty = doc.gpu_duty;
                 j.wake.notify_one();
             }
             if let Some(e) = r.evictions.iter().find(|e| e.attempt_id == *aid) {
@@ -198,7 +278,8 @@ impl Protection {
             }
         }
         self.lowered.retain(|a| t.contains_key(a));
-        self.frozen.retain(|a| t.contains_key(a));
+        frozen.retain(|a| t.contains_key(a));
+        fast.retain(|a, _| t.contains_key(a));
     }
 
     pub fn journal_out(&self) -> Value {
@@ -215,6 +296,75 @@ impl Protection {
         let pids: HashSet<i32> = table.lock().unwrap().values().filter_map(|j| j.pgid)
             .flat_map(|pg| procs::group_pids(pg).into_iter().chain([pg])).collect();
         self.ctrl.process_summary(crate::doctor::now(), &pids).map(|rows| serde_json::to_value(rows).unwrap_or(json!([])))
+    }
+}
+
+/// What a co-tenancy certificate is bound to on this node: the hardware, the OS major version and this agent.
+fn cert_context(facts: &Value) -> P::CertContext {
+    let cpu = &facts["cpu"];
+    let os = &facts["platform"];
+    let major = os["os_version"].as_str().unwrap_or("").split('.').next().unwrap_or("").to_string();
+    P::CertContext {
+        hardware: format!("{} {}p/{}e", cpu["model"].as_str().unwrap_or("?"), cpu["perf_cores"], cpu["eff_cores"]),
+        os_major: format!("{} {major}", os["os"].as_str().unwrap_or("?")),
+        agent_version: crate::VERSION.to_string(),
+    }
+}
+
+/// The event path's fast pause (D51): an immediate rule's phase turned on between ticks. Pauses the agent's own
+/// attempts in the phase's scope at once (a freeze through the spawn registry, or `pause` in a cooperative runner's
+/// control document), journals it with the source event's time (S25), and leaves the release to the next tick.
+struct FastPause {
+    table: Table,
+    registry: Arc<P::SpawnRegistry>,
+    journal: Arc<P::DecisionJournal>,
+    frozen: Arc<Mutex<BTreeSet<i64>>>,
+    fast_paused: Arc<Mutex<HashMap<i64, f64>>>,
+}
+
+impl P::FastPath for FastPause {
+    fn phase_on(&self, hit: &P::PhaseHit) -> usize {
+        let Some(scope) = hit.pause else { return 0 };
+        let now = crate::doctor::now();
+        let mut done = vec![];
+        {
+            let mut t = self.table.lock().unwrap();
+            let mut frozen = self.frozen.lock().unwrap();
+            let mut fast = self.fast_paused.lock().unwrap();
+            for (aid, j) in t.iter_mut() {
+                let Some(pg) = j.pgid else { continue };
+                let in_scope = match scope {
+                    P::ProtectionScope::All | P::ProtectionScope::Io => true,
+                    P::ProtectionScope::Cpu => !j.gpu,
+                    P::ProtectionScope::Gpu => j.gpu,
+                };
+                if !in_scope || j.stop.is_some() || frozen.contains(aid) || j.pause {
+                    continue;
+                }
+                if j.caps.iter().any(|c| c == "freeze_ok") {
+                    if self.registry.signal(pg, P::Signal::Stop, "PROTECTION_PAUSE").is_ok() {
+                        frozen.insert(*aid);
+                    } else {
+                        continue;
+                    }
+                } else if j.caps.iter().any(|c| c == "cooperative_pause") {
+                    j.pause = true;
+                    j.wake.notify_one();
+                } else {
+                    continue; // neither: the tick lowers or releases it
+                }
+                fast.insert(*aid, now);
+                done.push(*aid);
+            }
+        }
+        if !done.is_empty() {
+            let t = crate::doctor::now();
+            self.journal.record("attempt_paused", "PROTECTION_PAUSE", Some(&format!("rule:{}", hit.rule)), serde_json::Map::from_iter([
+                ("attempts".to_string(), json!(done)), ("rules".to_string(), json!([hit.key])), ("why".to_string(), json!("phase")),
+                ("event_t".to_string(), json!((hit.event_t * 1e4).round() / 1e4)),
+                ("latency_ms".to_string(), json!(((t - hit.event_t) * 1e5).round() / 100.0)), ("via".to_string(), json!(hit.via))]));
+        }
+        done.len()
     }
 }
 
@@ -285,7 +435,7 @@ mod caps_tests {
         for &(aid, started_at) in jobs {
             t.lock().unwrap().insert(aid, JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 1.0, gpu: false,
                 pgid: None, stop: None, pause: false, usage: Default::default(), log_bytes: 0, started_at, caps: vec![],
-                bandwidth: None, threads: None, needs: vec![], wake: Default::default() });
+                bandwidth: None, threads: None, gpu_duty: None, needs: vec![], wake: Default::default() });
         }
         t
     }
@@ -466,7 +616,7 @@ mod e2e {
     fn state(aid: i64, pgid: i32, caps: &[&str]) -> JobState {
         JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 0.1, gpu: false, pgid: Some(pgid), stop: None,
                    pause: false, usage: Default::default(), log_bytes: 0, started_at: crate::doctor::now(),
-                   caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, needs: vec![],
+                   caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, gpu_duty: None, needs: vec![],
                    wake: Default::default() }
     }
 
@@ -553,6 +703,66 @@ mod e2e {
         assert!(running > 0.3, "a resumed job used only {running} s of CPU");
         assert!(!lowered(pb));
         drop((a, b));
+    }
+
+    /// The event path (D51) on the agent: an immediate rule's phase turns on between ticks and the fast pause freezes
+    /// the job through the spawn registry at once, journaled with the source event's time; a tick that read its
+    /// sources before the pause keeps it (a newer fast pause stands); the phase's exit is applied by the next tick.
+    #[test]
+    fn an_immediate_phase_freezes_a_job_between_ticks() {
+        #[cfg(target_os = "linux")]
+        let _ = crate::cgroup::root();
+        let tmp = crate::scratch("prot-fast");
+        let l = Layout::new(tmp.path().to_path_buf());
+        l.ensure().unwrap();
+        let mut p = Protection::new(&l, false);
+        let a = job();
+        let pa = a.0.id() as i32;
+        assert!(p.registry.register(pa, Some(1), None));
+        let table = Table::default();
+        table.lock().unwrap().insert(1, state(1, pa, &["freeze_ok"]));
+        let marker = if cfg!(windows) { "127.0.0.43" } else { "4343.5" };
+        let _owner = Owner(if cfg!(windows) {
+            Command::new("ping").args(["-n", "600", marker]).stdout(Stdio::null()).spawn().unwrap()
+        } else {
+            Command::new("sleep").arg(marker).spawn().unwrap()
+        });
+        let src = tmp.path().join("phase.jsonl");
+        std::fs::write(&src, "{\"event\": \"idle\"}\n").unwrap();
+        let rule = json!({"id": "owner", "match": {"argv_regex": marker.replace('.', "\\.")}, "active_when": {"for_s": 0},
+                          "immediate": true, "during": [{"source": {"jsonl": src.to_string_lossy(), "enter": "upload",
+                                                                     "exit": "done"}, "pause_fleet": {}}]});
+        let d = json!({"desired_state": "active", "limits": {}, "policy": {"protection": {
+            "node": {"mode": "fleet_first"}, "rule": [rule]}}});
+        let facts = json!({"cpu": {"logical": 4}});
+        p.tick(&d, &table, &facts);
+        assert!(p.last.as_ref().unwrap().paused.is_empty());
+        std::thread::sleep(Duration::from_millis(600)); // the watcher has the file
+        use std::io::Write;
+        std::fs::OpenOptions::new().append(true).open(&src).unwrap().write_all(b"{\"event\": \"upload\"}\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !p.frozen.lock().unwrap().contains(&1) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(p.frozen.lock().unwrap().contains(&1), "the event path froze the job without a tick");
+        let rec = p.journal.recent_records();
+        let paused = rec.iter().find(|r| r.kind() == "attempt_paused").expect("journaled");
+        assert!(paused.get("event_t").is_some() && paused.get("latency_ms").is_some());
+        let frozen = cpu_over(pa, 0.5);
+        assert!(frozen < 0.05, "a frozen job used {frozen} s of CPU");
+        // a tick that read its sources before the fast pause does not resume it
+        let r = P::ProtectionTickResult { paused: Default::default(), ..p.last.clone().unwrap() };
+        p.actuate(&r, &table, crate::doctor::now() - 60.0);
+        assert!(p.frozen.lock().unwrap().contains(&1), "a fast pause newer than the tick's read stands");
+        // the next tick reads the phase on, then off after its exit
+        p.tick(&d, &table, &facts);
+        assert!(p.last.as_ref().unwrap().paused.contains(&1));
+        std::fs::OpenOptions::new().append(true).open(&src).unwrap().write_all(b"{\"event\": \"done\"}\n").unwrap();
+        p.tick(&d, &table, &facts);
+        assert!(p.last.as_ref().unwrap().paused.is_empty() && !p.frozen.lock().unwrap().contains(&1));
+        let running = cpu_over(pa, 1.0);
+        assert!(running > 0.2, "a resumed job used only {running} s of CPU");
+        drop(a);
     }
 
     /// macOS, a system install's view of a person's work: the agent's protection serving session helpers runs as

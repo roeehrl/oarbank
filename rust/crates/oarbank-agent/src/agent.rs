@@ -342,12 +342,14 @@ impl Agent {
 
     pub async fn heartbeat(&mut self) -> Result<Value, ApiError> {
         self.seq += 1;
-        let (capacity, telemetry, journal, processes) = match self.prot.as_mut() {
-            Some(p) => (p.capacity.as_ref().map(|c| c.to_json()), p.telemetry.clone(), p.journal_out(), p.processes(&self.table)),
-            None => (None, json!({}), json!([]), None),
+        let (capacity, telemetry, journal, processes, ab_runs) = match self.prot.as_mut() {
+            Some(p) => (p.capacity.as_ref().map(|c| c.to_json()), p.telemetry.clone(), p.journal_out(), p.processes(&self.table),
+                        p.ab_report()),
+            None => (None, json!({}), json!([]), None, json!([])),
         };
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
+                              "ab_runs": ab_runs,
                               "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(), "tools": self.tools,
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         if let Some(svc) = &self.services {
@@ -1096,7 +1098,7 @@ impl Agent {
                 mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0), gpu, pgid: None, stop: None, pause: false,
                 usage: Default::default(), log_bytes: 0, started_at: doctor::now(),
                 caps: runner["capabilities"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
-                bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None,
+                bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None, gpu_duty: None,
                 needs, wake: Default::default() });
             info!(attempt = aid, kind = g["kind"].as_str().unwrap_or(""), module = g["module"].as_str().unwrap_or(""), "granted");
             tokio::spawn(jobs::run(ctx.clone(), g.clone(), crate::clock::local_deadline(g, received)));
