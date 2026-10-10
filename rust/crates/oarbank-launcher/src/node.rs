@@ -608,7 +608,7 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
 /// good is remembered (by its hash) so a profile that stays in place is not retried at every boot.
 fn policy_apply(explicit_home: Option<&Path>) -> Result<i32> {
     let agent = agent_bin()?;
-    let out = Command::new(&agent).args(["policy"]).output()?;
+    let out = Command::new(&agent).args(["policy", "--with-join-code"]).output()?;
     let pol: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
     let code = pol["JoinCode"].as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
     let coordinator = pol["Coordinator"].as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);

@@ -194,8 +194,12 @@ enum Cmd {
         action: ToolsCmd,
     },
     /// The managed policy in force, as JSON (`oarbank-node policy-apply`; node-enrollment.md, "Managed policy keys").
+    /// The join code shows as `"(set)"` unless `--with-join-code` (the launcher's policy job, never a person's terminal).
     #[command(hide = true)]
-    Policy,
+    Policy {
+        #[arg(long)]
+        with_join_code: bool,
+    },
     /// This node's sandbox backend and what it enforces, as JSON (the coordinator asks it on Linux and Windows).
     #[command(name = "sandbox-status", hide = true)]
     SandboxStatus,
@@ -349,9 +353,10 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&rep)?);
             Ok(())
         }
-        Cmd::Policy => {
+        Cmd::Policy { with_join_code } => {
             let p = policy::read();
-            println!("{}", serde_json::json!({"JoinCode": p.join_code, "Coordinator": p.coordinator, "Scope": p.scope,
+            let code = if with_join_code { p.join_code.clone() } else { p.join_code.as_ref().map(|_| "(set)".to_string()) };
+            println!("{}", serde_json::json!({"JoinCode": code, "Coordinator": p.coordinator, "Scope": p.scope,
                 "Containers": p.containers, "Name": p.name, "AllowUserJoin": p.allow_user_join,
                 "ManagedByOrganizationName": p.managed_by, "ShowStatusIcon": p.show_status_icon,
                 // settings, not secrets: shown to the machine's admin as set (the join code above is the one secret)
