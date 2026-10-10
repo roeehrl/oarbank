@@ -7,7 +7,8 @@
 <table class="small"><tr><th>attempt</th><th>node</th><th>job</th><th>dataset</th><th>phase</th><th class="num">cpu s</th><th class="num">elapsed</th><th class="num">lease</th></tr>
 {% for a in live %}<tr><td>{{ a.attempt_id }}</td><td>{{ a.hostname }}</td><td><a href="/jobs/{{ a.job_id }}">{{ a.job_id }}</a></td>
 <td class="mono">{{ a.dataset_id }}</td><td>{{ a.phase }}</td><td class="num">{{ a.cpu_s | num(0) }}</td>
-<td class="num">{{ (now - a.granted_at) | secs }}</td><td class="num">{{ (a.expires_at - now) | num(0) }}s</td></tr>{% endfor %}</table>
+<td class="num">{{ (now - a.granted_at) | secs }}</td><td class="num">{{ (a.expires_at - now) | num(0) }}s</td></tr>
+{% else %}<tr><td colspan="8" class="mut">nothing running</td></tr>{% endfor %}</table>
 
 <h2>Queue</h2>
 <form class="row small" method="get">
@@ -20,6 +21,7 @@
 <td>{% if j.campaign_id %}<a href="/campaigns/{{ j.campaign_id }}">{{ j.campaign_id }}</a>{% endif %}</td><td class="mono mut">{{ j.labels_json if j.labels_json and j.labels_json != '{}' else '' }}</td>
 <td class="mono">{{ j.dataset_id }}</td><td>{{ j.state }}</td><td class="num">{{ j.score | num(6) if j.score is not none else '' }}</td>
 <td class="num">{{ j.exec_failures }}</td><td class="num">{{ j.expirations }}</td>
-<td>{% if j.state in ['failed','quarantined','cancelled'] %}{{ m.op_form("jobs.retry", j.job_id, "Retry") }}
-{% elif j.state in ['pending','leased'] %}{{ m.op_form("jobs.cancel", j.job_id, "Cancel", cls="danger", confirm="Cancel job " ~ j.job_id ~ "? Its live attempts are revoked.") }}{% endif %}</td></tr>{% endfor %}</table>
+<td class="actions">{% if j.state in ['failed','quarantined','cancelled'] %}{{ m.op_form("jobs.retry", j.job_id, "Retry") }}
+{% elif j.state in ['pending','leased'] %}{{ m.op_form("jobs.cancel", j.job_id, "Cancel", cls="danger", confirm="Cancel job " ~ j.job_id ~ "? Its live attempts are revoked.") }}{% endif %}</td></tr>
+{% else %}<tr><td colspan="10" class="mut">no jobs match</td></tr>{% endfor %}</table>
 {% endblock %}

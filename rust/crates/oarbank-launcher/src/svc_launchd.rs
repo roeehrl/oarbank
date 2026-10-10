@@ -14,6 +14,11 @@ use std::process::Command;
 /// Where a system install's agent serves session helpers (oarbank-protection's platform/macos/session.rs).
 const SESSION_DIR: &str = "/Library/Application Support/Oarbank/run";
 
+/// Oarbank Node.app (scripts/package-macos.sh): the app the node's jobs belong to in System Settings, Login Items,
+/// "Allow in the Background" (launchd `AssociatedBundleIdentifiers`). Without it macOS lists them under the signing
+/// team's name, and switching that entry off silently stops the node.
+const NODE_APP_BUNDLE: &str = "dev.codonic.oarbank.node";
+
 /// Where the service's definition lives and the launchctl domain it loads into: a LaunchAgent in the user's GUI
 /// session, or with `--system` a LaunchDaemon (run as `--user`, or root).
 struct ServiceTarget {
@@ -108,6 +113,62 @@ fn launchctl(args: &[&str], dry: bool) -> Result<std::process::Output> {
     Ok(Command::new("/bin/launchctl").args(args).output()?)
 }
 
+/// `service refresh [--system] [--label L] [--dry-run]`: render the installed job again with this launcher's keys (an
+/// upgrade's: a 2.8 job has no `ExitTimeOut`, so launchd would kill the agent 20 s into stopping its jobs), keeping its
+/// program, account, environment and logs, and restart it on the new launcher: reloaded when the definition changed,
+/// else kickstarted. Not installed: an error (the caller restarts what it has). The package's postinstall runs it on every upgrade.
+pub fn refresh(rest: &[String]) -> Result<()> {
+    let opts = rest;
+    let dry = opts.iter().any(|o| o == "--dry-run");
+    let t = service_target(opts)?;
+    let target = format!("{}/{}", t.domain, t.label);
+    if !t.plist.exists() {
+        bail!("not installed: {}", t.plist.display());
+    }
+    let out = Command::new("/usr/bin/plutil").args(["-convert", "json", "-o", "-"]).arg(&t.plist).output()?;
+    if !out.status.success() {
+        bail!("{} is not a property list: {}", t.plist.display(), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let mut spec = oarbank_core::service::launchd_spec(&v)
+        .with_context(|| format!("{} is not a job this launcher installs", t.plist.display()))?;
+    spec.stop_timeout_s = Some(oarbank_core::service::AGENT_STOP_TIMEOUT_S);
+    spec.associated_bundle = Some(NODE_APP_BUNDLE.into());
+    let plist = oarbank_core::service::launchd_plist(&spec);
+    if std::fs::read_to_string(&t.plist).ok().as_deref() == Some(plist.as_str()) {
+        let o = launchctl(&["kickstart", "-k", &target], dry)?;
+        if !o.status.success() {
+            bail!("launchctl kickstart failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+        }
+        println!("up to date: {target} restarted");
+        return Ok(());
+    }
+    if dry {
+        println!("# {}\n{plist}", t.plist.display());
+    } else {
+        let tmp = t.plist.with_extension("plist.tmp");
+        std::fs::write(&tmp, &plist)?;
+        std::fs::rename(&tmp, &t.plist)?;
+    }
+    // bootout stops the agent (SIGTERM, under the old definition's timeout); bootstrap loads the new one and starts it.
+    // A bootstrap right after a bootout can find the job still going away (error 5): once more after a moment.
+    let _ = launchctl(&["bootout", &target], dry);
+    let plist_path = t.plist.display().to_string();
+    let mut o = launchctl(&["bootstrap", &t.domain, &plist_path], dry)?;
+    for _ in 0..10 {
+        if o.status.success() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        o = launchctl(&["bootstrap", &t.domain, &plist_path], dry)?;
+    }
+    if !o.status.success() {
+        bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+    }
+    println!("refreshed {target}");
+    Ok(())
+}
+
 /// `service install|uninstall|status [--system [--user NAME]] [--label L] [--dry-run] [-- agent args...]`: run the
 /// launcher (and so the agent) under launchd, started at login (or boot) and kept alive.
 pub fn service(home: &Home, rest: &[String]) -> Result<()> {
@@ -139,6 +200,9 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
                 user: account.clone(),
                 keep_alive: true,
                 restart_on_failure: false,
+                associated_bundle: Some(NODE_APP_BUNDLE.into()),
+                // the agent stops its jobs on SIGTERM; launchd's default 20 s would kill it midway
+                stop_timeout_s: Some(oarbank_core::service::AGENT_STOP_TIMEOUT_S),
             };
             let plist = oarbank_core::service::launchd_plist(&spec);
             if dry {
@@ -164,7 +228,7 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
             // the agent binary installed beside the launcher (root's), never the service account's current version
             let helper_agent = exe.with_file_name("oarbank-agent");
             if account.is_some() && helper_agent.exists() {
-                let text = oarbank_core::service::session_helper_plist(&helper_label, &helper_agent.display().to_string());
+                let text = oarbank_core::service::session_helper_plist(&helper_label, &helper_agent.display().to_string(), Some(NODE_APP_BUNDLE));
                 if dry {
                     println!("# {}\n{text}", helper_plist.display());
                 } else {
@@ -209,7 +273,7 @@ pub fn service(home: &Home, rest: &[String]) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&st)?);
             Ok(())
         }
-        _ => bail!("usage: oarbank-launcher --home <dir> service install|uninstall|status [--system [--user NAME]] [--label L] [--dry-run] [-- agent args]"),
+        _ => bail!("usage: oarbank-launcher --home <dir> service install|uninstall|status [--system [--user NAME]] [--label L] [--dry-run] [-- agent args] | oarbank-launcher service refresh [--system] [--label L] [--dry-run]"),
     }
 }
 

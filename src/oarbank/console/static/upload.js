@@ -70,11 +70,25 @@
   };
 
   function say(text) { status.textContent = text; }
+  // overall progress (docs/design/console-loading-states.md): every byte is hashed once and uploaded once, so the work is
+  // twice the folder's size; `before` counts the work of the files already done, `current` the file in hand
+  var bar = document.getElementById("up-progress"), total = 0, before = 0, current = 0;
+  function progress(phase, bytes) {
+    if (!bar || !total) return;
+    var pct = Math.min(100, Math.floor(100 * (before + (phase === "upload" ? current : 0) + bytes) / (2 * total)));
+    bar.hidden = false;
+    bar.value = pct;
+    bar.setAttribute("aria-valuetext", pct + "% done");
+    var b = document.querySelector("#up-start .busy-label");
+    if (b) b.textContent = (phase === "upload" ? "Uploading… " : "Hashing… ") + pct + "%";
+  }
+  function announce(text) { if (window.OarbankUI && window.OarbankUI.announce) window.OarbankUI.announce(text); }
 
   async function hashFile(file) {
     var h = new Sha256();
     for (var off = 0; off < file.size; off += CHUNK) {
       h.update(new Uint8Array(await file.slice(off, off + CHUNK).arrayBuffer()));
+      progress("hash", Math.min(file.size, off + CHUNK));
     }
     return h.hex();
   }
@@ -97,6 +111,7 @@
           offset = Number(p.headers.get("upload-offset"));
           st.complete = p.headers.get("upload-complete") === "1";
           say(label + ": " + Math.round(100 * offset / Math.max(file.size, 1)) + "%");
+          progress("upload", offset);
         }
         return;
       } catch (e) {
@@ -107,20 +122,40 @@
     throw new Error(label + ": upload failed");
   }
 
-  document.getElementById("up-start").addEventListener("click", async function () {
+  var start = document.getElementById("up-start"), ui = window.OarbankUI;
+  start.addEventListener("click", async function () {
     var files = Array.prototype.slice.call(document.getElementById("up-files").files);
     var kind = document.getElementById("up-kind").value.trim();
     if (!files.length || !kind) { say("pick a folder and a kind"); return; }
     var module = document.getElementById("up-module").value, entries = [];
     var top = (files[0].webkitRelativePath || files[0].name).split("/")[0];
-    for (var i = 0; i < files.length; i++) {
-      var f = files[i], rel = (f.webkitRelativePath || f.name).split("/").slice(1).join("/") || f.name;
-      var label = rel + " (" + (i + 1) + "/" + files.length + ")";
-      say(label + ": hashing");
-      var digest = await hashFile(f);
-      await upload(f, digest, label);
-      entries.push({path: rel, digest: digest, size: f.size});
+    var err = document.getElementById("up-error");
+    if (err) err.hidden = true;
+    total = files.reduce(function (n, f) { return n + f.size; }, 0); before = 0;
+    if (ui) ui.busy(start, "Hashing…");
+    announce("Hashing and uploading " + files.length + (files.length === 1 ? " file." : " files."));
+    try {
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i], rel = (f.webkitRelativePath || f.name).split("/").slice(1).join("/") || f.name;
+        var label = rel + " (" + (i + 1) + "/" + files.length + ")";
+        say(label + ": hashing");
+        current = f.size;
+        var digest = await hashFile(f);
+        await upload(f, digest, label);
+        before += 2 * f.size;
+        current = 0;
+        progress("upload", 0);
+        entries.push({path: rel, digest: digest, size: f.size});
+      }
+    } catch (e) {
+      // an interrupted upload resumes where it stopped (the coordinator keeps the offset): Retry continues
+      say("");
+      if (err) { err.hidden = false; err.querySelector("span").textContent = e.message + ". Nothing was registered; Retry continues where it stopped."; }
+      if (ui) ui.idle(start);
+      return;
     }
+    if (ui) ui.idle(start);
+    announce(files.length + (files.length === 1 ? " file" : " files") + " uploaded. Review and register the dataset.");
     var id = document.getElementById("up-id").value.trim() || (kind + ":" + top.replace(/[^A-Za-z0-9_.+-]+/g, "-"));
     var params = {dataset_id: id, kind: kind, files: entries};
     if (module) params.module = module;
@@ -129,5 +164,9 @@
     // from a module page's upload link: once registered, go on to the module's importer for this dataset
     if (root.dataset.next) params_el.form.querySelector('input[name="return_to"]').value = root.dataset.next + "&dataset=" + encodeURIComponent(id);
     say(files.length + " files uploaded: review and register the dataset");
+    var reg = params_el.form.querySelector("button");
+    if (reg) reg.focus();                       // the next step, now that the upload is done
   });
+  var retry = document.querySelector("#up-error button");
+  if (retry) retry.addEventListener("click", function () { start.click(); });
 })();

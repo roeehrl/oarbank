@@ -723,3 +723,136 @@ fn all_days_and_full_day() {
     // a UTC offset moves the local day: 23:30 UTC Friday is 01:30 Saturday at +2 h
     assert!(Schedule::new(Some(&[5]), 60, 120).contains_unix(at(10, 2, 23, 30), 7200));
 }
+
+// ---- the honest memory budget: never more than the machine has available now
+
+/// A node as the fleet reported it on 2026-10-10: RAM, cores, os_reserve (policy_for), memory in use, presence.
+fn fleet_node(ram: f64, perf: i64, eff: i64, os_reserve: f64, used: f64, present: bool) -> CapacityInputs {
+    let policy = Policy::from_json(Some(&json!({"os_reserve_gb": os_reserve})), &Policy::default());
+    let mut i = CapacityInputs::new(ram, perf, eff, policy, Limits::uncapped());
+    i.available_gb = Some(ram - used);
+    i.mem_margin_gb = CapacityModel::mem_margin_gb(ram, 12.0);
+    i.user_present = present;
+    i
+}
+
+#[test]
+fn the_budget_never_exceeds_what_is_available() {
+    // a desktop, 12P + 4E, 64 GB with 46.1 GB in use and someone at it: the reserves alone said 50 GB
+    let studio = CapacityModel::compute(&fleet_node(64.0, 12, 4, 6.0, 46.1, true));
+    assert_eq!(studio.mem_budget_reserve_gb, 50.0);
+    assert!((studio.mem_margin_gb - 8.68).abs() < 1e-9);
+    assert!((studio.host_budget_gb - 9.22).abs() < 1e-9, "{studio:?}");
+    assert_eq!(studio.mem_binding, "in_use");
+    assert!((studio.mem_in_use_gb.unwrap() - 46.1).abs() < 1e-9);
+    assert_eq!((studio.cpu_slots, studio.idle_cpu_slots, studio.mem_slots, studio.slots), (2, 14, 6, 2));
+    assert!(studio.user_present);
+
+    // a laptop, 6P + 12E, 128 GB, 47.9 GB in use, a Screen Sharing session counting as present
+    let mbp = CapacityModel::compute(&fleet_node(128.0, 6, 12, 8.0, 47.9, true));
+    assert_eq!(mbp.mem_budget_reserve_gb, 112.0);
+    assert!((mbp.host_budget_gb - 63.74).abs() < 1e-9 && mbp.mem_binding == "in_use");
+    assert_eq!((mbp.cpu_slots, mbp.idle_cpu_slots), (2, 12));
+
+    // two small desktops, 5P + 10E, 24 GB, idle, with 16 and 19 GB in use: 10 CPU slots but memory for 2 and 0 jobs
+    let mini_a = CapacityModel::compute(&fleet_node(24.0, 5, 10, 4.0, 16.0, false));
+    assert!((mini_a.host_budget_gb - 4.12).abs() < 1e-9);
+    assert_eq!((mini_a.cpu_slots, mini_a.mem_slots, mini_a.slots), (10, 2, 2));
+    assert_eq!(mini_a.binding_limit, "memory_in_use");
+    let mini_b = CapacityModel::compute(&fleet_node(24.0, 5, 10, 4.0, 19.0, false));
+    assert!((mini_b.host_budget_gb - 1.12).abs() < 1e-9);
+    assert_eq!((mini_b.slots, mini_b.mem_gb_free > 1.0), (0, true));
+
+    // a Windows desktop, 8 cores (no Hyper-Threading), 15.8 GB, 7.3 GB in use: 11.8 GB by the reserves when idle,
+    // 3.8 GB while someone is at it (the reserve bound is the smaller then)
+    let pc = CapacityModel::compute(&fleet_node(15.8, 8, 0, 4.0, 7.3, false));
+    assert!((pc.host_budget_gb - 5.604).abs() < 1e-9 && pc.mem_binding == "in_use");
+    assert_eq!((pc.cpu_slots, pc.slots), (8, 3));
+    let pc_present = CapacityModel::compute(&fleet_node(15.8, 8, 0, 4.0, 7.3, true));
+    assert!((pc_present.host_budget_gb - 3.8).abs() < 1e-9 && pc_present.mem_binding == "reserve");
+    assert_eq!((pc_present.cpu_slots, pc_present.slots), (2, 2));
+}
+
+#[test]
+fn the_fleets_own_resident_memory_is_not_counted_twice() {
+    // two jobs reserved 4 GB each and hold 3 GB each: they are in use, yet already charged through used_mem_gb
+    let mut i = fleet_node(64.0, 12, 4, 6.0, 40.0, false);
+    i.used_mem_gb = 8.0;
+    i.fleet_rss_gb = 6.0;
+    i.fleet_resident_gb = 6.0;
+    let c = CapacityModel::compute(&i);
+    // in use: 24 available + 6 resident − 8.68 = 21.32; free for new jobs: 21.32 − 8 = 13.32 (the 2 GB the jobs have
+    // yet to touch stays set aside)
+    assert!((c.host_budget_gb - 21.32).abs() < 1e-9 && c.mem_binding == "in_use");
+    assert!((c.mem_gb_free - 13.32).abs() < 1e-9);
+    assert!((c.mem_in_use_gb.unwrap() - 34.0).abs() < 1e-9); // 40 used − 6 the fleet's
+    // a job over its reservation earns no credit for the excess: resident is capped at each reservation
+    let mut over = i.clone();
+    over.fleet_rss_gb = 10.0;
+    over.available_gb = Some(20.0);
+    let o = CapacityModel::compute(&over);
+    assert!((o.host_budget_gb - 17.32).abs() < 1e-9);
+}
+
+#[test]
+fn which_bound_binds() {
+    // plenty available and someone present: the reserves bind, exactly as before
+    let quiet = CapacityModel::compute(&fleet_node(64.0, 12, 4, 6.0, 3.0, true));
+    assert_eq!((quiet.host_budget_gb, quiet.mem_binding.as_str()), (50.0, "reserve"));
+    assert!((quiet.mem_budget_in_use_gb.unwrap() - 52.32).abs() < 1e-9);
+    // nobody present: 64 − 8 in use − the margin (the guard's 12 % plus 1 GB) is below the 58 GB the reserves allow,
+    // so a busy Mac's own use binds long before the reserves do
+    let idle = CapacityModel::compute(&fleet_node(64.0, 12, 4, 6.0, 8.0, false));
+    assert!((idle.host_budget_gb - 47.32).abs() < 1e-9 && idle.mem_binding == "in_use");
+    // not measured: the reserves alone (no in-use figure)
+    let mut unmeasured = fleet_node(64.0, 12, 4, 6.0, 8.0, false);
+    unmeasured.available_gb = None;
+    let u = CapacityModel::compute(&unmeasured);
+    assert_eq!((u.host_budget_gb, u.mem_budget_in_use_gb, u.mem_in_use_gb), (58.0, None, None));
+    // the owner can switch the in-use bound off: the reserves alone (the memory guard still holds admission at its floor)
+    let mut off = fleet_node(64.0, 12, 4, 6.0, 46.1, false);
+    off.policy = Policy::from_json(Some(&json!({"mem_in_use_bound": false})), &off.policy);
+    let o = CapacityModel::compute(&off);
+    assert_eq!((o.host_budget_gb, o.mem_binding.as_str(), o.mem_budget_in_use_gb), (58.0, "reserve", None));
+    assert!((o.mem_in_use_gb.unwrap() - 46.1).abs() < 1e-9);
+    // the owner's cap binds below both
+    let mut capped = fleet_node(64.0, 12, 4, 6.0, 46.1, false);
+    capped.limits.mem_gb = Some(4.0);
+    let c = CapacityModel::compute(&capped);
+    assert_eq!((c.host_budget_gb, c.mem_binding.as_str()), (4.0, "cap"));
+    // the heartbeat names the bound and both figures
+    let j = CapacityModel::compute(&fleet_node(64.0, 12, 4, 6.0, 46.1, true)).to_json();
+    assert_eq!(j["mem_binding"], json!("in_use"));
+    assert_eq!((j["host_budget_gb"].clone(), j["mem_budget_reserve_gb"].clone()), (json!(9.22), json!(50.0)));
+    assert_eq!((j["mem_budget_in_use_gb"].clone(), j["mem_in_use_gb"].clone()), (json!(9.22), json!(46.1)));
+    assert_eq!((j["user_present"].clone(), j["idle_cpu_slots"].clone(), j["cpu_slots"].clone()), (json!(true), json!(14), json!(2)));
+    assert_eq!(j["mem_gb_free"], json!(9.22));
+}
+
+/// S19 for the in-use bound: less available memory never yields a larger allowance, and the budget never exceeds
+/// what is available plus the fleet's own resident memory.
+#[test]
+fn less_available_memory_never_enlarges_the_allowance() {
+    let mut rng = SeededRandom::new(1010);
+    for _ in 0..2000 {
+        let ram = rng.int(8, 128) as f64;
+        let mut i = fleet_node(ram, rng.int(2, 16), rng.int(0, 12), rng.uniform(2.0, 8.0), rng.uniform(0.0, ram), rng.boolean());
+        i.fleet_resident_gb = rng.uniform(0.0, 4.0);
+        i.used_mem_gb = i.fleet_resident_gb + rng.uniform(0.0, 4.0);
+        let c = CapacityModel::compute(&i);
+        assert!(c.host_budget_gb <= i.available_gb.unwrap() + i.fleet_resident_gb - i.mem_margin_gb + 1e-9);
+        assert!(c.host_budget_gb <= c.mem_budget_reserve_gb + 1e-9);
+        let mut worse = i.clone();
+        worse.available_gb = Some((i.available_gb.unwrap() - rng.uniform(0.0, 8.0)).max(0.0));
+        let w = CapacityModel::compute(&worse);
+        assert!(w.mem_gb_free <= c.mem_gb_free + 1e-9 && w.slots <= c.slots && w.host_budget_gb <= c.host_budget_gb + 1e-9);
+    }
+}
+
+#[test]
+fn policy_reads_screen_sharing_present() {
+    assert!(Policy::default().screen_sharing_present);
+    let p = Policy::from_json(Some(&json!({"screen_sharing_present": false})), &Policy::default());
+    assert!(!p.screen_sharing_present);
+    assert!(!Policy::from_json(Some(&json!({"screen_sharing_present": "no"})), &p).screen_sharing_present);
+}

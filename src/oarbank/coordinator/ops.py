@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from ..common import canonical_json
 from ..contracts import operations as registry
-from . import audit, clock, core, effects, placement, protection, releases
+from . import audit, clock, core, effects, placement, protection, releases, settings
 from .db import DB, jl
 
 PLAN_TTL_S = 1800
@@ -68,6 +68,14 @@ class Handler:
     prepare: Callable[[DB, "OpRequest"], Any] | None = None   # outside the transaction (module IPC); result in req.prepared
     name: Callable[[DB, OpRequest], str] = lambda db, r: str(r.target)  # what a T3 confirmation must type
     target: Callable[[DB, OpRequest], None] | None = None   # checks the target's form (normalizing it) before anything reads it
+    tier: Callable[[OpRequest], str] | None = None   # the request's own tier when it depends on what it changes (settings.apply)
+
+
+def tier_of(req: OpRequest) -> str:
+    """The friction tier of this request: the registry's, or the handler's own for an operation whose tier follows
+    what it changes (settings.apply: each key's danger tier and scope)."""
+    h = HANDLERS.get(req.op)
+    return h.tier(req) if h is not None and h.tier is not None else registry.REGISTRY[req.op].tier
 
 
 HANDLERS: dict[str, Handler] = {}
@@ -107,8 +115,8 @@ def _make_plan(db: DB, req: OpRequest, h: Handler, impact: dict | None = None) -
          (pid, req.op, json.dumps({"target": req.target, "params": req.params}), json.dumps(vers), json.dumps(impact, default=str),
           req.actor, now, now + PLAN_TTL_S))
     return {"plan_id": pid, "op": req.op, "target": req.target, "params": req.params, "impact": impact,
-            "versions": vers, "expires_at": now + PLAN_TTL_S, "tier": registry.REGISTRY[req.op].tier,
-            "confirm_required": registry.REGISTRY[req.op].tier == "T3", "confirm_name": h.name(db, req)}
+            "versions": vers, "expires_at": now + PLAN_TTL_S, "tier": tier_of(req),
+            "confirm_required": tier_of(req) == "T3", "confirm_name": h.name(db, req)}
 
 
 # ------------------------------------------------------------------ execution
@@ -149,18 +157,20 @@ ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 
 
 def _execute(db: DB, req: OpRequest, op: registry.Operation, h: Handler) -> dict:
-    tier = op.tier
+    tier = tier_of(req)
     if req.role is not None and ROLE_RANK.get(req.role, -1) < ROLE_RANK[op.min_role]:
         raise OpError(403, "forbidden_role", f"{req.op} needs the {op.min_role} role; {req.actor} is {req.role}")
     if req.scope:
         mod = req.scope.split(":", 1)[1] if req.scope.startswith("module:") else ""
         if not mod or not req.op.startswith(f"mod.{mod.replace('-', '_')}."):
             raise OpError(403, "token_scope", f"this token may run only {req.scope}'s own operations, not {req.op}")
-    if req.secret is not None and (req.op != SECRET_OP or req.dry_run or req.plan_id):
-        raise OpError(400, "secret_not_accepted", f"only {SECRET_OP} takes a secret value, and never as a preview or a plan")
+    if req.secret is not None and (req.op not in SECRET_OPS or req.dry_run or req.plan_id):
+        raise OpError(400, "secret_not_accepted", f"only {' and '.join(SECRET_OPS)} take a secret value, and never as a "
+                      "preview or a plan")
     req.payload = req.payload_hash()          # of the request as sent (handlers may fill in the target)
-    # reason policy
-    if op.reason_policy == "required" and not (req.reason and req.reason.strip()) and not req.dry_run:
+    # reason policy (from the request's tier: a settings change set may be T0 on a node and T2 for the fleet)
+    reason_policy = op.reason if op.reason and tier == op.tier else registry.DEFAULT_REASON[tier]
+    if reason_policy == "required" and not (req.reason and req.reason.strip()) and not req.dry_run:
         raise OpError(400, "reason_required", f"{req.op} ({tier}) needs a reason")
     # idempotency for creations
     ikey = None
@@ -201,6 +211,10 @@ def _execute(db: DB, req: OpRequest, op: registry.Operation, h: Handler) -> dict
         planned = json.loads(plan_row["request_json"])
         req.target, req.params = planned["target"], planned["params"]
         req.plan_impact = json.loads(plan_row["impact_json"] or "{}")
+        if h.tier is not None:                # the planned change decides the tier, and so the reason and confirmation
+            tier = tier_of(req)
+            if registry.DEFAULT_REASON[tier] == "required" and not (req.reason and req.reason.strip()):
+                raise OpError(400, "reason_required", f"{req.op} ({tier}) needs a reason")
         if tier == "T3" and (req.confirm or "") != h.name(db, req):
             raise OpError(400, "confirmation_required", f"type the name {h.name(db, req)!r} to confirm")
     try:
@@ -289,11 +303,8 @@ def _node(db, nid):
 
 
 def _node_snap(db, req):
-    n = db.one("SELECT node_id, hostname, lifecycle, desired_state, limits_json, policy_json, quarantine_reason, want_doctor "
-               "FROM nodes WHERE node_id=? OR hostname=?", (req.target, req.target))
-    if not n:
-        return None
-    return {**n, "limits_json": jl(n["limits_json"], {}), "policy_json": jl(n["policy_json"], {})}
+    return db.one("SELECT node_id, hostname, lifecycle, desired_state, settings_rev, quarantine_reason, want_doctor "
+                  "FROM nodes WHERE node_id=? OR hostname=?", (req.target, req.target))
 
 
 def _nid(db, req):
@@ -313,18 +324,18 @@ def _campaign_snap(db, req):
 
 
 def _setting_snap(key):
-    return lambda db, req: {key: db.get_setting(key)}
+    return lambda db, req: {key: db.get_state(key)}
 
 
 # ------------------------------------------------------------------ fleet
 
 def _fleet_snap(db, req):
-    return {"fleet_state": db.get_setting("fleet_state", "active")}
+    return {"fleet_state": db.get_state("fleet_state", "active")}
 
 
 def _set_fleet(state):
     def apply(db, req):
-        db.set_setting("fleet_state", state)
+        db.set_state("fleet_state", state)
         n = 0
         if state == "halted":
             for a in db.q("SELECT attempt_id, node_id FROM attempts WHERE state='live'"):
@@ -368,20 +379,6 @@ def _state_handler(desired):
 for _op, _st in (("nodes.pause", "paused"), ("nodes.resume", "active"), ("nodes.drain", "draining")):
     HANDLERS[_op] = Handler(target_type="node", apply=_state_handler(_st), snapshot=_node_snap,
                             impact=lambda db, r: {"live_attempts": _live_on(db, _nid(db, r))})
-
-
-@handler("nodes.set_caps", target_type="node", snapshot=_node_snap,
-         versions=lambda db, r: [f"node:{_nid(db, r)}:limits"],
-         impact=lambda db, r: {"live_attempts": _live_on(db, _nid(db, r)), "patch": r.params})
-def _caps(db, req):
-    return core.set_limits(db, _nid(db, req), req.params.get("patch") or {}, req.actor,
-                           clear_all=bool(req.params.get("clear_all")))
-
-
-@handler("nodes.set_policy", target_type="node", snapshot=_node_snap,
-         versions=lambda db, r: [f"node:{_nid(db, r)}:policy"])
-def _policy(db, req):
-    return core.set_policy(db, _nid(db, req), req.params.get("patch") or {}, req.actor)
 
 
 @handler("nodes.quarantine", target_type="node", snapshot=_node_snap,
@@ -431,92 +428,83 @@ def _retire(db, req):
     return {"lifecycle": "retired", "pinned_jobs_cancelled": len(pinned)}
 
 
-# ------------------------------------------------------------------ protection
+# ------------------------------------------------------------------ protection (on the settings chain)
 
-def _prot_keys(db, r):
-    nid = _nid(db, r)
-    return [protection.resource_key(nid), f"node:{nid}:policy"]
+def _prot_scope(db, req) -> tuple[str, str]:
+    try:
+        return protection.scope_of(db, req.target)
+    except protection.ProtectionError as e:
+        raise core.ApiError(404, "not_found", str(e))
 
 
 def _prot_config(db, req) -> dict:
     cfg = req.params.get("config")
     if cfg is None:
-        raise core.ApiError(400, "missing_config", "params.config: the full protection section")
+        raise core.ApiError(400, "missing_config", "params.config: the scope's own protection section")
+    scope, sid = _prot_scope(db, req)
     try:
-        return protection.validate(cfg, protection.node_os(db, _nid(db, req)))
+        return protection.validate(cfg, protection.node_os(db, sid) if scope == "node" else None)
     except protection.ProtectionError as e:
         raise core.ApiError(422, "bad_protection", str(e))
 
 
-def _prot_version(db, req) -> dict:
-    nid = _nid(db, req)
+def _prot_changes(db, req) -> list:
+    from .settings import resolve as V
+    scope, sid = _prot_scope(db, req)
+    changes = protection.changes_for(V.snapshot(db), scope, sid, _prot_config(db, req))
+    if not changes:
+        raise core.ApiError(409, "no_change", "the section is what this scope already sets")
+    return changes
+
+
+def _prot_impact(db, req) -> dict:
+    out = _settings(lambda: settings.apply.plan(db, _prot_changes(db, req)))
+    scope, sid = _prot_scope(db, req)
+    if scope == "node":
+        try:
+            out.update({k: v for k, v in protection.preview(db, sid, _prot_config(db, req)).items() if k != "node_id"})
+        except protection.ProtectionError as e:
+            raise core.ApiError(422, "bad_protection", str(e))
+    return out
+
+
+def _prot_snap(db, req):
+    from .settings import resolve as V
     try:
-        v = int(req.params.get("version"))
-    except (TypeError, ValueError):
-        raise core.ApiError(400, "missing_version", "params.version")
-    r = db.one("SELECT config_json FROM protection_versions WHERE node_id=? AND version=?", (nid, v))
-    if not r:
-        raise core.ApiError(404, "not_found", f"protection version {v} of {nid}")
-    return json.loads(r["config_json"])
+        scope, sid = protection.scope_of(db, req.target)
+    except protection.ProtectionError:
+        return None
+    return {"scope": scope, "scope_id": sid, "own": protection.own(V.snapshot(db), scope, sid)}
 
 
-@handler("protection.rules.update", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: protection.preview(db, _nid(db, r), _prot_config(db, r)))
+@handler("protection.rules.update", target_type="protection", snapshot=_prot_snap, versions=lambda db, r: ["settings"],
+         impact=_prot_impact, name=lambda db, r: str(r.target))
 def _prot_update(db, req):
-    v = protection.write_version(db, _nid(db, req), _prot_config(db, req), req.actor, req.reason)
-    return {"version": v}
+    """A scope's own protection section (a node, `fleet` or `group:<group>`): its rules, node section and mode, as one
+    settings change set; the node's effective section is every scope's rules together (docs/design/settings.md,
+    "Protection on the chain")."""
+    scope, _ = _prot_scope(db, req)
+    if scope != "node" and req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"fleet or group protection needs the admin role; {req.actor} is {req.role}")
+    return _settings(lambda: settings.apply.commit(db, _prot_changes(db, req), req.actor, req.reason))
 
 
-@handler("protection.rules.restore", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: {**protection.preview(db, _nid(db, r), _prot_version(db, r)), "restores": r.params.get("version")})
-def _prot_restore(db, req):
-    v = protection.write_version(db, _nid(db, req), _prot_version(db, req), req.actor, req.reason,
-                                 source=f"rules.restore:{req.params.get('version')}")
-    return {"version": v, "restored": int(req.params["version"])}
+def _mode_impact(db, r):
+    from .settings import resolve as V
+    nid = _nid(db, r)
+    res = V.resolve(V.snapshot(db), _node(db, nid), "protection.mode")
+    return {"mode": {"from": res["value"], "to": r.params.get("mode"), "now_from": V.badge(res)},
+            "live_attempts": _live_on(db, nid)}
 
 
-def _canary_impact(db, r):
-    if r.params.get("promote"):
-        h = protection.canary_health(db)
-        c = db.get_setting(protection.CANARY_KEY)
-        targets, skipped = protection.promote_targets(db, c) if c else ([], {})
-        return {**h, "targets": targets, "skipped": skipped}
-    return {**protection.preview(db, _nid(db, r), _prot_config(db, r)), "canary": True,
-            "then": "promote after a clean soak of %d s" % protection.CANARY_MIN_SOAK_S}
-
-
-def _canary_target(db, req):
-    """Promoting names no node: the running canary's node is the target."""
-    if req.params.get("promote"):
-        c = db.get_setting(protection.CANARY_KEY)
-        if not c:
-            raise OpError(409, "no_canary", "no protection canary is running: oarbank protection canary <node> <file>")
-        req.target = c["node_id"]
-
-
-@handler("protection.rules.canary", target_type="node", impact=_canary_impact, target=_canary_target,
-         snapshot=lambda db, r: {"canary": db.get_setting(protection.CANARY_KEY)})
-def _prot_canary(db, req):
-    try:
-        if req.params.get("promote"):
-            return protection.promote(db, req.actor, req.reason, force=bool(req.params.get("force")))
-        c = protection.start_canary(db, _nid(db, req), _prot_config(db, req), req.actor, req.reason)
-        return {k: v for k, v in c.items() if k != "config"}
-    except protection.ProtectionError as e:
-        raise core.ApiError(409, "canary_not_promotable", str(e))
-
-
-@handler("nodes.set_mode", target_type="node", snapshot=_node_snap, versions=_prot_keys,
-         impact=lambda db, r: {"mode": {"from": ((protection.current(db, _nid(db, r))[1].get("node") or {}).get("mode")),
-                                        "to": r.params.get("mode")}, "live_attempts": _live_on(db, _nid(db, r))})
+@handler("nodes.set_mode", target_type="node", snapshot=lambda db, r: _prot_snap(db, r), versions=lambda db, r: ["settings"],
+         impact=_mode_impact)
 def _set_mode(db, req):
+    """This node's own protection mode (protection.mode at node scope; a lock above refuses it)."""
     mode = req.params.get("mode")
     if mode not in ("fleet_first", "moderate", "strict_yield"):
         raise core.ApiError(400, "bad_mode", f"{mode!r}: fleet_first | moderate | strict_yield")
-    try:
-        return {"version": protection.set_mode(db, _nid(db, req), mode, req.actor, req.reason)}
-    except protection.ProtectionError as e:
-        raise core.ApiError(422, "bad_protection", str(e))
+    return _settings(lambda: protection.set_mode(db, _nid(db, req), mode, req.actor, req.reason))
 
 
 @handler("protection.probe_now", target_type="node", snapshot=_node_snap)
@@ -716,8 +704,8 @@ def _register_dataset(db, req):
 # is refused with the form it does take, never misread as a module name.
 
 def _module_name(db, req):
-    """Operations on a module, whatever version runs (rollback, disable, set_pipeline, restart_host, check, verify,
-    cli_token): the target is its name."""
+    """Operations on a module, whatever version runs (rollback, disable, restart_host, check, verify, cli_token): the
+    target is its name."""
     t = req.target or ""
     if "@" in t:
         n = t.split("@", 1)[0]
@@ -747,13 +735,6 @@ def _module_canary(db, req):
     if v and v != canary:
         raise OpError(409, "not_canary", f"{n}'s canary is {canary}, not {v}: promote {n} or {n}@{canary}")
     req.target = n
-
-
-@handler("modules.set_pipeline", target_type="module", target=_module_name, snapshot=lambda db, r: {"pipeline": db.get_setting(f"pipeline:{r.target}", "single")},
-         impact=lambda db, r: {"pending_eval_jobs": db.one("SELECT COUNT(*) n FROM jobs WHERE module=? AND kind='eval' "
-                                                           "AND state='pending' AND depends_on IS NULL AND stage IS NULL", (r.target,))["n"]})
-def _pipeline(db, req):
-    return core.set_pipeline(db, req.target, req.params["mode"], req.actor)
 
 
 @handler("modules.restart_host", target_type="module", target=_module_name)
@@ -847,6 +828,8 @@ def _uninstall(db, req):
     if not r:
         raise core.ApiError(404, "not_found", f"{n} {v}")
     db.x("DELETE FROM modules WHERE name=? AND version=?", (n, v))
+    from .settings import modkeys
+    modkeys.register(db, n, req.actor)         # the registered version may have been this one (or the last one)
     import shutil
     shutil.rmtree(r["path"], ignore_errors=True)
     db.event("module_uninstalled", actor=req.actor, reason=f"{n} {v}", module=n)
@@ -861,14 +844,14 @@ def _mverify(db, req):
 
 
 def _approve_impact(db, r):
-    from . import modsandbox, platforms
+    from . import modsandbox, tools
     n, v = _name_ver(r)
     st = modsandbox.status(db, n, v)
     return {"module": f"{n} {v}", "grants": modsandbox.describe(st["requests"]),
             "net": (st["requests"].get("net") or {}).get("mode", "none"),
             "allow": (st["requests"].get("net") or {}).get("allow") or [],
-            "tools": {t["id"]: {"trust": t["trust"], "paths": ((platforms.tool_registry(db).get(t["id"]) or {}).get("paths") or {})}
-                      for t in st["requests"].get("tools") or []},
+            "tools": {t["id"]: {"trust": t["trust"], "version": t.get("version"), "arch": t.get("arch") or "any",
+                                "defined": t["id"] in tools.definitions(db)} for t in st["requests"].get("tools") or []},
             "gpu": (st["requests"].get("devices") or {}).get("gpu", "none"),
             "exec_writable": bool(st["requests"].get("exec_writable")),
             "containers": [f"{c['image']} ({c['platform']})" for c in st["requests"].get("containers") or []],
@@ -904,25 +887,41 @@ def _enable(db, req):
     def fn(db, req):
         from . import modstore
         n, v = _name_ver(req)
-        ch = modstore.enable(db, n, v)
+        ch = modstore.enable(db, n, v, req.actor)
         db.event("module_enabled", actor=req.actor, reason=f"{n} {ch['current']}", module=n)
         req.target = n
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 
 
+def _canary_nodes(db, req) -> list[str]:
+    """The canary's nodes: `nodes` by name or id, and the members of `group` now (a group canary takes the group's
+    members when it starts; docs/design/settings.md, "Canary to a group")."""
+    nodes = [core_node_id(db, x) for x in (req.params.get("nodes") or [])]
+    if req.params.get("group"):
+        from .settings import bulk
+        nodes += [n["node_id"] for n in _groups(lambda: bulk.select_nodes(db, group=req.params["group"]))]
+        if not nodes:
+            raise OpError(409, "empty_group", f"the group {req.params['group']} has no members to canary on")
+    return list(dict.fromkeys(nodes))
+
+
 @handler("modules.enable_canary", target_type="module", target=_module_version, atomic=False, snapshot=_channel_snap,
-         impact=lambda db, r: {"canary": _name_ver(r), "nodes": r.params.get("nodes") or [],
+         impact=lambda db, r: {"canary": _name_ver(r), "group": r.params.get("group"),
+                               "nodes": [_names(db).get(x, x) for x in _canary_nodes(db, r)],
                                "then": "the canary nodes install it, re-doctor and re-certify on its goldens; promote when they pass"})
 def _canary(db, req):
     def fn(db, req):
         from . import modstore
         n, v = _name_ver(req)
-        nodes = [core_node_id(db, x) for x in (req.params.get("nodes") or [])]
+        nodes = _canary_nodes(db, req)
         ch = modstore.canary(db, n, v, nodes)
-        db.event("module_canary", actor=req.actor, reason=f"{n} {v} on {', '.join(nodes)}", module=n)
+        names = _names(db)
+        on = (f"the group {req.params['group']} ({', '.join(names.get(x, x) for x in nodes)})" if req.params.get("group")
+              else ", ".join(names.get(x, x) for x in nodes))
+        db.event("module_canary", actor=req.actor, reason=f"{n} {v} on {on}", module=n)
         req.target = n
-        return {"channel": ch}
+        return {"channel": ch, "group": req.params.get("group")}
     return _lifecycle(fn)(db, req)
 
 
@@ -986,12 +985,8 @@ def _mrollback(db, req):
 def _disable(db, req):
     def fn(db, req):
         from . import modstore
-        ch = modstore.disable(db, req.target)
-        for a in db.q("SELECT a.attempt_id, a.node_id FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
-                      "WHERE a.state='live' AND j.module=?", (req.target,)):
-            core._end_attempt(db, a["attempt_id"], "released", "module_disabled", count_failure=False)
-            core._push(db, a["node_id"], "revoke", a["attempt_id"])
-        db.event("module_disabled", actor=req.actor, reason=req.target, module=req.target)
+        # the fleet's [module] enabled off: the change set's effects release its live attempts and record the event
+        ch = modstore.disable(db, req.target, req.actor, req.reason)
         return {"channel": ch}
     return _lifecycle(fn)(db, req)
 
@@ -1042,13 +1037,16 @@ def _prepare_impact(db, r):
                   "AND lifecycle!='retired'", (t, t))
     facts = jl(node["facts_json"], {}) if node else {}
     plat = platforms.node_platform(dict(node)) if node else None
-    return {"target": t, "kind": "enrolled node: its agent installs the standby coordinator" if node else "a host you start by hand",
+    return {"target": t, "kind": "enrolled node: its agent fetches and verifies the standby coordinator; its system service is "
+                    "installed as root on the target (a node's agent is unprivileged: it names the command)" if node
+                    else "a host where you install the standby as root (install-oarbankd.sh --pair)",
             "target_stable_id": node["ts_node_id"] if node else None,
             "target_platform": plat or "reported by the standby when it pairs",
             "blocking_modules": modlife.platform_blockers(db, plat) or "none",
             "warnings": [w for w in (
-                "the target has FileVault on and no auto-login: after a power loss it serves nothing until someone logs in"
-                if facts.get("filevault") == "on" and not facts.get("autologin") else None,
+                "the target has FileVault on: after a power loss it serves nothing until someone unlocks its disk at the Mac "
+                "(restarts with `fdesetup authrestart`, and macOS updates that unlock the disk, come back by themselves)"
+                if facts.get("filevault") == "on" else None,
                 "this coordinator's checkout has uncommitted changes: the bundle installed on the target carries tracked "
                 "files as they are on disk and no untracked ones (commit first)" if node and _bundle_dirty() else None) if w],
             "this_coordinator": {"fingerprint": identity.key(coordmove.home(db)).fingerprint[:16], "epoch": identity.epoch(db)},
@@ -1354,9 +1352,26 @@ def core_node_id(db, x: str) -> str:
 
 @handler("releases.build", target_type="release", atomic=False)
 def _build(db, req):
-    out = releases.build(db)
-    req.target = out.get("release_id")
-    return out
+    """Build every fleet platform's release (and the canary and pinned nodes' own), as a module change does. Nothing
+    to build while no module is enabled: a release is the bundle of the enabled modules."""
+    if not releases.any_module_enabled(db):
+        raise core.ApiError(409, "no_module_enabled", "No module is enabled, so there is no release to build. Install a "
+                            "module and enable it (Modules page, or `oarbank module enable <name>@<version>`): its release "
+                            "is then built for every platform in the fleet.")
+    out = releases.sync(db)
+    need = releases.signature_required(db)
+    rows = {r["release_id"]: r for r in db.q("SELECT release_id, status, sha256, signature, composition_json FROM releases "
+                                             "WHERE release_id IN "
+                                             f"({','.join('?' * len(out['defaults']))})", tuple(out["defaults"].values()))}
+    built = []
+    for plat, rid in out["defaults"].items():
+        r = rows[rid]
+        unsigned = need and not r["signature"]
+        built.append({"platform": plat, "release_id": rid, "status": r["status"], "sha256": r["sha256"], "needs_signature": unsigned,
+                      "modules": releases.contents(r["composition_json"]),
+                      **({"next": f"oarbank release sign {rid} --promote"} if unsigned or r["status"] != "current" else {})})
+    req.target = ",".join(out["defaults"].values())
+    return {"releases": built, "assigned": out["assigned"], "awaiting": releases.awaiting(db)}
 
 
 @handler("releases.attach_signature", target_type="release")
@@ -1384,69 +1399,474 @@ def _pin(db, req):
     from . import config as C
     if not C.RELEASE_SIGNING:
         raise core.ApiError(409, "feature_disabled", "release signing is disabled (OARBANK_RELEASE_SIGNING=1)")
-    cur = db.get_setting("release_pubkey")
+    cur = db.get_state("release_pubkey")
     pub = req.params["pubkey"]
     if cur and cur != pub and not req.params.get("rotate"):
         raise core.ApiError(409, "release_key_pinned", "a different release key is already pinned (rotate=true)")
     if len(base64.b64decode(pub)) != 32:
         raise core.ApiError(400, "bad_key", "expected a base64 raw Ed25519 public key")
-    db.set_setting("release_pubkey", pub)
+    db.set_state("release_pubkey", pub)
     db.event("release_key_set", actor=req.actor, reason="rotated" if cur and cur != pub else "pinned")
     return {"pinned": True}
 
 
 # ------------------------------------------------------------------ settings, audit
 
-@handler("settings.notifications.update", target_type="setting", snapshot=_setting_snap("ntfy"),
-         versions=lambda db, r: ["setting:ntfy"])
-def _ntfy(db, req):
-    p = req.params
-    db.set_setting("ntfy", {"url": (p.get("url") or "").strip() or None, "token": p.get("token") or None,
-                            "click_base": p.get("click_base") or None})
-    db.event("settings_changed", actor=req.actor, reason="ntfy")
-    return {"updated": "ntfy"}
-
-
-def _tools_impact(db, r):
-    from . import platforms
-    reg = platforms.tool_registry(db)
+def _settings(fn):
+    from .settings.apply import ApplyError
     try:
-        new = platforms.check_tool(r.target or "", r.params) if r.params.get("paths") else None
-    except ValueError as e:
+        return fn()
+    except ApplyError as e:
+        raise OpError(e.status, e.code, e.detail, extra={"errors": e.errors})
+
+
+def _settings_changes(req) -> list:
+    """The change set; an operator changes nodes, only an admin the fleet or a group (every node at once)."""
+    extra = set(req.params) - {"changes", "comment"}
+    if extra:
+        raise OpError(400, "bad_params", f"settings.apply takes changes and comment, not {sorted(extra)}")
+    changes = req.params.get("changes")
+    wide = [c for c in changes or [] if isinstance(c, dict) and c.get("scope") in ("fleet", "group")]
+    if wide and req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"a fleet or group setting needs the admin role; {req.actor} is {req.role}")
+    return changes
+
+
+def _settings_snap(db, req):
+    """Each changed row as it is (the audit's before and after): {scope:scope_id:module:key: {value, enforced} | None}."""
+    from .settings import store
+    out = {}
+    for c in req.params.get("changes") or []:
+        if isinstance(c, dict) and c.get("key"):
+            sid = c.get("scope_id") or ""
+            if c.get("scope") == "node":
+                n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (sid, sid))
+                sid = n["node_id"] if n else sid
+            x = store.row(db, c.get("scope") or "", sid, c.get("module") or "", c["key"])
+            out[f"{c.get('scope')}:{sid}:{c.get('module') or ''}:{c['key']}"] = \
+                {"value": x["value"], "enforced": bool(x["enforced"]), "rev": x["rev"]} if x else None
+    return out
+
+
+def _settings_confirm(db, req) -> str:
+    cs = [c for c in req.params.get("changes") or [] if isinstance(c, dict)]
+    return next((c.get("key") for c in cs if c.get("enforce")), None) or (cs[0].get("key") if cs else "") or ""
+
+
+@handler("settings.apply", target_type="setting", snapshot=_settings_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _settings(lambda: settings.apply.plan(db, _settings_changes(r))),
+         tier=lambda r: settings.bulk.tier(r.params.get("changes") if isinstance(r.params.get("changes"), list) else []),
+         name=_settings_confirm)
+def _settings_apply(db, req):
+    """A change set of owner settings (docs/design/settings.md): values set or reset at the fleet, a group or a node,
+    checked against the registry and the merged values on every node it reaches, written under one revision. Its tier
+    follows the keys and scopes it changes."""
+    changes = _settings_changes(req)
+    return _settings(lambda: settings.apply.commit(db, changes, req.actor, req.params.get("comment") or req.reason))
+
+
+def _import_text(req) -> str:
+    extra = set(req.params) - {"text", "comment"}
+    if extra:
+        raise OpError(400, "bad_params", f"settings.import takes text and comment, not {sorted(extra)}")
+    text = req.params.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise OpError(400, "bad_params", "text: the exported YAML file's content")
+    if len(text) > 4_000_000:
+        raise OpError(413, "too_large", "an import file is at most 4 MB")
+    return text
+
+
+def _import_impact(db, req) -> dict:
+    """The import's preview; the plan's tier follows what it changes (a new lock: T3), so the impact keeps it."""
+    from .settings import export
+    out = _settings(lambda: export.preview(db, _import_text(req)))
+    out = {k: v for k, v in out.items() if k != "_plan"}
+    req.plan_impact = out
+    return out
+
+
+def _import_tier(req) -> str:
+    t = (req.plan_impact or {}).get("_tier") or "T2"
+    return max(t, "T2", key=("T0", "T1", "T2", "T3").index)
+
+
+@handler("settings.import", target_type="setting", versions=lambda db, r: ["settings"], impact=_import_impact,
+         tier=_import_tier, name=lambda db, r: "import")
+def _settings_import(db, req):
+    """Settings as code (docs/design/settings.md, "Settings as code"): a file `oarbank settings export` wrote, applied
+    as one operation (groups, labels and tool definitions first, then the values as one change set). Only the
+    differences change; a key the file leaves out inherits."""
+    from .settings import export
+    _admin_only(req, "an import")
+    out = _settings(lambda: export.commit(db, _import_text(req), req.actor, req.params.get("comment") or req.reason))
+    if out.get("tools"):
+        _sync_releases(db)
+    return out
+
+
+# ------------------------------------------------------------------ groups, labels, bulk and canary (settings)
+
+def _groups(fn):
+    from .settings.bulk import BulkError
+    from .settings.groups import GroupError
+    try:
+        return fn()
+    except (GroupError, BulkError) as e:
+        raise OpError(e.status, e.code, e.detail)
+
+
+def _admin_only(req, what: str):
+    if req.role not in (None, "admin"):
+        raise OpError(403, "forbidden_role", f"{what} changes what every member node gets: it needs the admin role; "
+                                             f"{req.actor} is {req.role}")
+
+
+def _snap_as(db, groups=None, labels=None, drop_group: str | None = None):
+    """The settings snapshot with groups, labels or a deleted group's values swapped in (a group change's preview)."""
+    from .settings import resolve as V
+    s = V.snapshot(db)
+    if groups is not None:
+        s.groups = sorted(groups, key=lambda g: g["rank"])
+    if labels is not None:
+        s.labels = labels
+    if drop_group:
+        s.rows = {k: x for k, x in s.rows.items() if not (k[0] == "group" and k[1] == drop_group)}
+    return s
+
+
+def _group_after(db, req) -> tuple:
+    """(before, after, extra) for a group operation's preview and apply: the snapshots around the change."""
+    from .settings import groups as G, store as S
+    from .settings import resolve as V
+    before = V.snapshot(db)
+    gs = [dict(g) for g in S.groups(db)]
+    extra = {}
+    if req.op == "groups.create":
+        sp = G.spec(db, {**req.params, "name": req.params.get("name") or req.target})
+        gs.append({**sp, "rank": G.top_rank(db), "builtin": 0})
+        extra["group"] = f"{sp['name']} ({G.describe(sp, _names(db))}), ranked above every other owner group"
+        return before, _snap_as(db, groups=gs), extra
+    g = G.get_owner(db, req.target or "")
+    if req.op == "groups.update":
+        sp = G.spec(db, req.params, g)
+        gs = [{**x, **sp} if x["id"] == g["id"] else x for x in gs]
+        extra["group"] = f"{sp['name']}: {G.describe(sp, _names(db))}"
+        return before, _snap_as(db, groups=gs), extra
+    if req.op == "groups.rank":
+        order = G.reorder(db, g["id"], req.params.get("move"), req.params.get("order"))
+        ranks = {gid: S.OWNER_RANK_MIN + 10 * (len(order) - 1 - k) for k, gid in enumerate(order)}
+        gs = [{**x, "rank": ranks.get(x["id"], x["rank"])} for x in gs]
+        names = {x["id"]: x["name"] for x in gs}
+        extra["order"] = " > ".join(names[x] for x in order) + " (highest rank first: it wins where groups disagree)"
+        return before, _snap_as(db, groups=gs), extra
+    # groups.delete
+    vals = [k + (f" [{m}]" if m else "") for (sc, sid, m, k) in before.rows if sc == "group" and sid == g["id"]]
+    extra["values_deleted"] = vals or ["none"]
+    from . import modsecrets
+    extra["secrets_deleted"] = modsecrets.group_secret_names(db, g["id"]) or ["none"]
+    return before, _snap_as(db, groups=[x for x in gs if x["id"] != g["id"]], drop_group=g["id"]), extra
+
+
+def _names(db) -> dict:
+    return {n["node_id"]: n["hostname"] for n in db.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired'")}
+
+
+def _group_impact(db, req) -> dict:
+    from .settings import groups as G
+    before, after, extra = _group_after(db, req)
+    return G.impact(db, before, after, extra)
+
+
+def _group_snap(db, req):
+    from .settings import groups as G
+    g = G.find(db, req.target or "") if req.target else None
+    return {k: g[k] for k in ("id", "name", "rank", "selector", "members", "description")} if g else None
+
+
+def _group_commit(db, req, write) -> dict:
+    """Write a group change, then refresh every node whose effective settings moved (effects, statements, a new
+    settings revision for each)."""
+    from .settings import apply as A, groups as G, store as S
+    from .settings import resolve as V
+    before = V.snapshot(db)
+    out = write()
+    rev = S.next_rev(db)
+    imp = G.impact(db, before, V.snapshot(db))
+    touched = A.refresh(db, imp["_diff"], rev, statements=True)
+    db.event("groups_changed", actor=req.actor, reason=f"{req.op} {req.target}: {imp['summary']}"[:400], rev=rev,
+             joins=imp["joins"], leaves=imp["leaves"])
+    return {**(out or {}), "rev": rev, "nodes": touched, "joins": imp["joins"], "leaves": imp["leaves"],
+            "message": f"{req.op.split('.')[1].capitalize()} · rev {rev} · {imp['summary']}"}
+
+
+@handler("groups.create", target_type="group", snapshot=_group_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)))
+def _groups_create(db, req):
+    """An owner group: a name, a selector over node facts and labels, explicit members; it ranks above every other
+    owner group (move it with groups.rank)."""
+    from .settings import groups as G
+    _admin_only(req, "a group")
+    sp = _groups(lambda: G.spec(db, {**req.params, "name": req.params.get("name") or req.target}))
+    req.target = sp["id"]
+    return _group_commit(db, req, lambda: {"group": G.create(db, sp, req.actor)})
+
+
+@handler("groups.update", target_type="group", snapshot=_group_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)))
+def _groups_update(db, req):
+    from .settings import groups as G
+    _admin_only(req, "a group")
+    g = _groups(lambda: G.get_owner(db, req.target or ""))
+    sp = _groups(lambda: G.spec(db, req.params, g))
+    req.target = g["id"]
+    return _group_commit(db, req, lambda: G.update(db, g["id"], sp, req.actor))
+
+
+def _rank_snap(db, req):
+    from .settings import store as S
+    return {"order": [g["id"] for g in S.groups(db) if not g["builtin"]][::-1]}
+
+
+@handler("groups.rank", target_type="group", snapshot=_rank_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)))
+def _groups_rank(db, req):
+    """Move an owner group up or down the ranking (`move`: up, down, top, bottom), or give the whole order
+    (`order`: every owner group, highest first). Where groups set the same key, the higher rank wins."""
+    from .settings import groups as G
+    _admin_only(req, "a group's rank")
+    g = _groups(lambda: G.get_owner(db, req.target or ""))
+    order = _groups(lambda: G.reorder(db, g["id"], req.params.get("move"), req.params.get("order")))
+    req.target = g["id"]
+    return _group_commit(db, req, lambda: (G.write_order(db, order), {"order": order})[1])
+
+
+@handler("groups.delete", target_type="group", snapshot=_group_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _group_impact(db, r)), name=lambda db, r: str(r.target))
+def _groups_delete(db, req):
+    """Delete an owner group, its values and its secrets' values; its members fall back to the next layer down."""
+    from .settings import groups as G
+    _admin_only(req, "a group")
+    g = _groups(lambda: G.get_owner(db, req.target or ""))
+    req.target = g["id"]
+    return _group_commit(db, req, lambda: G.delete(db, g["id"]))
+
+
+def _label_nodes(db, req) -> list[str]:
+    """The target node and `nodes` (the target may be `nodes` when only the list names them: the bulk page)."""
+    first = [] if (req.target or "nodes") == "nodes" else [_nid(db, req)]
+    ids = list(dict.fromkeys(first + [core_node_id(db, x) for x in (req.params.get("nodes") or [])]))
+    if not ids:
+        raise OpError(400, "bad_params", "nodes.label: name a node (the target) or nodes")
+    return ids
+
+
+def _label_impact(db, req) -> dict:
+    from .settings import groups as G, store as S
+    from .settings import resolve as V
+    extra = set(req.params) - {"add", "remove", "nodes"}
+    if extra:
+        raise OpError(400, "bad_params", f"nodes.label takes add, remove and nodes, not {sorted(extra)}")
+    labels = {k: list(v) for k, v in S.labels(db).items()}
+    add = [_groups(lambda: G.check_label(x)) for x in req.params.get("add") or []]
+    remove = [_groups(lambda: G.check_label(x)) for x in req.params.get("remove") or []]
+    if not add and not remove:
+        raise OpError(400, "bad_params", "give labels to add or remove")
+    for nid in _label_nodes(db, req):
+        cur = [x for x in labels.get(nid, []) if x not in remove]
+        labels[nid] = sorted({*cur, *add})
+    names = _names(db)
+    return G.impact(db, V.snapshot(db), _snap_as(db, labels=labels),
+                    {"labels": [f"{names.get(n, n)}: {', '.join(labels[n]) or 'none'}" for n in _label_nodes(db, req)]})
+
+
+def _no_lock_escape(db, ids: list, remove: list, actor: str, role: str) -> None:
+    """Only an admin may take a node out of a group whose locked value then stops applying to it: removing a label
+    must not be a way around a lock."""
+    from .settings import resolve as V, store as S
+    labels = {k: list(v) for k, v in S.labels(db).items()}
+    for nid in ids:
+        labels[nid] = [x for x in labels.get(nid, []) if x not in remove]
+    before, after = V.snapshot(db), _snap_as(db, labels=labels)
+    locked = {sid for (sc, sid, _m, _k), x in before.rows.items() if sc == "group" and x.get("enforced")}
+    for nid in ids:
+        node = db.one("SELECT node_id, hostname, os, arch, facts_json FROM nodes WHERE node_id=?", (nid,))
+        now = {g["id"] for g in V.node_groups(after, node)}
+        for g in V.node_groups(before, node):
+            if g["id"] in locked and g["id"] not in now:
+                raise OpError(403, "forbidden_role", f"{node['hostname']} would leave the group {g['name']}, whose locked "
+                                                     f"values then stop applying to it: that needs the admin role; {actor} is {role}")
+
+
+def _label_snap(db, req):
+    from .settings import store as S
+    have = S.labels(db)
+    try:
+        return {n: have.get(n, []) for n in _label_nodes(db, req)}
+    except (OpError, core.ApiError):
+        return None
+
+
+@handler("nodes.label", target_type="node", snapshot=_label_snap, versions=lambda db, r: ["settings"],
+         impact=lambda db, r: _groups(lambda: _label_impact(db, r)))
+def _nodes_label(db, req):
+    """Add and remove a node's labels (`nodes`: more nodes to label the same way). A label can move a node into or
+    out of a group, so the result names the groups joined and left, and the nodes refresh their settings."""
+    from .settings import groups as G
+    _label_impact(db, req)                                  # checks the request
+    ids = _label_nodes(db, req)
+    if req.role not in (None, "admin"):
+        _no_lock_escape(db, ids, req.params.get("remove") or [], req.actor, req.role)
+    req.target = ids[0]
+    return _group_commit(db, req, lambda: {"labels": {n: _groups(lambda: G.set_labels(
+        db, n, req.params.get("add") or [], req.params.get("remove") or [], req.actor))["labels"] for n in ids}})
+
+
+def _promote_changes(db, req) -> list:
+    from .settings import bulk
+    extra = set(req.params) - {"key", "module", "group", "to", "comment"}
+    if extra:
+        raise OpError(400, "bad_params", f"settings.promote takes key, module, group, to and comment, not {sorted(extra)}")
+    return _groups(lambda: bulk.promote_changes(db, req.params.get("key") or req.target or "", req.params.get("group") or "",
+                                                req.params.get("module") or "", req.params.get("to") or "fleet"))
+
+
+def _promote_tier(req) -> str:
+    from .settings import registry as R
+    to = req.params.get("to") or "fleet"
+    return R.change_tier([{"scope": "fleet" if to == "fleet" else "group", "key": req.params.get("key") or req.target or ""}])
+
+
+def _promote_snap(db, req):
+    """The group's row and the target's row (the audit's before and after)."""
+    from .settings import groups as G
+    g = G.find(db, req.params.get("group") or "")
+    to = req.params.get("to") or "fleet"
+    t = None if to == "fleet" else G.find(db, to)
+    key, m = req.params.get("key") or req.target or "", req.params.get("module") or ""
+    changes = [{"scope": "group", "scope_id": g["id"] if g else "", "module": m, "key": key},
+               {"scope": "fleet" if to == "fleet" else "group", "scope_id": t["id"] if t else "", "module": m, "key": key}]
+    return _settings_snap(db, OpRequest(op="settings.apply", actor="", params={"changes": changes}))
+
+
+@handler("settings.promote", target_type="setting", versions=lambda db, r: ["settings"], snapshot=_promote_snap,
+         impact=lambda db, r: _settings(lambda: settings.apply.plan(db, _promote_changes(db, r))), tier=_promote_tier,
+         name=lambda db, r: str(r.params.get("key") or r.target or ""))
+def _settings_promote(db, req):
+    """Canary, then promote: a group's value of a key (the canary) moves to the fleet or a wider group in one change
+    set: set there, deleted from the group (docs/design/settings.md, "Canary to a group")."""
+    _admin_only(req, "promoting a setting")
+    changes = _promote_changes(db, req)
+    out = _settings(lambda: settings.apply.commit(db, changes, req.actor, req.params.get("comment") or req.reason))
+    return {**out, "message": out["message"].replace("Saved", "Promoted", 1)}
+
+
+def _core_secret(fn):
+    from . import modsecrets
+    try:
+        return fn(modsecrets)
+    except modsecrets.SecretError as e:
+        raise OpError(e.status, e.code, e.detail)
+
+
+@handler("settings.secrets.set", target_type="setting",
+         snapshot=lambda db, r: _core_secret(lambda S: S.core_state(db, r.target or "")))
+def _core_secret_set(db, req):
+    """A core secret (the ntfy token): write-only, encrypted like module secrets, shown only as a fingerprint."""
+    if set(req.params):
+        raise OpError(400, "bad_params", "the value goes beside params, as `secret`")
+    if not req.secret:
+        raise OpError(400, "secret_required", "send the value beside params, as `secret`")
+    out = _core_secret(lambda S: S.core_set(db, req.target or "", req.secret, req.actor))
+    db.event("settings_changed", actor=req.actor, reason=f"core secret {req.target} set ({out['fingerprint']})")
+    return out
+
+
+@handler("settings.secrets.clear", target_type="setting",
+         snapshot=lambda db, r: _core_secret(lambda S: S.core_state(db, r.target or "")))
+def _core_secret_clear(db, req):
+    out = _core_secret(lambda S: S.core_clear(db, req.target or ""))
+    db.event("settings_changed", actor=req.actor, reason=f"core secret {req.target} cleared")
+    return out
+
+
+def _tool_users(db, tool_id: str) -> list[str]:
+    """The approved module versions whose requests name a tool."""
+    return sorted({f"{m['name']} {m['version']}" for m in db.q("SELECT name, version, requests_json FROM module_grants")
+                   if any(t.get("id") == tool_id for t in (json.loads(m["requests_json"]).get("tools") or []))})
+
+
+def _define_impact(db, r):
+    from . import tools
+    try:
+        new = tools.check_definition(r.target or "", r.params)
+    except tools.ToolError as e:
         return {"refused": str(e)}
-    users = sorted({f"{m['name']} {m['version']}" for m in db.q("SELECT name, version FROM module_grants")
-                    if any(t.get("id") == r.target for t in (_grant_tools(db, m["name"], m["version"])))})
-    return {"tool": r.target, "before": reg.get(r.target), "after": new, "approved_module_versions": users,
-            "then": "releases are rebuilt so agents get the new paths"}
+    before = tools.definitions(db).get(r.target)
+    return {"tool": r.target, "before": {k: before[k] for k in ("kind", "search", "version")} if before else None,
+            "after": new, "approved_module_versions": _tool_users(db, r.target or ""),
+            "then": "every platform's release is rebuilt with the definitions" + (" and waits for your signature" if _signing() else "")
+                    + "; nodes detect again once they install it"}
 
 
-def _grant_tools(db, name, version):
-    from . import modsandbox
-    a = modsandbox.approval(db, name, version) or {}
-    return (a.get("requests") or {}).get("tools") or []
-
-
-@handler("settings.tools.update", target_type="setting", impact=_tools_impact,
-         snapshot=lambda db, r: {"tool_registry": db.get_setting("tool_registry")}, versions=lambda db, r: ["setting:tool_registry"])
-def _tools(db, req):
-    """The tool registry (oarbank-sdk spec/sandbox.md, `tools`): a logical tool id mapped to host paths per OS. No paths
-    removes the id. Releases are rebuilt so every agent gets the paths for its OS."""
-    from . import modstore, platforms, releases
-    reg = dict(platforms.tool_registry(db))
-    try:
-        entry = platforms.check_tool(req.target or "", req.params)
-    except ValueError as e:
-        raise core.ApiError(400, "bad_tool", str(e))
-    if entry["paths"]:
-        reg[req.target] = entry
-    else:
-        reg.pop(req.target, None)
-    db.set_setting(platforms.TOOL_REGISTRY, reg)
-    db.event("settings_changed", actor=req.actor, reason=f"tool_registry {req.target}: "
-             + (", ".join(f"{o}={len(p)}" for o, p in entry["paths"].items()) or "removed"))
+def _sync_releases(db):
+    from . import modstore, releases
     if any(ch["current"] for ch in modstore.channels(db).values()):
         releases.sync(db)
-    return {"tool": req.target, "entry": reg.get(req.target)}
+
+
+def _tool_snap(db, r):
+    from . import tools
+    return {"tool": r.target, "definition": tools.definitions(db).get(r.target or "")}
+
+
+@handler("tools.define", target_type="setting", impact=_define_impact, snapshot=_tool_snap,
+         versions=lambda db, r: [f"tool:{r.target}"])
+def _tools_define(db, req):
+    """A host tool definition (docs/design/host-tools.md): a tool's detector kind and its extra search patterns for every
+    OS (`fleet`) or one platform group, and an executable's version command. jdk and python are built in and take extra
+    patterns only. The releases are rebuilt: they carry the definitions to the agents."""
+    from . import tools
+    try:
+        d = tools.define(db, req.target or "", req.params, req.actor)
+    except tools.ToolError as e:
+        raise core.ApiError(400, "bad_tool", str(e))
+    db.event("settings_changed", actor=req.actor, reason=f"tool {req.target}: {d['kind']}, extra search "
+             + (", ".join(f"{k}={len(v)}" for k, v in d["search"].items()) or "none"))
+    _sync_releases(db)
+    return {"tool": req.target, "definition": d}
+
+
+def _delete_impact(db, r):
+    from . import tools
+    d = tools.definitions(db).get(r.target or "")
+    if not d:
+        return {"refused": f"no tool {r.target!r}"}
+    return {"tool": r.target, "builtin": d["builtin"], "approved_module_versions": _tool_users(db, r.target or ""),
+            "then": ("its extra search paths are removed; the built-in patterns stay" if d["builtin"] else
+                     "modules asking for it run nowhere (TOOL_NOT_FOUND) until it is defined again")}
+
+
+@handler("tools.delete", target_type="setting", impact=_delete_impact, snapshot=_tool_snap,
+         versions=lambda db, r: [f"tool:{r.target}"])
+def _tools_delete(db, req):
+    from . import tools
+    try:
+        out = tools.delete(db, req.target or "")
+    except tools.ToolError as e:
+        raise core.ApiError(404, "no_tool", str(e))
+    db.event("settings_changed", actor=req.actor, reason=f"tool {req.target} deleted" + (" (its extras)" if out["builtin"] else ""))
+    _sync_releases(db)
+    return out
+
+
+@handler("tools.detect", target_type="node", snapshot=_node_snap)
+def _tools_detect(db, req):
+    """Ask a node's agent to detect its host tools again (Re-detect): it reports them with its next heartbeat."""
+    nid = _nid(db, req)
+    db.x("UPDATE nodes SET want_detect=1, detect_requested_at=? WHERE node_id=?", (time.time(), nid))
+    db.event("tools_detect_requested", actor=req.actor, node_id=nid)
+    return {"want_detect": True}
 
 
 def _folders_impact(db, r):
@@ -1459,17 +1879,17 @@ def _folders_impact(db, r):
                     if any(f.get("id") == r.target for f in (json.loads(m["requests_json"]).get("folders") or []))})
     return {"folder": r.target, "before": folders.registry(db).get(r.target), "after": new,
             "approved_module_versions": users,
-            "then": "each changed node gets a new folder statement" + (" for the owner to sign (oarbank folders sign <node>)"
-                                                                       if _signing() else "")}
+            "then": "each changed node gets a new statement" + (" for the owner to sign (oarbank node sign <node>)"
+                                                                if _signing() else "")}
 
 
 @handler("settings.folders.update", target_type="setting", impact=_folders_impact,
-         snapshot=lambda db, r: {"folder_registry": db.get_setting("folder_registry")}, versions=lambda db, r: ["setting:folder_registry"])
+         snapshot=lambda db, r: {"folder_registry": settings.fleet_value(db, "folder_registry")}, versions=lambda db, r: ["setting:folder_registry"])
 def _folders(db, req):
     """The folder registry (oarbank-sdk spec/sandbox.md, "Folders"): a folder id mapped to a path on each node, with its
     access. `nodes` entries set to null remove the node; an entry with no nodes left removes the id. Every node whose
-    mapping changed gets a new folder statement (signed by the owner in signing mode before nodes apply it)."""
-    from . import folders
+    mapping changed gets a new node statement (signed by the owner in signing mode before nodes apply it)."""
+    from . import folders, statements
     try:
         entry = folders.check_entry(db, req.target or "", req.params)
     except folders.FolderError as e:
@@ -1480,20 +1900,21 @@ def _folders(db, req):
         reg[req.target] = entry
     else:
         reg.pop(req.target, None)
-    db.set_setting(folders.REGISTRY, reg)
-    changed = folders.refresh(db, sorted(before | set(entry["nodes"])))
+    settings.write_fleet(db, folders.REGISTRY, reg, req.actor, comment=f"folder {req.target}")
+    changed = statements.refresh(db, sorted(before | set(entry["nodes"])))
     db.event("settings_changed", actor=req.actor, reason=f"folder_registry {req.target}: {entry['access']} on "
              f"{len(entry['nodes'])} nodes; new statements for {', '.join(changed) or 'none'}")
     return {"folder": req.target, "entry": reg.get(req.target), "statements": changed}
 
 
-@handler("folders.sign", target_type="node", atomic=False)
-def _folders_sign(db, req):
-    from . import folders
+@handler("nodes.sign_statement", target_type="node", atomic=False)
+def _sign_statement(db, req):
+    """Attach the owner's signature to a node's statement (statements.py: its folders and added tool paths)."""
+    from . import statements
     try:
-        return folders.sign(db, req.target or "", req.params.get("statement") or "", req.params.get("signature") or "")
-    except folders.FolderError as e:
-        raise core.ApiError(422, "bad_folder_signature", str(e))
+        return statements.sign(db, req.target or "", req.params.get("statement") or "", req.params.get("signature") or "")
+    except statements.StatementError as e:
+        raise core.ApiError(422, "bad_statement_signature", str(e))
 
 
 def _origins_impact(db, r):
@@ -1510,7 +1931,7 @@ def _origins_impact(db, r):
 
 
 @handler("settings.origins.update", target_type="setting", impact=_origins_impact,
-         snapshot=lambda db, r: {"dataset_origins": db.get_setting("dataset_origins")}, versions=lambda db, r: ["setting:dataset_origins"])
+         snapshot=lambda db, r: {"dataset_origins": settings.fleet_value(db, "dataset_origins")}, versions=lambda db, r: ["setting:dataset_origins"])
 def _origins(db, req):
     """The origin host policy (docs/design/datasets-media-checkpoints.md): host patterns dataset origins must match
     (`example.org`, `*.example.org`, with an optional `:port`); none admits every public https host. It applies when a
@@ -1519,7 +1940,7 @@ def _origins(db, req):
     imp = _origins_impact(db, req)
     if imp.get("refused"):
         raise core.ApiError(400, "bad_origin_policy", imp["refused"])
-    db.set_setting(blobstore.ORIGIN_SETTING, {"hosts": imp["after"]})
+    settings.write_fleet(db, blobstore.ORIGIN_SETTING, imp["after"], req.actor)
     db.event("settings_changed", actor=req.actor, reason=f"dataset_origins: {', '.join(imp['after']) or 'any host'}")
     return {"hosts": imp["after"]}
 
@@ -1644,7 +2065,7 @@ def _default_account(db) -> str | None:
 
 def _join_urls(db) -> list[str]:
     from . import config as C
-    urls = [u for u in [db.get_setting("coordinator_url")] + list(db.get_setting("join_urls") or []) if u]
+    urls = [u for u in [db.get_state("coordinator_url")] + list(db.get_state("join_urls") or []) if u]
     return list(dict.fromkeys(u.rstrip("/") for u in urls)) or [f"https://{C.AGENT_BIND}:{C.AGENT_PORT}"]
 
 
@@ -1749,33 +2170,25 @@ def _pk_remove(db, req):
     return _access(fn)(db, req)
 
 
-@handler("settings.update", target_type="setting", snapshot=lambda db, r: {r.target: db.get_setting(r.target)},
-         versions=lambda db, r: [f"setting:{r.target}"])
-def _setting(db, req):
-    if req.target in ("release_pubkey", "ntfy", "fleet_state", "audit_pubkey", "tool_registry"):
-        raise core.ApiError(400, "use_typed_operation", f"{req.target} has its own operation")
-    db.set_setting(req.target, req.params.get("value"))
-    db.event("settings_changed", actor=req.actor, reason=req.target)
-    return {"updated": req.target}
-
-
 # ------------------------------------------------------------------ module secrets (write-only)
 
 SECRET_OP = "secrets.set"
+SECRET_OPS = (SECRET_OP, "settings.secrets.set")      # the operations that take a value beside params
 
 
 def _secret_scope(db, req) -> tuple[str, str, str]:
-    """(module, secret name, node id or '') from target (the module) and params {name, node?}; nothing else."""
+    """(module, secret name, scope) from target (the module) and params {name, node? | group?}; nothing else. The scope
+    is '' (the module), a node id or `group:<id>` (modsecrets.scope_ref)."""
     from . import modsecrets
-    extra = set(req.params) - {"name", "node"}
+    extra = set(req.params) - {"name", "node", "group"}
     if extra:
-        raise OpError(400, "bad_params", f"{req.op} takes params name and node only (the value goes beside params, as "
-                      f"`secret`), not {sorted(extra)}")
+        raise OpError(400, "bad_params", f"{req.op} takes params name, node and group only (the value goes beside params, "
+                      f"as `secret`), not {sorted(extra)}")
     name = req.params.get("name")
     if not req.target or not isinstance(name, str) or not name:
         raise OpError(400, "bad_params", f"{req.op}: target is the module, params.name the secret")
     try:
-        return req.target, name, modsecrets.node_id(db, req.params.get("node"))
+        return req.target, name, modsecrets.scope_ref(db, req.params.get("node"), req.params.get("group"))
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
 
@@ -1784,6 +2197,13 @@ def _secret_snap(db, req):
     from . import modsecrets
     module, name, node = _secret_scope(db, req)
     return {"secret": name, "scope": node or "module", **modsecrets.state(db, module, name, node)}
+
+
+def _secret_scope_fields(db, scope: str) -> dict:
+    from . import modsecrets
+    if scope.startswith(modsecrets.GROUP_PREFIX):
+        return {"node": None, "group": scope[len(modsecrets.GROUP_PREFIX):], "scope": modsecrets.scope_text(db, scope)}
+    return {"node": scope or None, "group": None, "scope": modsecrets.scope_text(db, scope)}
 
 
 @handler(SECRET_OP, target_type="module", target=_module_name, snapshot=_secret_snap)
@@ -1796,8 +2216,10 @@ def _secret_set(db, req):
         out = modsecrets.put(db, module, name, node, req.secret, req.actor)
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
-    db.event("secret_set", actor=req.actor, node_id=node or None, reason=f"{module}/{name} {out['fingerprint']}", module=module)
-    return {"module": module, "name": name, "node": node or None, **out}
+    f = _secret_scope_fields(db, node)
+    db.event("secret_set", actor=req.actor, node_id=f["node"], reason=f"{module}/{name} for {f['scope']} {out['fingerprint']}",
+             module=module)
+    return {"module": module, "name": name, **f, **out}
 
 
 @handler("secrets.clear", target_type="module", target=_module_name, snapshot=_secret_snap)
@@ -1808,8 +2230,9 @@ def _secret_clear(db, req):
         out = modsecrets.clear(db, module, name, node)
     except modsecrets.SecretError as e:
         raise OpError(e.status, e.code, e.detail)
-    db.event("secret_cleared", actor=req.actor, node_id=node or None, reason=f"{module}/{name}", module=module)
-    return {"module": module, "name": name, "node": node or None, **out}
+    f = _secret_scope_fields(db, node)
+    db.event("secret_cleared", actor=req.actor, node_id=f["node"], reason=f"{module}/{name} for {f['scope']}", module=module)
+    return {"module": module, "name": name, **f, **out}
 
 
 @handler("audit.verify", target_type="audit")
@@ -1823,8 +2246,6 @@ def _verify(db, req):
 
 # ------------------------------------------------------------------ module operations (D23)
 
-def _module_settings_key(module: str) -> str:
-    return effects.settings_key(module)
 
 
 def apply_effects(db: DB, module: str, decl, effs: list[dict], actor: str = "system") -> list[dict]:
@@ -1889,7 +2310,7 @@ def module_handler(module: str, decl) -> Handler:
                 "result": res.get("result") or {}}
 
     return Handler(target_type="module", apply=apply, prepare=prepare, impact=impact,
-                   snapshot=lambda db, r: {"settings": db.get_setting(_module_settings_key(module), {})})
+                   snapshot=lambda db, r: {"settings": effects.module_settings(db, module)})
 
 
 def register_module(module: str) -> list[str]:

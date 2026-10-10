@@ -60,7 +60,8 @@ def make_db(path, modules=(TOY_DIR, RELAY_DIR)) -> DB:
     for m in modules:
         install(d, m)
     modcalls.use(d)
-    d.set_setting("module_settings:relay", {"goldens": [GOLDEN]})
+    if RELAY_DIR in modules:
+        set_module(d, "relay", {"goldens": [GOLDEN]})
     for did in READY:
         d.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at) VALUES(?,?,?,?,?,?)",
             (did, did.split(":")[0], "relay", json.dumps({"frames": "1-24", "scene": "atrium"}), "[]", clock.now()))
@@ -110,6 +111,68 @@ def golden_result(grant, db=None):
 
 def fresh(db, node):
     return db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
+
+
+# ------------------------------------------------------------------ settings (docs/design/settings.md)
+
+def settings_apply(db, *changes, actor="test") -> dict:
+    """A change set, checked and committed as settings.apply does (hooks and node refresh included), without the
+    operation's preview and audit."""
+    from oarbank.coordinator.settings import apply
+    with db.tx():
+        return apply.commit(db, list(changes), actor)
+
+
+def set_fleet(db, key, value, module=""):
+    """An owner's fleet value: through settings.apply (a module's core key with `module`), or for a key another operation
+    owns (the folder registry, dataset origins) through that key's store as its operation writes it."""
+    from oarbank.coordinator.settings import REGISTRY, apply, write_fleet
+    d = REGISTRY.get(key)
+    if d is not None and d.writer:
+        with db.tx():
+            write_fleet(db, key, value, "test", module)
+            apply.sync_nodes(db)
+        return None
+    return settings_apply(db, {"scope": "fleet", "key": key, "value": value, **({"module": module} if module else {})})
+
+
+def set_module(db, module, values: dict, actor="test"):
+    """A module's own settings at fleet scope ({key: value}, None resets), validated against its settings schema."""
+    from oarbank.coordinator.settings import modkeys
+    with db.tx():
+        return modkeys.write(db, module, values, actor)
+
+
+def set_node(db, node, key, value=None, reset=False, module=""):
+    """A node's own value (or its reset) through settings.apply: effect hooks run (a services change re-doctors)."""
+    nid = node if isinstance(node, str) else node["node_id"]
+    return settings_apply(db, {"scope": "node", "scope_id": nid, "key": key, "module": module,
+                               **({"reset": True} if reset else {"value": value})})
+
+
+def put_node(db, node, key, value, module=""):
+    """A node's own value written straight into the store (no hooks): the state a test starts from."""
+    from oarbank.coordinator.settings import apply, store
+    nid = node if isinstance(node, str) else node["node_id"]
+    with db.tx():
+        store.put(db, "node", nid, module, key, value, "test", store.next_rev(db))
+        apply.sync_nodes(db, [nid])
+
+
+def node_settings(db, node) -> dict:
+    """The node's effective policy and caps as its agent gets them, in one dict."""
+    from oarbank.coordinator.settings.apply import flat_values
+    nid = node if isinstance(node, str) else node["node_id"]
+    return flat_values(db.one("SELECT * FROM nodes WHERE node_id=?", (nid,)))
+
+
+def set_protection(db, node, config, actor="test"):
+    """A node's (or `fleet`'s, or `group:<g>`'s) own protection section, validated and written onto the settings chain
+    as the protection editor's operation writes it."""
+    from oarbank.coordinator import protection
+    nid = node if isinstance(node, str) else node["node_id"]
+    with db.tx():
+        return protection.write(db, nid, config, actor, None)
 
 
 def node_key_and_csr():

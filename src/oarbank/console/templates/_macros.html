@@ -1,9 +1,10 @@
 {# One form per operation. T0 posts directly; T1 confirms in the browser (app.js, data-confirm);
    T2/T3 open a plan page (preview) before applying. `newtab` opens it in a new tab (a page that must stay on screen,
-   such as a one-time join code). #}
-{% macro op_form(op, target, label, cls="", confirm=None, reason_prompt=False, params=None, return_to="", always=False, inline=True, multipart=False, newtab=False) -%}
-{% set e = OPS[op] %}
-<form class="{{ 'inline' if inline }}" method="post" action="/do/{{ op }}"{% if newtab %} target="_blank"{% endif %}{% if multipart %} enctype="multipart/form-data"{% endif %}{% if confirm and e.tier == 'T1' %} data-confirm="{{ confirm }}"{% endif %}{% if reason_prompt %} data-reason="prompt"{% endif %}>
+   such as a one-time join code). The button's busy state (spinner, label, double-submit guard) is app.js; a multipart form
+   whose operation has a staging route (STAGE_OPS) uploads its file first, with progress (docs/design/console-loading-states.md). #}
+{% macro op_form(op, target, label, cls="", confirm=None, reason_prompt=False, params=None, return_to="", always=False, inline=True, multipart=False, newtab=False, button=True, tier=None, novalidate=False) -%}
+{% set e = OPS[op] %}{% set t = tier or e.tier %}{# tier: an operation whose tier follows what it changes (settings.apply) #}
+<form class="{{ 'inline' if inline }}" method="post" action="/do/{{ op }}"{% if novalidate %} novalidate{% endif %}{% if newtab %} target="_blank"{% endif %}{% if multipart %} enctype="multipart/form-data"{% endif %}{% if confirm and t == 'T1' %} data-confirm="{{ confirm }}"{% endif %}{% if reason_prompt %} data-reason="prompt"{% endif %}{% if multipart and op in STAGE_OPS %} data-stage="/stage/{{ op }}" data-stage-field="{{ STAGE_OPS[op] }}"{% endif %}>
 <input type="hidden" name="target" value="{{ target }}">
 <input type="hidden" name="return_to" value="{{ return_to }}">
 <input type="hidden" name="idem" value="{{ new_key() }}">
@@ -11,6 +12,72 @@
 <input type="hidden" name="reason" value="">
 {% if params is not none %}<input type="hidden" name="params" value="{{ params | tojson | forceescape }}">{% endif %}
 {% if caller is defined %}{{ caller() }}{% endif %}
-<button{% if cls %} class="{{ cls }}"{% endif %} title="{{ e.summary }} ({{ e.tier }})"{% if always %} data-always{% endif %}>{{ label }}</button>
+{# button=False: the caller renders the form's buttons itself (its default button must come first) #}
+{% if button %}<button{% if cls %} class="{{ cls }}"{% endif %} title="{{ e.summary }} ({{ e.tier }})"{% if always %} data-always{% endif %}{% if e.tier in ('T2', 'T3') %} data-busy-label="Preparing review…"{% endif %}>{{ label }}</button>{% endif %}
 </form>
+{%- endmacro %}
+
+{# Releases waiting for the owner's signature (releases.awaiting): nothing new reaches those nodes until the owner signs
+   each one offline with the owner key. Shown on the Fleet, Modules and Settings pages. #}
+{% macro release_banner(items) -%}
+{% if items %}<div class="flash warn release-wait" role="status"><b>{{ items | length }} release{{ 's' if items | length != 1 }} waiting for your signature.</b>
+  Nodes get nothing new until you sign {{ 'them' if items | length != 1 else 'it' }}: run on the machine that holds the owner key
+  <ul class="small">{% for a in items %}<li><span class="mono">{{ a.release_id }}</span> for {{ a.platform }}:
+    <span class="mono">{{ a.modules | join(', ') if a.modules else 'no module' }}</span> ({% if a.kind == 'node' %}the canary or pinned node{{ 's' if a.nodes | length != 1 }} {{ a.nodes | join(', ') }}{% else %}{{ a.nodes | length }} node{{ 's' if a.nodes | length != 1 }}{% endif %}):
+    <code class="mono">{{ a.command }}</code></li>{% endfor %}</ul>
+  <span class="small"><a href="/settings#releases">Releases in Settings</a></span></div>{% endif %}
+{%- endmacro %}
+
+{# A module operation (mod.<module>.<verb>) as a form: the module's own parameters as JSON (its pages offer richer forms). #}
+{% macro mod_op_form(o, return_to="") -%}
+{% if {'viewer': 0, 'operator': 1, 'admin': 2}.get(role, 0) < {'viewer': 0, 'operator': 1, 'admin': 2}.get(o.min_role, 1) %}
+<button disabled title="needs the {{ o.min_role }} role">{{ o.title }}</button>
+{% else %}
+<form class="{{ 'inline' if not o.has_params }}" method="post" action="/do/{{ o.op }}"{% if o.tier == 'T1' %} data-confirm="{{ o.title }}?"{% endif %}>
+<input type="hidden" name="target" value="">
+<input type="hidden" name="return_to" value="{{ return_to }}">
+<input type="hidden" name="idem" value="{{ new_key() }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="reason" value="">
+{% if o.has_params %}<label class="small">parameters (JSON; see the module's pages for its form) <textarea name="params" rows="2" class="mono" style="width:100%">{}</textarea></label>{% endif %}
+<button class="pri" title="{{ o.op }} ({{ o.tier }})">{{ o.title }}{% if o.tier in ('T2', 'T3') %}…{% endif %}</button>
+</form>
+{% endif %}
+{%- endmacro %}
+
+{# "Getting this module running" (oarbankd's readiness checklist, coordinator/readiness.py): every step from install to
+   the first operation, each with its status, why, and the action that moves it on. `compact`: the Modules page card. #}
+{% macro readiness(r, compact=False, return_to="") -%}
+{% set tone = {'done': 'ok', 'blocked': 'bad', 'waiting': 'warn', 'next': 'acc', 'skipped': ''} %}
+{% set state_tone = {'ready': 'ok', 'blocked': 'bad', 'waiting': 'warn'} %}
+{% if compact %}
+<div class="readiness-compact small" style="margin-top:4px"><span class="chip {{ state_tone[r.state] }}">{{ r.summary }}</span>
+  <span class="mut">{% for s in r.steps %}<span class="chip {{ tone[s.status] }}" title="{{ s.status }}: {{ s.reason }}">{{ s.title }}</span>{% endfor %}</span>
+  <a href="/modules/{{ r.name }}#readiness">Getting it running →</a></div>
+{% else %}
+<section id="readiness" class="card readiness" aria-labelledby="readiness-h">
+<div class="row"><h2 id="readiness-h" style="margin:0">Getting this module running</h2><span class="chip {{ state_tone[r.state] }}">{{ r.summary }}</span></div>
+<ol class="readiness-steps" style="padding-left:1.4em">
+{% for s in r.steps %}<li style="margin:6px 0"><div class="row"><span class="chip {{ tone[s.status] }}">{{ s.status }}</span><b>{{ s.title }}</b></div>
+  <div class="small">{{ s.reason }}</div>
+  {% if s.id == 'next' %}
+  {% set first = s['items'] | selectattr('target', 'equalto', 'none') | list %}
+  <ul class="small">{% for o in first[:2] %}<li>{{ mod_op_form(o, return_to) }} <code class="small">{{ o.command }}</code></li>{% endfor %}</ul>
+  {% set rest = s['items'] | reject('in', first[:2]) | list %}
+  {% if rest %}<details class="small"><summary>Its other operations ({{ rest | length }})</summary><ul>{% for o in rest %}<li>
+    {% if o.target == 'none' %}{{ mod_op_form(o, return_to) }}{% else %}<b>{{ o.title }}</b> <span class="mut">(on a {{ o.target }}, from its pages)</span>{% endif %}
+    <code class="small">{{ o.command }}</code></li>{% endfor %}</ul></details>{% endif %}
+  {% elif s['items'] %}
+  <ul class="small">{% for i in s['items'] %}<li><span class="chip {{ tone.get(i.status, '') }}">{{ i.status or '' }}</span> {{ i.text }}{% if i.needs %} <span class="mut">(needs {{ i.needs }})</span>{% endif %}
+    {% if i.href %}<a href="{{ i.href }}">fix in Settings</a>{% endif %}
+    {% if i.op %}{{ op_form(i.op, i.target, "Promote…") }}{% endif %}
+    {% if i.command %}<div><code class="small">{{ i.command }}</code></div>{% endif %}
+    {% if i.groups %}<ul>{% for g in i.groups %}<li><b>{{ g.nodes | join(', ') }}</b>: {{ g.reasons | join('; ') if g.reasons | select | list else 'ok' }}</li>{% endfor %}</ul>{% endif %}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if s.actions %}<div class="row small">{% for a in s.actions %}
+    {% if a.op %}{{ op_form(a.op, a.target, a.label, cls="pri") }}{% elif a.href %}<a class="btn" href="{{ a.href }}">{{ a.label }}</a>{% endif %}
+    {% if a.command %}<code class="small">{{ a.command }}</code>{% endif %}{% endfor %}</div>{% endif %}
+</li>{% endfor %}
+</ol></section>
+{% endif %}
 {%- endmacro %}

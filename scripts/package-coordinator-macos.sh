@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Wrap a compiled coordinator build in a native Installer package. No host installation.
 # scripts/package-coordinator-macos.sh [archive]
+# Its postinstall (deploy/macos/coordinator/scripts) links /usr/local/bin/oarbank and oarbank-setup to the app's
+# launchers, refreshes an installed system service on the new build, and moves an earlier release's per-user
+# coordinator to the system service (docs/design/coordinator-system-service.md); a first install starts no service.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/pyproject.toml" | head -1)"
@@ -18,7 +21,13 @@ tar -xzf "$ARCHIVE" -C "$ROOT"
 PY="$ROOT/python/bin/python3.12"
 "$PY" -I -B -c 'import json, sys; from pathlib import Path; m=json.loads((Path(sys.argv[1])/"oarbank-coordinator.json").read_text()); assert m["format"] == 1 and m["version"] == sys.argv[2] and m["platform"] == sys.argv[3]; import oarbank.setup' "$ROOT" "$VERSION" "$PLATFORM"
 [[ -x "$ROOT/install-oarbankd.sh" && -x "$ROOT/bin/oarbank-setup" ]] || { echo "build has no guided setup" >&2; exit 1; }
-cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"
+# the postinstall puts these on the PATH as links (/usr/local/bin): each must run through a link to it, as by its path
+mkdir "$WORK/linked"
+for cmd in oarbank oarbank-setup; do
+    ln -s "$ROOT/bin/$cmd" "$WORK/linked/$cmd"
+    "$WORK/linked/$cmd" --help >/dev/null || { echo "bin/$cmd does not run through a link to it" >&2; exit 1; }
+done
+cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-coordinator-symbolic.png" "$REPO/deploy/icons/oarbank-coordinator-symbolic@2x.png" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -36,25 +45,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSLocalNetworkUsageDescription</key><string>Oarbank connects your computers to this coordinator to run the jobs you choose.</string>
 </dict></plist>
 PLIST
-xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement "$REPO/deploy/macos/coordinator/Launcher.swift" -o "$APP/Contents/MacOS/Oarbank Coordinator"
-# Remove inherited extended attributes before sealing the application.
-xattr -cr "$WORK/root"
+# the menu bar app, with the menu bar model it shares with Oarbank Node.app (deploy/macos/shared/MenuBar.swift)
+xcrun swiftc -O -parse-as-library -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement \
+    "$REPO/deploy/macos/coordinator/Launcher.swift" "$REPO/deploy/macos/shared/MenuBar.swift" -o "$APP/Contents/MacOS/Oarbank Coordinator"
+# Remove inherited extended attributes before sealing the application (and from the scripts: no ._ files).
+cp -R "$REPO/deploy/macos/coordinator/scripts" "$WORK/scripts"
+xattr -cr "$WORK/root" "$WORK/scripts"
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
-sign_with_timestamp() {
-    local attempt
-    for attempt in 1 2 3; do
-        codesign --force --options runtime --timestamp --sign "$ID" "$1" && return 0
-        [[ $attempt == 3 ]] || sleep 3
-    done
-    return 1
-}
-find "$APP" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
-    file -b "$f" | grep Mach-O >/dev/null || continue
-    if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-    else sign_with_timestamp "$f"; fi
-done
-if [[ "$ID" == "-" ]]; then codesign --force --sign - "$APP"
-else sign_with_timestamp "$APP"; fi
+# every Mach-O file, the bundled interpreter with deploy/macos/python.entitlements (modules run on it and load wheels
+# signed by other teams; scripts/macos-codesign.sh, docs/release-signing.md "macOS code signatures"), then the app
+source "$REPO/scripts/macos-codesign.sh"
+macos_sign_tree "$ID" "$APP"
+macos_sign "$ID" "$APP"
+# the interpreter carries exactly that entitlement (with the hardened runtime under a Developer ID) and loads a native
+# wheel from PyPI the build did not sign, in an environment outside the app; the seal check below sees any change
+DEVELOPER_ID=()
+[[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)
+"$PY" -I -B "$REPO/scripts/check-macos-signing.py" ${DEVELOPER_ID[@]+"${DEVELOPER_ID[@]}"} --canary --work "$WORK/canary" "$ROOT"
+rm -rf "$WORK/canary"
 codesign --verify --deep --strict "$APP"
 # pkgbuild marks the bundles it finds relocatable: Installer would then update a copy of the app it finds anywhere on the
 # disk instead of installing /Applications/Oarbank Coordinator.app. Pin every bundle where the payload puts it.
@@ -65,7 +73,7 @@ while plutil -extract "$n.RootRelativeBundlePath" raw -o /dev/null "$WORK/compon
     n=$((n + 1))
 done
 [[ $n -gt 0 ]] || { echo "pkgbuild found no bundle in the payload (Oarbank Coordinator.app)" >&2; exit 1; }
-pkgbuild --quiet --root "$WORK/root" --component-plist "$WORK/components.plist" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
+pkgbuild --quiet --root "$WORK/root" --component-plist "$WORK/components.plist" --scripts "$WORK/scripts" --identifier dev.codonic.oarbank.coordinator --version "$VERSION" --install-location / --ownership recommended "$WORK/coordinator.pkg" 2> >(grep -vx 'write: Permission denied' >&2)
 # macOS can retain provenance attributes despite xattr -cr. pkgbuild then embeds
 # AppleDouble siblings; omit those without changing signed app resources, link
 # targets, file modes or Installer's recommended root ownership.
@@ -108,7 +116,7 @@ XML
 PKG="$OUT/oarbank-coordinator-$VERSION-macos-$ARCH.pkg"
 SIGN=()
 [[ -z "${OARBANK_INSTALLER_IDENTITY:-}" ]] || SIGN=(--sign "$OARBANK_INSTALLER_IDENTITY" --timestamp)
-productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" "${SIGN[@]}" "$PKG"
+productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" ${SIGN[@]+"${SIGN[@]}"} "$PKG"
 if [[ -n "${OARBANK_NOTARY_PROFILE:-}" ]]; then
     [[ -n "${OARBANK_INSTALLER_IDENTITY:-}" && "$ID" != "-" ]] || { echo "notarization needs Developer ID signatures" >&2; exit 1; }
     xcrun notarytool submit "$PKG" --keychain-profile "$OARBANK_NOTARY_PROFILE" --wait

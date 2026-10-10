@@ -53,6 +53,9 @@ pub struct JobState {
     pub needs: Vec<String>,
     /// Wakes the job's monitor when `stop`, `pause` or `threads` change, so control.json follows at once.
     pub wake: Arc<Notify>,
+    /// The agent is stopping (agent.rs `stop_jobs`): the runner is killed at this instant at the latest, whatever its
+    /// own grace, so the agent ends within its service manager's stop timeout.
+    pub stop_by: Option<Instant>,
 }
 
 /// Whether the job runs a stage the release marks `bootstrap` (spec/sandbox.md, "Bootstrap jobs"): taken from the
@@ -107,7 +110,7 @@ pub struct Ctx {
     pub images: Arc<crate::imageset::Verifier>,
     /// The module services, for the readiness gate before a runner that needs their pools starts.
     pub services: Option<Arc<Mutex<crate::services::ServiceManager>>>,
-    /// The folder statement this node applies (folders.rs): which folders runners may get, and where.
+    /// The node statement this node applies (folders.rs): which folders runners may get, and where.
     pub folders: crate::folders::Folders,
 }
 
@@ -241,6 +244,16 @@ pub async fn run(ctx: Arc<Ctx>, grant: Value, deadline: Option<Instant>) {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A runner's settings: the module's own node settings with the grant's `settings` (the job's campaign overrides of
+/// them) laid over key by key, the grant's value winning.
+fn runner_settings(module_settings: &Value, grant: &Value) -> Value {
+    let mut out = module_settings.as_object().cloned().unwrap_or_default();
+    if let Some(over) = grant["settings"].as_object() {
+        out.extend(over.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    Value::Object(out)
+}
+
 /// The secrets a grant carries for its stage, `(name, value)`.
 fn secrets_of(grant: &Value) -> Vec<(String, Value)> {
     grant["secrets"].as_object().map(|m| m.iter().filter(|(_, v)| v.is_string()).map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -336,14 +349,16 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         crate::fsutil::private_dir(&data.join("tmp"))?;
     }
     let grants_dir = ws.join(".grants");
-    let mut settings = ctx.policy["module_settings"][module].clone();
-    if settings.is_null() || bootstrap {
-        settings = json!({});                            // operators keep credentials in settings: never a bootstrap job's
-    }
+    let settings = if bootstrap {
+        json!({})                                        // operators keep credentials in settings: never a bootstrap job's
+    } else {
+        runner_settings(&ctx.policy["module_settings"][module], grant)
+    };
     // folders: runners only, never a bootstrap job; exactly what this node's applied statement provides for the
     // module's approved requests
     let folders = if bootstrap { serde_json::Map::new() } else { ctx.folders.granted(&entry["sandbox"]["folders"]) };
-    let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings)?;
+    // tools: the module's resolution on this node (tools.rs); a bootstrap entry asks for none and gets none
+    let (tools_file, settings_file, tool_paths) = grant_files(&grants_dir, &entry, &settings, &ctx.policy["tool_grants"][module])?;
     // the secrets this job's stage lists (only such a grant carries any): an owner-only file inside the work directory,
     // deleted with it; never in spec.json, the environment or a log
     let secrets = secrets_of(grant);
@@ -486,6 +501,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     if let Some(r) = &ctx.registry {
         r.register(pid, Some(aid), None);                 // only registered groups may ever be signalled (S16)
     }
+    // what a later agent (or this one's watchdog) needs to end the runner should this agent die without stopping it
+    #[cfg(unix)]
+    let mut record = crate::runners::Record::create(&ctx.layout, aid, pid);
     {
         let mut t = ctx.table.lock().unwrap();
         if let Some(j) = t.get_mut(&aid) {
@@ -509,6 +527,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         if let Some(f) = fault {
             warn!(attempt = aid, "{f}; killed");
             procs::signal_group(pid, procs::Sig::Kill);
+            #[cfg(unix)]
+            if let Some(r) = record.take() {
+                r.remove();
+            }
             bail!("the runner did not come up sandboxed");
         }
     }
@@ -538,7 +560,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         }
         let usage = procs::group_usage(pid);
         let log_len = std::fs::metadata(ws.join(".runner.log")).map(|m| m.len()).unwrap_or(0);
-        let (stop, want_pause, want_threads) = {
+        #[cfg(unix)]
+        if let Some(r) = record.as_mut() {
+            r.track();
+        }
+        let (stop, want_pause, want_threads, stop_by) = {
             let mut t = ctx.table.lock().unwrap();
             let j = t.get_mut(&aid);
             match j {
@@ -551,9 +577,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                             j.phase = p;
                         }
                     }
-                    (j.stop.clone(), j.pause, j.threads)
+                    (j.stop.clone(), j.pause, j.threads, j.stop_by)
                 }
-                None => (Some(Stop::Revoke), false, None),
+                None => (Some(Stop::Revoke), false, None, None),
             }
         };
         // a value split across two chunks would escape redaction: hold back as many bytes as the longest secret
@@ -600,8 +626,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                     stopping = Some((s, Instant::now(), grace));
                 }
             }
-        } else if let Some((_, at, g)) = &stopping {
-            if at.elapsed() > Duration::from_secs_f64(*g) {
+        }
+        if let Some((_, at, g)) = &stopping {
+            // its grace is over, or the agent is stopping and cannot wait for it any longer
+            if at.elapsed() > Duration::from_secs_f64(*g) || stop_by.is_some_and(|d| Instant::now() >= d) {
                 procs::signal_group(pid, procs::Sig::Kill);
             }
         }
@@ -614,6 +642,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     };
     let oom = crate::sys::oom(pid);
     procs::signal_group(pid, procs::Sig::Kill);                     // nothing outlives its attempt
+    #[cfg(unix)]
+    if let Some(r) = record.take() {
+        r.remove();                                                 // its processes are gone: nothing to reap
+    }
+    let stop_by = ctx.table.lock().unwrap().get(&aid).and_then(|j| j.stop_by);
     // the runner is gone: the last checkpoint it wrote (always taken when it answers the request) is uploaded before
     // the attempt ends, so the job's next attempt finds it; a finished job needs none
     if let Some(c) = ck.as_mut() {
@@ -623,7 +656,17 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
             uploads.step(ctx, aid, c, asked_checkpoint, ws);
             if uploads.busy() {
                 set_phase(&ctx.table, aid, "checkpointing");
-                uploads.finish(ctx, aid, c, ws).await;
+                match stop_by {
+                    // the agent is stopping: the upload gets what is left of its stop budget
+                    Some(d) => {
+                        let until = tokio::time::Instant::from_std(d + crate::agent::STOP_REPORT);
+                        if tokio::time::timeout_at(until, uploads.finish(ctx, aid, c, ws)).await.is_err() {
+                            warn!(attempt = aid, "the agent is stopping: the last checkpoint's upload was cut short");
+                            uploads.abort();
+                        }
+                    }
+                    None => uploads.finish(ctx, aid, c, ws).await,
+                }
             }
         }
         c.clean();
@@ -859,6 +902,17 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    /// A campaign's overrides of the module's settings reach its runners, key by key; the rest stay the node's.
+    #[test]
+    fn a_grants_settings_override_the_modules_key_by_key() {
+        let module = json!({"region": "eu", "batch": 8, "token": "t"});
+        assert_eq!(runner_settings(&module, &json!({"settings": {"batch": 32, "extra": true}})),
+                   json!({"region": "eu", "batch": 32, "token": "t", "extra": true}));
+        assert_eq!(runner_settings(&module, &json!({"spec": {}})), module);
+        assert_eq!(runner_settings(&Value::Null, &json!({"settings": {"batch": 2}})), json!({"batch": 2}));
+        assert_eq!(runner_settings(&Value::Null, &json!({"settings": "x"})), json!({}));
     }
 
     /// (what removes the scratch directory when dropped, its path)

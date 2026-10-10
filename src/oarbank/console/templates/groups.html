@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% import "_groups.html" as G with context %}
+{% block title %}Groups · Oarbank{% endblock %}
+{% block body %}
+<h1>Groups</h1>
+<p class="small mut">A group gives its members settings that differ from the fleet's: laptops' battery and presence rules, a canary
+cohort, a lab's caps. Membership comes from each node's facts and labels (and any node you list), evaluated whenever settings are
+resolved, so a node that changes moves at once. Where groups set the same setting, the <b>higher-ranked</b> group wins; a node's own
+value beats every group unless a group or the fleet <b>locks</b> it. Set a group's values on its page.
+<a href="/nodes/bulk">Bulk changes</a> sets values or labels on many nodes at once.</p>
+
+<section class="card wide" aria-labelledby="h-owner">
+<h2 id="h-owner">Your groups <span class="small mut">(highest rank first)</span></h2>
+<table class="small groups-table"><caption class="sr-only">Owner groups in rank order</caption>
+<tr><th scope="col">rank</th><th scope="col">group</th><th scope="col">members because</th><th scope="col">members</th><th scope="col">sets</th><th class="actions" scope="col"><span class="sr-only">actions</span></th></tr>
+{% for g in owner %}<tr><td class="num nowrap">{{ loop.index }}</td>
+  <td><a href="/groups/{{ g.id }}"><b>{{ g.name }}</b></a>{% if g.description %}<div class="mut">{{ g.description }}</div>{% endif %}</td>
+  <td>{{ g.rule }}</td>
+  <td>{{ g.members_list | map(attribute='hostname') | join(', ') or '–' }} <span class="mut nowrap">({{ g.members_list | length }})</span></td>
+  <td>{% for v in g['values'] %}<span class="chip{{ ' warn' if v.enforced }}" title="{{ v.label }}{{ ' (locked)' if v.enforced }}">{{ v.key }}{{ ' [' ~ v.module ~ ']' if v.module }} = {{ v.value_text }}{% if v.enforced %} · locked{% endif %}</span> {% else %}<span class="mut">nothing yet</span>{% endfor %}</td>
+  <td class="actions">{% if not loop.first %}{{ m.op_form("groups.rank", g.id, "Up", params={"move": "up"}) }}{% endif %}{% if not loop.last %}{{ m.op_form("groups.rank", g.id, "Down", params={"move": "down"}) }}{% endif %}
+    <a class="btn" href="/groups/{{ g.id }}">Open</a></td></tr>
+{% else %}<tr><td colspan="6" class="mut">No groups of your own yet: create one below (for example Laptops: has a battery).</td></tr>{% endfor %}
+</table>
+</section>
+
+<section class="card wide" aria-labelledby="h-new">
+<h2 id="h-new">New group</h2>
+<p class="small mut">It ranks above every other group (move it with Up and Down). Saving shows who joins before anything changes.</p>
+{{ G.group_form("groups.create", "", "Review and create…", nodes=nodes, all_labels=all_labels) }}
+</section>
+
+<section class="card wide" aria-labelledby="h-builtin">
+<h2 id="h-builtin">Built-in groups</h2>
+<p class="small mut">Their membership is the system's own (by OS, and the coordinator's own machine) and they rank below yours. You can
+still set values on them, for example a macOS default.</p>
+<table class="small"><tr><th scope="col">group</th><th scope="col">members because</th><th scope="col">members</th><th scope="col">sets</th></tr>
+{% for g in builtin %}<tr><td><a href="/groups/{{ g.id }}"><b>{{ g.name }}</b></a></td><td>{{ g.rule }}</td>
+  <td>{{ g.members_list | map(attribute='hostname') | join(', ') or '–' }}</td>
+  <td>{% for v in g.builtin_values %}<span class="chip" title="{{ v.reason }}">{{ v.key }} = {{ v.value_text }} (built in)</span> {% endfor %}{% for v in g['values'] %}<span class="chip{{ ' warn' if v.enforced }}">{{ v.key }} = {{ v.value_text }}{% if v.enforced %} · locked{% endif %}</span> {% endfor %}{% if not g['values'] and not g.builtin_values %}<span class="mut">nothing</span>{% endif %}</td></tr>
+{% endfor %}</table>
+</section>
+
+<section class="card wide" aria-labelledby="h-labels">
+<h2 id="h-labels">Labels</h2>
+<p class="small mut">Short words on a node that groups select on. Set them on a node's Settings page or on <a href="/nodes/bulk">Bulk changes</a>;
+labels "from facts" (laptop: the node has a battery) come from what the node reports. A group that locks a safety value should select on
+your own labels, listed members or the OS, which a node cannot claim for itself.</p>
+<table class="small"><tr><th scope="col">node</th><th scope="col">labels</th><th scope="col">from facts</th></tr>
+{% for host, labs in labels | dictsort %}<tr><td>{{ host }}</td><td>{% for l in labs.owner %}<span class="chip acc">{{ l }}</span> {% else %}<span class="mut">–</span>{% endfor %}</td>
+  <td>{% for l in labs.facts %}<span class="chip">{{ l }}</span> {% else %}<span class="mut">–</span>{% endfor %}</td></tr>
+{% else %}<tr><td colspan="3" class="mut">No nodes yet.</td></tr>{% endfor %}</table>
+</section>
+{% endblock %}

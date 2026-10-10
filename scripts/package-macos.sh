@@ -12,12 +12,20 @@
 #
 # Besides the programs it ships (docs/design/node-enrollment.md): the join window (/Library/Oarbank/share/join, from
 # deploy/node), the menu bar app /Applications/Oarbank Node.app (deploy/macos/node/NodeApp.swift, built here for the
-# package's architecture), and the managed-policy job /Library/LaunchDaemons/dev.codonic.oarbank.agent.policy.plist.
-# The postinstall links /usr/local/bin/oarbank-node to the launcher and loads the policy job.
+# package's architecture), the managed-policy job /Library/LaunchDaemons/dev.codonic.oarbank.agent.policy.plist, and the
+# root helper through which the app asks for an administrator to join or leave (docs/design/node-enrollment.md, "macOS
+# elevation"): /Library/Oarbank/bin/oarbank-node-helper (deploy/macos/node/NodeHelper.swift and Elevation.swift) and its
+# job /Library/LaunchDaemons/dev.codonic.oarbank.agent.helper.plist. The postinstall links /usr/local/bin/oarbank-node
+# to the launcher, loads both jobs and registers the helper's authorization rights.
 #
 # Signing is the owner's: nothing here holds keys.
 #   OARBANK_CODESIGN_IDENTITY   "Developer ID Application: …" for the binaries and the app (default: ad-hoc, for local
 #                               tests)
+#   OARBANK_TEAM_ID             the Developer ID team the helper requires its client app to be signed by (default
+#                               MKNM96EU7J). An ad-hoc package's helper requires instead exactly the app binary that
+#                               package holds, by its cdhash: only that build's app can ask it, but an ad-hoc app has no
+#                               hardened runtime, so any local process that can start it with an injected library can
+#                               ask too (the administrator's password is still required). Ad-hoc packages are for tests.
 #   OARBANK_INSTALLER_IDENTITY  "Developer ID Installer: …" to sign the pkg (default: unsigned)
 #   OARBANK_NOTARY_PROFILE      a notarytool keychain profile: notarize and staple the signed pkg
 #   OARBANK_TUF_ROOT            the vendor's TUF root.json, compiled into the agent (scripts/tuf_vendor.py)
@@ -57,16 +65,22 @@ for f in join-window.py join-window.html; do
     [[ -f "$REPO/deploy/node/$f" ]] || { echo "deploy/node/$f is missing: the package has no join window" >&2; exit 1; }
     install -m 644 "$REPO/deploy/node/$f" "$JOIN/$f"
 done
-# the managed-policy job; Installer's recommended ownership makes it root:wheel, which launchd requires of a daemon
+# the managed-policy job and the helper's; Installer's recommended ownership makes them root:wheel, which launchd
+# requires of a daemon
 mkdir -p "$WORK/root/Library/LaunchDaemons"
-plutil -lint -s "$REPO/deploy/macos/dev.codonic.oarbank.agent.policy.plist"
-install -m 644 "$REPO/deploy/macos/dev.codonic.oarbank.agent.policy.plist" "$WORK/root/Library/LaunchDaemons/"
+for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper; do
+    plutil -lint -s "$REPO/deploy/macos/$job.plist"
+    # Login Items, Allow in the Background lists the job under Oarbank Node (the app below), not the signing team
+    [[ "$(plutil -extract AssociatedBundleIdentifiers.0 raw -o - "$REPO/deploy/macos/$job.plist")" == dev.codonic.oarbank.node ]] \
+        || { echo "$job.plist does not name Oarbank Node.app (dev.codonic.oarbank.node) in AssociatedBundleIdentifiers" >&2; exit 1; }
+    install -m 644 "$REPO/deploy/macos/$job.plist" "$WORK/root/Library/LaunchDaemons/"
+done
 # Oarbank Node.app, the menu bar app (the coordinator's app is built the same way: scripts/package-coordinator-macos.sh).
 # /Applications keeps the mode it has on every Mac (Installer gives the folder our mode).
 APP="$WORK/root/Applications/Oarbank Node.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 chmod 775 "$WORK/root/Applications"
-cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-symbolic.png" "$APP/Contents/Resources/"
+cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-node-symbolic.png" "$REPO/deploy/icons/oarbank-node-symbolic@2x.png" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -90,8 +104,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 plutil -lint -s "$APP/Contents/Info.plist"
-xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement \
-    "$REPO/deploy/macos/node/NodeApp.swift" -o "$APP/Contents/MacOS/Oarbank Node"
+# the app with the elevation contract it shares with the helper (its --elevate mode is the join window's) and the menu
+# bar model it shares with Oarbank Coordinator.app (deploy/macos/shared/MenuBar.swift)
+xcrun swiftc -O -parse-as-library -target "$ARCH-apple-macos15.0" -framework AppKit -framework ServiceManagement \
+    -framework Security "$REPO/deploy/macos/node/NodeApp.swift" "$REPO/deploy/macos/node/Elevation.swift" \
+    "$REPO/deploy/macos/shared/MenuBar.swift" -o "$APP/Contents/MacOS/Oarbank Node"
 # the node runtime beside the launcher (CPython 3.12 with the module SDK, and uv; scripts/build-node-runtime.sh)
 "$REPO/scripts/build-node-runtime.sh" "$PAYLOAD/runtime" "$PLATFORM"
 # the payload holds no link out of itself and no path of this machine, every native file in it (the app's too) is for
@@ -114,12 +131,18 @@ for b in oarbank-agent oarbank-launcher; do
     [[ "$signed" == *"Identifier=dev.codonic.$b"* && "$signed" == *"Info.plist entries="* ]] \
         || { echo "$b is not signed with its Info.plist as dev.codonic.$b" >&2; exit 1; }
 done
-# every Mach-O file of the runtime, signed like the binaries
-find "$PAYLOAD/runtime" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0 | while IFS= read -r -d '' f; do
-    file -b "$f" | grep Mach-O >/dev/null || continue
-    if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-    else codesign --force --options runtime --timestamp --sign "$ID" "$f"; fi
-done
+# every Mach-O file of the runtime, signed like the binaries; its interpreter with deploy/macos/python.entitlements
+# (library validation off, so the hardened interpreter loads the wheels modules install from PyPI, whose code is signed
+# ad hoc or by other teams; scripts/macos-codesign.sh, docs/release-signing.md "macOS code signatures")
+source "$REPO/scripts/macos-codesign.sh"
+macos_sign_tree "$ID" "$PAYLOAD/runtime"
+# the interpreter carries exactly that entitlement (with the hardened runtime under a Developer ID), and loads a native
+# wheel from PyPI that the build did not sign, in an environment of its own outside the payload
+DEVELOPER_ID=()
+[[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)
+uv run --no-project --python 3.12 python "$REPO/scripts/check-macos-signing.py" ${DEVELOPER_ID[@]+"${DEVELOPER_ID[@]}"} \
+    --canary --work "$WORK/canary" "$PAYLOAD/runtime"
+rm -rf "$WORK/canary"
 # the app, sealed as a bundle under its identifier (hardened runtime with a Developer ID); no extended attribute may be
 # on its files when it is signed (codesign refuses Finder information and resource forks)
 xattr -cr "$APP"
@@ -130,6 +153,35 @@ else
 fi
 codesign --verify --deep --strict "$APP"
 [[ "$(codesign -dv "$APP" 2>&1)" == *"Identifier=dev.codonic.oarbank.node"* ]] || { echo "Oarbank Node.app is not signed as dev.codonic.oarbank.node" >&2; exit 1; }
+# The root helper, built once the app is signed: it accepts requests only from a process whose code signature
+# satisfies the requirement compiled into it (HelperBuild.swift), the Developer ID app of the team or, ad-hoc, this
+# package's app by its cdhash. The app must satisfy it, and the helper is checked like the app (architecture, no build
+# paths) and signed under its identifier.
+if [[ "$ID" == "-" ]]; then
+    cdhash="$(codesign -dvvv "$APP" 2>&1 | sed -n 's/^CDHash=//p')"
+    [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]] || { echo "no cdhash for the ad-hoc Oarbank Node.app" >&2; exit 1; }
+    pin=".adHoc(cdhash: \"$cdhash\")"
+else
+    team="${OARBANK_TEAM_ID:-MKNM96EU7J}"
+    [[ "$team" =~ ^[A-Z0-9]{10}$ ]] || { echo "bad OARBANK_TEAM_ID $team" >&2; exit 1; }
+    pin=".developerID(team: \"$team\")"
+fi
+printf '// written by scripts/package-macos.sh: the client the helper serves\nlet helperClientPin: Elevation.ClientPin = %s\n' "$pin" > "$WORK/HelperBuild.swift"
+xcrun swiftc -O -parse-as-library -target "$ARCH-apple-macos15.0" -framework Security \
+    "$REPO/deploy/macos/node/NodeHelper.swift" "$REPO/deploy/macos/node/Elevation.swift" "$WORK/HelperBuild.swift" \
+    -o "$PAYLOAD/oarbank-node-helper"
+chmod 755 "$PAYLOAD/oarbank-node-helper"
+uv run --no-project --python 3.12 python "$REPO/scripts/check-package.py" --build-path "$WORK" --platform "$PLATFORM" \
+    "$PAYLOAD/oarbank-node-helper"
+if [[ "$ID" == "-" ]]; then
+    codesign --force --identifier dev.codonic.oarbank-node-helper --sign - "$PAYLOAD/oarbank-node-helper"
+else
+    codesign --force --options runtime --timestamp --identifier dev.codonic.oarbank-node-helper --sign "$ID" "$PAYLOAD/oarbank-node-helper"
+fi
+codesign --verify --strict "$PAYLOAD/oarbank-node-helper"
+requirement="$("$PAYLOAD/oarbank-node-helper" requirement)"
+codesign --verify --strict -R="$requirement" "$APP" \
+    || { echo "Oarbank Node.app does not satisfy the helper's client requirement: $requirement" >&2; exit 1; }
 grep -aq "oarbank-agent-version:$VERSION" "$PAYLOAD/oarbank-agent" || { echo "the agent does not carry version $VERSION" >&2; exit 1; }
 [[ "$("$PAYLOAD/oarbank-agent" --version)" == "oarbank-agent $VERSION" ]] || { echo "the signed agent does not run" >&2; exit 1; }
 

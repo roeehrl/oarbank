@@ -5,22 +5,28 @@
 <p class="small"><a href="/nodes/{{ n.node_id }}">← {{ n.hostname }}</a></p>
 <div class="row"><h1>Protection on {{ n.hostname }}</h1>
   <span class="chip {{ 'ok' if n.online else 'bad' }}">{{ 'online' if n.online else 'offline' }}</span>
-  <span class="chip">version {{ version }}</span><span class="chip acc">{{ prot.mode or mode }}</span>
+  <span class="chip acc">{{ prot.mode or mode }}</span>
   {% if prot.rung %}<span class="chip warn">rung {{ prot.rung }}</span>{% endif %}
   <span class="sp"></span>{{ m.op_form("protection.probe_now", n.node_id, "Run a pause probe now") }}
 </div>
 <p class="small mut">Owner-set only: rules protect your own processes from fleet work. Actions touch fleet jobs only (reserve, cap, lower,
-pause, evict); nothing here can signal a protected process. The node unions this with its local protection file, strictest wins.</p>
+pause, evict); nothing here can signal a protected process. Protection is on the settings chain: the fleet's rules, this node's groups'
+rules and its own rules all apply together, and the mode is the most specific one set (unless a group or the fleet locks it). The node
+also unions this with its local protection file, strictest wins.</p>
 
 <div class="grid">
 <div class="card">
-  <b>Mode</b>
-  {% call m.op_form("nodes.set_mode", n.node_id, "Set mode", cls="pri", confirm="Change the protection mode of " ~ n.hostname ~ "?", reason_prompt=True, inline=False) %}
+  <b>Mode</b> <span class="chip">{{ mode_source }}</span>
+  {% if mode_locked_by %}<p class="small"><b>{{ mode }}</b>: locked by {{ mode_locked_by }}. Change it there.</p>
+  {% else %}
+  {% call m.op_form("nodes.set_mode", n.node_id, "Set this node's mode", cls="pri", confirm="Change the protection mode of " ~ n.hostname ~ "?", reason_prompt=True, inline=False) %}
   <div class="small" style="margin:6px 0">{% for md, what in [('fleet_first', 'static rules and guards only; the fleet uses what is left'),
       ('moderate', 'adaptive budget: grows while protected processes are unharmed, halves on harm; frontmost app and owner stall protected'),
       ('strict_yield', 'pause fleet work at once on any protected activity; ramps back after 15 idle minutes')] %}
     <label style="display:block"><input type="radio" name="p.mode" value="{{ md }}" {% if md == mode %}checked{% endif %}> <b>{{ md }}</b> <span class="mut">{{ what }}</span></label>{% endfor %}</div>
   {% endcall %}
+  {% if own_mode %}<p class="small mut">This node sets its own mode ({{ own_mode }}); remove <span class="mono">mode</span> from its section below to inherit again.</p>{% endif %}
+  {% endif %}
 </div>
 <div class="card">
   <b>Controller now</b>
@@ -32,33 +38,31 @@ pause, evict); nothing here can signal a protected process. The node unions this
   </div>
 </div>
 <div class="card">
-  <b>Canary</b>
-  {% if canary %}
-  <div class="kv small" style="margin-top:6px">
-    <span class="mut">node</span><span class="mono">{{ canary.node_id }} (version {{ canary.version }})</span>
-    <span class="mut">soaked</span><span>{{ canary.soak_s | secs }} · {{ canary.refused }} refused actuation(s)</span>
-    <span class="mut">by</span><span>{{ canary.actor }} · {{ canary.started_at | ago }}</span>
-  </div>
-  <div class="row" style="margin-top:6px">{{ m.op_form("protection.rules.canary", canary.node_id, "Review promotion to every node…", cls="pri", params={"promote": true}) }}</div>
-  <p class="small mut">The review shows whether it is promotable: a clean soak (no S16/S18 findings or refused actuations) of at least 10 minutes.</p>
-  {% else %}<p class="small mut">No canary running. Use "Canary on this node" below to try a rule set here first, then promote it.</p>{% endif %}
+  <b>Inherited rules</b>
+  <table class="small"><tr><th scope="col">rule</th><th scope="col">from</th><th scope="col">matches</th></tr>
+  {% for x in inherited %}<tr><td class="mono">{{ x.rule.id }}</td><td>{% if x.source and x.source.startswith('Group: ') %}<a href="/groups">{{ x.source }}</a>{% else %}<a href="/settings#protection-rules">{{ x.source }}</a>{% endif %}</td><td class="mono small">{{ x.rule.match | tojson }}</td></tr>
+  {% else %}<tr><td colspan="3" class="mut">none: only this node's own rules below apply</td></tr>{% endfor %}</table>
+  {% for x in skipped %}<p class="small"><span class="chip warn">skipped here</span> <span class="mono">{{ x.rule }}</span> ({{ x.source }}): {{ x.why }}</p>{% endfor %}
+  {% for x in conflicts %}<p class="small"><span class="chip bad">conflict</span> {{ x }}</p>{% endfor %}
+  <p class="small mut">To roll rules out across the fleet, add them to a group first (a canary group on the <a href="/groups">Groups</a>
+  page), then promote them to the fleet from that group's page.</p>
 </div>
 </div>
 
-<h2>Rules <span class="small mut">(protection schema 1, edited as JSON; the preview updates as you type)</span></h2>
+<h2>This node's own rules <span class="small mut">(a protection section, edited as JSON; the preview updates as you type)</span></h2>
 {% if os_note %}<p class="small mut">{{ os_note }}</p>{% endif %}
 {% for c in runtime %}<p class="small"><span class="chip {{ c.tone }}">{{ c.code }}</span> {{ c.message }}</p>{% endfor %}
 <div class="grid">
 <div class="card">
   {% call m.op_form("protection.rules.update", n.node_id, "Review and apply…", cls="pri", inline=False) %}
-  <textarea id="prot-config" name="pj.config" aria-label="protection rules (JSON)" rows="26" class="mono" spellcheck="false" style="width:100%"
+  <textarea id="prot-config" name="pj.config" aria-label="this node's own protection section (JSON)" rows="22" class="mono" spellcheck="false" style="width:100%"
     hx-get="/frag/nodes/{{ n.node_id }}/protection/preview" hx-trigger="input changed delay:400ms, load" hx-target="#prot-preview"
-    hx-swap="innerHTML">{{ config_text }}</textarea>
-  <div class="row" style="margin-top:6px"><button formaction="/do/protection.rules.canary" title="Apply to this node only, then promote after a clean soak">Canary on this node…</button>
-    <span class="sp"></span><span class="small mut">T2: you review the diff and live matches, and give a reason, before anything changes.</span></div>
+    hx-swap="innerHTML" hx-sync="this:replace">{{ config_text }}</textarea>
+  <p class="small mut">T2: you review the diff and live matches, and give a reason, before anything changes. Leave out <span class="mono">mode</span>
+  to inherit it; the node section's other fields (memory guard, timing) are this node's own tuning.</p>
   {% endcall %}
 </div>
-<div class="card"><b>Live preview</b><div id="prot-preview" class="small" aria-live="polite"><span class="mut">computing…</span></div></div>
+<div class="card"><b>Live preview</b><div id="prot-preview" class="small" aria-live="polite"><p class="placeholder"><span class="spin" aria-hidden="true"></span>Computing the preview…</p></div></div>
 </div>
 
 <h2>Process picker <span class="small mut">(reported by the agent {{ processes_at | ago if processes_at else 'never' }}; refreshed when you preview)</span></h2>
@@ -85,10 +89,11 @@ pause, evict); nothing here can signal a protected process. The node unions this
 <p class="small mut">Bands: rules active. Red: escalation rung. Green dashed: moderate-mode budget. Orange dots: pause probes. Brown lines: memory guard.</p>
 </div>
 
-<h2>Versions</h2>
-<table class="small"><tr><th>version</th><th>when</th><th>by</th><th>source</th><th>reason</th><th>rules</th><th><span class="sr-only">actions</span></th></tr>
+<h2>History</h2>
+<p class="small mut">Each change of this node's effective protection (its own section, its groups', the fleet's, or a fact that moved it),
+with the settings revision that made it. The audit log has who changed which scope, and why.</p>
+<table class="small"><tr><th>version</th><th>when</th><th>by</th><th>source</th><th>rules</th></tr>
 {% for h in history %}<tr><td>{{ h.version }}</td><td class="mut">{{ h.created_at | ago }}</td><td>{{ h.actor }}</td><td class="mono">{{ h.source }}</td>
-  <td>{{ h.reason or '' }}</td><td class="mono small">{{ (h.config.rule or []) | map(attribute='id') | join(', ') }} · {{ (h.config.node or {}).mode or 'moderate' }}</td>
-  <td>{% if not loop.first %}{{ m.op_form("protection.rules.restore", n.node_id, "Restore…", params={"version": h.version}) }}{% endif %}</td></tr>
-{% else %}<tr><td colspan="7" class="mut">no versioned edits yet (version 0 is the policy's section)</td></tr>{% endfor %}</table>
+  <td class="mono small">{{ (h.config.rule or []) | map(attribute='id') | join(', ') or '–' }} · {{ (h.config.node or {}).mode or 'moderate' }}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">no change yet: the node has the default protection (moderate, no rules)</td></tr>{% endfor %}</table>
 {% endblock %}

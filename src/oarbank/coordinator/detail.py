@@ -3,13 +3,13 @@ GET /api/v1/nodes/{id} and /api/v1/jobs/{id}) and what the console's node and jo
 on its own read connection (D10). One function per document, so the CLI and the console never say different
 things (docs/design/console-parity.md).
 
-Every function here is pure over a reader (q/one/get_setting): oarbankd's DB or the console's query-only pool. Module
+Every function here is pure over a reader (q/one/get_state): oarbankd's DB or the console's query-only pool. Module
 manifests come from the caller (`manifest_for`), since only oarbankd holds the active versions in memory and the console
 has the catalogue it fetched.
 """
 from collections.abc import Callable
 
-from . import checkpoints, folders, nodeservices, platforms
+from . import checkpoints, folders, nodepolicy, nodeservices, platforms, tools
 from . import config as C
 from .db import jl
 
@@ -17,11 +17,14 @@ from .db import jl
 def gpu(facts: dict, doctor: dict | None) -> dict:
     """The GPU APIs the node's doctor reports (docs/protocol.md "Doctor"), with the evidence for each API (what was
     found, or why not), and how its containers get the GPU (the facts' `containers.gpu`): `cdi:<kind>` on Linux and
-    Windows, `virtio-gpu:venus` on macOS with krunkit, else none."""
+    Windows, `virtio-gpu:venus` on macOS with krunkit, else none. A node whose facts say it has no container runtime
+    (`containers.state` absent) has no GPU APIs in containers, whatever an older report says."""
     g = (doctor or {}).get("gpu_apis")
-    how = ((facts or {}).get("containers") or {}).get("gpu") or ""
+    ct = (facts or {}).get("containers") or {}
+    how = "" if ct.get("state") == "absent" else ct.get("gpu") or ""
     mechanism = f"{how[4:]} (CDI)" if how.startswith("cdi:") else "Venus over virtio-gpu (krunkit)" if how == "virtio-gpu:venus" else None
-    return {"reported": g is not None, "host": list((g or {}).get("host") or []), "containers": list((g or {}).get("containers") or []),
+    return {"reported": g is not None, "host": list((g or {}).get("host") or []),
+            "containers": list((g or {}).get("containers") or []) if ct.get("state") != "absent" else [],
             "evidence": dict((g or {}).get("evidence") or {}), "mechanism": mechanism}
 
 
@@ -44,9 +47,10 @@ def enforcement(facts: dict, mods: list[str], manifest_for: Callable) -> dict:
 
 def folder_grants(r, n: dict) -> list[dict]:
     """The folders mapped to the node (the folder registry), each with what the node's agent last reported applying,
-    and whether the node's current folder statement carries the owner's signature."""
+    and whether the node's current statement carries the owner's signature."""
+    from . import statements
     nid, rep = n["node_id"], folders.report(n)
-    stmt = folders.statements(r).get(nid) or {}
+    stmt = statements.statements(r).get(nid) or {}
     out = []
     for fid, e in sorted(folders.registry(r).items()):
         if nid in (e.get("nodes") or {}):
@@ -71,12 +75,19 @@ def doctor(doc: dict | None) -> dict | None:
 
 def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict | None:
     """The node's detail document, by node id or hostname: `oarbank node show` prints it (GET /api/v1/nodes/{id}) and the
-    console's node page renders its GPU API, enforcement and folder sections. `services` are the agent's per-service
-    report (nodeservices.rows), the rows of the node page's Services table."""
+    console's node page renders its GPU API, enforcement, folder and host tool sections. `services` are the agent's per-service
+    report (nodeservices.rows), the rows of the node page's Services table; `why` explains its slots and memory and
+    `settings` are its effective settings, each with its source and whether the node applied it (settings/views.py)."""
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         return None
     facts, mods = jl(n["facts_json"], {}) or {}, jl(n.get("modules_json"), {}) or {}
+    from .settings import resolve as V, views as SV
+    from .settings.apply import flat_values
+    policy = flat_values(n)
+    snap = V.snapshot(r)
+    eff = V.effective(snap, n)
+    sources = {k: V.badge(x) for k, x in eff.items()}
     hb, doc = n["last_heartbeat_at"] or 0, jl(n["doctor_json"])
     return {
         "node": {"node_id": n["node_id"], "hostname": n["hostname"], "platform": platforms.node_platform(n),
@@ -85,7 +96,14 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "modules": {m: {"state": st.get("state"), "reason": st.get("reason")} for m, st in sorted(mods.items())},
         "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),
         "services": nodeservices.rows(n), "services_at": n.get("services_at"), "folders": folder_grants(r, n),
-        "sandbox": enforcement(facts, sorted(mods), manifest_for)}
+        # host tools: what the node found, and each enabled module's resolution per tool request (tools.py)
+        "tools": tools.node_view(r, n),
+        "sandbox": enforcement(facts, sorted(mods), manifest_for),
+        # why it has the slots and memory it has, citing the settings it rests on with their source (nodepolicy.py)
+        "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os"),
+                              n["node_id"], sources),
+        # its effective settings with their source and applied state (settings/views.py)
+        "settings": SV.effective_doc(r, n["node_id"])}
 
 
 def job(r, jid: int) -> dict | None:

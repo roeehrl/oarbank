@@ -61,6 +61,14 @@ pub fn helper_config(opts: &[String]) -> Result<()> {
 }
 
 /// `service install|uninstall|status [--system [--user ACCOUNT]] [--label NAME] [--dry-run] [-- agent args...]`
+/// `service refresh`: nothing to render again on Windows. The service's stop wait (the wait hint and the launcher's
+/// wait for the agent) lives in the launcher binary itself, which the MSI replaces in place, and a major upgrade runs
+/// `setup --scope system`, which creates the service again (oarbank-agent.wxs, SetupWaiting).
+pub fn refresh(_rest: &[String]) -> Result<()> {
+    println!("up to date: the Windows service's stop wait is the launcher's own");
+    Ok(())
+}
+
 pub fn service(home: &Home, rest: &[String]) -> Result<()> {
     let split = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
     let (opts, agent_args) = (&rest[..split], rest.get(split + 1..).unwrap_or(&[]));
@@ -161,7 +169,8 @@ fn report(state: u32, exit: u32) {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS, dwCurrentState: state,
         dwControlsAccepted: if state == SERVICE_RUNNING { SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN } else { 0 },
         dwWin32ExitCode: if exit == 0 { NO_ERROR } else { ERROR_SERVICE_SPECIFIC_ERROR }, dwServiceSpecificExitCode: exit,
-        dwCheckPoint: 0, dwWaitHint: if state == SERVICE_STOP_PENDING { 30_000 } else { 0 },
+        // a stop waits for the agent to stop its jobs (the launcher's stop_now): up to AGENT_STOP_TIMEOUT_S
+        dwCheckPoint: 0, dwWaitHint: if state == SERVICE_STOP_PENDING { oarbank_core::service::AGENT_STOP_TIMEOUT_S * 1000 } else { 0 },
     };
     unsafe { SetServiceStatus(*h as SERVICE_STATUS_HANDLE, &st) };
 }

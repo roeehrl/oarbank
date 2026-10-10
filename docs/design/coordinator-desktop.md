@@ -1,19 +1,38 @@
 # Coordinator desktop companion
 
-The native application offers a compact menu: coordinator status, **Open web app**,
-**Preferences…**, and **Quit Oarbank Coordinator**. Login remains in the browser.
-Preferences contains **Start automatically at sign-in**, off until the user enables
-it. Automatic startup opens the companion quietly. Quitting closes the companion;
-it does not stop the separately managed coordinator and console services.
+The native application offers a compact menu: coordinator status, **Open web app**, its settings, and a way out that
+never reads as stopping the coordinator. Login remains in the browser. Closing the companion does not stop the
+separately managed coordinator and console services.
 
-The companion runs as the signed-in user. Status probes only the loopback console
+On macOS the companion follows the node app's menu bar model ([node-enrollment.md, "Menu bar and
+tray"](node-enrollment.md#menu-bar-and-tray)): one setting, **Show Oarbank Coordinator in the menu bar** (on after the
+first launch: the item is shown and the app opens at login through `SMAppService.mainApp`), **Hide from Menu Bar** (⌘Q,
+"The coordinator keeps running") turns it off and quits, and the settings window has **This Mac's coordinator** (the
+services in plain words, the status, Open Web App) and **Menu bar**. The services are system services, launchd daemons
+run by `_oarbankd` from boot ([coordinator-system-service.md](coordinator-system-service.md)): the window says "Runs as
+a system service — starts with the Mac, before anyone logs in, as _oarbankd, and keeps running when this app quits."
+Open Login Items… appears only as a fix (the login item needs approval, or Allow in the Background switched the
+coordinator's daemons off; both carry `AssociatedBundleIdentifiers` `dev.codonic.oarbank.coordinator`, so they are
+listed as Oarbank Coordinator). Where the account still has a 2.8 per-user coordinator (its LaunchAgents), the window
+and the menu show **Move the Coordinator to a System Service…**: the app exports the keys from the person's Keychain
+and runs the migration through the administrator prompt (`oarbank.desktop --migrate`), the only administrator prompt
+the app shows besides setup. Where the node package is
+installed too, the menu shows **This Mac's Node** and Oarbank Node shows no item of its own. Its glyph is the logo's
+three oars; the node's is one oar.
+
+On Windows and Linux, Preferences contains **Start automatically at sign-in**, off until the user enables it.
+Automatic startup opens the companion quietly. **Quit Oarbank Coordinator** closes the companion only.
+
+The companion runs as the signed-in user, who cannot read the service's home: status reads the
+service record and the person's own setup journal, and probes only the loopback console
 health endpoint, ignores environment proxies, does not follow redirects, and exposes
 no account credentials, owner keys or enrollment secrets. The console reports only
 configured/pending booleans when Windows service ACLs prevent the companion from
 inspecting setup file metadata. The explicit Open action refreshes this status before
 deciding whether elevation is needed. Opening a configured
 coordinator goes to its normal login page. Unfinished setup uses the existing wizard;
-on Windows only that explicit action requests elevation. A private loopback wizard
+only its start step asks for an administrator (macOS's administrator prompt, polkit's
+pkexec on Linux, elevation on Windows), to create the system services. A private loopback wizard
 record allows subsequent launches to reopen a live, authenticated setup session.
 A stale or externally addressed record cannot redirect the browser.
 
@@ -22,9 +41,9 @@ A stale or externally addressed record cannot redirect the browser.
 - **macOS:** AppKit `NSStatusItem` and standard `NSMenu` provide native click,
   keyboard and accessibility behavior. A simplified monochrome oar image is an
   `NSImage` template, so macOS supplies the appropriate light/dark appearance.
-  Preferences is a native window, with Command-comma and Command-Q. Registration
-  uses `SMAppService.mainApp`; the OS is the source of truth and a pending approval
-  is shown explicitly with a shortcut to Login Items. No private APIs or hand-made
+  Settings is a native window, with Command-comma; Command-Q is Hide from Menu Bar.
+  Registration uses `SMAppService.mainApp`; the OS is the source of truth and a
+  pending approval is shown explicitly with a shortcut to Login Items. No private APIs or hand-made
   LaunchAgent are used for this preference. See [Apple NSStatusBar](https://developer.apple.com/documentation/appkit/nsstatusbar)
   and [SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice).
 - **Windows:** a native WinForms `NotifyIcon` and context menu respond to left or

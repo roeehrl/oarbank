@@ -36,7 +36,7 @@ def db(tmp_path):
 @pytest.fixture
 def key(tmp_path, db):
     k = tmp_path / "keys" / "release.key"
-    db.set_setting("release_pubkey", signing.keygen(k))
+    db.set_state("release_pubkey", signing.keygen(k))
     return k
 
 
@@ -95,7 +95,7 @@ def test_directives_carry_the_signed_statement_and_the_pubkey(db, key):
     from helpers import enrolled_node
     _, node = enrolled_node(db)
     d = core._node_directives(db, node)
-    assert d["release_pubkey"] == db.get_setting("release_pubkey")
+    assert d["release_pubkey"] == db.get_state("release_pubkey")
     assert json.loads(d["release"]["statement"])["release_id"] == "r_b" and d["release"]["signature"]
     signing.verify(d["release"]["statement"], d["release"]["signature"], d["release_pubkey"])
 
@@ -104,7 +104,8 @@ def test_release_key_endpoint_refuses_silent_rotation(db, key, tmp_path):
     gui = TestClient(coord_app.admin_app(db, coord_app.EventBus()), client=("127.0.0.1", 5), headers=admin_headers(db))
     new = signing.keygen(tmp_path / "new.key")
     assert api_op(gui, "releases.pin_key", "release-key", {"pubkey": new}).status_code == 409
-    assert api_op(gui, "settings.update", "release_pubkey", {"value": new}).status_code == 400
+    raw = gui.post("/api/v1/ops/settings.update", json={"target": "release_pubkey", "params": {"value": new}, "reason": "t"})
+    assert raw.status_code == 404                                          # no raw writes at all
     assert api_op(gui, "releases.pin_key", "release-key", {"pubkey": new, "rotate": True}).status_code == 200
     assert api_op(gui, "releases.promote", "r_a").status_code == 409          # unsigned
 
@@ -136,7 +137,7 @@ def test_when_off_nothing_is_advertised_gated_or_accepted(db, key, monkeypatch):
         releases.attach_signature(db, "r_b", *signed(db, key, "r_b", 1))
     gui = TestClient(coord_app.admin_app(db, coord_app.EventBus()), client=("127.0.0.1", 5), headers=admin_headers(db))
     assert gui.get("/api/v1/features").json() == {"release_signing": False}
-    assert api_op(gui, "releases.pin_key", "release-key", {"pubkey": db.get_setting("release_pubkey")}).status_code == 409
+    assert api_op(gui, "releases.pin_key", "release-key", {"pubkey": db.get_state("release_pubkey")}).status_code == 409
 
 
 def test_every_key_option_names_the_key_keygen_writes(tmp_path):

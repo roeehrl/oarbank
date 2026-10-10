@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::config::ProtectionScope;
 use crate::evaluator::CombinedConstraint;
 use crate::json::{
     bool_of, f64_of, get, int_of, is_null, opt_int, opt_num, opt_str, rounded, str_of,
@@ -207,29 +208,38 @@ pub struct Policy {
     pub user_idle_s: f64,
     pub run_on_battery: bool,
     pub nice: i64,
+    /// A remote screen-sharing session counts as someone using the machine, even without input (macOS).
+    pub screen_sharing_present: bool,
+    /// The host budget never exceeds what is available now (the in-use bound); off: the reserves alone decide.
+    pub mem_in_use_bound: bool,
     /// The central protection section (unioned with the local file).
     pub protection: Option<Value>,
 }
 
+/// The registry's defaults (generated: `settings_table`), what a node runs with before its first heartbeat.
 impl Default for Policy {
     fn default() -> Self {
+        use crate::settings_table as T;
         Self {
-            os_reserve_gb: 4.0,
-            user_reserve_gb: 8.0,
-            max_slots: None,
-            threads_per_job: 1,
-            job_mem_gb: 1.5,
-            user_present_slots: 2,
-            user_idle_s: 300.0,
-            run_on_battery: false,
-            nice: 10,
+            os_reserve_gb: T::OS_RESERVE_GB,
+            user_reserve_gb: T::USER_RESERVE_GB,
+            max_slots: T::MAX_SLOTS,
+            threads_per_job: T::THREADS_PER_JOB,
+            job_mem_gb: T::JOB_MEM_GB,
+            user_present_slots: T::USER_PRESENT_SLOTS,
+            user_idle_s: T::USER_IDLE_S,
+            run_on_battery: T::RUN_ON_BATTERY,
+            nice: T::NICE,
+            screen_sharing_present: T::SCREEN_SHARING_PRESENT,
+            mem_in_use_bound: T::MEM_IN_USE_BOUND,
             protection: None,
         }
     }
 }
 
 impl Policy {
-    /// Parse over `base`: only keys present (and of the right type) change it.
+    /// Read a policy section the agent already checked against the settings table (`settings::validate`): every key
+    /// is present and well-typed there; `base` only fills what a caller's partial section leaves out (tests).
     pub fn from_json(j: Option<&Value>, base: &Policy) -> Self {
         let mut p = base.clone();
         if !j.is_some_and(Value::is_object) {
@@ -268,6 +278,12 @@ impl Policy {
         if let Some(v) = i("nice") {
             p.nice = v.clamp(0, 20);
         }
+        if let Some(v) = bool_of(get(j, "screen_sharing_present")) {
+            p.screen_sharing_present = v;
+        }
+        if let Some(v) = bool_of(get(j, "mem_in_use_bound")) {
+            p.mem_in_use_bound = v;
+        }
         let prot = get(j, "protection");
         if !is_null(prot) && prot.is_some_and(Value::is_object) {
             p.protection = prot.cloned();
@@ -296,6 +312,16 @@ pub struct CapacityInputs {
     pub in_schedule: bool,
     /// Summed RSS of the agent's own job process groups.
     pub fleet_rss_gb: f64,
+    /// Memory the OS could hand to new work now, GB: RAM minus what the host signals count as used (macOS:
+    /// app + wired + compressed, so free, file cache, purgeable and speculative pages count as available; Linux:
+    /// MemAvailable; Windows: ullAvailPhys, free plus standby). None: not measured (no in-use bound).
+    pub available_gb: Option<f64>,
+    /// The part of the fleet jobs' reservations already resident: Σ min(footprint, resources.mem_gb), GB. It is in
+    /// use (so not in `available_gb`) but already charged to the budget through `used_mem_gb`.
+    pub fleet_resident_gb: f64,
+    /// Kept free under the in-use bound: the memory guard's soft floor plus 1 GB (`CapacityModel::mem_margin_gb`), so
+    /// admitting up to the budget never trips the guard.
+    pub mem_margin_gb: f64,
     pub live_attempts: i64,
     /// Σ spec.resources.cpu / mem_gb of live attempts.
     pub used_cpu: f64,
@@ -325,6 +351,9 @@ impl CapacityInputs {
             local_pause: false,
             in_schedule: true,
             fleet_rss_gb: 0.0,
+            available_gb: None,
+            fleet_resident_gb: 0.0,
+            mem_margin_gb: CapacityModel::mem_margin_gb(ram_gb, 12.0),
             live_attempts: 0,
             used_cpu: 0.0,
             used_mem_gb: 0.0,
@@ -358,6 +387,24 @@ pub struct CapacityResult {
     pub reserved_mem_gb: f64,
     /// GPU fleet jobs allowed now (None: no limit; 0 while a protected group is GPU-active).
     pub gpu_jobs: Option<i64>,
+    /// Which bound set the host budget: `reserve` (RAM minus the reserves), `in_use` (what is actually available
+    /// plus the fleet's own resident memory, minus the margin) or `cap` (the owner's `mem_gb` cap).
+    pub mem_binding: String,
+    /// The reserve bound: ram − os_reserve − services − protection reservations − (user present: user_reserve).
+    pub mem_budget_reserve_gb: f64,
+    /// The in-use bound: available + fleet resident − margin (None when available memory is not measured).
+    pub mem_budget_in_use_gb: Option<f64>,
+    /// Memory in use by everything but the fleet's jobs (the owner's apps, the system, services), GB.
+    pub mem_in_use_gb: Option<f64>,
+    pub mem_margin_gb: f64,
+    pub user_present: bool,
+    /// The automatic CPU slots with nobody present (thermal and max_slots applied).
+    pub idle_cpu_slots: i64,
+    /// The fleet work active rules pause (`all`, `cpu`, `gpu`, `io`): the coordinator grants none of it here while they
+    /// last (`PROTECTION_ACTIVE`); `all` and `io` stop admission altogether.
+    pub paused: Vec<String>,
+    /// The first rule pausing it (`rule:<id>`).
+    pub paused_by: Option<String>,
 }
 
 impl CapacityResult {
@@ -369,7 +416,12 @@ impl CapacityResult {
             "auto_slots": self.auto_slots, "binding_limit": self.binding_limit, "admit": self.admit,
             "pool_jobs_only": self.pool_jobs_only, "reserved_cpu": rounded(self.reserved_cpu, 2),
             "reserved_mem_gb": rounded(self.reserved_mem_gb, 2), "why": opt_str(self.not_admitting_because.as_deref()),
-            "gpu_jobs": opt_int(self.gpu_jobs),
+            "gpu_jobs": opt_int(self.gpu_jobs), "host_budget_gb": rounded(self.host_budget_gb, 2),
+            "mem_binding": self.mem_binding, "mem_budget_reserve_gb": rounded(self.mem_budget_reserve_gb, 2),
+            "mem_budget_in_use_gb": self.mem_budget_in_use_gb.map_or(Value::Null, |v| rounded(v, 2)),
+            "mem_in_use_gb": self.mem_in_use_gb.map_or(Value::Null, |v| rounded(v, 2)),
+            "mem_margin_gb": rounded(self.mem_margin_gb, 2), "user_present": self.user_present,
+            "idle_cpu_slots": self.idle_cpu_slots, "paused": self.paused, "paused_by": opt_str(self.paused_by.as_deref()),
         })
     }
 }
@@ -390,9 +442,16 @@ fn floor_int(x: f64) -> i64 {
 }
 
 impl CapacityModel {
+    /// The margin the in-use bound keeps free: the memory guard's soft floor (`soft_free_pct` of RAM) plus 1 GB.
+    pub fn mem_margin_gb(ram_gb: f64, soft_free_pct: f64) -> f64 {
+        ram_gb.max(0.0) * soft_free_pct.max(0.0) / 100.0 + 1.0
+    }
+
     /// ```text
-    /// host_budget = ram − os_reserve − services_reserved − protection.reserved_mem − (user ? user_reserve : 0)
-    /// host_budget = min(host_budget, cap.mem_gb − services_reserved)
+    /// reserve     = ram − os_reserve − services_reserved − protection.reserved_mem − (user ? user_reserve : 0)
+    /// in_use      = available + fleet_resident − margin          (available measured, policy mem_in_use_bound;
+    ///                                                             margin = the guard's soft floor + 1 GB)
+    /// host_budget = min(reserve, in_use, cap.mem_gb − services_reserved)        (mem_binding names the smallest)
     /// cpu         = perf + eff/2 − protection.reserved_cpu; ×0.75 at thermal fair, 0 at serious+;
     ///               ≤ user_present_slots while a user is present
     /// auto_cpu    = min(max_slots, cpu)
@@ -400,14 +459,15 @@ impl CapacityModel {
     /// slots       = min(auto_cpu, floor(host_budget / job_mem), cap.jobs, cap.cpu_cores / threads, protection.slots)
     /// pools       = the services' tokens (only the rule's pool tokens while a rule allows pool jobs only)
     /// admit       = active, no local pause, in schedule, no protection brake (rule, memory floor, thermal,
-    ///               battery), protection slots ≠ 0, and fleet RSS + services ≤ cap.mem_gb
+    ///               battery), no rule pausing every job, protection slots ≠ 0, and fleet RSS + services ≤ cap.mem_gb
+    /// paused      = the scopes active rules pause (the coordinator grants no work in them)
     /// ```
     pub fn compute(i: &CapacityInputs) -> CapacityResult {
         let p = &i.policy;
         let l = &i.limits;
         let c = &i.constraint;
         let svc = i.service_reserved_mem_gb.max(0.0);
-        let uncapped_budget = i.ram_gb
+        let reserve_budget = i.ram_gb
             - p.os_reserve_gb
             - svc
             - c.reserved_mem_gb
@@ -416,12 +476,24 @@ impl CapacityModel {
             } else {
                 0.0
             };
+        // never more than the machine has free now, plus what the fleet's own jobs already hold of their reservations
+        let in_use_budget = i
+            .available_gb
+            .filter(|a| a.is_finite() && p.mem_in_use_bound)
+            .map(|a| a.max(0.0) + i.fleet_resident_gb.max(0.0) - i.mem_margin_gb.max(0.0));
+        let mut uncapped_budget = reserve_budget;
+        let mut mem_binding = "reserve";
+        if let Some(u) = in_use_budget.filter(|u| *u < reserve_budget) {
+            uncapped_budget = u;
+            mem_binding = "in_use";
+        }
         let mut host_budget = uncapped_budget;
         let mut mem_capped = false;
         if let Some(cap_mem) = l.mem_gb {
             if cap_mem - svc < host_budget {
                 host_budget = cap_mem - svc;
                 mem_capped = true;
+                mem_binding = "cap";
             }
         }
 
@@ -436,6 +508,7 @@ impl CapacityModel {
             thermal_reduced = true;
         }
         let mut cpu_whole = floor_int(cpu);
+        let idle_cpu_whole = cpu_whole;
         if i.user_present {
             cpu_whole = cpu_whole.min(p.user_present_slots.max(0));
         }
@@ -490,6 +563,8 @@ impl CapacityModel {
             binding = "cap.mem_gb".into();
         } else if c.reserved_mem_gb > 0.0 && mem_slots < capped_cpu {
             binding = bind("reserve_mem");
+        } else if mem_binding == "in_use" && mem_slots < capped_cpu {
+            binding = "memory_in_use".into();
         } else if c.reserved_cpu > 0.0
             && floor_int(base_cpu) > auto_cpu_slots
             && !thermal_reduced
@@ -522,6 +597,12 @@ impl CapacityModel {
         } else if c.no_admit {
             admit = false;
             binding = bind("admit");
+            because = Some(binding.clone());
+        } else if c.paused.contains(&ProtectionScope::All) || c.paused.contains(&ProtectionScope::Io) {
+            // a rule pauses every fleet job: one admitted now would only be paused, then released after the longest
+            // pause and granted here again
+            admit = false;
+            binding = bind("pause");
             because = Some(binding.clone());
         } else if c.slots == Some(0) || c.pool_jobs_only.is_some() {
             admit = false;
@@ -566,6 +647,18 @@ impl CapacityModel {
             reserved_cpu: c.reserved_cpu,
             reserved_mem_gb: c.reserved_mem_gb,
             gpu_jobs: c.gpu_jobs,
+            mem_binding: mem_binding.into(),
+            mem_budget_reserve_gb: reserve_budget,
+            mem_budget_in_use_gb: in_use_budget,
+            mem_in_use_gb: i
+                .available_gb
+                .filter(|a| a.is_finite())
+                .map(|a| (i.ram_gb - a - i.fleet_rss_gb).max(0.0)),
+            mem_margin_gb: i.mem_margin_gb,
+            user_present: i.user_present,
+            idle_cpu_slots: max_slots.min(idle_cpu_whole).max(0),
+            paused: c.paused.iter().map(|s| s.as_str().to_string()).collect(),
+            paused_by: (!c.paused.is_empty()).then(|| bind("pause")),
         }
     }
 }

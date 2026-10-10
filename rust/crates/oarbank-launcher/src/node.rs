@@ -4,6 +4,7 @@
 //! the node joined, waits for approval, or failed with a stable code. `check`, `status`, `leave` and `doctor` read the
 //! same document; `policy-apply` is what macOS's managed-policy job runs.
 
+use crate::container_support;
 use crate::setup::{self, SetupOpts};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -158,41 +159,78 @@ fn read_code(o: &Opts) -> Result<String, Fail> {
     if o.has("--no-input") {
         return Err(fail("E_CODE_FORMAT", "no join code: give --code-stdin or --code-file (--no-input never prompts)", 2));
     }
-    prompt_hidden("Join code (input hidden): ").map(|s| s.trim().to_string()).map_err(|e| fail("E_CODE_FORMAT", e.to_string(), 2))
+    prompt_hidden().map(|s| s.trim().to_string()).map_err(|e| fail("E_CODE_FORMAT", e.to_string(), 2))
 }
 
+const PROMPT_HIDDEN: &str = "Join code (input hidden): ";
+const PROMPT_SHOWN: &str = "Join code (this terminal cannot hide it; it shows as you paste): ";
+
+/// The code from the terminal with its echo off, checked: when the terminal does not take it, the prompt says the code
+/// will show rather than claim it is hidden.
+///
+/// The echo turned off is the one of this process's terminal. That hides the code when the terminal is the person's,
+/// or a pseudo-terminal whose relay puts the person's terminal in raw mode: sudo with use_pty (the default since
+/// 1.9.14) does so when its own standard input is the terminal, as in `sudo oarbank-node join`. It cannot reach a
+/// terminal further out, and nothing here can tell: under `curl ... | sudo sh` sudo's standard input is the pipe, so it
+/// leaves the person's terminal echoing while the command runs on sudo's pseudo-terminal, and a hidden prompt there
+/// shows the paste. That case does not reach this prompt by itself: read_code prompts only when standard input is a
+/// terminal, and a piped script's standard input is the pipe; oarbank-install.sh, piped, never asks for the code.
 #[cfg(unix)]
-fn prompt_hidden(msg: &str) -> std::io::Result<String> {
+fn prompt_hidden() -> std::io::Result<String> {
     use std::os::fd::AsRawFd;
     let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty")?;
     let fd = tty.as_raw_fd();
-    let mut old: libc::termios = unsafe { std::mem::zeroed() };
-    unsafe { libc::tcgetattr(fd, &mut old) };
-    let mut new = old;
-    new.c_lflag &= !libc::ECHO;
-    new.c_lflag |= libc::ECHONL;
-    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &new) };
+    let old = echo_off(fd);
     let mut w = &tty;
-    let _ = write!(w, "{msg}");
+    let _ = write!(w, "{}", if old.is_some() { PROMPT_HIDDEN } else { PROMPT_SHOWN });
     let _ = w.flush();
     let mut line = String::new();
     let r = std::io::BufReader::new(&tty).read_line(&mut line);
-    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &old) };
+    if let Some(old) = old {
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &old) };
+    }
     r.map(|_| line)
 }
 
+/// Echo off on the terminal `fd` (a newline still echoes): the settings to restore, or None when the terminal did not
+/// take it (read back, not assumed) and typed input would show.
+#[cfg(unix)]
+fn echo_off(fd: std::os::fd::RawFd) -> Option<libc::termios> {
+    let mut old: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut old) } != 0 {
+        return None;
+    }
+    let mut new = old;
+    new.c_lflag &= !libc::ECHO;
+    new.c_lflag |= libc::ECHONL;
+    let mut now: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &new) } != 0
+        || unsafe { libc::tcgetattr(fd, &mut now) } != 0
+        || now.c_lflag & libc::ECHO != 0
+    {
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &old) };
+        return None;
+    }
+    Some(old)
+}
+
 #[cfg(windows)]
-fn prompt_hidden(msg: &str) -> std::io::Result<String> {
+fn prompt_hidden() -> std::io::Result<String> {
     use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
-    eprint!("{msg}");
     let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
     let mut mode = 0u32;
-    unsafe { GetConsoleMode(h, &mut mode) };
-    unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    let mut now = 0u32;
+    let hidden = unsafe { GetConsoleMode(h, &mut mode) } != 0
+        && unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) } != 0
+        && unsafe { GetConsoleMode(h, &mut now) } != 0
+        && now & ENABLE_ECHO_INPUT == 0;
+    eprint!("{}", if hidden { PROMPT_HIDDEN } else { PROMPT_SHOWN });
     let mut line = String::new();
     let r = std::io::stdin().read_line(&mut line);
-    unsafe { SetConsoleMode(h, mode) };
-    eprintln!();
+    if hidden {
+        unsafe { SetConsoleMode(h, mode) };
+        eprintln!();
+    }
     r.map(|_| line)
 }
 
@@ -304,13 +342,28 @@ fn join_inner(explicit_home: Option<&Path>, o: &Opts, out: &mut Out) -> Result<V
             return Err(fail("E_CANCELLED", "Cancelled.", 1));
         }
     }
-    // Windows: container jobs need WSL components, installed now while elevated
+    // Windows: container jobs need WSL components, installed now while elevated. Never inside another installation
+    // (the WSL package is a Windows Installer package): the agent waits for one that runs, and if it still runs, or
+    // Windows must restart, the container support task finishes the job (container_support.rs)
     let containers = o.has("--containers") || (detail["containers"] == true && !o.has("--no-containers"));
     let mut restart = false;
     if cfg!(windows) && containers {
         if let Ok(agent) = agent_bin() {
             out.state(&json!({"state": "containers"}), "  ...   containers  installing the WSL components container jobs need");
-            restart = Command::new(agent).args(["containers", "install"]).status().map(|s| s.code() == Some(3010)).unwrap_or(false);
+            let (code, output) = match Command::new(agent).args(["containers", "install", "--wait", "600"]).output() {
+                Ok(r) => (r.status.code(), format!("{}\n{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))),
+                Err(e) => (Some(1), e.to_string()),
+            };
+            let (state, why) = container_support::outcome(code, &output, 1);
+            if !container_support::final_state(state) {
+                let _ = container_support::schedule();
+            }
+            container_support::record(state, &why, 1);
+            restart = state == "restart";
+            // a restart is said with the result; anything else that is not done, now
+            if let (false, Some(l)) = (restart, container_support::line(state, &why)) {
+                out.state(&json!({"state": "containers", "container_support": state, "detail": why}), &format!("  !     containers  {l}"));
+            }
         }
     }
     let since = now();
@@ -419,7 +472,20 @@ fn status(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
         let found: Vec<(String, Value)> = homes(explicit_home).into_iter().map(|(s, h)| (s, read_status(&h)))
             .filter(|(_, v)| !v.is_null()).collect();
         let (scope, st) = found.into_iter().next().unwrap_or(("".into(), json!({"state": "not installed"})));
-        let text = if o.has("--json") { json!({"scope": scope, "status": st}).to_string() } else { describe(&scope, &st) };
+        let support = container_support::read();
+        let text = if o.has("--json") {
+            let mut v = json!({"scope": scope, "status": st});
+            if let Some(r) = &support {
+                v["container_support"] = r.json();
+            }
+            v.to_string()
+        } else {
+            let mut t = describe(&scope, &st);
+            if let Some(l) = support.as_ref().and_then(|r| container_support::line(&r.state, &r.detail)) {
+                t += &format!("\n  {l}");
+            }
+            t
+        };
         if text != last {
             println!("{text}");
             last = text;
@@ -516,6 +582,10 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
             report["containers"] = serde_json::from_slice(&c.stdout).unwrap_or(Value::Null);
         }
     }
+    let support = container_support::read();
+    if let Some(r) = &support {
+        report["container_support"] = r.json();
+    }
     if o.has("--json") {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -526,6 +596,9 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
         if let Some(c) = report["containers"]["state"].as_str() {
             println!("  containers: {c}");
         }
+        if let Some(l) = support.as_ref().and_then(|r| container_support::line(&r.state, &r.detail)) {
+            println!("  {l}");
+        }
     }
     Ok(if ok { 0 } else { 1 })
 }
@@ -535,7 +608,7 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
 /// good is remembered (by its hash) so a profile that stays in place is not retried at every boot.
 fn policy_apply(explicit_home: Option<&Path>) -> Result<i32> {
     let agent = agent_bin()?;
-    let out = Command::new(&agent).args(["policy"]).output()?;
+    let out = Command::new(&agent).args(["policy", "--with-join-code"]).output()?;
     let pol: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
     let code = pol["JoinCode"].as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
     let coordinator = pol["Coordinator"].as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
@@ -589,4 +662,47 @@ fn policy_apply(explicit_home: Option<&Path>) -> Result<i32> {
         let _ = std::fs::write(&marker, &digest);
     }
     Ok(r)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::echo_off;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    /// A pseudo-terminal pair (no controlling terminal taken): (master, slave).
+    fn pty() -> (OwnedFd, OwnedFd) {
+        unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(m >= 0, "posix_openpt");
+            assert!(libc::grantpt(m) == 0 && libc::unlockpt(m) == 0);
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(m)).to_owned();
+            let s = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            assert!(s >= 0, "opening {name:?}");
+            (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s))
+        }
+    }
+
+    fn lflag(fd: i32) -> libc::tcflag_t {
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut t) }, 0);
+        t.c_lflag
+    }
+
+    #[test]
+    fn echo_off_turns_echo_off_on_a_terminal_and_gives_back_what_to_restore() {
+        let (_m, s) = pty();
+        let fd = s.as_raw_fd();
+        assert_ne!(lflag(fd) & libc::ECHO, 0, "a new pseudo-terminal echoes");
+        let old = echo_off(fd).expect("a pseudo-terminal takes echo off");
+        assert_eq!(lflag(fd) & libc::ECHO, 0);
+        assert_ne!(lflag(fd) & libc::ECHONL, 0);
+        assert_eq!(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &old) }, 0);
+        assert_ne!(lflag(fd) & libc::ECHO, 0);
+    }
+
+    #[test]
+    fn echo_off_is_none_where_input_cannot_be_hidden() {
+        let f = std::fs::File::open("/dev/null").unwrap();
+        assert!(echo_off(f.as_raw_fd()).is_none());
+    }
 }

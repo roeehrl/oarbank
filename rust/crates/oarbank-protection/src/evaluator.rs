@@ -26,6 +26,9 @@ pub struct ConstraintVector {
     pub gpu_jobs: Option<i64>,
     pub pool_jobs_only: Option<BTreeMap<String, i64>>,
     pub evict: BTreeSet<ProtectionScope>,
+    /// The fleet work an active rule pauses (`pause_fleet`): while it lasts no new work of that kind is admitted, or it
+    /// would be paused at once and released after the longest pause, only to be granted here again.
+    pub pause: BTreeSet<ProtectionScope>,
     pub no_admit: bool,
     pub reserve_cpu: BTreeMap<String, f64>,
     pub reserve_mem_gb: BTreeMap<String, f64>,
@@ -57,6 +60,9 @@ pub struct CombinedConstraint {
     pub gpu_jobs: Option<i64>,
     pub pool_jobs_only: Option<BTreeMap<String, i64>>,
     pub evict: BTreeSet<ProtectionScope>,
+    /// The fleet work active rules pause (the union of their `pause_fleet` scopes): no new work of that kind is
+    /// admitted while they last (`binding["pause"]` names the first rule).
+    pub paused: BTreeSet<ProtectionScope>,
     pub no_admit: bool,
     pub reserved_cpu: f64,
     pub reserved_mem_gb: f64,
@@ -92,6 +98,16 @@ fn min_dim<T: PartialOrd + Copy>(
     Some(x)
 }
 
+/// A rule's `pause_fleet` in its constraint vector: the scope it pauses, and no GPU jobs while it pauses GPU work (`gpu`,
+/// or every job: `all`, `io`), whatever the node's `gpu_jobs` setting, which only says whether a protected process using
+/// the GPU holds GPU jobs back.
+pub fn pause_vector(v: &mut ConstraintVector, scope: ProtectionScope) {
+    v.pause.insert(scope);
+    if scope != ProtectionScope::Cpu {
+        v.gpu_jobs = Some(0);
+    }
+}
+
 impl CombinedConstraint {
     /// Most restrictive wins per dimension: min of ceilings, OR of evict scopes and the admission brake, and
     /// reservations summed over distinct processes at the largest reservation each.
@@ -105,6 +121,10 @@ impl CombinedConstraint {
         c.gpu_jobs = min_dim(vs, b, "gpu_jobs", |v| v.gpu_jobs);
         for v in vs {
             c.evict.extend(v.evict.iter().copied());
+            if !v.pause.is_empty() {
+                c.binding.entry("pause".into()).or_insert_with(|| v.source.clone());
+                c.paused.extend(v.pause.iter().copied());
+            }
             if v.no_admit {
                 if !c.no_admit {
                     c.binding.insert("admit".into(), v.source.clone());
@@ -161,6 +181,10 @@ impl CombinedConstraint {
         o.insert(
             "evict".into(),
             Value::Array(self.evict.iter().map(|s| Value::from(s.as_str())).collect()),
+        );
+        o.insert(
+            "paused".into(),
+            Value::Array(self.paused.iter().map(|s| Value::from(s.as_str())).collect()),
         );
         o.insert(
             "binding".into(),
@@ -472,6 +496,9 @@ impl RuleEvaluator {
                 }
                 if let Some(e) = rule.evict {
                     v.evict.insert(e);
+                }
+                if let Some(sc) = rule.pause_fleet {
+                    pause_vector(&mut v, sc);
                 }
                 out.vectors.push(v);
             }

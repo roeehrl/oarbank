@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Export and import · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/settings">← Settings</a></p>
+<h1>Export and import</h1>
+<div class="grid">
+<section class="card small" aria-labelledby="h-export">
+  <h2 id="h-export">Export</h2>
+  <p>A scope's settings as a YAML file: the values set there (a lock as <code>!locked</code>), and for the fleet also its
+  groups, node labels and host tool definitions. Secrets are listed as fingerprints only, never their values.</p>
+  <form method="get" action="/settings/export" class="row">
+    <label for="ex-scope">Scope</label>
+    <select id="ex-scope" name="scope"><option value="fleet">The whole fleet</option>
+      {% for g in groups %}<option value="group:{{ g.id }}">Group: {{ g.name }}</option>{% endfor %}
+      {% for n in nodes %}<option value="node:{{ n.hostname }}">Node: {{ n.hostname }}</option>{% endfor %}</select>
+    <label for="ex-module">Module</label>
+    <select id="ex-module" name="module"><option value="">Every key</option>{% for x in modules %}<option>{{ x }}</option>{% endfor %}</select>
+    <button class="pri">Download</button>
+  </form>
+  <p class="mut">Or: <code class="mono">oarbank settings export --scope fleet &gt; fleet.yml</code></p>
+</section>
+<section class="card small" aria-labelledby="h-import">
+  <h2 id="h-import">Import</h2>
+  <p>Upload or paste an export. The preview lists every difference (values, locks, groups, labels, tools) and the nodes
+  whose effective values change; nothing is saved until you confirm. A key the file leaves out is never touched;
+  <code>key: !reset</code> deletes a value. Importing an unchanged export of this fleet changes nothing.</p>
+  {% call m.op_form("settings.import", "import", "Preview import…", inline=False, multipart=True, return_to="/settings/import") %}
+    <p><label for="im-file">File</label> <input id="im-file" type="file" name="file" accept=".yml,.yaml,text/yaml,application/yaml,text/plain"></p>
+    <p><label for="im-text">Or paste it</label><br><textarea id="im-text" name="text" rows="10" class="mono wide-input" placeholder="oarbank: settings/v1"></textarea></p>
+  {% endcall %}
+  <p class="mut">Or: <code class="mono">oarbank settings import fleet.yml --dry-run</code></p>
+</section>
+</div>
+{% endblock %}

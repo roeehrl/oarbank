@@ -173,6 +173,51 @@ pub fn missing_components(flags: u32) -> Vec<Missing> {
     m
 }
 
+/// `oarbank-agent containers install` exits 3010 when Windows must restart to finish (the Virtual Machine Platform).
+pub const EXIT_RESTART: i32 = 3010;
+/// ... and 1618 (ERROR_INSTALL_ALREADY_RUNNING) when another Windows Installer installation is running: the WSL package
+/// is itself a Windows Installer package, so it is never installed inside another installation.
+pub const EXIT_INSTALLER_BUSY: i32 = 1618;
+
+/// What installing the WSL components did.
+#[derive(Debug, PartialEq)]
+pub enum Installed {
+    /// Nothing was missing.
+    Nothing,
+    Done,
+    /// Done once Windows restarts.
+    Restart,
+}
+
+/// Why installing the WSL components did not happen.
+#[derive(Debug, PartialEq)]
+pub enum InstallError {
+    /// Another Windows Installer installation is running: try again when it has finished.
+    Busy(String),
+    Failed(String),
+}
+
+/// What `WslcInstallWithDependencies` answered for the components asked for (`vmp`: the Virtual Machine Platform was one).
+/// Installing the Virtual Machine Platform answers "restart required" (recorded from WSL 3.0.1 run as LocalSystem) and
+/// still installs the WSL package in the same call (wslcsdk.cpp); a WSL package that Windows Installer refused because
+/// another installation runs comes back as HRESULT_FROM_WIN32(ERROR_INSTALL_ALREADY_RUNNING).
+pub fn install_result(hr: u32, vmp: bool) -> Result<Installed, InstallError> {
+    const REBOOT_REQUIRED: [u32; 2] = [0x8007_0BC2, 0x8007_0BC3];
+    const NEEDS_ADMIN: [u32; 2] = [0x8007_0005, 0x8007_02E4];
+    const BUSY: u32 = 0x8007_0652;
+    if REBOOT_REQUIRED.contains(&hr) {
+        return Ok(Installed::Restart);
+    }
+    if hr == BUSY {
+        return Err(InstallError::Busy("another installation is in progress (Windows Installer): the WSL package waits until it has finished".into()));
+    }
+    if (hr as i32) < 0 {
+        let admin = if NEEDS_ADMIN.contains(&hr) { ": run it as an administrator" } else { "" };
+        return Err(InstallError::Failed(format!("installing the WSL components failed (0x{hr:08x}){admin}")));
+    }
+    Ok(if vmp { Installed::Restart } else { Installed::Done })
+}
+
 /// What a wslc or SDK failure means for the node, by its symbolic code (recorded from WSL 3.0.1); None: not a missing
 /// prerequisite (a failure to report as is).
 pub fn classify(code: &str) -> Option<&'static str> {
@@ -945,34 +990,59 @@ mod imp {
         }
     }
 
-    /// `oarbank-agent containers install`: install the WSL components the SDK says are missing (administrator). Returns
-    /// whether a restart is needed (the Virtual Machine Platform).
-    pub fn install() -> Result<bool, String> {
+    /// Whether a Windows Installer installation is running now: one holds the `Global\_MSIExecute` mutex while it
+    /// processes its execute sequence (Microsoft Learn, "_MSIExecute Mutex"). The mutex is taken and given back at once
+    /// when it is free. A mutex this process may not open says nothing (the installer's own 1618 still applies).
+    pub fn installer_busy() -> bool {
+        use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{OpenMutexW, ReleaseMutex, WaitForSingleObject, MUTEX_MODIFY_STATE,
+                                                    SYNCHRONIZATION_SYNCHRONIZE};
+        let name: Vec<u16> = "Global\\_MSIExecute".encode_utf16().chain([0]).collect();
+        let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE, 0, name.as_ptr()) };
+        if h.is_null() {
+            return false;
+        }
+        let w = unsafe { WaitForSingleObject(h, 0) };
+        if w == WAIT_OBJECT_0 || w == WAIT_ABANDONED {
+            unsafe { ReleaseMutex(h) };
+        }
+        unsafe { CloseHandle(h) };
+        w == WAIT_TIMEOUT
+    }
+
+    /// Wait up to `max` for the running installation (if any) to finish; false: it still runs.
+    pub fn wait_for_installer(max: Duration) -> bool {
+        let until = std::time::Instant::now() + max;
+        loop {
+            if !installer_busy() {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_secs(5).min(until - now));
+        }
+    }
+
+    /// `oarbank-agent containers install`: install the WSL components the SDK says are missing (administrator). The
+    /// caller makes sure no other installation runs (`wait_for_installer`): the WSL package is a Windows Installer
+    /// package, and an installation started inside another one (an MSI's custom action) breaks both.
+    pub fn install() -> Result<Installed, InstallError> {
         use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
         unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
-        let sdk = sdk::Sdk::load(&agent_dir().join(SDK_DLL))?;
+        let sdk = sdk::Sdk::load(&agent_dir().join(SDK_DLL)).map_err(InstallError::Failed)?;
         let mut flags = 0u32;
         let hr = unsafe { (sdk.missing)(&mut flags) };
         if hr < 0 {
-            return Err(format!("WslcGetMissingComponents failed (0x{:08x})", hr as u32));
+            return Err(InstallError::Failed(format!("WslcGetMissingComponents failed (0x{:08x})", hr as u32)));
         }
         let wanted = flags & (sdk::COMPONENT_VMP | sdk::COMPONENT_WSL);
         if wanted == 0 {
-            return Ok(false);
+            return Ok(Installed::Nothing);
         }
-        // installing the Virtual Machine Platform "fails" with a restart request: done, once Windows restarts (recorded
-        // from WSL 3.0.1 run by the MSI as LocalSystem)
-        const REBOOT_REQUIRED: [u32; 2] = [0x8007_0BC2, 0x8007_0BC3];
-        const NEEDS_ADMIN: [u32; 2] = [0x8007_0005, 0x8007_02E4];
         let hr = unsafe { (sdk.install)(wanted, 0, None, std::ptr::null_mut()) } as u32;
-        if REBOOT_REQUIRED.contains(&hr) {
-            return Ok(true);
-        }
-        if (hr as i32) < 0 {
-            let admin = if NEEDS_ADMIN.contains(&hr) { ": run it as an administrator" } else { "" };
-            return Err(format!("installing the WSL components failed (0x{hr:08x}){admin}"));
-        }
-        Ok(wanted & sdk::COMPONENT_VMP != 0)
+        install_result(hr, wanted & sdk::COMPONENT_VMP != 0)
     }
 
     /// The prerequisites as the SDK sees them now (doctor, without the agent's session).
@@ -1181,6 +1251,13 @@ mod tests {
         assert_eq!(m, ["virtual_machine_platform", "wsl_package", "sdk_update"]);
         assert!(missing_components(0).is_empty());
         assert!(Missing::new("virtual_machine_platform", "x").fix().contains("containers install"));
+        // what installing the components answered: a restart, another installation running, a failure, done
+        assert_eq!(install_result(0x8007_0BC2, true), Ok(Installed::Restart));
+        assert_eq!(install_result(0, true), Ok(Installed::Restart));
+        assert_eq!(install_result(0, false), Ok(Installed::Done));
+        assert!(matches!(install_result(0x8007_0652, false), Err(InstallError::Busy(_))));
+        assert!(matches!(install_result(0x8007_02E4, false), Err(InstallError::Failed(e)) if e.ends_with("as an administrator")));
+        assert!(matches!(install_result(0x8000_4005, false), Err(InstallError::Failed(e)) if e.contains("0x80004005")));
         // UTF-16 output (a console code page) decodes like UTF-8
         let w: Vec<u8> = "wslc 3.0.1.0\r\n".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         assert_eq!(decode(&w), "wslc 3.0.1.0\r\n");

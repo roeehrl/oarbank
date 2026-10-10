@@ -12,6 +12,20 @@ sudo apt-get install -y "$PACKAGE"
 trap 'sudo dpkg --remove oarbank-coordinator; rm -rf "$scratch"' EXIT
 # Help must resolve the /usr/bin symlink to the payload, without setup or services.
 HOME="$scratch" oarbank-setup --help
+# The CLI resolves from the PATH (the /usr/bin link) to the payload, and behaves as by its full path: the same local
+# admin channel lookup, for the system service's home (docs/design/coordinator-system-service.md).
+[[ "$(command -v oarbank)" == /usr/bin/oarbank && "$(readlink /usr/bin/oarbank)" == /opt/oarbank/coordinator/bin/oarbank ]]
+help="$(HOME="$scratch" oarbank --help)"
+[[ "$help" == "usage: oarbank "* ]]
+token="/var/lib/oarbank/coordinator/admin.token"
+# a first install starts no service and makes no fleet (the wizard does)
+[[ ! -e /etc/oarbank/coordinator-service.json && ! -e /etc/systemd/system/dev.codonic.oarbank.oarbankd.service ]]
+for cli in oarbank /opt/oarbank/coordinator/bin/oarbank; do
+    if out="$(env -u XDG_DATA_HOME -u OARBANKD_HOME -u OARBANKD_URL -u OARBANK_TOKEN HOME="$scratch" "$cli" fleet 2>&1)"; then
+        echo "$cli fleet succeeded without a coordinator" >&2; exit 1
+    fi
+    [[ "$out" == *"($token)"* ]] || { echo "$cli did not look for the system coordinator: $out" >&2; exit 1; }
+done
 [[ -x /opt/oarbank/coordinator/bin/oarbankd && -e /usr/share/applications/dev.codonic.oarbank.coordinator.desktop ]]
 [[ ! -e "$scratch/.local/share/oarbank/coordinator" ]]
 [[ -s /usr/share/icons/hicolor/scalable/apps/oarbank-coordinator.svg ]]
@@ -20,5 +34,8 @@ sudo apt-get install -y xvfb dbus-x11
 XDG_CONFIG_HOME="$scratch/config" xvfb-run -a dbus-run-session -- /usr/bin/oarbank-coordinator --self-test
 sudo dpkg --remove oarbank-coordinator
 [[ ! -e /opt/oarbank/coordinator/bin/oarbankd && ! -e /usr/bin/oarbank-setup ]]
+[[ ! -e /usr/bin/oarbank && ! -L /usr/bin/oarbank ]]
+hash -r  # forget where bash found oarbank before
+if command -v oarbank >/dev/null; then echo "oarbank still resolves from the PATH after removal" >&2; exit 1; fi
 [[ ! -e /usr/share/icons/hicolor/scalable/apps/oarbank-coordinator.svg ]]
 trap 'rm -rf "$scratch"' EXIT

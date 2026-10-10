@@ -6,6 +6,7 @@ use crate::jobs::Table;
 use crate::paths::Layout;
 use crate::{host, procs};
 use oarbank_protection as P;
+use oarbank_protection::settings_table as T;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -73,7 +74,7 @@ impl Protection {
         mem.swap_used_gb = m.swap_used_gb;
         let mut inputs = P::TickInputs::new(now, mem);
         let mut inputs_services = vec![];
-        let (jobs, fleet_pids, fleet_rss, used_cpu, used_mem, live) = {
+        let (jobs, fleet_pids, fleet_rss, fleet_resident, used_cpu, used_mem, live) = {
             let t = table.lock().unwrap();
             let mut pids = HashSet::new();
             let mut views = vec![];
@@ -104,19 +105,21 @@ impl Protection {
             }).collect();
             inputs_services = svc_views;
             let rss: f64 = t.values().map(|j| j.usage.footprint_gb).sum();
-            (views, pids, rss, t.values().map(|j| j.cpu).sum::<f64>(), t.values().map(|j| j.mem_gb).sum::<f64>(), t.len() as i64)
+            // the part of each job's reservation it already holds: in use, yet already charged through used_mem
+            let resident: f64 = t.values().map(|j| j.usage.footprint_gb.min(j.mem_gb).max(0.0)).sum();
+            (views, pids, rss, resident, t.values().map(|j| j.cpu).sum::<f64>(), t.values().map(|j| j.mem_gb).sum::<f64>(), t.len() as i64)
         };
-        let perf = facts["cpu"]["perf_cores"].as_i64().unwrap_or_else(|| facts["cpu"]["logical"].as_i64().unwrap_or(1));
-        let eff = facts["cpu"]["eff_cores"].as_i64().unwrap_or(0);
+        let (perf, eff) = crate::facts::capacity_cores(&facts["cpu"]);
         let thermal = host::thermal();
         let on_battery = host::on_battery();
         // unknown presence counts as someone present (S19); nobody logged in is idle for ever
+        self.presence.set_screen_sharing_present(policy["screen_sharing_present"].as_bool().unwrap_or(T::SCREEN_SHARING_PRESENT));
         let presence = self.presence.read();
         let idle = presence.effective_idle_s();
         inputs.fleet_pids = fleet_pids.clone();
         inputs.thermal = thermal;
         inputs.on_battery = on_battery;
-        inputs.run_on_battery = policy["run_on_battery"].as_bool().unwrap_or(false);
+        inputs.run_on_battery = policy["run_on_battery"].as_bool().unwrap_or(T::RUN_ON_BATTERY);
         inputs.jobs = jobs;
         inputs.services = inputs_services;
         inputs.user_idle_s = idle;
@@ -132,10 +135,17 @@ impl Protection {
         let mut ci = P::CapacityInputs::new(m.ram_gb, perf, eff, P::Policy::from_json(Some(policy), &base), limits);
         ci.in_schedule = in_schedule;
         ci.constraint = r.constraint.clone();
-        ci.user_present = idle < policy["user_idle_s"].as_f64().unwrap_or(300.0);
+        ci.user_present = idle < policy["user_idle_s"].as_f64().unwrap_or(T::USER_IDLE_S);
         ci.thermal = thermal;
         ci.desired_state = d["desired_state"].as_str().unwrap_or("active").into();
         ci.fleet_rss_gb = fleet_rss;
+        // the in-use bound: what the OS has available now (RAM minus what it counts as used), never past the
+        // memory guard's soft floor
+        if m.ram_gb > 0.0 {
+            ci.available_gb = Some((m.ram_gb - m.used_gb).max(0.0));
+        }
+        ci.fleet_resident_gb = fleet_resident;
+        ci.mem_margin_gb = P::CapacityModel::mem_margin_gb(m.ram_gb, self.ctrl.config().memory.soft_free_pct);
         ci.live_attempts = live;
         ci.used_cpu = used_cpu;
         ci.used_mem_gb = used_mem;
@@ -189,6 +199,16 @@ impl Protection {
         }
         self.lowered.retain(|a| t.contains_key(a));
         self.frozen.retain(|a| t.contains_key(a));
+    }
+
+    /// Resume every job protection froze (the agent is stopping them: a frozen process cannot act on a stop request).
+    pub fn thaw_all(&mut self, table: &Table) {
+        let t = table.lock().unwrap();
+        for aid in std::mem::take(&mut self.frozen) {
+            if let Some(pg) = t.get(&aid).and_then(|j| j.pgid) {
+                let _ = self.registry.signal(pg, P::Signal::Cont, "PROTECTION_RESUME");
+            }
+        }
     }
 
     pub fn journal_out(&self) -> Value {
@@ -275,7 +295,7 @@ mod caps_tests {
         for &(aid, started_at) in jobs {
             t.lock().unwrap().insert(aid, JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 1.0, gpu: false,
                 pgid: None, stop: None, pause: false, usage: Default::default(), log_bytes: 0, started_at, caps: vec![],
-                bandwidth: None, threads: None, needs: vec![], wake: Default::default() });
+                bandwidth: None, threads: None, needs: vec![], wake: Default::default(), stop_by: None });
         }
         t
     }
@@ -457,7 +477,7 @@ mod e2e {
         JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 0.1, gpu: false, pgid: Some(pgid), stop: None,
                    pause: false, usage: Default::default(), log_bytes: 0, started_at: crate::doctor::now(),
                    caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, needs: vec![],
-                   wake: Default::default() }
+                   wake: Default::default(), stop_by: None }
     }
 
     /// CPU seconds the container uses over `secs`.

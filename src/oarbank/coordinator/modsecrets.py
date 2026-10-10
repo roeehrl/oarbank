@@ -1,10 +1,13 @@
 """Module secrets (oarbank-sdk spec/manifest.md, "Secrets"; docs/design/secrets-and-signed-images.md).
 
-A module declares secrets by name (`[[secrets]]`); the owner sets each value, for the module or for one node, with
-`secrets.set`. Values are write-only: they are stored encrypted (AES-256-GCM under the coordinator's secrets key, which
+A module declares secrets by name (`[[secrets]]`); the owner sets each value on the settings chain, with
+`secrets.set`: for the module (fleet-wide), for a node group, or for one node. A node resolves each secret like a
+setting: its own value, else the value of the highest-ranked group it belongs to that sets one, else the module's
+(docs/design/settings.md, "Secrets on the chain"). The `node_id` column is the scope: '' for the module, a node id, or
+`group:<group id>`. Values are write-only: they are stored encrypted (AES-256-GCM under the coordinator's secrets key, which
 the secret store keeps outside the database: the Keychain on macOS, an owner-only file on Linux, a DPAPI-wrapped file on
 Windows), shown only as "set" with a keyed fingerprint, and decrypted only to deliver them: in the grant of a job whose
-stage lists them (resolved for the node: its own value, else the module's), and through `host.secrets.get` to a module
+stage lists them (resolved for the node along the chain), and through `host.secrets.get` to a module
 whose coordinator side has `secrets:read:self` (the module's value).
 
 A coordinator move seals every value to the target's transport key (X25519) in the snapshot it sends; the target opens
@@ -104,8 +107,14 @@ def declared(module: str) -> dict:
 def _check(db: DB, module: str, name: str, node: str):
     if name not in declared(module):
         raise SecretError(404, "unknown_secret", f"{module} declares no secret {name!r}")
-    if node and not db.one("SELECT 1 FROM nodes WHERE node_id=? AND lifecycle!='retired'", (node,)):
+    if node.startswith(GROUP_PREFIX):
+        if not db.one("SELECT 1 FROM node_groups WHERE id=?", (node[len(GROUP_PREFIX):],)):
+            raise SecretError(404, "unknown_group", f"no group {node[len(GROUP_PREFIX):]}")
+    elif node and not db.one("SELECT 1 FROM nodes WHERE node_id=? AND lifecycle!='retired'", (node,)):
         raise SecretError(404, "unknown_node", f"no node {node}")
+
+
+GROUP_PREFIX = "group:"
 
 
 def node_id(db: DB, node: str | None) -> str:
@@ -116,6 +125,30 @@ def node_id(db: DB, node: str | None) -> str:
     if not r:
         raise SecretError(404, "unknown_node", f"no node {node}")
     return r["node_id"]
+
+
+def scope_ref(db: DB, node: str | None = None, group: str | None = None) -> str:
+    """The stored scope of a value: '' (the module), a node id, or `group:<id>` (a group by id or name)."""
+    if node and group:
+        raise SecretError(400, "bad_params", "a value is for one node or one group, not both")
+    if group:
+        from .settings.groups import find
+        g = find(db, group)
+        if g is None:
+            raise SecretError(404, "unknown_group", f"no group {group}")
+        return GROUP_PREFIX + g["id"]
+    return node_id(db, node)
+
+
+def scope_text(db: DB, ref: str) -> str:
+    """How a person reads a stored scope: "the module", "group Laptops", "node mini"."""
+    if not ref:
+        return "the module"
+    if ref.startswith(GROUP_PREFIX):
+        g = db.one("SELECT name FROM node_groups WHERE id=?", (ref[len(GROUP_PREFIX):],))
+        return f"group {g['name'] if g else ref[len(GROUP_PREFIX):]}"
+    n = db.one("SELECT hostname FROM nodes WHERE node_id=?", (ref,))
+    return f"node {n['hostname'] if n else ref}"
 
 
 # ------------------------------------------------------------------ write-only operations
@@ -165,25 +198,85 @@ def listing(db: DB, module: str) -> list[dict]:
     out = []
     for s in man.secrets:
         rows = db.q("SELECT * FROM secrets WHERE module=? AND name=? ORDER BY node_id", (module, s.name))
-        scopes = []
+        scopes, groups = [], []
         for r in rows:
+            st = {"fingerprint": r["fingerprint"], "set_at": r["set_at"], "set_by": r["set_by"],
+                  "readable": _row_value(db, r, key) is not None}
+            if r["node_id"].startswith(GROUP_PREFIX):
+                gid = r["node_id"][len(GROUP_PREFIX):]
+                g = db.one("SELECT name, rank FROM node_groups WHERE id=?", (gid,))
+                groups.append({"group_id": gid, "group": g["name"] if g else gid, "rank": g["rank"] if g else 0, **st})
+                continue
             host = db.one("SELECT hostname FROM nodes WHERE node_id=?", (r["node_id"],)) if r["node_id"] else None
-            scopes.append({"node_id": r["node_id"] or None, "hostname": host["hostname"] if host else None,
-                           "fingerprint": r["fingerprint"], "set_at": r["set_at"], "set_by": r["set_by"],
-                           "readable": _row_value(db, r, key) is not None})
+            scopes.append({"node_id": r["node_id"] or None, "hostname": host["hostname"] if host else None, **st})
         module_scope = next((x for x in scopes if x["node_id"] is None), None)
         out.append({"name": s.name, "description": s.description,
                     "stages": [st.name for st in man.stages if s.name in st.secrets],
                     "coordinator": "secrets:read:self" in man.coordinator.permissions,
                     "set": module_scope is not None, "module": module_scope,
+                    "groups": sorted(groups, key=lambda g: -g["rank"]),
                     "nodes": [x for x in scopes if x["node_id"] is not None]})
     return out
 
 
+# ------------------------------------------------------------------ the core's own secrets (fleet-wide, write-only)
+# Rows with module '' (beside the fingerprint key): the ntfy token. Same encryption, fingerprint and moves as a module's.
+
+CORE = {"ntfy_token": "the ntfy access token (Notifications)"}
+
+
+def _core_name(name: str) -> str:
+    if name not in CORE:
+        raise SecretError(404, "unknown_secret", f"no core secret {name!r} ({', '.join(CORE)})")
+    return name
+
+
+def core_set(db: DB, name: str, value: str, actor: str) -> dict:
+    """Store a core secret (inside the caller's transaction); what may be shown: {set, fingerprint, set_at}."""
+    _core_name(name)
+    raw = value.encode("utf-8") if isinstance(value, str) else b""
+    if not raw or len(raw) > MAX_VALUE:
+        raise SecretError(422, "bad_secret", f"a secret is a string of 1 byte to {MAX_VALUE} bytes")
+    fp, t = fingerprint(db, raw), time.time()
+    db.x("INSERT INTO secrets(module,name,node_id,ciphertext,fingerprint,set_at,set_by,sealed) VALUES('',?,'',?,?,?,?,0) "
+         "ON CONFLICT(module,name,node_id) DO UPDATE SET ciphertext=excluded.ciphertext, fingerprint=excluded.fingerprint, "
+         "set_at=excluded.set_at, set_by=excluded.set_by, sealed=0",
+         (name, _encrypt(_key(db), "", name, "", raw), fp, t, actor))
+    return {"set": True, "fingerprint": fp, "set_at": t}
+
+
+def core_clear(db: DB, name: str) -> dict:
+    _core_name(name)
+    had = db.one("SELECT 1 FROM secrets WHERE module='' AND name=? AND node_id=''", (name,))
+    db.x("DELETE FROM secrets WHERE module='' AND name=? AND node_id=''", (name,))
+    return {"set": False, "cleared": bool(had)}
+
+
+def core_state(r, name: str) -> dict:
+    """What a page may show about a core secret: set or not, its fingerprint, when and by whom. Never the value."""
+    rows = r.q("SELECT fingerprint, set_at, set_by FROM secrets WHERE module='' AND name=? AND node_id=''", (name,))
+    return {"set": True, **rows[0]} if rows else {"set": False}
+
+
+def core_value(db: DB, name: str) -> str | None:
+    r = db.one("SELECT * FROM secrets WHERE module='' AND name=? AND node_id=''", (_core_name(name),))
+    v = _row_value(db, r) if r else None
+    return v.decode("utf-8") if v is not None else None
+
+
 # ------------------------------------------------------------------ delivery
 
-def _readable(db: DB, module: str, name: str, node: str, key: bytes) -> bytes | None:
-    for scope in ((node, "") if node else ("",)):
+def chain(db: DB, node: str) -> list[str]:
+    """The scopes a node's value is looked up in, most specific first: the node, its groups (highest rank first), the
+    module."""
+    if not node:
+        return [""]
+    from .settings.groups import groups_of
+    return [node] + [GROUP_PREFIX + g["id"] for g in reversed(groups_of(db, node))] + [""]
+
+
+def _readable(db: DB, module: str, name: str, node: str, key: bytes, scopes: list | None = None) -> bytes | None:
+    for scope in scopes if scopes is not None else chain(db, node):
         r = db.one("SELECT * FROM secrets WHERE module=? AND name=? AND node_id=?", (module, name, scope))
         if r:
             v = _row_value(db, r, key)
@@ -192,20 +285,30 @@ def _readable(db: DB, module: str, name: str, node: str, key: bytes) -> bytes | 
     return None
 
 
+def source(db: DB, module: str, name: str, node: str) -> dict:
+    """Where a node's value of a secret comes from: {scope, text ("group Laptops"), fingerprint}, or {scope: None}."""
+    key = _key(db)
+    for scope in chain(db, node):
+        r = db.one("SELECT * FROM secrets WHERE module=? AND name=? AND node_id=?", (module, name, scope))
+        if r and _row_value(db, r, key) is not None:
+            return {"scope": scope, "text": scope_text(db, scope), "fingerprint": r["fingerprint"]}
+    return {"scope": None, "text": "not set", "fingerprint": None}
+
+
 def missing_for(db: DB, module: str, names: list[str], node: str) -> list[str]:
-    """The listed secrets with no readable value for this node (its own, else the module's)."""
+    """The listed secrets with no readable value for this node anywhere on its chain."""
     if not names:
         return []
-    key = _key(db)
-    return [n for n in names if _readable(db, module, n, node, key) is None]
+    key, scopes = _key(db), chain(db, node)
+    return [n for n in names if _readable(db, module, n, node, key, scopes) is None]
 
 
 def for_job(db: DB, module: str, names: list[str], node: str) -> dict:
     """{name: value} for a grant: each listed secret resolved for the node. Callers checked missing_for first."""
-    key = _key(db)
+    key, scopes = _key(db), chain(db, node)
     out = {}
     for n in names:
-        v = _readable(db, module, n, node, key)
+        v = _readable(db, module, n, node, key, scopes)
         if v is not None:
             out[n] = v.decode("utf-8")
     return out
@@ -262,6 +365,18 @@ def drop_node(db: DB, node: str):
     db.x("DELETE FROM secrets WHERE node_id=? AND module!=''", (node,))
 
 
+def group_secret_names(db: DB, gid: str) -> list[str]:
+    return [f"{r['module']}/{r['name']}" for r in db.q("SELECT module, name FROM secrets WHERE node_id=? AND module!='' "
+                                                        "ORDER BY module, name", (GROUP_PREFIX + gid,))]
+
+
+def drop_group(db: DB, gid: str) -> list[str]:
+    """A deleted group's values go with it; returns `module/name` of each."""
+    names = group_secret_names(db, gid)
+    db.x("DELETE FROM secrets WHERE node_id=? AND module!=''", (GROUP_PREFIX + gid,))
+    return names
+
+
 # ------------------------------------------------------------------ coordinator moves
 
 def transport_public(home) -> str:
@@ -301,7 +416,8 @@ def seal_snapshot(db: DB, path: Path, target_pub_b64: str) -> list[str]:
         c.commit()
     finally:
         c.close()
-    return [f"{m}/{n} ({'node ' + nd if nd else 'module'})" for m, n, nd, _, _ in rows if m]
+    return [f"{m}/{n} ({'module' if not nd else nd.replace(GROUP_PREFIX, 'group ') if nd.startswith(GROUP_PREFIX) else 'node ' + nd})"
+            for m, n, nd, _, _ in rows if m]
 
 
 def adopt_sealed(db: DB) -> int:
@@ -334,8 +450,5 @@ def adopt_sealed(db: DB) -> int:
 
 def names_for_preview(db: DB) -> list[str]:
     """`module/name (scope)` of every stored secret, for a move's preview."""
-    out = []
-    for r in db.q("SELECT module, name, node_id FROM secrets WHERE module!='' ORDER BY module, name, node_id"):
-        host = db.one("SELECT hostname FROM nodes WHERE node_id=?", (r["node_id"],)) if r["node_id"] else None
-        out.append(f"{r['module']}/{r['name']} ({'node ' + (host['hostname'] if host else r['node_id']) if r['node_id'] else 'module'})")
-    return out
+    return [f"{r['module']}/{r['name']} ({scope_text(db, r['node_id']).replace('the module', 'module')})"
+            for r in db.q("SELECT module, name, node_id FROM secrets WHERE module!='' ORDER BY module, name, node_id")]

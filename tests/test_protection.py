@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from oarbank.coordinator import config as C, core, invariants, modcalls
+from oarbank.coordinator import core, invariants, modcalls
 
 from helpers import certify, enrolled_node, fresh, make_db
+from helpers import put_node, set_fleet, set_module, set_protection
 
 
 @pytest.fixture
@@ -17,12 +18,17 @@ def db(tmp_path):
 
 
 def test_protection_policy_is_validated(db):
+    from oarbank.coordinator.protection import ProtectionError
     n = enrolled_node(db)[1]
-    with pytest.raises(core.ApiError) as e:
-        core.set_policy(db, n["node_id"], {"protection": {"schema": 1, "rule": [{"id": "x", "match": {}}]}}, "t")
-    assert e.value.code == "bad_protection"
-    core.set_policy(db, n["node_id"], {"protection": {"schema": 1, "node": {"mode": "fleet_first"}, "rule": []}}, "t")
-    assert json.loads(fresh(db, n)["policy_json"])["protection"]["node"]["mode"] == "fleet_first"
+    with pytest.raises(ProtectionError):
+        set_protection(db, n, {"schema": 1, "rule": [{"id": "x", "match": {}}]})
+    rev = fresh(db, n)["settings_rev"]
+    set_protection(db, n, {"schema": 1, "node": {"mode": "fleet_first"}, "rule": []})
+    assert db.one("SELECT value_json FROM setting_values WHERE scope='node' AND key='protection.mode'")["value_json"] \
+        == '"fleet_first"'                                            # a node value on the settings chain
+    # the agent gets it in its policy, under a new settings revision
+    assert json.loads(fresh(db, n)["settings_json"])["policy"]["protection"]["node"]["mode"] == "fleet_first"
+    assert fresh(db, n)["settings_rev"] > rev
 
 
 def test_journal_ingestion_ack_and_s16(db):
@@ -49,10 +55,10 @@ def test_s17_flags_admission_under_a_memory_floor(db):
 
 def test_disabled_service_zeroes_its_pools(db):
     n = enrolled_node(db)[1]
-    db.x("UPDATE nodes SET capacity_json=?, policy_json=? WHERE node_id=?",
-         (json.dumps({"pools": {"scorer": 4}}), json.dumps({"disabled_services": ["relay/scorer"]}), n["node_id"]))
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"scorer": 4}}), n["node_id"]))
+    put_node(db, n, "services.disabled", ["scorer"], "relay")
     assert core._node_pools(fresh(db, n)) == {"scorer": 0}
-    db.x("UPDATE nodes SET policy_json=? WHERE node_id=?", (json.dumps({"disabled_services": []}), n["node_id"]))
+    put_node(db, n, "services.disabled", [], "relay")
     assert core._node_pools(fresh(db, n)) == {"scorer": 4}
     from oarbank.coordinator import modcalls
     assert modcalls.node_class(fresh(db, n), "relay")["pools"] == {"scorer": 1}
@@ -73,8 +79,8 @@ def test_golden_node_class_has_the_agents_own_pools_and_the_doctors_capabilities
     assert {"java17", "own"} <= set(c["capabilities"])
     assert "own" not in modcalls.node_class(fresh(db, n), "toy")["capabilities"]      # another module's doctor
     # a pool only disabled services provide stays off, whatever the node reports
-    db.x("UPDATE nodes SET capacity_json=?, policy_json=? WHERE node_id=?",
-         (json.dumps({"pools": {"containers": 2, "scorer": 4}}), json.dumps({"disabled_services": ["relay/scorer"]}), n["node_id"]))
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"containers": 2, "scorer": 4}}), n["node_id"]))
+    put_node(db, n, "services.disabled", ["scorer"], "relay")
     assert modcalls.node_class(fresh(db, n), "relay")["pools"] == {"containers": 1, "scorer": 0}
     from oarbank_sdk.module_protocol import NodeClass
     NodeClass.model_validate(c)
@@ -103,8 +109,8 @@ def test_goldens_per_platform_certify_each_platform_on_its_own_expectation(db):
     from helpers import GOLDEN, READY, DOCTOR_OK, POOLS, facts_for, relay_result
     from oarbank.coordinator import modcalls, releases
     win_exp = {"score": "0.900000", "tiles": 1536, "image_sha256": "W"}
-    db.set_setting("module_settings:relay", {"goldens": [{**GOLDEN, "expected_by_platform": {"windows": win_exp}},
-                                                         {**GOLDEN, "name": "G-linux", "platforms": ["linux"]}]})
+    set_module(db, "relay", {"goldens": [{**GOLDEN, "expected_by_platform": {"windows": win_exp}},
+                                         {**GOLDEN, "name": "G-linux", "platforms": ["linux"]}]})
 
     def run(name, platform, result):
         _, n = enrolled_node(db, name, facts=facts_for(platform, os_version="10.0.26100" if platform.startswith("windows") else "6.8"))
@@ -194,14 +200,15 @@ def test_node_page_shows_protection_and_conditions(db, tmp_path):
     from oarbank.console import views
     from oarbank.console.state import ReadPool
     node = certify(db, enrolled_node(db)[1])
-    pol = {**C.DEFAULT_POLICY, "protection": {"schema": 1, "node": {"mode": "fleet_first"}, "rule": [
+    prot = {"schema": 1, "node": {"mode": "fleet_first"}, "rule": [
         {"id": "gpu-trainer", "match": {"path_contains": "GPU Trainer/releases"}, "tree": "descendants",
-         "reserve": {"mem_gb": "peak(300s).footprint + 2"}}]}}
+         "reserve": {"mem_gb": "peak(300s).footprint + 2"}}]}
     tel = {"guard": "clear", "protection": {"mode": "fleet_first", "active": ["gpu-trainer"],
                                             "rules": [{"id": "gpu-trainer", "active": True, "processes": 3, "cpu_cores": 0.5,
                                                        "footprint_gb": 4.1, "reason": "active"}],
                                             "constraint": {"reserved_mem_gb": 6.1, "reserved_cpu": 0, "binding": {"reserve_mem": "rule:gpu-trainer"}}}}
-    db.x("UPDATE nodes SET policy_json=?, telemetry_json=? WHERE node_id=?", (json.dumps(pol), json.dumps(tel), node["node_id"]))
+    set_protection(db, node, prot)
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (json.dumps(tel), node["node_id"]))
     d = views.node_page(db, node["node_id"], time.time(), lambda m: modcalls.info(m).manifest)
     assert [c["code"] for c in d["conditions"]] == ["PROTECTION_RESERVED"]
 

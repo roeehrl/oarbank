@@ -107,7 +107,7 @@ class Health:
 
 # what this host implements of the optional host features (module_protocol.HOST_CAPABILITIES), and the UI contract it renders
 HOST_CAPABILITIES = (mp.HOST_PLACEMENT, mp.HOST_COORDINATOR_VARIANTS, mp.HOST_NODES_PLATFORM, mp.HOST_GOLDENS_BY_PLATFORM,
-                     mp.HOST_JOBS_STAGE, mp.HOST_DATASETS_ORIGINS, f"ui_contract:{UI_CONTRACT}")
+                     mp.HOST_JOBS_STAGE, mp.HOST_DATASETS_ORIGINS, mp.HOST_CAMPAIGN_SETTINGS, f"ui_contract:{UI_CONTRACT}")
 
 
 def host_info() -> dict:

@@ -16,7 +16,20 @@ pub struct ServiceSpec {
     pub keep_alive: bool,
     /// Without `keep_alive`: restart only after a failed exit (a clean exit 0 stays stopped).
     pub restart_on_failure: bool,
+    /// macOS: the bundle identifier of the app this job belongs to (launchd `AssociatedBundleIdentifiers`). System
+    /// Settings, Login Items, "Allow in the Background" then lists the job under that app's name and icon (Oarbank Node,
+    /// Oarbank Coordinator) instead of the signing team's name, so whoever switches it off sees what stops.
+    pub associated_bundle: Option<String>,
+    /// How long the service manager waits for the service to stop after asking it to (SIGTERM) before it kills it:
+    /// launchd `ExitTimeOut`, systemd `TimeoutStopSec` (their defaults, 20 s and 90 s, otherwise).
+    pub stop_timeout_s: Option<u32>,
 }
+
+/// The agent's stop timeout: on a stop the agent stops its jobs' runners (checkpointing first where they can), releases
+/// their attempts and stops what it must of the services (agent.rs `stop_jobs`, at most about 25 s for the runners and
+/// their reports), and must not be killed meanwhile, or a runner outlives it until its watchdog or its next start ends
+/// it. The Windows launcher waits as long for the agent before it ends it.
+pub const AGENT_STOP_TIMEOUT_S: u32 = 60;
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
@@ -30,9 +43,10 @@ pub fn launchd_plist(s: &ServiceSpec) -> String {
 
 /// The LaunchAgent that runs the session helper in every GUI login (`LimitLoadToSessionType` Aqua), installed in
 /// /Library/LaunchAgents by a system install: `agent` is the agent binary installed beside the launcher (root's,
-/// never the service account's current version).
-pub fn session_helper_plist(label: &str, agent: &str) -> String {
-    let spec = ServiceSpec { label: label.into(), program: vec![agent.into(), "session-helper".into()], keep_alive: true, ..Default::default() };
+/// never the service account's current version). `associated_bundle`: the app it belongs to in Login Items.
+pub fn session_helper_plist(label: &str, agent: &str, associated_bundle: Option<&str>) -> String {
+    let spec = ServiceSpec { label: label.into(), program: vec![agent.into(), "session-helper".into()], keep_alive: true,
+                             associated_bundle: associated_bundle.map(str::to_string), ..Default::default() };
     launchd_plist_with(&spec, "  <key>LimitLoadToSessionType</key><string>Aqua</string>\n")
 }
 
@@ -68,7 +82,13 @@ fn launchd_plist_with(s: &ServiceSpec, extra: &str) -> String {
     out += &format!("  <key>KeepAlive</key>{}\n", if s.keep_alive { "<true/>" } else if s.restart_on_failure {
         "<dict><key>SuccessfulExit</key><false/></dict>" } else { "<false/>" });
     out += "  <key>ThrottleInterval</key><integer>10</integer>\n";
+    if let Some(t) = s.stop_timeout_s {
+        out += &format!("  <key>ExitTimeOut</key><integer>{t}</integer>\n");
+    }
     out += "  <key>ProcessType</key><string>Standard</string>\n";
+    if let Some(b) = &s.associated_bundle {
+        out += &format!("  <key>AssociatedBundleIdentifiers</key><array><string>{}</string></array>\n", esc(b));
+    }
     out += extra;
     out += "</dict></plist>\n";
     out
@@ -95,7 +115,11 @@ pub fn systemd_unit(s: &ServiceSpec, description: &str, system: bool) -> String 
         out += &format!("User={u}\nGroup={u}\nRuntimeDirectory=oarbank\nRuntimeDirectoryMode=0755\n");
     }
     out += if s.keep_alive { "Restart=always\n" } else if s.restart_on_failure { "Restart=on-failure\n" } else { "Restart=no\n" };
-    out += "RestartSec=10\nKillMode=mixed\nDelegate=yes\n\n[Install]\n";
+    out += "RestartSec=10\nKillMode=mixed\nDelegate=yes\n";
+    if let Some(t) = s.stop_timeout_s {
+        out += &format!("TimeoutStopSec={t}\n");
+    }
+    out += "\n[Install]\n";
     out += if system { "WantedBy=multi-user.target\n" } else { "WantedBy=default.target\n" };
     out
 }
@@ -107,6 +131,92 @@ pub fn session_helper_unit(agent: &str, account: &str) -> String {
     format!("[Unit]\nDescription=Oarbank session helper (tells the Oarbank agent's host protection about this session)\n\
              ConditionUser=!{account}\n\n[Service]\nExecStart={} \"session-helper\"\nRestart=always\nRestartSec=10\n\n\
              [Install]\nWantedBy=default.target\n", systemd_quote(agent))
+}
+
+/// The spec of a launchd job this module rendered, read back from its property list as JSON (`plutil -convert json`),
+/// so an upgrade can render it again with today's keys (`oarbank-launcher service refresh`). None: not a job these
+/// functions render (no label or program, or a session helper's `LimitLoadToSessionType`).
+pub fn launchd_spec(v: &serde_json::Value) -> Option<ServiceSpec> {
+    let o = v.as_object()?;
+    if o.contains_key("LimitLoadToSessionType") {
+        return None;
+    }
+    let text = |k: &str| o.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let program: Vec<String> = o.get("ProgramArguments")?.as_array()?.iter().map(|a| a.as_str().map(str::to_string))
+        .collect::<Option<_>>()?;
+    if program.is_empty() {
+        return None;
+    }
+    // plutil's JSON keeps no key order: by name, as the launcher writes them
+    let mut env: Vec<(String, String)> = match o.get("EnvironmentVariables") {
+        Some(e) => e.as_object()?.iter().map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect::<Option<_>>()?,
+        None => vec![],
+    };
+    env.sort();
+    let (keep_alive, restart_on_failure) = match o.get("KeepAlive") {
+        Some(serde_json::Value::Bool(b)) => (*b, false),
+        Some(serde_json::Value::Object(d)) => (false, d.get("SuccessfulExit") == Some(&serde_json::Value::Bool(false))),
+        _ => (false, false),
+    };
+    Some(ServiceSpec {
+        label: text("Label")?, program, env, working_dir: text("WorkingDirectory"), stdout: text("StandardOutPath"),
+        stderr: text("StandardErrorPath"), user: text("UserName"), keep_alive, restart_on_failure,
+        associated_bundle: o.get("AssociatedBundleIdentifiers").and_then(|a| a.get(0)).and_then(|b| b.as_str()).map(str::to_string),
+        stop_timeout_s: o.get("ExitTimeOut").and_then(|t| t.as_u64()).map(|t| t as u32),
+    })
+}
+
+/// Undo systemd_quote: the words of an ExecStart or Environment value this module wrote (each in double quotes).
+fn systemd_words(v: &str) -> Option<Vec<String>> {
+    let mut out = vec![];
+    let mut it = v.chars().peekable();
+    loop {
+        while it.peek() == Some(&' ') {
+            it.next();
+        }
+        match it.next() {
+            None => return Some(out),
+            Some('"') => {}
+            Some(_) => return None,
+        }
+        let mut w = String::new();
+        loop {
+            match it.next()? {
+                '"' => break,
+                '\\' => w.push(it.next()?),
+                '%' => { if it.next()? != '%' { return None; } w.push('%') }
+                c => w.push(c),
+            }
+        }
+        out.push(w);
+    }
+}
+
+/// The spec and description of a systemd unit systemd_unit rendered, read back so an upgrade can render it again with
+/// today's settings (`oarbank-launcher service refresh`). None: a unit these functions did not write.
+pub fn systemd_spec(text: &str) -> Option<(ServiceSpec, String)> {
+    let mut spec = ServiceSpec::default();
+    let mut description = None;
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k {
+            "Description" => description = Some(v.to_string()),
+            "ExecStart" => spec.program = systemd_words(v)?,
+            "Environment" => {
+                let (ek, ev) = systemd_words(v)?.into_iter().next()?.split_once('=').map(|(a, b)| (a.to_string(), b.to_string()))?;
+                spec.env.push((ek, ev));
+            }
+            "WorkingDirectory" => spec.working_dir = Some(v.to_string()),
+            "User" => spec.user = Some(v.to_string()),
+            "Restart" => { spec.keep_alive = v == "always"; spec.restart_on_failure = v == "on-failure"; }
+            "TimeoutStopSec" => spec.stop_timeout_s = Some(v.parse().ok()?),
+            _ => {}
+        }
+    }
+    if spec.program.is_empty() {
+        return None;
+    }
+    Some((spec, description?))
 }
 
 /// `sc.exe create` arguments for a Windows service whose binary path is `program` (quoted per the Windows rules),
@@ -143,11 +253,19 @@ mod tests {
             env: vec![("OARBANK_LOG".into(), "info".into())], keep_alive: true, ..Default::default() });
         assert!(p.contains("<string>/a b/&lt;home&gt;</string>") && p.contains("<key>KeepAlive</key><true/>"));
         assert!(p.contains("<key>ProcessType</key><string>Standard</string>") && !p.contains("UserName"));
-        let h = session_helper_plist("dev.codonic.oarbank.agent.session", "/Library/Oarbank/bin/oarbank-agent");
+        assert!(!p.contains("AssociatedBundleIdentifiers") && !p.contains("ExitTimeOut"));
+        let stops = launchd_plist(&ServiceSpec { label: "x".into(), program: vec!["/x".into()], stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S),
+                                                 ..Default::default() });
+        assert!(stops.contains("<key>ExitTimeOut</key><integer>60</integer>\n"));
+        let owned = launchd_plist(&ServiceSpec { label: "dev.codonic.oarbank.agent".into(), program: vec!["/x".into()],
+            associated_bundle: Some("dev.codonic.oarbank.node".into()), ..Default::default() });
+        assert!(owned.contains("<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>\n"));
+        let h = session_helper_plist("dev.codonic.oarbank.agent.session", "/Library/Oarbank/bin/oarbank-agent", Some("dev.codonic.oarbank.node"));
         assert!(h.contains("<key>Label</key><string>dev.codonic.oarbank.agent.session</string>"));
         assert!(h.contains("<array>\n    <string>/Library/Oarbank/bin/oarbank-agent</string>\n    <string>session-helper</string>\n  </array>"));
         assert!(h.contains("<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>") && h.contains("<key>KeepAlive</key><true/>"));
         assert!(!h.contains("UserName") && !h.contains("StandardOutPath"));
+        assert!(h.contains("<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>"));
     }
 
     #[test]
@@ -159,6 +277,9 @@ mod tests {
         assert!(u.contains("ExecStart=\"/opt/oarbank/oarbank-launcher\" \"--home\" \"/var/lib/oarbank/a b\" \"run\"\n"));
         assert!(u.contains("User=oarbank\n") && u.contains("Restart=always") && u.contains("WantedBy=multi-user.target"));
         assert!(u.contains("RuntimeDirectory=oarbank\nRuntimeDirectoryMode=0755\n"));
+        assert!(!u.contains("TimeoutStopSec"));
+        let stops = systemd_unit(&ServiceSpec { stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S), ..spec.clone() }, "Oarbank agent", true);
+        assert!(stops.contains("KillMode=mixed\nDelegate=yes\nTimeoutStopSec=60\n\n[Install]\n"));
         let personal = systemd_unit(&spec, "x", false);
         assert!(!personal.contains("User=") && !personal.contains("RuntimeDirectory"));
         let h = session_helper_unit("/usr/lib/oarbank/oarbank-agent", "oarbank");
@@ -167,6 +288,46 @@ mod tests {
         let a = sc_create_args("OarbankAgent", "Oarbank agent", &[r"C:\Program Files\Oarbank\oarbank-launcher.exe".into(), "run".into()], None);
         assert_eq!(a[3], r#""C:\Program Files\Oarbank\oarbank-launcher.exe" run"#);
         assert_eq!(a[7], r"NT SERVICE\OarbankAgent");
+    }
+
+    #[test]
+    fn a_rendered_definition_reads_back_and_an_old_one_gains_the_stop_timeout() {
+        // a 2.8 node's LaunchDaemon (no ExitTimeOut), as plutil -convert json gives it
+        let old = ServiceSpec { label: "dev.codonic.oarbank.agent".into(),
+            program: vec!["/Library/Oarbank/bin/oarbank-launcher".into(), "--home".into(), "/Library/Oarbank/agent".into(),
+                          "run".into(), "--session-hub".into()],
+            env: vec![("OARBANK_LOG".into(), "info".into()), ("PATH".into(), "/usr/bin:/bin".into())],
+            working_dir: Some("/Library/Oarbank/agent".into()), stdout: Some("/x/launcher.log".into()),
+            stderr: Some("/x/launcher.log".into()), user: Some("_oarbank".into()), keep_alive: true,
+            associated_bundle: Some("dev.codonic.oarbank.node".into()), ..Default::default() };
+        let json = serde_json::json!({"Label": "dev.codonic.oarbank.agent", "ProgramArguments": old.program,
+            "EnvironmentVariables": {"OARBANK_LOG": "info", "PATH": "/usr/bin:/bin"}, "WorkingDirectory": "/Library/Oarbank/agent",
+            "StandardOutPath": "/x/launcher.log", "StandardErrorPath": "/x/launcher.log", "UserName": "_oarbank",
+            "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 10, "ProcessType": "Standard",
+            "AssociatedBundleIdentifiers": ["dev.codonic.oarbank.node"]});
+        let back = launchd_spec(&json).unwrap();
+        assert_eq!(launchd_plist(&back), launchd_plist(&old));
+        let now = launchd_plist(&ServiceSpec { stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S), ..back });
+        assert!(now.contains("<key>ExitTimeOut</key><integer>60</integer>") && now.contains("<string>--session-hub</string>"));
+        let mut with = json.clone();
+        with["ExitTimeOut"] = 60.into();
+        assert_eq!(launchd_spec(&with).unwrap().stop_timeout_s, Some(60));
+        with["KeepAlive"] = serde_json::json!({"SuccessfulExit": false});
+        assert!(launchd_spec(&with).map(|s| s.restart_on_failure && !s.keep_alive).unwrap());
+        assert!(launchd_spec(&serde_json::json!({"Label": "x", "ProgramArguments": ["/a"], "LimitLoadToSessionType": "Aqua"})).is_none());
+        assert!(launchd_spec(&serde_json::json!({"Label": "x"})).is_none());
+        // a 2.8 system unit: every word quoted, % doubled
+        let unit = ServiceSpec { label: "dev.codonic.oarbank.agent".into(),
+            program: vec!["/usr/lib/oarbank/oarbank-launcher".into(), "--home".into(), "/var/lib/oarbank/a \"b\" 100%".into(), "run".into()],
+            env: vec![("OARBANK_LOG".into(), "info".into())], working_dir: Some("/var/lib/oarbank/agent".into()),
+            user: Some("oarbank".into()), keep_alive: true, ..Default::default() };
+        let text = systemd_unit(&unit, "Oarbank agent", true);
+        let (back, desc) = systemd_spec(&text).unwrap();
+        assert_eq!((systemd_unit(&back, &desc, true), back.stop_timeout_s), (text, None));
+        let now = systemd_unit(&ServiceSpec { stop_timeout_s: Some(AGENT_STOP_TIMEOUT_S), ..back }, &desc, true);
+        assert!(now.contains("TimeoutStopSec=60\n") && now.contains("\"/var/lib/oarbank/a \\\"b\\\" 100%%\""));
+        assert_eq!(systemd_spec(&now).unwrap().0.stop_timeout_s, Some(60));
+        assert!(systemd_spec("[Service]\nExecStart=/bin/true\n").is_none());          // not quoted as this module writes
     }
 
     #[test]

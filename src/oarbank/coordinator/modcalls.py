@@ -15,6 +15,7 @@ from pathlib import Path
 
 from oarbank_sdk import manifest as mf
 
+from .settings.store import fleet_value
 from .modulehost import ModuleError, ModuleHost, ModuleSpec, ModuleUnavailable  # noqa: F401  (re-exported)
 
 _hosts: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
@@ -202,7 +203,7 @@ def payload_problem(name: str, version: str | None, payload) -> str | None:
 
 
 def split_enabled(db, name: str) -> bool:
-    return name in CATALOG and info(name).splittable and db.get_setting(f"pipeline:{name}", "single") == "split"
+    return name in CATALOG and info(name).splittable and fleet_value(db, "pipeline", name) == "split"
 
 
 # ------------------------------------------------------------------ host per database
@@ -293,7 +294,8 @@ def host_callbacks(db) -> dict:
         return {"exists": bool(r), "size": r["size"] if r else None}
 
     def settings_get(module, p):
-        return {"value": (_db().get_setting(f"module_settings:{module}", {}) or {}).get(p.get("key"))}
+        from . import effects
+        return {"value": effects.module_settings(_db(), module).get(p.get("key"))}
 
     def secrets_get(module, p):
         from . import modsecrets
@@ -466,7 +468,8 @@ def node_class(node: dict | None, name: str) -> dict:
     names for the module (services and healthy probes, such as a tool probe) and its enabled services'."""
     import json as _json
     from .predicates import node_capabilities, node_gpu_apis
-    disabled = (_json.loads((node or {}).get("policy_json") or "{}") or {}).get("disabled_services") or [] if node else []
+    from .core import node_disabled_services
+    disabled = node_disabled_services(node) if node else []
     facts = _json.loads((node or {}).get("facts_json") or "{}") or {} if node else {}
     reported = (_json.loads((node or {}).get("capacity_json") or "{}") or {}).get("pools") or {} if node else {}
     off = pools_of_disabled(disabled)
@@ -595,10 +598,18 @@ def stage_secrets(name: str, stage: str | None) -> list[str]:
 
 
 def stage_bootstrap(name: str, stage: str | None) -> bool:
-    """Whether a job of this stage is a bootstrap job (oarbank-sdk stages[].bootstrap): it runs where the module's doctor is
-    healthy before its goldens pass, with the bootstrap grants, and its result must be exactly pinned datasets."""
+    """Whether a job of this stage is a bootstrap job (oarbank-sdk stages[].bootstrap): it runs where the module's runner
+    starts, before its goldens pass, with the bootstrap grants, and its result must be exactly pinned datasets."""
     i = CATALOG.get(name)
     return bool(i and i.manifest.is_bootstrap(stage))
+
+
+def stage_exempt(name: str, stage: str | None) -> bool:
+    """Whether a job of this stage needs no certification (oarbank-sdk Manifest.certification_exempt): a bootstrap stage,
+    or one that compares nothing and needs no capability or pool. It runs wherever the module's runner starts
+    (docs/design/stage-gating.md)."""
+    i = CATALOG.get(name)
+    return bool(i and i.manifest.certification_exempt(stage))
 
 
 def resources_on(res: dict, platform: str | None) -> dict:

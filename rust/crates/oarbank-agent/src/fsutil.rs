@@ -33,6 +33,20 @@ pub fn write_private(p: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, p)
 }
 
+/// Write `data` to `p` only when its content differs, through a temporary file and a rename (default permissions): a
+/// process reading the file never sees half of it, and a file whose content stays is not touched at all (a module's
+/// settings file when another module's settings change). Returns whether it wrote.
+pub fn write_if_changed(p: &Path, data: &[u8]) -> std::io::Result<bool> {
+    if std::fs::read(p).ok().as_deref() == Some(data) {
+        return Ok(false);
+    }
+    let dir = p.parent().unwrap_or(Path::new("."));
+    let tmp = dir.join(format!(".{}.{}.tmp", p.file_name().and_then(|n| n.to_str()).unwrap_or("f"), std::process::id()));
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, p)?;
+    Ok(true)
+}
+
 /// Point `link` at `target` (a name relative to its directory) atomically: a symlink renamed into place on Unix, a
 /// pointer file holding the name on Windows (where links need privileges and a running .exe cannot be replaced).
 pub fn point(link: &Path, target: &str) -> std::io::Result<()> {

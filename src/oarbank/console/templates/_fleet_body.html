@@ -3,6 +3,7 @@
   {{ m.op_form("fleet.halt", "fleet", "Halt fleet", cls="danger", confirm="Halt the fleet? Every live attempt is released and requeued; no new leases.", reason_prompt=True) }}</div>{% endif %}
 {% if fleet_state != 'active' %}<div class="flash bad" role="alert">Fleet {{ fleet_state }}: no new leases.
   {{ m.op_form("fleet.resume", "fleet", "Resume fleet…", cls="pri", reason_prompt=True) }}</div>{% endif %}
+{{ m.release_banner(releases_awaiting) }}
 {% if alerts %}
 <h2>Alerts{% if alerts_pending %} <span class="small mut">({{ alerts_pending }} pending: they notify only if they outlive their rule's pending period)</span>{% endif %}</h2>
 <div class="grid">{% for a in alerts %}
@@ -32,7 +33,7 @@
 {% endif %}
 
 <h2>Nodes</h2>
-<div class="row small add-row"><a class="btn pri" href="/add-machine">Add machine…</a>
+<div class="row small add-row"><a class="btn pri" href="/add-machine">Add machine…</a> <a class="btn" href="/nodes/bulk">Bulk changes…</a> <a class="btn" href="/groups">Groups</a>
   <span class="mut">A join code for one machine or many, with the installers and commands for macOS, Linux and Windows.</span></div>
 {# preserved across the live refresh (hx-preserve): a refresh never clears a code being typed #}
 <div class="row small approve-code" id="approve-by-code" hx-preserve>
@@ -48,9 +49,10 @@
       <a href="/nodes/{{ n.node_id }}"><b>{{ n.hostname }}</b></a>
       {% if n.platform %}<span class="chip" title="platform {{ n.platform }}{% if n.os_version %}, {{ n.os }} {{ n.os_version }}{% endif %}">{{ {'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}.get(n.os, n.os) or n.platform }}{% if n.arch %} {{ n.arch }}{% endif %}</span>{% endif %}
       {% if not n.online %}<span class="chip bad">offline</span>
-      {% elif n.lifecycle != 'ready' %}<span class="chip warn">{{ n.lifecycle }}</span>
+      {% elif n.lifecycle != 'ready' %}<span class="chip warn"{% if n.release_wait %} title="{{ n.release_wait.title }}"{% endif %}>{{ n.release_wait.text if n.release_wait else n.lifecycle }}</span>
       {% elif n.desired_state != 'active' %}<span class="chip warn">{{ n.desired_state }}</span>
       {% else %}<span class="chip ok">active</span>{% endif %}
+      {% if n.release_wait and (not n.online or n.lifecycle == 'ready') %}<span class="chip warn" title="{{ n.release_wait.title }}">{{ n.release_wait.text }}</span>{% endif %}
       {% if n.cap.binding_limit and n.cap.binding_limit.startswith('cap.') %}<span class="chip acc">capped: {{ n.cap.binding_limit[4:] }}{% if n.limits[n.cap.binding_limit[4:]] is defined %} {{ n.limits[n.cap.binding_limit[4:]] }}{% endif %}</span>{% endif %}
       {% for r in (n.tel.protection or {}).get('active') or [] %}<span class="chip acc" title="protection rule active">protecting: {{ r }}</span>{% endfor %}
       {% if n.tel.guard and n.tel.guard != 'clear' %}<span class="chip warn" title="{{ (n.tel.protection or {}).get('guard_reason') or '' }}">memory guard: {{ n.tel.guard }}</span>{% endif %}
@@ -65,6 +67,7 @@
       {%- else %}jobs {{ n.live }} / {{ s.slots }} CPU slots{% if s.auto is not none %} <span class="mut">(auto {{ s.auto }})</span>{% endif %}{% endif %}
       {%- if n.cap.mem_gb_free is known %} · {{ n.cap.mem_gb_free | num(1) }} GB free for jobs{% endif %}
       {%- if pools %} · pools {% for p, k in pools | dictsort %}{{ p }} {{ k }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %} · {{ n.done1h }} done/h</div>
+    {% if n.why %}<div class="small mut why">{{ n.why.line }}</div>{% endif %}
     <div class="bar"><i style="width:{{ (100 * n.live / s.slots) if s.reported and s.slots and not s.held else 0 }}%"></i></div>
     <div class="row small mut">
       {% if n.tel.mem_used_gb is known and n.hw.memory_gb is known %}<span>mem {{ n.tel.mem_used_gb | num(1) }} / {{ n.hw.memory_gb | num(1) }} GB</span>
@@ -73,7 +76,7 @@
       {% if n.pressure %}<span>pressure {{ n.pressure }}</span>{% endif %}
       {% if n.heat %}<span>thermal {{ n.heat }}</span>{% endif %}
       {% if n.tel.on_battery %}<span class="chip warn">battery</span>{% endif %}
-      {% if n.tel.user_idle_s is known and n.tel.user_idle_s < (n.policy.user_idle_s or 300) %}<span class="chip">user present</span>{% endif %}
+      {% if n.tel.user_idle_s is known and n.policy.user_idle_s is known and n.tel.user_idle_s < n.policy.user_idle_s %}<span class="chip">user present</span>{% endif %}
       {% if n.tel.services_running %}<span>services {{ n.tel.services_running | join(', ') }}</span>{% endif %}
       {% if n.tel.services_held %}<span class="chip warn">service stopped: {{ n.tel.services_held | list | join(', ') }}</span>{% endif %}
       <span>heartbeat {{ n.hb_age | secs if n.hb_age is not none else 'never' }}</span>
@@ -85,7 +88,7 @@
       {% else %}
       {{ m.op_form("nodes.resume", n.node_id, "Resume", cls="pri") }}
       {% endif %}
-      <a class="btn" href="/nodes/{{ n.node_id }}">Details & caps</a>
+      <a class="btn" href="/nodes/{{ n.node_id }}">Details</a><a class="btn" href="/nodes/{{ n.node_id }}/settings">Settings</a>
     </div>
   </div>
 {% else %}
@@ -101,7 +104,7 @@
   <td class="num">{{ c.uses }} / {{ c.max_uses }}</td>
   <td>{{ 'automatic' if c.approve else 'you approve' }}{% if c.enrollments | selectattr('status', 'equalto', 'pending') | list %} <span class="chip warn">{{ c.enrollments | selectattr('status', 'equalto', 'pending') | list | length }} waiting</span>{% endif %}</td>
   <td>{{ c.expires_at | ts }}</td><td><span class="chip ok">{{ c.state }}</span></td>
-  <td>{{ m.op_form("nodes.revoke_join_code", c.id, "Revoke", cls="danger", return_to="/", confirm="Revoke join code " ~ (c.label or c.id) ~ "? Machines that already joined with it stay.") }}</td></tr>
+  <td class="actions">{{ m.op_form("nodes.revoke_join_code", c.id, "Revoke", cls="danger", return_to="/", confirm="Revoke join code " ~ (c.label or c.id) ~ "? Machines that already joined with it stay.") }}</td></tr>
 {% endfor %}</table>
 {% endif %}
 

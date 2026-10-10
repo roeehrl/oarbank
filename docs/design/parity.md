@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 89 operations, 2 explain kinds, 122 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 94 operations, 2 explain kinds, 129 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -19,8 +19,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `nodes.pause` | T0 | yes | `oarbank node state <nid> paused` | yes |
 | `nodes.resume` | T0 | yes | `oarbank node state <nid> active` | yes |
 | `nodes.drain` | T1 | yes | `oarbank node state <nid> draining` | yes |
-| `nodes.set_caps` | T0 | yes | `oarbank node limits <nid> ...`<br>`oarbank node limits <nid> --clear-all` | yes |
-| `nodes.set_policy` | T1 | yes | `oarbank node policy <nid> ...` | yes |
 | `nodes.quarantine` | T1 | yes | `oarbank op nodes.quarantine` | yes |
 | `nodes.clear_quarantine` | T1 | yes | `oarbank op nodes.clear_quarantine` | yes |
 | `nodes.run_doctor` | T0 | yes | `oarbank op nodes.run_doctor` | yes |
@@ -40,14 +38,13 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `campaigns.rebind_platform` | T2 | yes | `oarbank campaign rebind <id> --platform <token>` | yes |
 | `datasets.register` | T1 | yes | `oarbank dataset upload <dir> --kind <kind>`<br>`oarbank dataset register <file.json>` | yes |
 | `settings.origins.update` | T2 | yes | `oarbank op settings.origins.update -p hosts=...` | yes |
-| `modules.set_pipeline` | T2 | yes | `oarbank pipeline single|split --module <module>` | yes |
 | `modules.install` | T2 | yes | `oarbank module install <bundle.mfb>` | yes |
 | `modules.uninstall` | T2 | yes | `oarbank module uninstall <name>@<version>` | yes |
 | `modules.verify` | T0 | yes | `oarbank module verify [name]` | yes |
 | `modules.check` | T0 | yes | `oarbank module check [name] [--deep]` | yes |
 | `modules.enable` | T1 | yes | `oarbank module enable <name>@<version>` | yes |
 | `modules.approve` | T2 | yes | `oarbank module approve <name>@<version>` | yes |
-| `modules.enable_canary` | T2 | yes | `oarbank module canary <name>@<version> --node <node>` | yes |
+| `modules.enable_canary` | T2 | yes | `oarbank module canary <name>@<version> --node <node>`<br>`oarbank module canary <name>@<version> --group <group>` | yes |
 | `modules.promote` | T2 | yes | `oarbank module promote <name>[@<canary version>]` | yes |
 | `modules.rollback` | T1 | yes | `oarbank module rollback <name>` | yes |
 | `modules.disable` | T1 | yes | `oarbank module disable <name>` | yes |
@@ -73,17 +70,26 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `coordinator.builds.sign` | T1 | yes | `oarbank coordinator-build sign <build>` | yes |
 | `releases.promote` | T2 | yes | `oarbank release promote <rid>` | yes |
 | `releases.pin_key` | T3 | yes | `oarbank release keygen` | yes |
-| `protection.rules.update` | T2 | yes | `oarbank protection set <nid> <file>`<br>`oarbank protection preview <nid> <file>` | yes |
-| `protection.rules.restore` | T2 | yes | `oarbank protection restore <nid> <version>` | yes |
-| `protection.rules.canary` | T2 | yes | `oarbank protection canary <nid> <file>`<br>`oarbank protection promote` | yes |
+| `protection.rules.update` | T2 | yes | `oarbank protection set <node> <file>`<br>`oarbank protection set fleet <file>`<br>`oarbank protection set group:<group> <file>`<br>`oarbank protection preview <node> <file>` | yes |
 | `protection.probe_now` | T0 | yes | `oarbank protection probe <nid>` | yes |
 | `alerts.ack` | T0 | yes | `oarbank alerts ack <id> [--useful|--noise]` | yes |
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
-| `settings.notifications.update` | T2 | yes | `oarbank op settings.notifications.update` | yes |
-| `settings.tools.update` | T2 | yes | `oarbank op settings.tools.update` | yes |
+| `settings.apply` | T0 | yes | `oarbank settings set <key> <value> [--node <node>] [--group <group>]`<br>`oarbank settings reset <key> [--node <node>] [--group <group>]` | yes |
+| `settings.import` | T2 | yes | `oarbank settings import <file> [--dry-run]` | yes |
+| `settings.secrets.set` | T1 | yes | `oarbank settings set-secret <name>` | yes |
+| `settings.secrets.clear` | T1 | yes | `oarbank settings clear-secret <name>` | yes |
+| `settings.promote` | T1 | yes | `oarbank settings promote <key> --group <group> [--to <group>]` | yes |
+| `groups.create` | T1 | yes | `oarbank groups create <name> [--os <os>] [--label <label>] [--member <node>]` | yes |
+| `groups.update` | T2 | yes | `oarbank groups update <group>` | yes |
+| `groups.rank` | T2 | yes | `oarbank groups rank <group> up|down|top|bottom` | yes |
+| `groups.delete` | T2 | yes | `oarbank groups delete <group>` | yes |
+| `nodes.label` | T1 | yes | `oarbank node label <node> <labels> [--remove]` | yes |
+| `tools.define` | T2 | yes | `oarbank tools define <id> --search <os>=<pattern>` | yes |
+| `tools.delete` | T2 | yes | `oarbank tools delete <id>` | yes |
+| `tools.detect` | T0 | yes | `oarbank tools detect <node>` | yes |
 | `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
-| `folders.sign` | T1 | yes | `oarbank folders sign <node>` | yes |
+| `nodes.sign_statement` | T1 | yes | `oarbank node sign <node>` | yes |
 | `access.accounts.create` | T2 | yes | `oarbank account create <name>` | yes |
 | `access.accounts.update` | T2 | yes | `oarbank op access.accounts.update` | yes |
 | `access.accounts.reset_totp` | T2 | yes | `oarbank op access.accounts.reset_totp` | yes |
@@ -91,11 +97,10 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `access.tokens.create` | T2 | yes | `oarbank token create` | yes |
 | `access.tokens.revoke` | T1 | yes | `oarbank op access.tokens.revoke` | yes |
 | `access.login_link` | T1 | yes | `oarbank console login [--account <name>]` | yes |
-| `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]` | yes |
-| `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]` | yes |
+| `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]`<br>`oarbank secret set <module> <name> [--group G]` | yes |
+| `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]`<br>`oarbank secret clear <module> <name> [--group G]` | yes |
 | `modules.cli_token` | T1 | yes | `oarbank cli <module> [args...]` | yes |
 | `access.passkeys.remove` | T1 | yes | `oarbank op access.passkeys.remove` | yes |
-| `settings.update` | T2 | yes | `oarbank op settings.update <key>`<br>`module CLIs (golden:<module>, dataset_groups)` | yes |
 | `audit.verify` | T0 | yes | `oarbank audit verify` | yes |
 
 ## Explain
@@ -112,8 +117,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NO_ELIGIBLE_NODE` | `jobs.set_priority` |
 | `QUEUED_BEHIND` | `jobs.set_priority` |
 | `CAMPAIGN_PAUSED` | `campaigns.resume` |
+| `CAMPAIGN_SETTING_HOLDS` | `settings.apply` |
 | `OARBANK_PAUSED` | `fleet.resume` |
-| `USER_CAP_BINDING` | `nodes.set_caps` |
+| `USER_CAP_BINDING` | `settings.apply` |
 | `MODULE_NOT_READY` | `nodes.run_doctor` |
 | `MODULE_NOT_CERTIFIED` | `nodes.recertify` |
 | `MODULE_DISABLED` | `modules.enable_canary` |
@@ -123,12 +129,17 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `STAGE_CAPABILITY_MISSING` | `nodes.run_doctor` |
 | `GPU_API_MISSING` | `nodes.run_doctor` |
 | `SECRETS_NOT_SET` | `secrets.set` |
+| `SETTINGS_NOT_SET` | `settings.apply` |
 | `DATASET_PLATFORM_MISMATCH` | `jobs.cancel` |
-| `TOOL_UNAVAILABLE` | `settings.tools.update` |
+| `TOOL_NOT_FOUND` | `tools.detect`, `tools.define` |
+| `TOOL_VERSION_UNMET` | `tools.detect` |
+| `TOOL_REFUSED` | `tools.detect` |
 | `FOLDER_UNAVAILABLE` | `settings.folders.update` |
 | `AGENT_TOO_OLD` | `agent.promote` |
 | `RETRIES_EXHAUSTED` | `jobs.cancel` |
 | `NODE_PAUSED_BY_ADMIN` | `nodes.resume` |
 | `NODE_DRAINING` | `nodes.resume` |
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |
+| `NO_RELEASE` | `modules.install`, `modules.enable` |
+| `RELEASE_UNSIGNED` | `releases.attach_signature` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

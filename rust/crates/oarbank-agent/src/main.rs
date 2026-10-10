@@ -8,6 +8,8 @@ mod cgroup;
 mod check;
 mod checkpoints;
 mod clock;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod colima;
 mod config;
 mod container_runtime;
 mod coordinstall;
@@ -33,6 +35,8 @@ mod prot;
 mod proxy;
 mod release;
 mod rescue;
+#[cfg(unix)]
+mod runners;
 mod runtime;
 mod sandbox;
 #[cfg(target_os = "linux")]
@@ -48,6 +52,7 @@ mod staging;
 mod status;
 mod sys;
 mod tls;
+mod tools;
 mod tuf;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod wslc;
@@ -184,18 +189,44 @@ enum Cmd {
         #[command(subcommand)]
         action: ContainersCmd,
     },
+    /// Detect this node's host tools and print what was found, as the agent reports it (docs/design/host-tools.md):
+    /// the built-in tools, the definitions of the installed release, the hints file and the statement's added paths.
+    Tools {
+        #[command(subcommand)]
+        action: ToolsCmd,
+    },
     /// The managed policy in force, as JSON (`oarbank-node policy-apply`; node-enrollment.md, "Managed policy keys").
+    /// The join code shows as `"(set)"` unless `--with-join-code` (the launcher's policy job, never a person's terminal).
     #[command(hide = true)]
-    Policy,
+    Policy {
+        #[arg(long)]
+        with_join_code: bool,
+    },
     /// This node's sandbox backend and what it enforces, as JSON (the coordinator asks it on Linux and Windows).
     #[command(name = "sandbox-status", hide = true)]
     SandboxStatus,
+    /// Wait until the agent with this pid and start time has ended (its end of the pipe on standard input closes),
+    /// then end the runners its records name (internal: the agent's watchdog, runners.rs).
+    #[cfg(unix)]
+    #[command(name = "reap-runners", hide = true)]
+    ReapRunners {
+        #[arg(long)]
+        agent_pid: u32,
+        #[arg(long)]
+        agent_start: u64,
+    },
     /// Apply a sandbox profile to this process, then exec argv (internal: how module processes start).
     #[command(name = "sandbox-exec", hide = true)]
     SandboxExec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ToolsCmd {
+    /// Detect every defined tool now and print the report (version commands run sandboxed, as the agent runs them).
+    Detect,
 }
 
 #[derive(Subcommand)]
@@ -209,8 +240,13 @@ enum ContainersCmd {
         #[arg(long)]
         gpu: bool,
     },
-    /// Windows: install the WSL components the runtime needs (an administrator; exit 3010 when Windows must restart).
-    Install,
+    /// Windows: install the WSL components the runtime needs (an administrator; exit 3010 when Windows must restart,
+    /// 1618 while another Windows Installer installation runs: the WSL package is one, and never goes inside another).
+    Install {
+        /// Wait up to this many seconds for another installation to finish (default: exit 1618 at once).
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
+    },
     /// Windows: end the agent's WSL containers session and delete its storage (the WSL package stays).
     Remove,
 }
@@ -228,6 +264,18 @@ fn containers(layout: &paths::Layout, action: ContainersCmd) -> anyhow::Result<(
                     report["missing"] = serde_json::json!(now.iter().map(wslc::Missing::json).collect::<Vec<_>>());
                     report["state"] = serde_json::json!("missing");
                 }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // the prerequisites as they are now (as this account sees them: run it as the agent's account), beside
+                // the running agent's last report
+                let now = container_runtime::mac_report_now(&layout.home);
+                if !now.missing.is_empty() {
+                    report["missing"] = serde_json::json!(now.missing.iter().map(colima::Missing::json).collect::<Vec<_>>());
+                    report["state"] = serde_json::json!("missing");
+                    report["gpu"] = serde_json::json!("undetected");
+                }
+                report["gpu_profile"]["missing"] = serde_json::json!(now.gpu_missing.iter().map(colima::Missing::json).collect::<Vec<_>>());
             }
             let mut ok = report["missing"].as_array().is_none_or(|m| m.is_empty());
             if probe {
@@ -253,21 +301,37 @@ fn containers(layout: &paths::Layout, action: ContainersCmd) -> anyhow::Result<(
             std::process::exit(if ok { 0 } else { 3 })
         }
         #[cfg(windows)]
-        ContainersCmd::Install => match wslc::install() {
-            Ok(true) => {
-                println!("installed; restart Windows to finish (the Virtual Machine Platform)");
-                std::process::exit(3010)
+        ContainersCmd::Install { wait } => {
+            // never inside another installation (an MSI's custom action, Windows Update): Windows Installer runs one
+            // installation at a time, and one started inside another breaks both (docs/design/windows-containers.md)
+            if !wslc::wait_for_installer(std::time::Duration::from_secs(wait)) {
+                eprintln!("another installation is in progress (Windows Installer): run this again when it has finished");
+                std::process::exit(wslc::EXIT_INSTALLER_BUSY)
             }
-            Ok(false) => {
-                println!("nothing to install");
-                Ok(())
+            match wslc::install() {
+                Ok(wslc::Installed::Restart) => {
+                    println!("installed; restart Windows to finish (the Virtual Machine Platform)");
+                    std::process::exit(wslc::EXIT_RESTART)
+                }
+                Ok(wslc::Installed::Done) => {
+                    println!("installed the WSL components");
+                    Ok(())
+                }
+                Ok(wslc::Installed::Nothing) => {
+                    println!("nothing to install: the WSL components are in place");
+                    Ok(())
+                }
+                Err(wslc::InstallError::Busy(e)) => {
+                    eprintln!("{e}");
+                    std::process::exit(wslc::EXIT_INSTALLER_BUSY)
+                }
+                Err(wslc::InstallError::Failed(e)) => anyhow::bail!(e),
             }
-            Err(e) => anyhow::bail!(e),
-        },
+        }
         #[cfg(windows)]
         ContainersCmd::Remove => wslc::remove(&layout.home).map_err(anyhow::Error::msg),
         #[cfg(not(windows))]
-        ContainersCmd::Install | ContainersCmd::Remove => anyhow::bail!("only on Windows: this node's runtime is the host's own"),
+        ContainersCmd::Install { .. } | ContainersCmd::Remove => anyhow::bail!("only on Windows: this node's runtime is the host's own"),
     }
 }
 
@@ -291,12 +355,29 @@ fn main() -> anyhow::Result<()> {
             println!("{}", sandbox::report());
             Ok(())
         }
+        #[cfg(unix)]
+        Cmd::ReapRunners { agent_pid, agent_start } => {
+            runners::watchdog_main(&layout, (agent_pid, agent_start));
+            Ok(())
+        }
         Cmd::Containers { action } => containers(&layout, action),
-        Cmd::Policy => {
+        Cmd::Tools { action: ToolsCmd::Detect } => {
+            let rel = release::current(&layout);
+            let defs = tools::defs(rel.as_ref().map(|r| &r.tools).unwrap_or(&serde_json::Value::Null));
+            let stmt = folders::Folders::load(&layout.state().join("folders.json"));
+            let run = tools::sandboxed_runner(&layout.home);
+            let rep = tools::detect(&defs, &tools::hints(&layout.home), &stmt.tools, &agent::data_root(&layout.home), &run);
+            println!("{}", serde_json::to_string_pretty(&rep)?);
+            Ok(())
+        }
+        Cmd::Policy { with_join_code } => {
             let p = policy::read();
-            println!("{}", serde_json::json!({"JoinCode": p.join_code, "Coordinator": p.coordinator, "Scope": p.scope,
+            let code = if with_join_code { p.join_code.clone() } else { p.join_code.as_ref().map(|_| "(set)".to_string()) };
+            println!("{}", serde_json::json!({"JoinCode": code, "Coordinator": p.coordinator, "Scope": p.scope,
                 "Containers": p.containers, "Name": p.name, "AllowUserJoin": p.allow_user_join,
-                "ManagedByOrganizationName": p.managed_by}));
+                "ManagedByOrganizationName": p.managed_by, "ShowStatusIcon": p.show_status_icon,
+                // settings, not secrets: shown to the machine's admin as set (the join code above is the one secret)
+                "Settings": p.settings}));
             Ok(())
         }
         Cmd::Status => rt.block_on(async {
@@ -352,6 +433,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("test build: crashing on start");
                 std::process::exit(1);
             }
+            // ends this agent's runners should it end without stopping them (killed, crashed): runners.rs
+            #[cfg(unix)]
+            let _watchdog = runners::watchdog(&layout);
             let code = serve(layout, Serve { coordinator, join, join_file, status_file, policy, name, session_hub }).await?;
             if code != 0 {
                 std::process::exit(code);
@@ -458,7 +542,8 @@ struct Serve {
 async fn serve(layout: paths::Layout, o: Serve) -> anyhow::Result<i32> {
     let (tx, rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let why = stop_requested().await;
+        tracing::info!("{why}: stopping (running jobs are stopped and their attempts released)");
         let _ = tx.send(true);
     });
     let mut st = status::Status::new(o.status_file.clone());
@@ -535,6 +620,43 @@ async fn serve(layout: paths::Layout, o: Serve) -> anyhow::Result<i32> {
                 wait(&rx, 5).await;
             }
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The agent is asked to stop: Ctrl-C (SIGINT), SIGTERM (launchd's and systemd's stop, the launcher's, a test's
+/// `terminate()`) or SIGHUP on Unix; on Windows Ctrl-C, Ctrl-Break, the console closing or the system shutting down, or
+/// the launcher's stop event (it sets it when the service manager stops the service, and ends the agent only if it has
+/// not stopped in time). Every one is the same graceful stop (agent.rs `stop_jobs`). Says which.
+async fn stop_requested() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (Ok(mut term), Ok(mut hup), Ok(mut int)) =
+            (signal(SignalKind::terminate()), signal(SignalKind::hangup()), signal(SignalKind::interrupt())) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return "interrupt";
+        };
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = hup.recv() => "SIGHUP",
+            _ = int.recv() => "SIGINT",
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let launcher = sys::launcher_stop_event();
+        let (Ok(mut brk), Ok(mut close), Ok(mut shut)) = (ctrl_break(), ctrl_close(), ctrl_shutdown()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return "Ctrl-C";
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "Ctrl-C",
+            _ = brk.recv() => "Ctrl-Break",
+            _ = close.recv() => "console closed",
+            _ = shut.recv() => "system shutdown",
+            _ = launcher => "stop requested by the launcher",
         }
     }
 }

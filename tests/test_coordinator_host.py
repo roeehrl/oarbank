@@ -13,30 +13,80 @@ from helpers import admin_headers, make_db, sign_in
 from oarbank.coordinator import app as coord_app, hostinfo
 from oarbank.platform import service
 
-LAUNCHCTL = """gui/501/dev.codonic.oarbank.oarbankd = {
+LAUNCHCTL_SYSTEM = """system/dev.codonic.oarbank.oarbankd = {
 \tactive count = 1
-\tpath = /Users/owner/Library/LaunchAgents/dev.codonic.oarbank.oarbankd.plist
-\ttype = LaunchAgent
+\tpath = /Library/LaunchDaemons/dev.codonic.oarbank.oarbankd.plist
+\ttype = LaunchDaemon
 \tstate = running
 
-\tprogram = /Users/owner/Library/Application Support/Oarbank/coordinator-app/current/bin/oarbankd
+\tprogram = /Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin/oarbankd
+\tdomain = system
+\tusername = _oarbankd
 \tpid = 4242
 }
 """
 
-SYSTEMCTL = "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=777\n"
+LAUNCHCTL_AGENT = """gui/501/dev.codonic.oarbank.oarbankd = {
+\tactive count = 1
+\tpath = /Users/owner/Library/LaunchAgents/dev.codonic.oarbank.oarbankd.plist
+\ttype = LaunchAgent
+\tstate = running
+\tpid = 4243
+\tevent triggers = {
+\t\tstate = active
+\t}
+}
+"""
+
+SYSTEMCTL = "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=777\nUser=oarbankd\n"
 
 
 def test_launchd_and_systemd_answers_become_one_shape():
-    assert service.parse_launchctl("dev.codonic.oarbank.oarbankd", 0, LAUNCHCTL, "owner") == {
-        "name": "dev.codonic.oarbank.oarbankd", "installed": True, "state": "running", "start": "at login",
-        "account": "owner", "pid": 4242}
+    """System services report their account and the system domain; an earlier release's per-user services the user
+    domain, which makes the form per-user (coordinator-system-service.md, decision 12)."""
+    daemon = service.parse_launchctl("dev.codonic.oarbank.oarbankd", 0, LAUNCHCTL_SYSTEM, None)
+    assert daemon == {"name": "dev.codonic.oarbank.oarbankd", "installed": True, "domain": "system", "state": "running",
+                      "start": "at boot", "account": "_oarbankd", "pid": 4242}
+    agent = service.parse_launchctl("dev.codonic.oarbank.oarbankd", 0, LAUNCHCTL_AGENT, "owner")
+    assert agent == {"name": "dev.codonic.oarbank.oarbankd", "installed": True, "domain": "user", "state": "running",
+                     "start": "at login", "account": "owner", "pid": 4243}
     assert service.parse_launchctl("x", 113, "Could not find service", "owner")["installed"] is False
-    assert service.parse_systemctl("dev.codonic.oarbank.console", SYSTEMCTL, "owner") == {
-        "name": "dev.codonic.oarbank.console", "installed": True, "state": "active (running)", "start": "enabled",
-        "account": "owner", "pid": 777}
+    unit = service.parse_systemctl("dev.codonic.oarbank.console", SYSTEMCTL, None)
+    assert unit == {"name": "dev.codonic.oarbank.console", "installed": True, "domain": "system", "state": "active (running)",
+                    "start": "enabled", "account": "oarbankd", "pid": 777}
+    user_unit = service.parse_systemctl("dev.codonic.oarbank.console", SYSTEMCTL.replace("User=oarbankd\n", ""), "owner")
+    assert user_unit["domain"] == "user" and user_unit["account"] == "owner"
     gone = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nMainPID=0\n"
     assert service.parse_systemctl("x", gone, "owner")["installed"] is False
+    assert service.form([daemon, unit]) == "system"
+    assert service.form([daemon, agent]) == "per-user"
+    assert service.form([service.parse_systemctl("x", gone, None)] * 2) == "none"
+
+
+def test_the_cli_says_the_form_in_plain_words():
+    from oarbank.cli.main import form_words
+    system = {"form": "system", "services": [{"installed": True, "account": "_oarbankd"}]}
+    assert form_words(system) == "system service — runs from boot, as _oarbankd"
+    per_user = {"form": "per-user", "services": [{"installed": True, "account": "owner"}]}
+    assert "runs only while owner is logged in" in form_words(per_user) and "oarbank coordinator migrate" in form_words(per_user)
+    assert form_words({"form": "none", "services": []}).startswith("not installed as a service")
+
+
+def test_a_per_user_coordinator_is_flagged_on_every_console_page(tmp_path):
+    from oarbank.console import views
+    db = make_db(tmp_path / "oarbank.sqlite3", modules=())
+    h = hostinfo.refresh(db)
+    h["form"], h["services"] = "per-user", [{**s, "installed": True, "domain": "user", "account": "owner"} for s in h["services"]]
+    db.set_state(hostinfo.SETTING, h)
+
+    class R:
+        def q(self, sql, args=()):
+            return db.q(sql, args)
+    banner = views.coordinator_banner(R())
+    assert banner["state"] == "per_user" and banner["account"] == "owner"
+    h["form"] = "system"
+    db.set_state(hostinfo.SETTING, h)
+    assert views.coordinator_banner(R()) is None
 
 
 def test_the_host_document_names_the_platform_the_services_and_the_sandbox(tmp_path):
@@ -45,8 +95,9 @@ def test_the_host_document_names_the_platform_the_services_and_the_sandbox(tmp_p
     assert h["platform"] == portable.host_platform() and h["manager"] == service.manager()
     assert [s["name"] for s in h["services"]] == list(service.SERVICES) and h["pid"] == os.getpid()
     assert h["managed"] is False                                  # the suite is no service of anything
+    assert h["form"] in ("system", "per-user", "none") and "migration" in h
     assert h["sandbox"]["backend"] and ("helper" in h["sandbox"]) == (sys.platform == "win32")
-    assert db.get_setting(hostinfo.SETTING)["at"] == h["at"]
+    assert db.get_state(hostinfo.SETTING)["at"] == h["at"]
 
 
 def test_the_api_the_cli_and_the_console_show_it(tmp_path):
@@ -65,6 +116,7 @@ def test_the_api_the_cli_and_the_console_show_it(tmp_path):
         assert out.returncode == 0, out.stderr
         assert f"platform {portable.host_platform()}  {service.manager()}" in out.stdout
         assert "(not run by the service manager)" in out.stdout and "dev.codonic.oarbank.console" in out.stdout
+        assert "\nform  " in out.stdout
         state = ConsoleState(tmp_path / "oarbank.sqlite3", f"http://127.0.0.1:{oarbankd.port}", secret=SECRET)
         with TestClient(console_app(state), client=("127.0.0.1", 50001)) as c:
             sign_in(c, db)

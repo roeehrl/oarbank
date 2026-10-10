@@ -1,10 +1,13 @@
-//! Folder grants on the node (spec/sandbox.md, "Folders"; docs/design/datasets-media-checkpoints.md).
+//! Folder grants on the node (spec/sandbox.md, "Folders"; docs/design/datasets-media-checkpoints.md), and the node's
+//! signed statement that carries them.
 //!
 //! A module version asks for folders by id (`[sandbox].folders`, carried in the signed release's module entry as
 //! `sandbox.folders: [{id, access}]`); the operator maps each id to a path on this node, and the coordinator sends the
-//! mapping as this node's **folder statement**: `{"type": "oarbank.folders/v1", "fleet_id", "node_id", "seq", "folders":
-//! {id: {access, path}}, "signed_at"}`. With a release key pinned (signing mode) a statement applies only with a valid
-//! signature and a seq above the last one applied, as releases do; until then the last applied one stays.
+//! mapping in this node's **statement**: `{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq", "folders":
+//! {id: {access, path}}, "tools": [{id, module, path}], "signed_at"}`. `tools` are the host tool paths added for this
+//! node that its detector did not find itself (tools.rs checks and verifies them before anything is granted). With a
+//! release key pinned (signing mode) a statement applies only with a valid signature and a seq above the last one
+//! applied, as releases do; until then the last applied one stays.
 //!
 //! Every folder of an applied statement is checked here: the path must exist and be a directory; it is granted by its
 //! canonical path; it may not be a filesystem root, a home directory itself, inside or around the Oarbank data root, a
@@ -15,7 +18,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
-pub const STATEMENT_TYPE: &str = "oarbank.folders/v1";
+pub const STATEMENT_TYPE: &str = "oarbank.node/v1";
 
 /// The statement this node applies, and what it found for each folder.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -23,6 +26,8 @@ pub struct Folders {
     pub seq: i64,
     /// id -> {access, path (as mapped), canonical (granted), status ("ok" or why not)}
     pub folders: Map<String, Value>,
+    /// The host tool paths the statement adds: [{id, module, path}] (tools.rs detects and verifies them).
+    pub tools: Vec<Value>,
 }
 
 /// Directories no folder may be, contain or lie in (besides roots, homes and the Oarbank data root): what the sandbox
@@ -39,12 +44,13 @@ const SYSTEM: &[&str] = &[];
 impl Folders {
     pub fn load(p: &Path) -> Folders {
         std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .map(|v| Folders { seq: v["seq"].as_i64().unwrap_or(0), folders: v["folders"].as_object().cloned().unwrap_or_default() })
+            .map(|v| Folders { seq: v["seq"].as_i64().unwrap_or(0), folders: v["folders"].as_object().cloned().unwrap_or_default(),
+                               tools: v["tools"].as_array().cloned().unwrap_or_default() })
             .unwrap_or_default()
     }
 
     pub fn save(&self, p: &Path) -> std::io::Result<()> {
-        crate::fsutil::write_private(p, &serde_json::to_vec(&json!({"seq": self.seq, "folders": self.folders}))?)
+        crate::fsutil::write_private(p, &serde_json::to_vec(&json!({"seq": self.seq, "folders": self.folders, "tools": self.tools}))?)
     }
 
     /// The heartbeat's `folders`: {id: {access, status}}.
@@ -71,13 +77,13 @@ impl Folders {
 pub fn apply(cur: &Folders, d: &Value, node_id: &str, fleet_id: Option<&str>, pinned_key: Option<&str>, data_root: &Path)
              -> Result<Option<Folders>> {
     let Some(stmt) = d["statement"].as_str() else { return Ok(None) };
-    let s: Value = serde_json::from_str(stmt).context("a folder statement that is not JSON")?;
+    let s: Value = serde_json::from_str(stmt).context("a statement that is not JSON")?;
     if s["type"].as_str() != Some(STATEMENT_TYPE) || s["node_id"].as_str() != Some(node_id) {
-        bail!("a folder statement for another node or of another type");
+        bail!("a statement for another node or of another type");
     }
     if let (Some(f), Some(have)) = (s["fleet_id"].as_str(), fleet_id) {
         if f != have {
-            bail!("a folder statement of another fleet");
+            bail!("a statement of another fleet");
         }
     }
     let seq = s["seq"].as_i64().unwrap_or(0);
@@ -85,10 +91,12 @@ pub fn apply(cur: &Folders, d: &Value, node_id: &str, fleet_id: Option<&str>, pi
         return Ok(None);
     }
     if let Some(key) = pinned_key {
-        let sig = d["signature"].as_str().context("the folder statement is not signed yet: a release key is pinned (oarbank folders sign)")?;
-        crate::identity::verify_ed25519(key, stmt.as_bytes(), sig).context("bad folder statement signature")?;
+        let sig = d["signature"].as_str().context("the statement is not signed yet: a release key is pinned (oarbank node sign)")?;
+        crate::identity::verify_ed25519(key, stmt.as_bytes(), sig).context("bad statement signature")?;
     }
-    let mut out = Folders { seq, folders: Map::new() };
+    let tools = s["tools"].as_array().cloned().unwrap_or_default().into_iter()
+        .filter(|t| t["id"].is_string() && t["path"].is_string()).collect();
+    let mut out = Folders { seq, folders: Map::new(), tools };
     let wanted = s["folders"].as_object().cloned().unwrap_or_default();
     let mut canon: Vec<(String, Option<PathBuf>)> = vec![];
     for (id, f) in &wanted {
@@ -165,11 +173,11 @@ pub fn check_path(p: &Path, data_root: &Path) -> Result<PathBuf> {
     Ok(c)
 }
 
-fn homes() -> Vec<PathBuf> {
+pub(crate) fn homes() -> Vec<PathBuf> {
     ["HOME", "USERPROFILE"].iter().filter_map(std::env::var_os).filter_map(|h| std::fs::canonicalize(h).ok()).collect()
 }
 
-fn system_dirs() -> Vec<PathBuf> {
+pub(crate) fn system_dirs() -> Vec<PathBuf> {
     let listed = SYSTEM.iter().filter_map(|p| std::fs::canonicalize(p).ok());
     #[cfg(windows)]
     let listed = listed.chain(["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "ProgramW6432"].iter()
@@ -203,6 +211,21 @@ mod tests {
         assert!(apply(&f, &d, "n1", Some("f1"), None, &t.join("data")).unwrap().is_none());      // not newer
         assert!(apply(&Folders::default(), &d, "n2", Some("f1"), None, &t).is_err());              // another node
         assert!(apply(&Folders::default(), &d, "n1", Some("f2"), None, &t).is_err());              // another fleet
+        let mut old = d.clone();                                                                   // a folders-only statement
+        old["statement"] = json!(d["statement"].as_str().unwrap().replace(STATEMENT_TYPE, "oarbank.folders/v1"));
+        assert!(apply(&Folders::default(), &old, "n1", Some("f1"), None, &t).is_err());
+    }
+
+    #[test]
+    fn the_statement_carries_the_tool_paths_added_for_this_node() {
+        let (_t, t) = scratch("tools");
+        let d = json!({"statement": json!({"type": STATEMENT_TYPE, "fleet_id": "f1", "node_id": "n1", "seq": 3, "folders": {},
+                                           "tools": [{"id": "jdk", "module": "", "path": "/opt/jdk-17"}, {"id": 7}],
+                                           "signed_at": 1}).to_string(), "signature": null});
+        let f = apply(&Folders::default(), &d, "n1", Some("f1"), None, &t).unwrap().unwrap();
+        assert_eq!(f.tools, [json!({"id": "jdk", "module": "", "path": "/opt/jdk-17"})]);
+        f.save(&t.join("s.json")).unwrap();
+        assert_eq!(Folders::load(&t.join("s.json")), f);
     }
 
     #[test]

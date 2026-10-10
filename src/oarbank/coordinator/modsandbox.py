@@ -90,31 +90,42 @@ REQUIRE_SANDBOXED_AGENTS = True        # the core's own test suite turns this of
 def node_exclusions(db: DB, node: dict, offered: set) -> dict:
     """{module: reason code} for the modules this node must not get work for (spec/sandbox.md "Placement",
     spec/platforms.md): every module when its agent has no sandbox backend; a module whose version for the node does
-    not support the node's platform or OS version, needs host tools the registry lacks for the node's OS, needs sandbox
+    not support the node's platform or OS version, needs host tools that do not resolve on the node, needs sandbox
     capabilities the node's backend does not enforce, needs a newer agent (`requires.agent`), or whose runner needs a
     GPU API the node's host does not provide (its doctor's `gpu_apis`)."""
-    from . import modcalls, modstore, platforms
+    from . import modcalls, modstore
     facts = json.loads(node.get("facts_json") or "{}")
     if REQUIRE_SANDBOXED_AGENTS and not (facts.get("sandbox") or {}).get("backend"):
         return {m: "SANDBOX_BACKEND_MISSING" for m in offered}
     out = {}
-    have = node.get("agent_version") or ""
     for name in offered:
         ver = modstore.version_for_node(db, name, node.get("node_id"))
         try:
             man = modcalls.info_for(name, ver).manifest
         except KeyError:
             continue
-        why = platforms.unsupported(db, man, node)
-        if not why and REQUIRE_SANDBOXED_AGENTS and platforms.sandbox_gaps(man, facts):
-            why = "CAPABILITY_NOT_ENFORCED"
-        if not why and man.requires.agent and (not have or not modstore.in_range(have, man.requires.agent)):
-            why = "AGENT_TOO_OLD"
-        if not why and runner_gpu_unmet(man, node):
-            why = "GPU_API_MISSING"
+        why = exclusion(db, man, node, name)
         if why:
             out[name] = why
     return out
+
+
+def exclusion(db: DB, man, node: dict, name: str = "") -> str | None:
+    """Why this module version (its manifest) must not get work on this node (a reason code), or None: node_exclusions
+    for one manifest, also for a version the module host has not loaded (the readiness checklist)."""
+    from . import modstore, platforms
+    facts = json.loads(node.get("facts_json") or "{}")
+    if REQUIRE_SANDBOXED_AGENTS and not (facts.get("sandbox") or {}).get("backend"):
+        return "SANDBOX_BACKEND_MISSING"
+    have = node.get("agent_version") or ""
+    why = platforms.unsupported(db, man, node, name)
+    if not why and REQUIRE_SANDBOXED_AGENTS and platforms.sandbox_gaps(man, facts):
+        why = "CAPABILITY_NOT_ENFORCED"
+    if not why and man.requires.agent and (not have or not modstore.in_range(have, man.requires.agent)):
+        why = "AGENT_TOO_OLD"
+    if not why and runner_gpu_unmet(man, node):
+        why = "GPU_API_MISSING"
+    return why
 
 
 def runner_gpu_unmet(manifest, node: dict) -> dict | None:
@@ -142,9 +153,11 @@ def bootstrap_enforced(node: dict) -> bool:
 
 def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
     """{module: words for the exclusion}: the module's own reason for PLATFORM_UNSUPPORTED (requires.unsupported.runner,
-    by the node's platform, then its OS), and for GPU_API_MISSING what its runner needs and what the node provides."""
+    by the node's platform, then its OS), for GPU_API_MISSING what its runner needs and what the node provides, and for
+    TOOL_NOT_FOUND, TOOL_VERSION_UNMET and TOOL_REFUSED the tool and what the node found ("jdk >=17: found 11.0.2 at
+    /usr/lib/jvm/java-11; needs >=17")."""
     from oarbank_sdk import gpu, platform as pf
-    from . import modcalls, modstore, platforms, predicates
+    from . import modcalls, modstore, platforms, predicates, tools
     plat, out = platforms.node_platform(node), {}
     for name, code in excluded.items():
         try:
@@ -152,6 +165,9 @@ def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
         except KeyError:
             continue
         why = pf.resolve(man.requires.unsupported.runner, plat) if code == "PLATFORM_UNSUPPORTED" and plat else None
+        if code in tools.CODES.values():
+            miss = tools.unmet(db, man, node, name)
+            why = miss[1] if miss else None
         need = runner_gpu_unmet(man, node) if code == "GPU_API_MISSING" else None
         if need:
             have = predicates.node_gpu_apis(node)["host"]
@@ -162,7 +178,10 @@ def exclusion_reasons(db: DB, node: dict, excluded: dict) -> dict:
 
 
 def node_excluded(db: DB, node: dict, offered: set) -> set:
-    return set(node_exclusions(db, node, offered))
+    """The modules no job of which may run on this node: node_exclusions without those that spare some stages
+    (predicates.SPARED: a host tool that does not resolve, an unmapped folder), which claim's predicates decide per job."""
+    from .predicates import SPARED
+    return {m for m, code in node_exclusions(db, node, offered).items() if code not in SPARED}
 
 
 # ------------------------------------------------------------------ approvals of node-side grants
@@ -176,7 +195,8 @@ def requests(manifest, bundle) -> dict:
         return {}
     from . import modimages
     out = {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": sorted(sb.net.allow)},
-           "tools": sorted(({"id": t.id, "trust": t.trust} for t in sb.tools), key=lambda t: t["id"]),
+           "tools": sorted(({"id": t.id, "trust": t.trust, **({"version": t.version} if t.version else {}),
+                             **({"arch": t.arch} if t.arch != "any" else {})} for t in sb.tools), key=lambda t: t["id"]),
            "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
            "containers": sorted(({"image": c.image, "platform": c.platform} for c in sb.containers), key=lambda c: c["image"])}
     if sb.container_sets:
@@ -245,7 +265,10 @@ def describe(req: dict) -> str:
     elif net.get("mode") not in (None, "none"):
         out.append(f"network mode {net['mode']}")
     if req.get("tools"):
-        out.append("host tools " + ", ".join(t["id"] + (" (runs code)" if t["trust"] == "code-exec" else "") for t in req["tools"]))
+        out.append("host tools " + ", ".join(
+            t["id"] + (f" {t['version']}" if t.get("version") else "") + "".join(
+                f" ({w})" for w in ([t["arch"]] if t.get("arch") else []) + (["runs code"] if t["trust"] == "code-exec" else []))
+            for t in req["tools"]))
     if (req.get("devices") or {}).get("gpu", "none") != "none":
         out.append(f"GPU {req['devices']['gpu']}")
     if req.get("exec_writable"):

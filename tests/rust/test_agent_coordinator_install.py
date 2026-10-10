@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, Coordinator, agent_env, free_port, install_module  # noqa: E402
 from test_agent_move import LOCK, t3  # noqa: E402
-from test_agent_session import wait  # noqa: E402
+from test_agent_session import read_json, wait  # noqa: E402
 from helpers import stop_tree  # noqa: E402
 
 TOY = REPO / "vendor" / "oarbank-sdk" / "examples" / "toy"
@@ -43,7 +43,7 @@ def test_the_agent_installs_the_standby_and_follows_the_move(agent_bin, tmp_path
             wait(lambda: st() == "paired", timeout=600)
             t3(a, "coordinator.move", params={"timelock_s": 3}, reason="e2e move")
             b_url = f"https://127.0.0.1:{b_port}"
-            cfg = lambda: json.loads((tmp_path / "agent" / "agent.json").read_text(encoding="utf-8"))
+            cfg = lambda: read_json(tmp_path / "agent" / "agent.json")
             wait(lambda: cfg()["coordinator"] == b_url and cfg()["coordinator_trust"]["max_epoch"] == 2, timeout=240)
             with sqlite3.connect(b_home / "oarbank.sqlite3") as db:
                 assert db.execute("SELECT current FROM module_channels WHERE name='toy'").fetchone() == ("0.1.0",)

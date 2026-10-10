@@ -222,7 +222,9 @@ def test_killing_the_module_process_during_completions_is_a_module_fault_never_c
 
 def test_ntfy_down_queues_nothing_and_breaks_nothing(fleet):
     db = fleet.db()
-    db.set_setting("ntfy", {"url": "http://127.0.0.1:9/unreachable"})
+    from oarbank.coordinator.settings import write_fleet
+    with db.tx():
+        write_fleet(db, "ntfy.url", "http://127.0.0.1:9/unreachable", "chaos")
     from oarbank.coordinator import core
     core._alert(db, "invariant:S0", "fleet", "chaos: ntfy is down", priority="max")
     assert db.one("SELECT state FROM alerts WHERE rule='invariant:S0'")["state"] == "open"        # the inbox has it

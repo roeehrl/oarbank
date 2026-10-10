@@ -66,11 +66,11 @@ def home(db: DB) -> Path:
 
 
 def phase(db: DB) -> str:
-    return db.get_setting("move_phase", "idle") or "idle"
+    return db.get_state("move_phase", "idle") or "idle"
 
 
 def set_phase(db: DB, p: str, **detail):
-    db.set_setting("move_phase", p)
+    db.set_state("move_phase", p)
     db.event("coordinator_move_phase", reason=p, **detail)
 
 
@@ -136,14 +136,16 @@ def prepare(db: DB, target: str, actor: str) -> dict:
          "created_at,actor,target_platform) VALUES(?,?,?,?,?,?,'prepared',?,?,?)",
          (pid, url, stable, nid, hashlib.sha256(code.encode()).hexdigest(), now() + PAIR_TTL_S, now(), actor, plat))
     db.event("coordinator_move_prepared", actor=actor, reason=f"{pid} -> {url}")
-    from_url = db.get_setting("coordinator_url") or f"https://{C.AGENT_BIND}:{C.AGENT_PORT}"
+    from_url = db.get_state("coordinator_url") or f"https://{C.AGENT_BIND}:{C.AGENT_PORT}"
     from . import tlsca
     from_ca = tlsca.pins(home(db))["ca_spki_sha256"] if (home(db) / "tls" / "ca.pem").exists() else None
     from . import modlife
     out = {"plan_id": pid, "target_url": url, "target_stable_id": stable, "target_node": nid, "target_platform": plat,
            "blocking_modules": modlife.platform_blockers(db, plat), "pair_code": code,
            "expires_at": now() + PAIR_TTL_S, "from_url": from_url, "from_ca": from_ca,
-           "install_command": f"oarbankd --standby --pair {code} --from {from_url}" + (f" --from-ca {from_ca}" if from_ca else "")}
+           # on the target, as root, from its coordinator build: the system service (coordinator-system-service.md)
+           "install_command": f"sudo bash install-oarbankd.sh --build <coordinator build> --agent-bind <this machine's address> "
+                              f"--pair {code} --from {from_url}" + (f" --from-ca {from_ca}" if from_ca else "")}
     if nid:
         from . import coordbuilds
         try:
@@ -219,7 +221,7 @@ def manifest(db: DB) -> dict:
     root = home(db)
     files, dbs = [], []
     # blobs that module move rules rebuild or drop (and nothing else names) stay behind
-    skip = set((db.get_setting("move_rules_plan") or {}).get("skip_blobs") or [])
+    skip = set((db.get_state("move_rules_plan") or {}).get("skip_blobs") or [])
     skip_paths = {str(db.abs(b["path"]).resolve()) for b in db.q("SELECT digest, path FROM blobs WHERE path IS NOT NULL")
                   if b["digest"] in skip}
     for p in sorted(root.rglob("*")):
@@ -293,7 +295,7 @@ def snapshot(db: DB, final: bool) -> dict:
                 c.close()
         out["databases"][rel] = invariants(dst)
         out["databases"][rel]["file"] = dst.name
-    db.set_setting("move_snapshot", out)
+    db.set_state("move_snapshot", out)
     return out
 
 
@@ -369,7 +371,7 @@ def request_move(db: DB, actor: str, reason: str | None, timelock_s: int | None 
     mid = "mv_" + secrets.token_hex(6)
     stmt = identity.canonical({
         "type": identity.MOVE_TYPE, "fleet_id": identity.fleet_id(db), "move_id": mid, "epoch": identity.epoch(db) + 1,
-        "from": {"url": db.get_setting("coordinator_url") or f"http://{C.AGENT_BIND}:{C.AGENT_PORT}", "cik": k.public_b64},
+        "from": {"url": db.get_state("coordinator_url") or f"http://{C.AGENT_BIND}:{C.AGENT_PORT}", "cik": k.public_b64},
         "to": {"url": p["b_url"], "cik": p["b_cik"], "ts_stable_node_id": p["target_stable_id"], "required_tag": None},
         "issued_at": int(t), "not_before": int(t + tl), "expires": int(t + tl + STATEMENT_VALID_S),
         "canary": canary or [], "prev": hashlib.sha256(prev["statement"].encode()).hexdigest() if prev else None})
@@ -434,7 +436,7 @@ def cancel(db: DB, actor: str, reason: str | None = None) -> dict:
     r = db.one("SELECT * FROM coordinator_moves WHERE state IN ('pending','cutover','awaiting_owner') ORDER BY created_at DESC LIMIT 1")
     if not r:
         raise MoveError("no pending move")
-    if r["state"] == "cutover" and phase(db) == "promoting" and db.get_setting("move_commit_decided"):
+    if r["state"] == "cutover" and phase(db) == "promoting" and db.get_state("move_commit_decided"):
         raise MoveError("the commit decision was taken: going back is a reverse move")
     payload = identity.canonical({"type": identity.CANCEL_TYPE, "fleet_id": identity.fleet_id(db), "move_id": r["move_id"],
                                   "epoch": r["epoch"], "issued_at": int(now())})
@@ -454,10 +456,10 @@ def cancel(db: DB, actor: str, reason: str | None = None) -> dict:
 
 
 def _thaw(db: DB):
-    db.set_setting("move_phase", "idle")
-    db.set_setting("move_commit_decided", None)
+    db.set_state("move_phase", "idle")
+    db.set_state("move_commit_decided", None)
     for k in ("move_blockers", "move_preflight_at", "move_draining_at", "move_rules_plan"):
-        db.set_setting(k, None)
+        db.set_state(k, None)
 
 
 # ------------------------------------------------------------------ the cutover (driven by the background loop)
@@ -478,7 +480,7 @@ def driver_tick(db: DB):
     try:
         if ph == "idle":
             set_phase(db, "draining", move_id=r["move_id"])
-            db.set_setting("move_draining_at", now())
+            db.set_state("move_draining_at", now())
             n = db.x("UPDATE attempts SET expires_at=MAX(expires_at, ?) WHERE state='live'", (now() + LEASE_CARRY_S,))
             db.event("leases_extended", reason=f"carried across the coordinator move ({n} live)")
             _notify(db, f"Coordinator move {r['move_id']}: cutover started (dispatch paused, running work continues).")
@@ -488,7 +490,7 @@ def driver_tick(db: DB):
                 return                                   # a module still blocks (or the wait expired: aborted)
             from . import modlife
             set_phase(db, "frozen", move_id=r["move_id"])
-            db.set_setting("move_rules_plan", modlife.move_plan(db))      # what modules rebuild or drop (travels in the copy)
+            db.set_state("move_rules_plan", modlife.move_plan(db))      # what modules rebuild or drop (travels in the copy)
             src = modlife.check_all(db, "move_source", move_id=r["move_id"], actor="oarbankd")
             bad = [n for n, c in src.items() if not c["ok"]]
             if bad and not r["force"]:
@@ -499,12 +501,12 @@ def driver_tick(db: DB):
             snap["modules"] = {n: {"ok": c["ok"], "fingerprint": c["fingerprint"]} for n, c in src.items()}
             db.x("UPDATE coordinator_moves SET final_snapshot_json=? WHERE move_id=?", (json.dumps(snap), r["move_id"]))
             set_phase(db, "final_ready", move_id=r["move_id"], snapshot=snap["snapshot_id"])
-            db.set_setting("move_phase_at", now())
+            db.set_state("move_phase_at", now())
         elif ph == "final_ready":
-            if now() - (db.get_setting("move_phase_at") or now()) > COMMIT_TIMEOUT_S:
+            if now() - (db.get_state("move_phase_at") or now()) > COMMIT_TIMEOUT_S:
                 abort(db, "the target did not verify the final copy in time")
         elif ph == "promoting":
-            if not db.get_setting("move_commit_decided") and now() - (db.get_setting("move_phase_at") or now()) > COMMIT_TIMEOUT_S:
+            if not db.get_state("move_commit_decided") and now() - (db.get_state("move_phase_at") or now()) > COMMIT_TIMEOUT_S:
                 abort(db, "the target did not ask for the commit decision in time")
     except MoveError as e:
         abort(db, str(e))
@@ -514,26 +516,26 @@ def _module_preflight(db: DB, r: dict, p: dict) -> bool:
     """While draining: ask modules every few seconds; True when none blocks (or the operator forced the move). After
     modlife.BLOCKER_WAIT_S of blockers the move aborts and this coordinator thaws."""
     from . import modlife
-    if now() - (db.get_setting("move_preflight_at") or 0) < modlife.PREFLIGHT_EVERY_S and db.get_setting("move_blockers") is not None:
-        blocked = db.get_setting("move_blockers") or []
+    if now() - (db.get_state("move_preflight_at") or 0) < modlife.PREFLIGHT_EVERY_S and db.get_state("move_blockers") is not None:
+        blocked = db.get_state("move_blockers") or []
     else:
         pre = modlife.preflight(db, r["move_id"], p["b_url"], r["not_before"], "draining", p["target_platform"])
         blocked = modlife.blockers(pre)
-        db.set_setting("move_preflight_at", now())
-        db.set_setting("move_blockers", blocked)
+        db.set_state("move_preflight_at", now())
+        db.set_state("move_blockers", blocked)
         mods = jl(r.get("modules_json"), {}) or {}
         mods["draining"] = pre
         db.x("UPDATE coordinator_moves SET modules_json=? WHERE move_id=?", (json.dumps(mods), r["move_id"]))
     if not blocked or r["force"]:
         return True
-    if now() - (db.get_setting("move_draining_at") or now()) > modlife.BLOCKER_WAIT_S:
+    if now() - (db.get_state("move_draining_at") or now()) > modlife.BLOCKER_WAIT_S:
         raise MoveError("modules still block the move: " + "; ".join(blocked)[:300])
     return False
 
 
 def abort(db: DB, why: str):
     """Before the commit decision: thaw at the same epoch; agents drop the pending statement on our cancel."""
-    if db.get_setting("move_commit_decided"):
+    if db.get_state("move_commit_decided"):
         db.event("coordinator_move_stuck", reason=f"after the commit decision: {why}")
         return
     r = db.one("SELECT * FROM coordinator_moves WHERE state IN ('pending','cutover') ORDER BY created_at DESC LIMIT 1")
@@ -571,7 +573,7 @@ def ready(db: DB, body: dict, p: dict) -> dict:
               "files": len(want), "modules": {n: {"a": mods_a[n], "b": mods_b.get(n)} for n in mods_a}, "verified_at": now()}
     db.x("UPDATE coordinator_moves SET report_json=? WHERE move_id=?", (json.dumps(report), r["move_id"]))
     set_phase(db, "promoting", move_id=r["move_id"])
-    db.set_setting("move_phase_at", now())
+    db.set_state("move_phase_at", now())
     _signed_post(p, "/v1/move/promote", {"move_id": r["move_id"], **signed(r)}, db)
     return {"ok": True}
 
@@ -585,11 +587,11 @@ def commit(db: DB, body: dict, p: dict) -> dict:
     if r["state"] in ("cancelled", "aborted") or (phase(db) != "promoting" and identity.role(db) != "handed_off"):
         return _decision(db, r, False)
     if identity.role(db) != "handed_off":
-        db.set_setting("move_commit_decided", now())
+        db.set_state("move_commit_decided", now())
         identity.set_role(db, "handed_off")
         db.x("UPDATE coordinator_moves SET state='committed', ended_at=? WHERE move_id=?", (now(), r["move_id"]))
         db.x("UPDATE coordinator_plans SET state='done' WHERE plan_id=?", (p["plan_id"],))
-        db.set_setting("move_phase", "handed_off")
+        db.set_state("move_phase", "handed_off")
         db.event("coordinator_handed_off", reason=f"{r['move_id']} -> {p['b_url']} epoch {r['epoch']}")
         _notify(db, f"Coordinator moved to {p['b_url']} (epoch {r['epoch']}). This machine now only redirects agents.")
     return _decision(db, r, True)

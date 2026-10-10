@@ -30,6 +30,7 @@ from cryptography.x509.oid import NameOID
 
 from .coordinator import campaigns, clock, core, identity, invariants, modcalls, modstore, ops, releases, tlsca
 from .coordinator.db import DB
+from .coordinator.settings import write_fleet
 
 # the simulated fleet runs the SDK's reference module and the core suite's relay fixture module
 REPO = Path(__file__).resolve().parents[2]
@@ -133,16 +134,20 @@ class Simulation:
         clock.set_fake(1_900_000_000.0)
         self.t0 = clock.now()
         self.db = self._make_db(n_datasets)
-        self.db.set_setting("replica_rate", self.faults.replica_rate)
+        from .coordinator.settings import store as settings_store, write_fleet
+        from .coordinator.settings.apply import sync_nodes
+        write_fleet(self.db, "replica_rate", self.faults.replica_rate, "sim")
         if self.faults.split:
-            self.db.set_setting("pipeline:relay", "split")
+            write_fleet(self.db, "pipeline", "split", "sim", "relay")
         self.agents = [self._make_agent(f"node{i}", PLATFORMS[i % len(PLATFORMS)],
                                         bad=(self.faults.nondeterministic_node and i == n_nodes - 1)) for i in range(n_nodes)]
         if self.faults.split:
             for i, ag in enumerate(self.agents):
                 ag.pools = 4 if i == 0 else 0
-                self.db.x("UPDATE nodes SET policy_json=?, capacity_json=? WHERE node_id=?",
-                          (json.dumps({"disabled_services": [] if i == 0 else ["relay/scorer"]}), json.dumps({"pools": {"scorer": ag.pools}}), ag.node_id))
+                settings_store.put(self.db, "node", ag.node_id, "relay", "services.disabled", [] if i == 0 else ["scorer"], "sim",
+                                   settings_store.next_rev(self.db))
+                self.db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps({"pools": {"scorer": ag.pools}}), ag.node_id))
+                sync_nodes(self.db, [ag.node_id])
         configs = [{"label": f"c{k}", "params": {**PARAMS, "samples": 15 + k}} for k in range(n_configs)]
         extra = {k: v for k, v in (("placement", self.faults.placement), ("group_by", self.faults.group_by)) if v}
         self.sid = create_study(self.db, f"sim-{seed}", configs, self.datasets, {"label": "base", "params": PARAMS}, **extra)
@@ -160,8 +165,11 @@ class Simulation:
             modstore.dev_install_dir(db, m, actor="sim")
         modcalls.use(db)
         # render-only nodes certify on the golden frame digest
-        db.set_setting("module_settings:relay", {"goldens": [{"name": "G1", "params": PARAMS, "dataset": "demo:atrium",
-                                                              "expected": {"score": "0.947512", "tiles": 1536, "image_sha256": "g"}}]})
+        from .coordinator.settings import modkeys
+        with db.tx():
+            modkeys.write(db, "relay", {"goldens": [{"name": "G1", "params": PARAMS, "dataset": "demo:atrium",
+                                                     "expected": {"score": "0.947512", "tiles": 1536, "image_sha256": "g"}}]},
+                          "sim")
         self.datasets = [f"scene:s{i}" for i in range(n_datasets)]
         for did in self.datasets + ["demo:atrium"]:
             db.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at) VALUES(?,?,?,?,?,?)",

@@ -1,4 +1,4 @@
-"""View models for the console pages: pure functions over a read-only reader (q/one/get_setting).
+"""View models for the console pages: pure functions over a read-only reader (q/one/get_state).
 
 Hot pages (the fleet home) render from the snapshot built by state.ConsoleState; drill-down pages call
 these with a pooled read connection. Nothing here writes; module views are materialized by oarbankd, so the
@@ -8,11 +8,12 @@ import json
 from pathlib import Path
 import time
 
-from ..coordinator import detail, nodeservices
+from ..coordinator import detail, nodepolicy, nodeservices
+from ..coordinator.settings import views as settings_views
+from ..coordinator.settings.apply import flat_values, node_values
 
 OFFLINE_AFTER = 30.0          # oarbankd config.OFFLINE_AFTER
 CLOCK_SKEW_S = 60.0           # oarbankd core.CLOCK_SKEW_S
-LIMIT_KEYS = ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps", "schedule")
 
 
 def jl(s, default=None):
@@ -32,6 +33,7 @@ OS_NAMES = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
 PRESSURE = {0: "normal", 1: "warning", 3: "critical"}                 # the heartbeat's mem_pressure scale
 THERMAL = {0: "nominal", 1: "fair", 2: "serious", 3: "critical"}
 HELD = {"guard:memory": "memory guard", "guard:thermal": "heat", "guard:battery": "on battery",
+        "memory_in_use": "memory in use on the machine",
         "local:pause": "paused on the machine", "local_pause": "paused on the machine", "thermal": "heat",
         "outside_schedule": "outside its schedule", "cap.mem_gb exceeded": "memory cap reached",
         "protection": "host protection", "user": "the owner"}
@@ -42,10 +44,12 @@ def hardware(facts: dict) -> dict:
     facts = facts or {}
     cpu, plat = facts.get("cpu") or {}, facts.get("platform") or {}
     perf, eff, logical = cpu.get("perf_cores"), cpu.get("eff_cores"), cpu.get("logical")
-    total = logical or ((perf or 0) + (eff or 0)) or None
+    # physical cores (perf + eff) where the agent reports them; older agents reported only logical processors
+    total = ((perf or 0) + (eff or 0)) or logical or None
+    threads = f" ({logical} threads)" if logical and total and logical > total else ""
     os_name = OS_NAMES.get(plat.get("os"), plat.get("os"))
     return {"cpu": cpu.get("model") or None, "cores_total": total,
-            "cores": f"{perf}P + {eff}E" if perf and eff else (f"{total} cores" if total else None),
+            "cores": f"{perf}P + {eff}E{threads}" if perf and eff else (f"{total} cores{threads}" if total else None),
             "memory_gb": facts.get("memory_gb"), "os": " ".join(x for x in (os_name, plat.get("os_version")) if x) or None,
             "arch": plat.get("arch") or None,
             "gpus": [g.get("model") or g.get("vendor") for g in facts.get("gpus") or [] if g.get("model") or g.get("vendor")]}
@@ -85,7 +89,7 @@ def capacity_summary(n: dict) -> dict:
         idle = tel.get("user_idle_s")
         out["zero_why"] = out["binding"] or (
             "heat" if (tel.get("thermal") or 0) >= 2 else
-            "user present" if idle is not None and idle < (policy.get("user_idle_s") or 300) else
+            "user present" if idle is not None and policy.get("user_idle_s") is not None and idle < policy["user_idle_s"] else
             "automatic capacity is 0")
     return out
 
@@ -99,11 +103,15 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
     online = bool(hb and now - hb < OFFLINE_AFTER)
     facts = jl(n["facts_json"], {}) or {}
     v = {**n, "mods": jl(n.get("modules_json"), {}) or {},
-         "facts": facts, "hw": hardware(facts), "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
-         "policy": jl(n["policy_json"], {}) or {}, "doctor": jl(n["doctor_json"]), "online": online,
+         "facts": facts, "hw": hardware(facts), "tel": tel, "cap": cap,
+         "limits": {k: v for k, v in (node_values(n).get("limits") or {}).items() if v is not None},
+         "policy": flat_values(n), "protection": (node_values(n).get("policy") or {}).get("protection") or {},
+         "doctor": jl(n["doctor_json"]),
+         "online": online,
          "hb_age": now - hb if hb else None, "live": live, "done1h": done1h,
          "pressure": PRESSURE.get(tel.get("mem_pressure")), "heat": THERMAL.get(tel.get("thermal"))}
     v["slots"] = capacity_summary(v)
+    v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"), n["node_id"])
     v["gpu"] = detail.gpu(facts, v["doctor"])
     v["services"] = nodeservices.rows(n)
     return v
@@ -142,14 +150,39 @@ def fleet_data(r, now: float | None = None) -> dict:
               for a in r.q("SELECT * FROM alerts WHERE state='open' ORDER BY opened_at DESC")]
     pending = r.one("SELECT COUNT(*) n FROM alerts WHERE state='pending'")["n"]
     known = {n["ts_node_id"] for n in nodes if n["ts_node_id"]}
-    discovered = [d for d in (r.get_setting("discovered", []) or []) if d["ts_node_id"] not in known]
+    discovered = [d for d in (r.get_state("discovered", []) or []) if d["ts_node_id"] not in known]
     events = r.q("SELECT * FROM events ORDER BY event_id DESC LIMIT 25")
     from ..coordinator import joincodes
     codes = [c for c in joincodes.listing(r) if c["state"] == "active"]
+    rel = release_state(r)
+    for n in nodes:
+        n["release_wait"] = release_wait(n, rel)
     return {"nodes": nodes, "enrollments": enr, "campaigns": camps, "alerts": alerts, "alerts_pending": pending, "discovered": discovered,
-            "events": events, "now": now, "fleet_state": r.get_setting("fleet_state", "active"),
-            "modules_disabled": r.get_setting("modules_disabled", []) or [], "join_codes": codes,
-            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None))}
+            "events": events, "now": now, "fleet_state": r.get_state("fleet_state", "active"),
+            "modules_disabled": r.get_state("modules_disabled", []) or [], "join_codes": codes,
+            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None)), "releases_awaiting": rel["awaiting"]}
+
+
+def release_state(r) -> dict:
+    """What the release banners and the node cards need: the releases waiting for the owner's signature (oarbankd keeps
+    them in the `releases_awaiting` setting: releases.note_awaiting) and whether any module is enabled."""
+    return {"awaiting": r.get_state("releases_awaiting", []) or [],
+            "modules_enabled": bool(r.one("SELECT COUNT(*) n FROM module_channels WHERE current IS NOT NULL")["n"])}
+
+
+def release_wait(n: dict, rel: dict) -> dict | None:
+    """Why a node waits for a release, for its card: {text, title}, or None when it does not. An enrolled node waits
+    for its first release (none while no module is enabled, or one the owner has not signed); a canary or pinned node
+    waits when its own release is unsigned."""
+    for a in rel["awaiting"]:
+        if n["node_id"] in (a.get("node_ids") or []) and (a["kind"] == "node" or n["lifecycle"] == "enrolled"):
+            return {"text": "release needs your signature", "title": f"release {a['release_id']}: {a['command']}"}
+    if n["lifecycle"] == "enrolled" and not rel["modules_enabled"]:
+        return {"text": "waiting for a release: install and enable a module",
+                "title": "a release is the bundle of the enabled modules; there is none until a module is enabled"}
+    if n["lifecycle"] == "enrolled" and n.get("assigned_release") is None and not n.get("release_id"):
+        return {"text": "waiting for its release", "title": "installing the release for its platform"}
+    return None
 
 
 def ca_fingerprint(home) -> str:
@@ -213,7 +246,7 @@ def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
     secrets = r.q("SELECT module, name, fingerprint, set_at FROM secrets WHERE node_id=? AND module!='' ORDER BY module, name",
                   (nid,))
     return {"n": nv, "d": detail.node(r, nid, now, manifest_for), "attempts": atts, "fails": fails, "events": events,
-            "history": history, "series": json.dumps(series), "limit_keys": LIMIT_KEYS, "decisions": decisions,
+            "history": history, "series": json.dumps(series), "decisions": decisions,
             "conditions": node_conditions(nv), "node_secrets": secrets}
 
 
@@ -252,10 +285,13 @@ def node_conditions(n: dict) -> list[dict]:
 # explain remedies whose operation needs more than its target: the page whose form collects the rest, formatted with
 # the explain document's subject ids, and where to go when the subject does not name them; `jobs.set_priority` takes its
 # one value inline
-REMEDY_FORMS = {"nodes.set_caps": ("/nodes/{node}#limits", "/"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
+REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#node-defaults"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
                 "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
-                "settings.tools.update": ("/settings", "/settings"), "settings.folders.update": ("/settings", "/settings"),
-                "agent.promote": ("/agent", "/agent")}
+                "tools.detect": ("/nodes/{node}#tools", "/"),
+                "tools.define": ("/settings#tools", "/settings"),
+                "settings.folders.update": ("/settings", "/settings"),
+                "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
+                "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 
@@ -333,7 +369,8 @@ def campaign_page(r, cid: str, now: float) -> dict | None:
     stranded = r.q("SELECT rule, detail FROM alerts WHERE subject=? AND state='open' AND rule LIKE 'placement_%'", (f"campaign:{cid}",))
     platforms = sorted(set(PLATFORM_TOKENS) | {x["platform"] for x in r.q("SELECT DISTINCT platform FROM nodes WHERE platform IS NOT NULL")})
     return {"c": c, "jobs": jobs, "eta_s": eta(r, cid, now), "history": history, "events": events, "results": results,
-            "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms}
+            "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms,
+            "overrides": settings_views.campaign_section(r, cid)}
 
 
 def result_cell(v, fmt: str | None, unit: str | None) -> str:
@@ -463,32 +500,170 @@ def audit_page(r, op: str, target: str, before: int | None) -> dict:
 
 
 def settings_page(r) -> dict:
-    s = {k: r.get_setting(k) for k in ("ntfy", "console_hosts", "dataset_groups", "tool_registry", "folder_registry",
-                                       "folder_statements", "dataset_origins")}
+    """Fleet Settings: node defaults and the fleet-wide sections (settings/views.py), the ntfy token's state (never its
+    value), the tool and folder registries, dataset origins, releases."""
+    from ..coordinator.modsecrets import core_state
+    from ..coordinator.settings import fleet_value
+    from ..coordinator import tools
+    s = {k: fleet_value(r, k) for k in ("folder_registry", "dataset_origins")}
+    s["node_statements"] = r.get_state("node_statements")
+    # host tools: the definitions (built-in patterns and extras) and who asks for each (Settings → Tools)
+    s["tool_defs"] = tools.definitions(r)
+    s["tool_users"] = {}
+    for m in r.q("SELECT name, version, requests_json FROM module_grants"):
+        for t in (jl(m["requests_json"], {}) or {}).get("tools") or []:
+            s["tool_users"].setdefault(t.get("id"), []).append(f"{m['name']} {m['version']}")
+    s["ntfy_token"] = core_state(r, "ntfy_token")
+    from ..coordinator import protection
+    from ..coordinator.settings import resolve as V
+    s["fleet_protection"] = json.dumps(protection.own(V.snapshot(r), "fleet", ""), indent=2)
     s["nodes"] = {n["node_id"]: n for n in r.q("SELECT node_id, hostname, platform, folders_json FROM nodes WHERE lifecycle!='retired' "
                                                 "ORDER BY hostname")}
     for n in s["nodes"].values():
         n["folders"] = jl(n.pop("folders_json"), {}) or {}
-    return {"s": s, "releases": r.q("SELECT release_id, platform, created_at, status, sha256 FROM releases ORDER BY created_at DESC LIMIT 10"),
-            "dscount": r.q("SELECT kind, COUNT(*) n FROM datasets GROUP BY kind")}
+    rel = release_state(r)
+    wait = {a["release_id"]: a for a in rel["awaiting"]}
+    from ..coordinator.releases import contents
+    releases = [{**x, "awaiting": wait.get(x["release_id"]), "modules": contents(x.pop("composition_json"))} for x in r.q(
+        "SELECT release_id, platform, created_at, status, sha256, signature IS NOT NULL AS signed, composition_json FROM releases "
+        "ORDER BY created_at DESC LIMIT 10")]
+    return {"s": s, "releases": releases, "releases_awaiting": rel["awaiting"], "modules_enabled": rel["modules_enabled"],
+            "dscount": r.q("SELECT kind, COUNT(*) n FROM datasets GROUP BY kind"), "fs": settings_views.fleet_page(r)}
+
+
+def node_settings_page(r, nid: str) -> dict | None:
+    """The node's Settings tab (settings/views.node_page) and the node's header facts."""
+    d = settings_views.node_page(r, nid)
+    if d is None:
+        return None
+    n = d["node"]
+    hb = n.get("last_heartbeat_at") or 0
+    d["n"] = {"node_id": n["node_id"], "hostname": n["hostname"], "online": bool(hb and time.time() - hb < OFFLINE_AFTER),
+              "lifecycle": n["lifecycle"], "desired_state": n["desired_state"], "os": n.get("os"),
+              "agent_version": n.get("agent_version"), "release_id": n.get("release_id"),
+              "quarantine_reason": n.get("quarantine_reason"), "hw": hardware(jl(n.get("facts_json"), {}) or {})}
+    return d
+
+
+def groups_page(r) -> dict:
+    """Groups: every group in rank order (highest first: it wins where groups disagree) with its rule in words, its
+    members and the values it sets, the nodes with their labels (the new-group form's member choices)."""
+    from ..coordinator.settings import groups as G
+    d = G.view(r)
+    d["nodes"] = r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+    d["owner"] = [g for g in d["groups"] if not g["builtin"]]
+    d["builtin"] = [g for g in d["groups"] if g["builtin"]]
+    d["all_labels"] = sorted({x for labs in d["labels"].values() for x in labs["all"]})
+    return d
+
+
+def group_page(r, gid: str) -> dict | None:
+    """One group: its rule and members (and why each is one), the edit form, its settings at group scope (locks,
+    Promote to fleet), its own protection section, and its secrets' state."""
+    from ..coordinator import modsecrets, protection
+    from ..coordinator.settings import groups as G, resolve as V
+    one = G.view(r, gid)
+    if not one["groups"]:
+        return None
+    g = one["groups"][0]
+    d = settings_views.group_sections(r, g["id"])
+    d["g"] = g
+    d["nodes"] = r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+    d["labels"] = one["labels"]
+    d["all_labels"] = sorted({x for labs in one["labels"].values() for x in labs["all"]})
+    own = protection.own(V.snapshot(r), "group", g["id"])
+    d["protection_text"], d["protection_rules"] = json.dumps(own, indent=2), [x.get("id") for x in own["rule"]]
+    d["secrets"] = [{"module": x["module"], "name": x["name"], "fingerprint": x["fingerprint"], "set_at": x["set_at"],
+                     "set_by": x["set_by"]} for x in r.q("SELECT module, name, fingerprint, set_at, set_by FROM secrets "
+                                                         "WHERE node_id=? AND module!='' ORDER BY module, name",
+                                                         (modsecrets.GROUP_PREFIX + g["id"],))]
+    sel = g["selector"] or {}
+    d["sel"] = {"os": sel.get("os") if isinstance(sel.get("os"), str) else "", "arch": sel.get("arch") if isinstance(sel.get("arch"), str) else "",
+                "labels": ", ".join(sel.get("labels") or []),
+                "hostname": ", ".join(sel["hostname"] if isinstance(sel.get("hostname"), list) else [sel["hostname"]] if sel.get("hostname") else []),
+                "battery": "" if "battery" not in sel else ("yes" if sel["battery"] else "no"),
+                "ram_gb_min": sel.get("ram_gb_min", ""), "ram_gb_max": sel.get("ram_gb_max", ""), "cores_min": sel.get("cores_min", "")}
+    return d
+
+
+def bulk_page(r, group: str = "", label: str = "") -> dict:
+    """Bulk changes: every node with its groups and labels (optionally only a group's members or a label's carriers),
+    and the settings a node may set, for one change set across the nodes ticked."""
+    from ..coordinator.settings import registry as R, resolve as V
+    from ..coordinator.settings.views import input_of
+    snap = V.snapshot(r)
+    rows = r.q("SELECT node_id, hostname, os, arch, facts_json, last_heartbeat_at FROM nodes WHERE lifecycle!='retired' "
+               "ORDER BY hostname")
+    now = time.time()
+    nodes = []
+    for n in rows:
+        gs = [g["name"] for g in V.node_groups(snap, n)]
+        labs = snap.node_labels(n)
+        if group and group.lower() not in [x.lower() for x in gs]:
+            continue
+        if label and label.lower() not in labs["all"]:
+            continue
+        nodes.append({"node_id": n["node_id"], "hostname": n["hostname"], "groups": gs, "labels": labs,
+                      "online": bool(n["last_heartbeat_at"] and now - n["last_heartbeat_at"] < OFFLINE_AFTER)})
+    keys = [{"key": d.key, "label": d.label, "unit": d.unit, "kind": input_of(d)["kind"], "section": R.SECTIONS[d.section][0]}
+            for d in R.SETTINGS if "node" in d.scopes and d.section in R.NODE_SECTIONS and not d.writer]
+    return {"nodes": nodes, "keys": keys, "groups": [g["name"] for g in sorted(snap.groups, key=lambda g: -g["rank"])],
+            "all_labels": sorted({x for labs in snap.labels.values() for x in labs}), "group": group, "label": label}
+
+
+def overrides_page(r, key: str, module: str = "") -> dict | None:
+    """The reverse view: who overrides a fleet default (or a module's fleet value), with what."""
+    from ..coordinator.settings import SettingError
+    try:
+        return settings_views.overrides_doc(r, key, module)
+    except SettingError:
+        return None
+
+
+def shadowed_page(r) -> dict:
+    """Values that change nothing (settings/reports.shadowed)."""
+    from ..coordinator.settings import reports
+    return reports.shadowed(r)
+
+
+def import_page(r) -> dict:
+    """Export and import: the scopes an export can cover (the fleet, each group, each node) and the modules."""
+    from ..coordinator.settings import resolve as V
+    snap = V.snapshot(r)
+    return {"groups": [{"id": g["id"], "name": g["name"]} for g in sorted(snap.groups, key=lambda g: -g["rank"])],
+            "nodes": r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname"),
+            "modules": snap.modules}
+
+
+def drift_page(r) -> dict:
+    """Nodes that do not run their latest settings, and what managed policy tightens (settings/reports.drift)."""
+    from ..coordinator.settings import reports
+    return reports.drift(r)
+
+
+def module_settings_page(r, name: str) -> dict | None:
+    """A module's Settings tab (settings/views.module_page)."""
+    return settings_views.module_page(r, name)
 
 
 # ------------------------------------------------------------------ protection editor
 
 def protection_page(r, nid: str, now: float) -> dict | None:
-    """The rule editor's view: the current version and its history, the node's reported processes (the
-    picker), the agent's live per-rule state, the running canary and the decision timeline."""
+    """The protection page: the node's effective protection with where each rule and the mode come from, the rules
+    its OS skips, its own section (the editor edits it), the history, the node's reported processes (the picker), the
+    agent's live per-rule state and the decision timeline."""
     from ..contracts import protection_match as PM
     from ..coordinator import protection
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         return None
     nid = n["node_id"]
+    st = protection.status(r, nid, 50)
     hist = r.q("SELECT version, config_json, config_hash, actor, reason, source, created_at FROM protection_versions "
                "WHERE node_id=? ORDER BY version DESC LIMIT 50", (nid,))
     for h in hist:
         h["config"] = jl(h.pop("config_json"), {})
-    cfg = hist[0]["config"] if hist else ((jl(n["policy_json"], {}) or {}).get("protection") or {"schema": 1, "rule": []})
+    cfg = st["config"]
     procs = jl(n.get("processes_json"), []) or []
     ids = {x.get("id") for x in cfg.get("rule") or []}
     matched = {p["pid"]: [m["rule"] for m in PM.preview(cfg, procs) if any(q["pid"] == p["pid"] for q in m["processes"])]
@@ -496,16 +671,15 @@ def protection_page(r, nid: str, now: float) -> dict | None:
     picker = [{**p, "name": PM.display_name(p), "rules": matched.get(p["pid"], []), "suggest": json.dumps(PM.suggest_rule(p, ids))}
               for p in procs]
     tel = jl(n["telemetry_json"], {}) or {}
-    canary = r.get_setting("protection_canary")
-    if canary:
-        refused = r.one("SELECT COUNT(*) n FROM protection_decisions WHERE node_id=? AND t>=? AND kind='actuation_refused'",
-                        (canary["node_id"], canary["started_at"]))["n"]
-        canary = {**{k: v for k, v in canary.items() if k != "config"}, "soak_s": int(now - canary["started_at"]),
-                  "refused": refused}
-    return {"n": {**n, "online": (n["last_heartbeat_at"] or 0) > now - OFFLINE_AFTER}, "config": cfg,
-            "config_text": json.dumps(cfg, indent=2), "version": hist[0]["version"] if hist else 0, "history": hist,
+    inherited = [{"rule": x, "source": st["sources"].get(x.get("id"))} for x in cfg.get("rule") or []
+                 if st["sources"].get(x.get("id")) != "This node"]
+    return {"n": {**n, "online": (n["last_heartbeat_at"] or 0) > now - OFFLINE_AFTER}, "config": cfg, "own": st["own"],
+            "config_text": json.dumps(st["own"], indent=2), "version": st["version"], "history": hist,
+            "inherited": inherited, "skipped": st["skipped"], "conflicts": st["conflicts"],
+            "mode_source": st["mode_source"], "mode_locked_by": st["mode_locked_by"],
+            "own_mode": (st["own"].get("node") or {}).get("mode"),
             "picker": picker, "processes_at": n.get("processes_at"), "prot": tel.get("protection") or {},
-            "canary": canary, "timeline": timeline(r, nid, now), "mode": (cfg.get("node") or {}).get("mode", "moderate"),
+            "timeline": timeline(r, nid, now), "mode": cfg["node"]["mode"],
             "os_note": os_note(n.get("os")), "runtime": protection.runtime_conditions(tel)}
 
 
@@ -563,24 +737,13 @@ def timeline(r, nid: str, now: float, hours: float = 6.0, width: int = 1000) -> 
 
 
 def protection_preview(r, nid: str, config) -> dict:
-    """The editor's live preview (no writes: a stale process summary is refreshed by oarbankd when the change
-    is reviewed as a plan)."""
-    from ..contracts import protection as P, protection_match as PM
-    P.ProtectionConfig.model_validate(config)
-    n = r.one("SELECT node_id, os, policy_json, processes_json, processes_at FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
-    if not n:
-        raise ValueError(f"node {nid} not found")
-    refused = P.refusals(config, n["os"]) if n["os"] else []
-    if refused:
-        raise ValueError(f"on {n['os']}: " + "; ".join(refused))
-    top = r.one("SELECT version, config_json FROM protection_versions WHERE node_id=? ORDER BY version DESC LIMIT 1", (n["node_id"],))
-    cur = jl(top["config_json"], {}) if top else ((jl(n["policy_json"], {}) or {}).get("protection") or {})
-    procs = jl(n["processes_json"], []) or []
-    return {"base_version": top["version"] if top else 0, "diff": PM.diff(cur, config), "matches": PM.preview(config, procs),
-            "processes_reported": len(procs),
-            "processes_age_s": None if n["processes_at"] is None else time.time() - n["processes_at"],
-            "note": "Computed from the node's last process summary with the same matcher the agent uses (shared test "
-                    "vectors); after apply the agent's own match counts show on the node page."}
+    """The editor's live preview of this node's own section (no writes: a stale process summary is refreshed by
+    oarbankd when the change is reviewed as a plan)."""
+    from ..coordinator import protection
+    try:
+        return protection.preview_doc(r, nid, config)
+    except protection.ProtectionError as e:
+        raise ValueError(str(e))
 
 
 # ------------------------------------------------------------------ module lifecycle
@@ -625,7 +788,9 @@ def module_store(r) -> dict:
                      (m["name"],))
         m["integrity"] = {**last, "failed": [c for c in jl(last["checks_json"], []) if not c.get("ok")]} if last else None
         m["files"] = r.one("SELECT COUNT(*) n, COALESCE(SUM(size),0) bytes FROM module_files WHERE module=?", (m["name"],))
-    return {"store": list(out.values()), "nodes": [{"node_id": n["node_id"], "hostname": n["hostname"]} for n in nodes]}
+    from ..coordinator.settings import store as settings_store
+    return {"store": list(out.values()), "nodes": [{"node_id": n["node_id"], "hostname": n["hostname"]} for n in nodes],
+            "groups": [g for g in settings_store.groups(r)][::-1]}
 
 
 def agent_builds(r) -> dict:
@@ -658,7 +823,7 @@ def coordinator(r) -> dict:
     import base64
     import hashlib
     st = {row["key"]: jl(row["value_json"]) for row in r.q(
-        "SELECT key, value_json FROM settings WHERE key IN ('coordinator_cik','coordinator_epoch','coordinator_role',"
+        "SELECT key, value_json FROM system_state WHERE key IN ('coordinator_cik','coordinator_epoch','coordinator_role',"
         "'move_phase','fleet_id','coordinator_host')")}
     cik = st.get("coordinator_cik") or ""
     fp = hashlib.sha256(base64.b64decode(cik)).hexdigest() if cik else ""
@@ -682,14 +847,19 @@ def coordinator(r) -> dict:
 
 
 def coordinator_banner(r) -> dict | None:
-    """The fleet-wide banner: a coordinator move waiting, pending or cutting over, or this console reading a
-    coordinator that handed off (or is a standby)."""
+    """The fleet-wide banner: a coordinator move waiting, pending or cutting over, this console reading a coordinator
+    that handed off (or is a standby), or a coordinator that still runs as a per-user service (it stops when its owner
+    logs out and does not start after a restart: coordinator-system-service.md)."""
     st = {row["key"]: jl(row["value_json"]) for row in r.q(
-        "SELECT key, value_json FROM settings WHERE key IN ('coordinator_role','move_phase')")}
+        "SELECT key, value_json FROM system_state WHERE key IN ('coordinator_role','move_phase','coordinator_host')")}
     mv = (r.q("SELECT move_id, statement, state, not_before FROM coordinator_moves WHERE state IN ('awaiting_owner','pending','cutover') "
               "ORDER BY created_at DESC LIMIT 1") or [None])[0]
     role = st.get("coordinator_role") or "active"
+    host = st.get("coordinator_host") or {}
     if not mv and role == "active":
+        if host.get("form") == "per-user":
+            account = next((v.get("account") for v in host.get("services") or [] if v.get("installed")), None)
+            return {"state": "per_user", "role": role, "account": account, "to": None, "not_before": None, "phase": "idle"}
         return None
     to = (jl(mv["statement"], {}) or {}).get("to", {}).get("url") if mv else None
     return {"state": mv["state"] if mv else role, "to": to, "not_before": mv["not_before"] if mv else None, "role": role,

@@ -383,13 +383,18 @@ const PROBES: [(&str, Probe); 6] = [("cuda", cuda), ("directml", directml), ("me
                                     ("vulkan", vulkan)];
 
 /// How this node's containers get the GPU: (the API list, the evidence), from the container runtime.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn containers(_home: &Path) -> (Vec<String>, String) {
     match crate::container_runtime::gpu_passthrough() {
         Some(p) => (p.apis, p.evidence),
-        None if cfg!(target_os = "macos") => (vec![], "no GPU in containers: krunkit is not installed".into()),
         None => (vec![], "no GPU in containers: no container engine with a CDI spec for a GPU".into()),
     }
+}
+
+/// macOS: what the agent's Colima runtime last reported (`vulkan` only from a ready runtime with krunkit).
+#[cfg(target_os = "macos")]
+fn containers(home: &Path) -> (Vec<String>, String) {
+    crate::colima::container_apis(home, || crate::container_runtime::mac_report_now(home))
 }
 
 /// Windows: what the agent's WSL containers session last found (wslc.rs; the APIs of a GPU container on its VM).

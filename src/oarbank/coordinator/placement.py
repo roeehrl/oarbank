@@ -191,10 +191,12 @@ def _ahead(j: dict) -> list[str]:
 
 def _serving(module: str, stage: str | None):
     """Whether a node can serve the module for jobs of `stage`: certified, or certifying recently (core._can_serve); a
-    bootstrap stage on any node whose module is certified or certifying and whose agent applies the bootstrap grants."""
-    from . import core, modsandbox
-    if modcalls.stage_bootstrap(module, stage):
-        return lambda n, st: predicates.module_serves({"bootstrap": True}, st.get("state"), modsandbox.bootstrap_enforced(n))
+    stage that needs no certification on any node where the module's runner started (core._module_serves: a bootstrap
+    stage also needs the bootstrap grants)."""
+    from . import core
+    if modcalls.stage_exempt(module, stage):
+        f = {"module": module, "exempt": True, "bootstrap": modcalls.stage_bootstrap(module, stage)}
+        return lambda n, st: core._module_serves(n, f)
     return lambda n, st: core._can_serve(st)
 
 
@@ -209,7 +211,7 @@ def classes_running(db: DB, module: str, stages, mix: str, online: bool = False,
     if cache is not None and key in cache:
         return cache[key]
     mi = modcalls.info(module)
-    sql = ("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json, facts_json FROM nodes "
+    sql = ("SELECT node_id, platform, release_id, modules_json, capacity_json, settings_json, doctor_json, facts_json FROM nodes "
            "WHERE lifecycle='ready' AND platform IS NOT NULL")
     args: tuple = ()
     if online:
@@ -404,21 +406,20 @@ def cache_hit(db: DB, j: dict) -> int | None:
 
 def capacity_class(db: DB, module: str, mix: str, feasible: list[str], stages, exclude: str | None = None) -> str | None:
     """Among the feasible classes where every one of `stages` has a node to run it (classes_running), the one with the
-    most free CPU on ready, active nodes certified for the module, or able to run its bootstrap stages when every one of
-    `stages` is one (None: no such class)."""
+    most free CPU on ready, active nodes certified for the module, or able to run its stages when every one of `stages`
+    needs no certification (None: no such class)."""
     runs = classes_running(db, module, stages, mix)
-    boot = bool(stages) and all(modcalls.stage_bootstrap(module, st) for st in stages)
+    exempt = bool(stages) and all(modcalls.stage_exempt(module, st) for st in stages)
+    f = {"module": module, "exempt": exempt, "bootstrap": exempt and any(modcalls.stage_bootstrap(module, st) for st in stages)}
     free: dict = {}
     live = {r["node_id"]: r["cpu"] or 0 for r in db.q(
         "SELECT a.node_id, SUM(COALESCE(json_extract(j.resources_json,'$.cpu'),1)) cpu FROM attempts a "
         "JOIN jobs j ON j.job_id=a.job_id WHERE a.state='live' GROUP BY a.node_id")}
-    from . import modsandbox
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, facts_json FROM nodes WHERE lifecycle='ready' "
-                  "AND desired_state='active' AND platform IS NOT NULL"):
+    from . import core
+    for n in db.q("SELECT node_id, platform, release_id, modules_json, capacity_json, doctor_json, facts_json FROM nodes "
+                  "WHERE lifecycle='ready' AND desired_state='active' AND platform IS NOT NULL"):
         cls = pf.class_key(n["platform"], mix)
-        state = (jl(n["modules_json"], {}) or {}).get(module, {}).get("state")
-        if cls not in feasible or cls not in runs or cls == exclude \
-                or not predicates.module_serves({"bootstrap": boot}, state, modsandbox.bootstrap_enforced(n)):
+        if cls not in feasible or cls not in runs or cls == exclude or not core._module_serves(n, f):
             continue
         slots = float((jl(n["capacity_json"], {}) or {}).get("cpu_slots") or 0)
         free[cls] = free.get(cls, 0.0) + max(0.0, slots - float(live.get(n["node_id"], 0)))

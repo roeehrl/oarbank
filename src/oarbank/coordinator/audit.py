@@ -98,22 +98,22 @@ def write_digest(db: DB, signer: Signer, next_pubkey: str | None = None) -> dict
     last = db.one("SELECT * FROM audit_digests ORDER BY last_event_id DESC LIMIT 1")
     if not head or (last and last["last_event_id"] == head["event_id"] and not next_pubkey):
         return None
-    if not db.get_setting("audit_pubkey_first"):
+    if not db.get_state("audit_pubkey_first"):
         # the key that signed every digest so far: verification starts from it, even after moves change the signer
-        db.set_setting("audit_pubkey_first", db.get_setting("audit_pubkey") or signer.public_b64)
+        db.set_state("audit_pubkey_first", db.get_state("audit_pubkey") or signer.public_b64)
     ts, prev_sig = time.time(), last["sig"] if last else None
     sig = signer.sign(_digest_body(head["event_id"], head["hash"], ts, prev_sig, next_pubkey))
     with db.tx():
         db.x("INSERT OR REPLACE INTO audit_digests(last_event_id,hash,ts,prev_sig,sig,pubkey,next_pubkey) VALUES(?,?,?,?,?,?,?)",
              (head["event_id"], head["hash"], ts, prev_sig, sig, signer.public_b64, next_pubkey))
-    db.set_setting("audit_pubkey", signer.public_b64)
+    db.set_state("audit_pubkey", signer.public_b64)
     return {"last_event_id": head["event_id"], "hash": head["hash"], "ts": ts, "prev_sig": prev_sig, "sig": sig,
             "next_pubkey": next_pubkey}
 
 
 def _rescue_key(db: DB) -> tuple | None:
     """(last digest before the rescue, the audit key the owner-signed rescue move names) after a rescue, else None."""
-    r = db.get_setting("audit_rescue")
+    r = db.get_state("audit_rescue")
     if not r:
         return None
     from . import owner
@@ -135,7 +135,7 @@ def verify(db: DB, public_b64: str | None = None) -> dict:
         hashes[rec.event_id] = rec.hash
         prev = rec.hash
     bad_digest, nd = None, 0
-    pub = public_b64 or db.get_setting("audit_pubkey_first") or db.get_setting("audit_pubkey")
+    pub = public_b64 or db.get_state("audit_pubkey_first") or db.get_state("audit_pubkey")
     if pub:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
         from cryptography.exceptions import InvalidSignature
@@ -190,7 +190,7 @@ def copy_off_host(db: DB) -> dict | None:
     """Run the owner's copy command (setting `audit_digest_copy`: an argv with `{file}`, e.g.
     ["scp", "-q", "{file}", "backup-host:oarbank-audit/"]) so a rewrite of this host's chain is detectable later."""
     import subprocess
-    argv = db.get_setting("audit_digest_copy")
+    argv = db.get_state("audit_digest_copy")
     p = digest_log(db)
     if not argv or not p.exists():
         return None

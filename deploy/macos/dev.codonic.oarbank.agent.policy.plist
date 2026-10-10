@@ -11,6 +11,9 @@
   prints a code, but a managed value or a coordinator's error text is no business of other accounts, and launchd
   creates a missing log file world-readable: the postinstall creates it 0600 root:wheel first (launchd appends to
   what is there), and Umask 077 covers a log someone deleted.
+
+  AssociatedBundleIdentifiers: System Settings, Login Items, "Allow in the Background" lists this job under Oarbank
+  Node (the app's name and icon) with the node's other jobs, not under the signing team's name.
 -->
 <plist version="1.0">
 <dict>
@@ -33,6 +36,10 @@
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>/var/log/oarbank-policy.log</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>dev.codonic.oarbank.node</string>
+    </array>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>

@@ -23,8 +23,9 @@ def _estimated_view(db: DB, node: dict, body: dict | None) -> predicates.NodeVie
         body = {"free_cpu": (float(slots) - float(live_cpu)) if slots is not None else 1e9,
                 "free_mem_gb": cap.get("mem_gb_free") if cap.get("mem_gb_free") is not None else 1e9,
                 "ready_datasets": jl(node["ready_datasets_json"], []) or [],
-                "pool_jobs_only": bool(cap.get("pool_jobs_only")), "gpu_jobs": cap.get("gpu_jobs")}
-    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db)
+                "pool_jobs_only": bool(cap.get("pool_jobs_only")), "gpu_jobs": cap.get("gpu_jobs"),
+                "paused": cap.get("paused") or [], "paused_by": cap.get("paused_by")}
+    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
     return core.node_view_for_claim(db, node, offered, set(body.get("ready_datasets") or []), free_cpu, free_mem, body)
@@ -50,6 +51,7 @@ def _job_on_node(db: DB, j: dict, nv: predicates.NodeView, now: float) -> list:
 
 
 REMEDY_TARGET = {"nodes": "node", "jobs": "job_id", "campaigns": "campaign_id"}      # operation area -> the subject id it targets
+RELEASE_CODES = ("RELEASE_PENDING", "NO_RELEASE", "RELEASE_UNSIGNED")                 # node codes whose message names its release
 
 
 def _remedies(codes, params) -> list[X.Remedy]:
@@ -85,6 +87,61 @@ def _checkpoint_actions(db: DB, j: dict) -> list[str]:
     return out
 
 
+def _listed(v) -> str:
+    return ", ".join(map(str, v)) if isinstance(v, (list, tuple, set)) else str(v)
+
+
+def _reason_params(j: dict, r: predicates.PredicateResult, nv: predicates.NodeView, rows: list) -> dict:
+    """The values a reason code's template names, from the first failed predicate on a node (`rows`: every node the summary
+    row covers, as (node, result, view), whose lists are merged) and the job."""
+    n, mod = nv.node, j["module"]
+    def lists(attr):
+        vals = (getattr(rr, attr) for _, rr, _ in rows)
+        return sorted({str(x) for val in vals if isinstance(val, (list, tuple, set)) for x in val})
+    v = {"module": mod, "platform": n.get("platform") or "an unknown platform", "os": (n.get("platform") or "?").split("-")[0],
+         "os_version": n.get("os_version") or "?", "need": _listed(r.required), "free": r.observed, "have": _listed(r.observed),
+         "missing": _listed(lists("observed") or r.observed or "?"), "platforms": _listed(r.required or "?"),
+         "release": r.required, "class_": _listed(r.required), "ahead": "?"}
+    if r.code == "STAGE_CAPABILITY_MISSING":
+        need = list(r.required or [])
+        missing = sorted({c for _, rr, _ in rows for c in set(rr.required or []) - set(rr.observed or [])})
+        v.update(capabilities=_listed(need), missing=_listed(missing))
+    elif r.code == "MODULE_NOT_READY":
+        failed = predicates.doctor_failed_checks(n, mod)
+        state = nv.states.get(mod, {}).get("state")
+        ran = predicates.doctor_ran(n, mod)
+        v["health"] = (state or "not reported") + ("" if ran or not (j.get("exempt") or j.get("bootstrap")) else
+                                                   ", its runner did not start") + \
+            (f"; failed checks {', '.join(failed)}" if failed else "")
+    elif r.code == "CAPABILITY_NOT_ENFORCED":
+        v["capability"] = "the bootstrap grants" if r.predicate == "bootstrap grants enforced" else _listed(r.required)
+    elif r.code in ("TOOL_NOT_FOUND", "TOOL_VERSION_UNMET", "TOOL_REFUSED"):
+        v["tools"] = r.observed if isinstance(r.observed, str) and r.observed != r.code else "?"
+    elif r.code in ("POOL_ABSENT", "POOL_EXHAUSTED"):
+        v.update(pool=r.predicate.split("(", 1)[-1].split(")", 1)[0], need=r.required)
+    elif r.code == "CAMPAIGN_SETTING_HOLDS":
+        v.update(setting=r.required, have=r.observed)
+    elif r.code == "PROTECTION_ACTIVE":
+        v["rule"] = str(r.required or "?").removeprefix("rule:")
+    elif r.code == "RETRIES_EXHAUSTED":
+        v.update(failures=j.get("exec_failures"), max_attempts=predicates.retry_max(j, n.get("platform")))
+    return v
+
+
+def _reason_text(j: dict, code: str, rows: list) -> str:
+    """One summary row as a sentence: its code's message with the values filled in, and how many nodes of which platform
+    it covers (`rows`: (node, first failed predicate, view)). Falls back to the predicate when the message names
+    values a predicate does not carry."""
+    n0, r0, nv0 = rows[0]
+    rc = RC.REGISTRY.get(code)
+    text = rc.render(**_reason_params(j, r0, nv0, rows)) if rc else code
+    if rc is None or "?" in text:
+        text = f"{r0.predicate} (observed {r0.observed}, required {r0.required})"
+    plat = collections.Counter(n["platform"] or "unknown-platform" for n, _, _ in rows)
+    where = ", ".join(f"{k} {p}" for p, k in sorted(plat.items(), key=lambda kv: (-kv[1], kv[0])))
+    return f"{text} ({len(rows)} node{'s' if len(rows) != 1 else ''}: {where})"
+
+
 def _job_ids(j: dict) -> dict:
     return {"job_id": j["job_id"], "module": j["module"], **({"campaign_id": j["campaign_id"]} if j["campaign_id"] else {})}
 
@@ -99,9 +156,14 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
     as_of = X.AsOf(snapshot_version=db.one("SELECT COALESCE(MAX(event_id),0) m FROM events")["m"], evaluated_at=now)
     subj = X.Subject(kind="job", id=job_id)
     boot = modcalls.stage_bootstrap(j["module"], j["stage"])
-    actions = [f"Runs as a bootstrap job (stage {j['stage']}): on nodes where {j['module']}'s doctor is healthy, before its "
-               "goldens pass, with only the module's egress allowlist; its result must be exactly the module's pinned datasets, "
-               "which the coordinator then registers, and it never counts toward certification"] if boot else []
+    exempt = j["kind"] != "golden" and modcalls.stage_exempt(j["module"], j["stage"])
+    actions = [f"Runs as a bootstrap job (stage {j['stage']}): on nodes where {j['module']}'s runner starts (its doctor ran, "
+               "healthy or not), before its goldens pass, with only the module's egress allowlist; its result must be "
+               "exactly the module's pinned datasets, which the coordinator then registers, and it never counts toward "
+               "certification"] if boot else \
+        [f"Needs no certification (stage {j['stage']} compares nothing and needs no capability or pool): runs on nodes where "
+         f"{j['module']}'s runner starts (its doctor ran, healthy or not), before its goldens pass; a failed doctor check "
+         "keeps it off a node only when the check proves a capability the stage needs"] if exempt else []
     actions += _checkpoint_actions(db, j)
     if j["state"] != "pending":
         a = db.one("SELECT a.*, n.hostname FROM attempts a LEFT JOIN nodes n ON n.node_id=a.node_id WHERE a.job_id=? "
@@ -123,6 +185,7 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
     nodes = db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
     matrix, by_code, eligible_nodes = [], collections.defaultdict(list), []
     clause = collections.defaultdict(lambda: [0, 0])
+    facts = core._job_facts(db, j)
     for n in nodes:
         nv = _estimated_view(db, n, (bodies or {}).get(n["node_id"]))
         results = _job_on_node(db, j, nv, now)
@@ -134,8 +197,13 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
         if ff is None:
             eligible_nodes.append(n)
         else:
-            by_code[ff.code].append(n["hostname"])
-    summary = [X.SummaryRow(code=c, nodes=ns) for c, ns in sorted(by_code.items(), key=lambda kv: -len(kv[1]))]
+            by_code[ff.code].append((n, ff, nv))
+    ranked = sorted(by_code.items(), key=lambda kv: -len(kv[1]))
+    texts = {c: _reason_text(facts, c, rows) for c, rows in ranked}
+    summary = [X.SummaryRow(code=c, nodes=[n["hostname"] for n, _, _ in rows],
+                            detail={"text": texts[c], "platforms": dict(collections.Counter(n["platform"] or "unknown-platform"
+                                                                                           for n, _, _ in rows))})
+               for c, rows in ranked]
     if eligible_nodes:
         ahead = db.one("SELECT COUNT(*) n FROM jobs WHERE state='pending' AND (priority>? OR (priority=? AND job_id<?))",
                        (j["priority"] or 0, j["priority"] or 0, job_id))["n"]
@@ -145,7 +213,9 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
     elif not nodes:
         head = X.Headline(code="NO_ELIGIBLE_NODE", text="There are no nodes")
     else:
-        head = X.Headline(code="NO_ELIGIBLE_NODE", text=RC.REGISTRY["NO_ELIGIBLE_NODE"].template)
+        # say why, not only that: each reason with the nodes (by platform) it keeps the job off, commonest first
+        head = X.Headline(code="NO_ELIGIBLE_NODE", text=RC.REGISTRY["NO_ELIGIBLE_NODE"].template + ": "
+                          + "; ".join(texts[c] for c, _ in ranked))
     return X.ExplainDocument(
         subject=subj, as_of=as_of, verdict="pending", headline=head, summary=summary,
         clauses=[X.Clause(predicate=p, matched=m, of=o) for p, (m, o) in clause.items()], matrix=matrix,
@@ -173,6 +243,13 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
     summary += [X.SummaryRow(code=c["code"], detail=c["values"]) for c in protection.runtime_conditions(jl(n["telemetry_json"], {}) or {})]
     head = X.Headline(code="OK", text="Admitting work") if ff is None else \
         X.Headline(code=ff.code, text=f"Not admitting: {ff.predicate} (observed {ff.observed}, required {ff.required})")
+    if ff is not None and ff.code == "PROTECTION_ACTIVE":     # which rule: work comes back once it clears
+        head = X.Headline(code=ff.code, text="Not admitting: " + RC.REGISTRY[ff.code].render(
+            rule=str(ff.required or "?").removeprefix("rule:")) + f" and pauses {', '.join(ff.observed or [])} work")
+    if ff is not None and ff.code in RELEASE_CODES:      # say which release, and what lets it through
+        rel = nv.release_of() if nv.release_of else {}
+        head = X.Headline(code=ff.code, text="Not admitting: " + RC.REGISTRY[ff.code].render(
+            release=rel.get("release") or "?", platform=rel.get("platform") or "?"))
     return X.ExplainDocument(
         subject=X.Subject(kind="node", id=n["node_id"]),
         as_of=X.AsOf(snapshot_version=db.one("SELECT COALESCE(MAX(event_id),0) m FROM events")["m"], evaluated_at=now),

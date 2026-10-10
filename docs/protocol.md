@@ -89,9 +89,16 @@ spec/platforms.md):
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
              "gpu.compute": "enforced", "exec_writable_deny": "enforced", "no_link_local": "unavailable",
              "grants.bootstrap": "enforced"}},
- "containers": {"gpu": "undetected"},
- "disk_free_gb": 398.0, "addresses": ["100.64.0.11", "192.168.1.20"]}
+ "containers": {"runtime": "colima", "state": "installed", "detail": "the agent's Colima VMs start when a job needs one",
+                "gpu": "virtio-gpu:venus"},
+ "disk_free_gb": 398.0, "power": {"battery": true}, "addresses": ["100.64.0.11", "192.168.1.20"]}
 ```
+- **CPU.** `perf_cores` and `eff_cores` are physical cores (a core running two hardware threads counts once), the
+  same on every OS; a CPU without core classes reports all its cores as `perf_cores` and `eff_cores` 0; `logical` is
+  the logical processors the agent may use. docs/design/protection.md, "Capacity", says how each OS is read.
+- **Power.** `battery` says the machine has a system battery (a laptop; a UPS or a device's battery does not count).
+  Node groups may select on it, and it gives the node the `laptop` label "from facts" (docs/design/settings.md,
+  "Groups and labels").
 - **Platform.** The coordinator stores the node's platform, OS, architecture and OS version in columns and
   re-certifies every module when the platform or OS version changes. A node of a platform the fleet has no
   release for gets one built when it enrolls.
@@ -101,12 +108,24 @@ spec/platforms.md):
   (`SANDBOX_BACKEND_MISSING`); a gap is `CAPABILITY_NOT_ENFORCED`. `grants.bootstrap` says the agent runs a bootstrap
   stage's jobs with the bootstrap grants (spec/sandbox.md, "Bootstrap jobs"); only such a node gets them.
 - **Placement.** A module version runs only on the platforms in its `requires.platforms`, on OS versions in
-  `requires.os`, and where the tool registry maps every approved `[sandbox].tools` id for the node's OS
-  (`PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_UNAVAILABLE`, `AGENT_TOO_OLD`).
-- **Containers.** `gpu` is how containers get the node's GPUs (`cdi:<kind>`, `virtio-gpu:venus`), else `undetected`;
-  the APIs such a container can use are the doctor report's `gpu_apis.containers` (below). A Windows node adds its WSL containers session's state ([design/windows-containers.md](design/windows-containers.md), "The
+  `requires.os`, and where every `[sandbox].tools` request resolves to an installation the node reported (`tools`,
+  below; docs/design/host-tools.md): `PLATFORM_UNSUPPORTED`, `OS_VERSION_UNSUPPORTED`, `TOOL_NOT_FOUND`,
+  `TOOL_VERSION_UNMET` ("found 11.0.2 at …; needs >=17"), `TOOL_REFUSED` (a path set for the node that it refused),
+  `AGENT_TOO_OLD`. A tool that does not resolve keeps off only the jobs of stages that need certification (and the
+  goldens): a stage that needs none runs without it (docs/design/stage-gating.md), and explain names the tool, what
+  the node found and what the module needs.
+- **Containers.** `runtime` and `state` say whether the node has a container runtime: on macOS `colima` (the agent's
+  Colima profiles; `installed`: their VMs start when a job needs one), on Linux `podman` or `docker` (`installed`),
+  else `runtime` null and `state` `absent`. `gpu` is how containers get the node's GPUs (`cdi:<kind>`,
+  `virtio-gpu:venus`), else `undetected`, always `undetected` without a runtime; the APIs such a container can use are
+  the doctor report's `gpu_apis.containers` (below), which `oarbank node show` and the node page list only beside a
+  runtime. A Windows node reports its WSL containers session's state instead ([design/windows-containers.md](design/windows-containers.md), "The
   node's report"): `runtime` (`wslc`), `state` (`absent`, `starting`, `ready`, `missing`, `failed`), `session`,
-  `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes.
+  `platforms`, and `missing` (`[{what, detail, fix}]`); it sends a new hello whenever that state changes. A macOS node
+  reports its Colima runtime the same way ([design/macos-containers.md](design/macos-containers.md)): `runtime`
+  (`colima`), the same `state` values, `profile`, `colima_home`, `platforms`, `missing`, `detail` when failed, and
+  `gpu_profile` (`{profile, state, missing}`: `unavailable`, `on_demand`, `starting`, `ready`, `failed`); its `gpu` is
+  `virtio-gpu:venus` only while the runtime is ready and krunkit is installed.
 
 `hostname` is the name the node reports: the machine's host name, or `OARBANK_NODE_NAME` in the agent's
 environment when the owner names it. The coordinator names the node after it, unless the node enrolled with a
@@ -118,7 +137,7 @@ changes it.
 `POST /v1/agent/hello` is sent on start, on wake, after a clock jump over 30 s, and on `recertify`.
 ```json
 {"agent_version": "…", "boot_id": "…", "facts": {…}, "live_attempts": [123, 124], "release_id": "r_…",
- "ready_datasets": ["scene:atrium", …], "clock": 1790000000.2}
+ "ready_datasets": ["scene:atrium", …], "clock": 1790000000.2, "tools": {…Tools…}}
 ```
 → directives (below), plus `"kill": [124]`: live attempts oarbankd no longer considers live. The agent kills
 their process groups, deletes their workspaces, and does not report them.
@@ -138,6 +157,12 @@ their process groups, deletes their workspaces, and does not report them.
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
+ "tools": {"detected_at": 1790000005.0, "native_arch": "arm64", "tools": {
+   "jdk": [{"path": "/opt/homebrew/Cellar/openjdk@17/17.0.12/libexec/openjdk.jdk/Contents/Home", "version": "17.0.12",
+            "arch": "aarch64", "vendor": "Homebrew", "source": "detected", "status": "ok", "detected_at": 1790000005.0},
+           {"path": "/srv/jdk", "given": "/srv/jdk", "version": null, "arch": null, "vendor": null, "source": "override",
+            "status": "refused: /srv/jdk does not exist here", "detected_at": 1790000005.0}],
+   "python": []}},
  "services": [{"service": "example/model", "health": "healthy", "running": false, "ready": false, "held": "preempt_memory",
                "disabled": false, "withdrawn": false, "failures": 0, "error": null, "gpu_api_missing": null, "users": 0,
                "pools": {"model": 1}, "reserve_mem_gb": 0.0, "busy": false, "endpoint": true, "accepting": false,
@@ -153,7 +178,9 @@ their process groups, deletes their workspaces, and does not report them.
 - **`clock`** (hello and heartbeat) is the agent's wall clock when it sent the request. oarbankd records the node's clock
   offset from it (see Clocks).
 - **`doctor`**, when present, is the latest doctor report (see Doctor).
-- **`folders`** is the outcome, per folder id, of the folder statement the agent applied (see Folders).
+- **`folders`** is the outcome, per folder id, of the node statement the agent applied (see Node statement).
+- **`tools`** (hello and every heartbeat) is the agent's latest host tool detection (see Host tools); oarbankd keeps
+  it as `nodes.tools_json` and places jobs by it.
 - **`services`** and **`probes`** are the agent's service report, sent on every heartbeat: each module service
   (`<module>/<name>`) with its health, whether it runs and has answered `ready`, why it is down (`held` by host protection
   with the release reason, `disabled` by the kill switch, `withdrawn` after failures, `gpu_api_missing`), its last
@@ -176,12 +203,14 @@ their process groups, deletes their workspaces, and does not report them.
 **Directives** (the answer to hello and to every heartbeat):
 ```json
 {"node_id": "n_…", "now": 1790000010.4, "desired_state": "active|paused|draining", "lifecycle": "enrolled|ready|quarantined|retired",
- "limits": {…Limits…}, "policy": {…Policy…}, "heartbeat_s": 10,
+ "limits": {…Limits…}, "policy": {…Policy…}, "settings_rev": 42, "heartbeat_s": 10,
  "release": {"release_id": "r_…", "url": "/v1/releases/r_….tar.gz", "sha256": "…", "statement": "…", "signature": "…"},
  "release_pubkey": null, "prefetch": ["tool:example-1.0", "scene:atrium"], "run_doctor": false, "recertify": false,
  "cancel": [125], "revoke": [126], "run_probe": false, "send_processes": false, "journal_ack": 41,
  "modules_disabled": ["example"],
- "folders": {"statement": "{…oarbank.folders/v1…}", "signature": null}}
+ "statement": {"statement": "{…oarbank.node/v1…}", "signature": null},
+ "tool_pins": {"": {"jdk": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"}, "example": {"jdk": "/opt/jdk-21"}},
+ "detect_tools": false}
 ```
 | Directive | Meaning |
 |---|---|
@@ -192,31 +221,41 @@ their process groups, deletes their workspaces, and does not report them.
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
-| `modules_disabled` | Modules the owner disabled (the kill switch, `modules.disable`): every service of theirs is disabled on the node (stopped, never offered) until they are enabled again. |
-| `folders` | This node's latest folder statement and the owner's signature (`null` in developer mode, or until the owner signs); `null` when no folder is mapped here (see Folders). |
+| `modules_disabled` | Modules that must not run on this node: their effective `[module] enabled` is off here (for the fleet: the kill switch, `modules.disable`; or for a group the node is in, or the node itself). Every service of theirs is disabled on the node (stopped, never offered) until they are enabled again; the coordinator grants none of their work there. |
+| `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
+| `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
+| `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
 
 ## Work
 
 `POST /v1/agent/claim`
 ```json
 {"free_cpu": 3, "free_mem_gb": 6.0, "modules": ["example", "toy"], "release_id": "r_…",
- "ready_datasets": ["tool:example-1.0", "scene:atrium", …], "pool_jobs_only": false, "gpu_jobs": null}
+ "ready_datasets": ["tool:example-1.0", "scene:atrium", …], "pool_jobs_only": false, "gpu_jobs": null,
+ "paused": [], "paused_by": null}
 ```
 oarbankd grants jobs:
 
 - whose resources fit `free_cpu` and `free_mem_gb`;
-- whose module is offered in `modules` (its doctor reported healthy) and certified on this node, or, for a job of a
-  bootstrap stage (docs/design/bootstrap-stages.md), certifying there, on a node whose facts report `grants.bootstrap`;
+- whose module is offered in `modules` (its runner started: its doctor printed a DoctorOutput, healthy or not) and
+  certified on this node; or, for a job of a stage that needs no certification (docs/design/stage-gating.md: a
+  bootstrap stage, or one that compares nothing and needs no capability or pool), in any state its doctor decides there
+  (certified, certifying, `doctor_failed`, `undetected`, `golden_failed`; not `revoked`), a bootstrap stage only on a
+  node whose facts report `grants.bootstrap` (docs/design/bootstrap-stages.md);
 - whose datasets are all registered (else `DATASETS_NOT_REGISTERED`) and in `ready_datasets`;
 - whose pool needs fit the node's pools;
-- whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor);
-  otherwise the job waits with `STAGE_CAPABILITY_MISSING`;
+- whose stage's `requires.capabilities` the node has for the module, by its latest doctor report (see Doctor: a failed
+  check named after a capability takes it away); otherwise the job waits with `STAGE_CAPABILITY_MISSING`;
 - whose stage's secrets (`stages[].secrets`) each have a value the coordinator can read for this node (its own, else
   the module's); otherwise the job waits with `SECRETS_NOT_SET` (docs/design/secrets-and-signed-images.md).
 
 With `pool_jobs_only`, only jobs reserving pools are granted. `gpu_jobs` is how many more GPU jobs the node
 may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`, or that reserves a pool
 of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while the node's live GPU jobs reach that number.
+`paused` is the work active host protection rules pause on the node (`pause_fleet` scopes: `all`, `cpu`, `gpu`, `io`) and
+`paused_by` the first such rule (`rule:<id>`): none of that work is granted there while they last (`PROTECTION_ACTIVE`;
+`all` and `io` every job, `gpu` GPU jobs, `cpu` the others), since a job granted now would be paused at once, released
+after the node's longest pause (`preempt_protection`, no charge) and granted to the same node again.
 
 → `{"grants": [Grant, …]}`, possibly empty. A **Grant** carries a SpecEnvelope:
 ```json
@@ -235,6 +274,11 @@ of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while th
 - **`timeout_s`** is the stage's timeout on this node's platform (or the job's own); `hard_deadline` follows it.
 - **`checkpoint`** and the spec's **`resume`** (`{"from_attempt", "digest", "data"}`) are present when the job resumes
   from a checkpoint an earlier attempt recorded (see Checkpoints).
+- **`settings`** (only for a job of a running campaign that overrides some of its module's own keys declared
+  `"x-oarbank": {"campaign": true}`): `{short name: value}`. The agent lays them over the module's node settings, key
+  by key, in that job's `OARBANK_SETTINGS_FILE` (never a bootstrap job's). A campaign's overrides of the keys a node
+  applies (`jobs`, `run_on_battery`, `user_present_slots`) are not sent: the coordinator holds the campaign's jobs to them
+  at claim (docs/design/settings.md, "Campaign overrides").
 - **`issued_at`**, `expires_at` and `hard_deadline` are oarbankd's clock. The agent stops the attempt
   `hard_deadline - issued_at` seconds after the grant arrived, on its monotonic clock (see Clocks).
 - **`secrets`** (only for a job whose stage lists secrets): `{name: value}`, resolved for this node. The agent writes
@@ -293,8 +337,10 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   - `artifact_missing`, `input_missing` and `input_mismatch`;
   - `pin_mismatch`: a bootstrap job's result is not exactly the module's pinned datasets. For a bootstrap job the host
     checks the pins instead of calling `result.evaluate`, and registers the datasets when the result is accepted.
-- `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel"}`;
-  a release without a reason is refused (400 `reason_required`). These are not failures.
+- `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel|agent_stop"}`;
+  a release without a reason is refused (400 `reason_required`). These are not failures. `agent_stop`: the agent was
+  asked to stop (its service stopped or restarted) and stopped the runner first (docs/design/architecture.md,
+  "Stopping the agent").
 - `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient", "images"?: [{"set", "image"}]}`.
   `fault` comes from the runner's `failure.json`: `transient` is no failure at all (the attempt is released and
   the job retried), `host` implicates this node, `job` never trips its breaker. `doctor`, `mode_mismatch`, `oom` and
@@ -369,19 +415,54 @@ nondeterminism takes the results resumed from its checkpoints with it.
 - **Ready.** A dataset is ready when every file is present and verified. `prefetch` names registered datasets to
   stage ahead of need.
 
+## Node statement
+
+Every node-scope value that grants access on one node travels in that node's **statement**: canonical JSON
+`{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}}, "tools":
+[{"id", "module", "path"}], "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
+release signing the agent applies a statement only with a valid signature by the pinned release key (`oarbank node sign
+<node>`, operation `nodes.sign_statement`) and a seq above the last one it applied; in developer mode statements are
+unsigned. The agent keeps the applied statement in `state/folders.json`.
+
 ## Folders
 
 An operator maps the folder ids modules ask for (`[sandbox].folders`, approved per version) to a path per node in the
-folder registry (`settings.folders.update`). Each node gets a **folder statement** in its directives: canonical JSON
-`{"type": "oarbank.folders/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}},
-"signed_at"}` and a signature. With release signing the agent applies a statement only with a valid signature by the
-pinned release key (`oarbank folders sign <node>`) and a seq above the last one it applied; in developer mode statements
-are unsigned. The agent checks each folder (an absolute, existing directory, granted by its canonical path; not a root,
-a home directory, Oarbank's data, a system directory or a path the sandbox already grants; no two folders overlapping),
-keeps the outcome in `state/folders.json` and reports it in every heartbeat. A job of a module that asks for folders is
-placed only where every one of them reports `ok` with the access asked for (else `FOLDER_UNAVAILABLE`). The runner gets
-the granted folders in `OARBANK_FOLDERS_FILE`, read folders read-only and write folders as outboxes it can create and
-write files in but never read, list or delete (the SDK's spec/sandbox.md, "Folders").
+folder registry (`settings.folders.update`); the mapping reaches each node in its statement (`folders`). The agent
+checks each folder (an absolute, existing directory, granted by its canonical path; not a root, a home directory,
+Oarbank's data, a system directory or a path the sandbox already grants; no two folders overlapping) and reports the
+outcome in every heartbeat. A job of a module that asks for folders is placed only where every one of them reports `ok`
+with the access asked for (else `FOLDER_UNAVAILABLE`). The runner gets the granted folders in `OARBANK_FOLDERS_FILE`,
+read folders read-only and write folders as outboxes it can create and write files in but never read, list or delete
+(the SDK's spec/sandbox.md, "Folders").
+
+## Host tools
+
+The node is the source of truth for what is installed (docs/design/host-tools.md). The agent detects every tool the
+fleet defines (the built-in `jdk` and `python`, plus the release's `tools` table) at startup, after a release install,
+on `detect_tools`, when its statement's tool paths change and hourly, and reports **Tools** in hello and every
+heartbeat:
+
+- `detected_at`, `native_arch` (`arm64`, `amd64`);
+- `tools`: per tool id, every installation it found: `path` (canonical: a JDK's home, an executable's file), `given`
+  (the path as set or hinted, when it differs), `version` (a JDK 8's `1.8.0_392` is `8.0.392`), `arch` (as the
+  installation names it: `aarch64`, `x86_64`), `vendor` (a JDK's `IMPLEMENTOR`), `source` (`detected`: a built-in
+  search pattern; `search`: the fleet's; `override`: a path the node's statement adds; `local-hint`: the hints file
+  `<agent home>/tool-hints.json`), `status` (`ok` or `refused: <reason>`) and `detected_at`.
+
+A JDK is read without running anything: its home's `release` file (`JAVA_VERSION`, `OS_ARCH`, `IMPLEMENTOR`) beside
+`bin/java`. Any other tool runs its version command inside the sandbox (read and execute on that installation only,
+no network, 10 s at most) and the definition's regex reads the version from its output. A path the statement adds first
+passes the folder rules (no roots, homes, data roots or system directories themselves) and then the detector.
+`OARBANK_TOOLS_BUILTIN_SEARCH=0` in the agent's environment skips the built-in patterns.
+
+For each module the agent resolves each approved request (`sandbox.tools` of the module entry: `{id, version, arch,
+trust}`) to one installation, as the coordinator does (`oarbank_core::tools::resolve`, `tools.resolve`; vectors in
+`src/oarbank/contracts/vectors/tool-resolution.json`): the module's pin in `tool_pins` when it names an installation
+found here, else the node's native arch first, then the highest version that satisfies the request. Its runners,
+doctor, services and probes get exactly that installation in **`OARBANK_TOOLS_FILE`**, a UTF-8 JSON file
+`{"<tool id>": [{"path": "<canonical path>", "version": "17.0.12", "arch": "aarch64"}]}`, and read and execute on its
+path (an interpreter's prefix for `python`); a request that does not resolve is left out. A bootstrap job's file lists
+no tools.
 
 ## Releases
 
@@ -390,7 +471,7 @@ enable, canary, promote; see the SDK's spec/bundles.md). For each module with a 
 platform, it holds the bundle of the version the node runs:
 ```
 <release>/MANIFEST.json            every file: path, sha256, mode
-<release>/modules.json             {"format": 2, "platform": "darwin-arm64", "modules": [Module, ...]}
+<release>/modules.json             {"format": 2, "platform": "darwin-arm64", "modules": [Module, ...], "tools": {…}}
 <release>/modules/<name>/...       the module's bundle files a node of the platform receives
 ```
 A bundle's `[bundle.platform_files]` decides which files each platform's release carries (unmatched files go
@@ -410,7 +491,7 @@ interpreter and `{bundle}` with the module's bundle directory (`modules/<name>` 
                "freeze_ok": false, "endpoint": true, "gpu": {"use": "shared", "apis_any": ["metal"]}, …}],
  "probes": [{"name": "java17", "exec": ["{bundle}/node/probes/java17"], "period_s": 3600}],
  "sandbox": {"contract": 1, "net": {"mode": "egress-allowlist", "allow": ["api.example.org"]},
-             "tools": [{"id": "java17", "trust": "code-exec", "paths": ["/opt/homebrew/opt/openjdk@17"]}],
+             "tools": [{"id": "jdk", "trust": "code-exec", "version": ">=17, <22", "arch": "native"}],
              "devices": {"gpu": "none"}, "exec_writable": false, "containers": []}}
 ```
 A stage's `platforms` limits where its jobs are granted (empty: every platform of the module). A service's `endpoint`
@@ -419,8 +500,9 @@ and `gpu` are present only when the manifest sets them (docs/design/service-endp
 `runner.bandwidth_class` (`low`, `medium` or `high`) is present only when the manifest declares it. Host
 protection uses it to pick rungs when the harm is to a GPU-bound protected group (docs/design/protection.md).
 `sandbox.tools`
-carries the host paths the operator's tool registry (`settings.tools.update`) maps each approved tool id to on the
-release's OS. `sandbox.container_sets` (present only when the manifest declares sets) carries each approved set with its
+carries each approved tool request, never a path; the release's top-level `tools` table carries the fleet's tool
+definitions for the release's OS: `{"<id>": {"kind": "jdk"|"python"|"executable", "search": [extra patterns],
+"version": {"args", "regex"}}}` (`version` for executables only; see Host tools). `sandbox.container_sets` (present only when the manifest declares sets) carries each approved set with its
 public key: `[{"name", "registry", "repository", "platform", "key": "<PEM>", "index"?}]`; the agent verifies a set
 image's cosign signature (or its index membership) with it before the runtime pulls the image.
 - **Fetch.** `GET /v1/releases/{release_id}.tar.gz` serves the tarball; its sha256 comes with the
@@ -567,9 +649,12 @@ broken) or `undetected` (this node cannot run it). The agent folds in its own ca
                        "toy": {"health": "undetected", "checks": [...]}}}
 ```
 `capabilities` are what the node's offered services and healthy probes provide when the doctors ran (the agent runs
-them again when that set changes); a module's `capabilities` are its own doctor's. Together they are the node's
-capabilities for that module: a job is granted only where they hold every capability its stage requires
-(`stages[].requires.capabilities`), and a unit of work binds only to a class with such a node.
+them again when that set changes); a module's `capabilities` are its own doctor's. Together, less every capability a
+failed check of the module's doctor is named after, they are the node's capabilities for that module: a job is granted
+only where they hold every capability its stage requires (`stages[].requires.capabilities`), and a unit of work binds
+only to a class with such a node. A failed check proves nothing else: one named after no capability (`pysam_import`,
+`disk_free_20gb`) keeps the module from being certified (the doctor is not `healthy`) and so off the stages that need
+certification, never off a stage that needs none.
 `gpu_apis` are the GPU APIs the node provides on the host and inside its containers, each detected by asking the API's
 runtime for a GPU device (`oarbank-agent gpu-apis` prints the same object; docs/design/gpu-placement.md), with what was
 found or why not per API. The agent probes at start and whenever its doctors run, never on a timer. A job is granted
@@ -577,8 +662,13 @@ only where every GPU API group its stage needs is met (`GPU_API_MISSING`; the ru
 platform, on the host or with `in_container` in containers, and those of GPU services it reserves a pool of); a module
 whose runner needs an API the host lacks is not offered there (the agent reports it `undetected`, with a `gpu_apis`
 check) and is excluded by oarbankd. A node that has not reported provides none.
-Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `doctor_failed` and alerts;
-`undetected` is recorded as such and never alerts. Release-install refusals appear as `release_install`.
+Each module's report carries `ran`: true when its runner printed a DoctorOutput, false when the agent wrote the report
+itself because the doctor did not start, crashed, hung or printed something else (then its only check is `doctor`, whose
+detail ends with the last 4000 characters of what the doctor printed). Modules with `ran` true are offered in claims,
+whatever their health; a report without `ran` (an older agent) counts as run unless it is that `doctor` failure. Check
+details are kept and shown whole (`oarbank node show`, the node page). oarbankd records `unhealthy` as `doctor_failed`
+and alerts; `undetected` is recorded as such and never alerts. Neither is certified, so only stages that need no
+certification run there (docs/design/stage-gating.md). Release-install refusals appear as `release_install`.
 
 ## Certification and goldens
 
@@ -594,16 +684,20 @@ Only `healthy` modules are offered in claims. oarbankd records `unhealthy` as `d
   stop retrying and alert. Nondeterminism against another node's canonical result quarantines the node.
 - **Stages that do not compare.** A stage whose effective determinism is `none` (`stages[].determinism`, else
   `results.determinism`) is never golden-tested, replicated or compared, and neither takes nor serves a result-cache hit:
-  its results depend on when it ran. Its jobs are otherwise ordinary (fenced, certified nodes only, stage retry,
-  placement). S21 checks it.
-- **Offers.** A node is granted only jobs of modules it is certified for.
+  its results depend on when it ran. Its jobs are otherwise ordinary (fenced, stage retry, placement). S21 checks it.
+- **Stages that need no certification** (docs/design/stage-gating.md): a bootstrap stage, and a stage that compares
+  nothing and requires no capability and no pool (oarbank-sdk `Manifest.certification_exempt`). Their jobs run on any
+  node where the module's runner started, before its goldens pass, and their results carry no certification fence;
+  they never count toward certification. S8 holds them to a state the doctor decides.
+- **Offers.** A node is granted only jobs of modules it is certified for, except jobs of stages that need no
+  certification.
 
 ## Staged jobs (stage chains)
 
 A module whose manifest has a stage `B` with `after = "A"` can run a job as the chain A → B. Its
 single-stage form is the default stage: the one marked `default = true`, or the only stage that neither runs `after`
-another nor is depended on. The chain is enabled when the module's pipeline is split (`oarbank pipeline split --module
-<name>`, setting `pipeline:<module>`), for jobs that name no stage. A `jobs.enqueue` item that names a standalone stage
+another nor is depended on. The chain is enabled when the module's pipeline is split (the setting `[module] pipeline`:
+`oarbank settings set pipeline split --module <name>`), for jobs that name no stage. A `jobs.enqueue` item that names a standalone stage
 (`stage`, host capability `jobs.stage`) runs exactly that stage in any pipeline mode, with that stage's resources,
 timeout, retry and platforms; its envelope names the stage, except the default stage, which stays absent.
 
@@ -625,7 +719,33 @@ timeout, retry and platforms; its envelope names the stage, except the default s
 
 ## Limits and node policy
 
-**Limits** (user caps): every key is optional, and a missing key or `null` means uncapped (the default):
+Both are the node's complete effective settings (docs/design/settings.md): the coordinator resolves every key (its
+default, the fleet's value, the node's groups', the node's own) and sends every key in every hello and heartbeat reply,
+with `settings_rev`, the revision at which they last changed. The agent checks each key against its table (generated
+from the coordinator's registry): a value of the wrong type or out of range, a missing key or one this agent does not
+know is refused, keeps its previous value (before the first heartbeat: the table's default) and is reported in the next
+heartbeat:
+```json
+"settings": {"applied_rev": 42, "rejected": [{"key": "job_mem_gb", "reason": "expected a number, got \"abc\""}]}
+```
+Owners change them with `settings.apply` at the fleet, a group or a node; there is no per-node copy to edit.
+
+**Managed on this machine.** The machine's managed policy may set keys of either section under `Settings` (macOS
+domain `dev.codonic.oarbank.agent`, the `Settings` subkey of `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent`,
+`/etc/oarbank/policy.json`; docs/install.md, "MDM"). The agent applies each only where it is stricter than what the
+coordinator sends (and over its defaults before the first heartbeat), so it can only tighten: the keys the table marks
+`managed`, in each key's `tighten` direction. When the policy sets any, the report adds them:
+```json
+"settings": {"applied_rev": 42, "rejected": [],
+             "managed": [{"key": "run_on_battery", "value": false, "binding": true}, {"key": "jobs", "value": 4, "binding": false}],
+             "managed_refused": [{"key": "job_mem_gb", "reason": "not a setting managed policy may set"}],
+             "managed_by": "Example Org"}
+```
+`binding` says the managed value is what applies (stricter than the coordinator's). The coordinator keeps the report,
+shows it ("Managed on this machine") and folds it into the node's resolution where it is stricter.
+
+**Limits** (user caps): every key is present; `null` means uncapped (the default). Every scope's cap applies and the
+lowest wins:
 ```json
 {"cpu_cores": null, "mem_gb": null, "jobs": null, "vm_mem_gb": null, "vm_cpus": null, "disk_gb": null,
  "staging_mbps": null, "schedule": null, "enforce": "soft"}
@@ -637,14 +757,29 @@ timeout, retry and platforms; its envelope names the stage, except the default s
 
 **Policy** (the owner's per-node settings):
 ```json
-{"run_on_battery": false, "user_idle_s": 300, "nice": 10, "threads_per_job": 1, "job_mem_gb": 1.5,
- "disabled_services": ["example/vm"], "module_settings": {"example": {…}},
+{"os_reserve_gb": 6, "user_reserve_gb": 8, "user_present_slots": 2, "user_idle_s": 300, "screen_sharing_present": true,
+ "run_on_battery": false, "mem_in_use_bound": true, "job_mem_gb": 1.5, "threads_per_job": 1, "max_slots": null,
+ "nice": 10, "hard_limits": false, "disabled_services": ["example/vm"], "module_settings": {"example": {…}},
  "protection": {"schema": 1, "node": {"mode": "moderate"}, "rule": [ … ]}}
 ```
-- **`disabled_services`** sets a node's role. Changing it re-doctors and re-certifies the node.
-- **`module_settings.<module>`** holds what a module's services read.
-- **`protection`** is owner-set host protection (schema 1). The console edits it with versions, restore and
-  canary; see docs/design/protection.md.
+- **Defaults** come from the settings registry; `os_reserve_gb`'s is computed from the node's RAM (4 GB up to 32 GB,
+  8 GB from 96 GB, else 6), so it follows the hardware the node reports. Nothing is copied at enrolment.
+- **`screen_sharing_present`** (default `true`): a macOS Screen Sharing session counts as someone using the machine
+  even without input.
+- **`mem_in_use_bound`** (default `true`): the memory for jobs never exceeds what the machine has available now (see
+  Capacity and host protection); `false` leaves the reserves alone.
+- **`disabled_services`** sets a node's role: `<module>/<service>` for each service a module does not run here, which
+  the coordinator computes from each module's effective `[module] services.disabled` for the node (set for the fleet, a
+  group or the node). Changing a module's re-doctors and re-certifies that module on the node.
+- **`module_settings.<module>`** is exactly what that module's runners, doctor and services read on this node in
+  `OARBANK_SETTINGS_FILE`: each key its settings schema declares with `"x-oarbank": {"scope": "node"}`, resolved for
+  the node (the fleet's, a group's or the node's value, else the key's default; a key with neither is absent). A module
+  appears only when it has such a value, and never sees another module's keys. The agent rewrites a module's file only
+  when its content changes, through a temporary file and a rename; a bootstrap job gets `{}`.
+- **`protection`** is owner-set host protection (schema 1): the node's effective section, which the coordinator
+  assembles from the settings chain (`protection.mode`, `protection.rules` from every scope together, `protection.node`;
+  a rule the node's OS cannot run is left out). See docs/design/protection.md and docs/design/settings.md,
+  "Protection on the chain".
 - **`hard_limits`** (default `false`) turns each job's reservation (`resources.cpu`, `resources.mem_gb`) into hard
   limits where the OS has them: a cgroup v2 leaf on Linux (when systemd delegated the agent's cgroup), the Job
   Object on Windows; macOS has none. A job over its memory limit fails with `oom`, the job's fault.
@@ -653,10 +788,20 @@ timeout, retry and platforms; its envelope names the stage, except the default s
 
 The agent computes `capacity` every tick and sends it in the heartbeat:
 ```json
-{"cpu_slots": 10, "mem_gb_free": 14.5, "pools": {"containers": 3}, "auto_cpu_slots": 12,
- "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|user",
- "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_mem_gb": 6.1}
+{"cpu_slots": 10, "mem_gb_free": 14.5, "pools": {"containers": 3}, "auto_cpu_slots": 12, "idle_cpu_slots": 12,
+ "slots": 9, "auto_slots": 9, "user_present": false,
+ "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|memory_in_use|user",
+ "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_cpu": 0, "reserved_mem_gb": 6.1,
+ "host_budget_gb": 14.5, "mem_binding": "reserve|in_use|cap", "mem_budget_reserve_gb": 44.0,
+ "mem_budget_in_use_gb": 14.5, "mem_in_use_gb": 40.9, "mem_margin_gb": 8.68, "paused": [], "paused_by": null}
 ```
+`paused` and `paused_by` are what the claim sends (see Work): a rule pausing `all` or `io` also stops admission
+(`admit` false, `why` and `binding_limit` the rule), one pausing `gpu` sets `gpu_jobs` to 0.
+`host_budget_gb` is the smaller of the reserve bound (RAM minus the OS and user reserves, the services' and protection's
+reservations) and the in-use bound (memory available now plus the fleet jobs' resident share of their reservations,
+minus the memory guard's soft floor and 1 GB), and of the owner's `mem_gb` cap; `mem_binding` names which.
+`mem_in_use_gb` is what everything but the fleet's jobs uses; `idle_cpu_slots` is the CPU slots with nobody present.
+Cores are physical (`perf + eff/2`); the formulas and the per-OS readings are in docs/design/protection.md, "Capacity".
 `cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide, plus the
 agent's own `containers` pool (its container runtime, while it can run containers: a Windows node whose session is not
 ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI; never on macOS) (a

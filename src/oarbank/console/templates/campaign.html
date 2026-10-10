@@ -5,4 +5,10 @@
 <div hx-get="/frag/campaign/{{ c.campaign_id }}" hx-trigger="sse:tick, sse:resync" hx-swap="innerHTML" class="live-tile">
 {% include "_campaign_body.html" %}
 </div>
+{% if overrides %}{% import "_settings.html" as S with context %}
+<div class="settings-sections campaign-overrides" id="overrides">
+{% if not overrides.active %}<p class="small" role="status"><span class="chip warn">inactive</span> The campaign is {{ c.state }}: its overrides are kept but apply to nothing.</p>
+{% elif overrides.section.changed or overrides.section.advanced_changed %}<p class="small banner-note" role="status"><span class="chip acc">while this campaign runs</span> Its jobs get the values set below instead of the fleet's.</p>{% endif %}
+{{ S.section_form(overrides.section, "campaign", c.campaign_id, "campaign:" ~ c.campaign_id, "/campaigns/" ~ c.campaign_id, c.name or c.campaign_id, explain) }}
+</div>{% endif %}
 {% endblock %}

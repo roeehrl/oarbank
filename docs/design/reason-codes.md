@@ -10,13 +10,14 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `QUEUED_BEHIND` | Eligible, but behind {ahead} higher-priority jobs | P1 | – | `jobs.set_priority` | – |
 | `DEPENDENCY_UNMET` | Waiting for stage {stage} (job {job_id}) | P1 | – | – | – |
 | `CAMPAIGN_PAUSED` | Campaign {campaign} is not running | P1 | – | `campaigns.resume` | – |
+| `CAMPAIGN_SETTING_HOLDS` | Its campaign's settings hold its jobs here: {setting} ({have}) | P1 | – | `settings.apply` | – |
 | `OARBANK_PAUSED` | The fleet is paused | P1 | – | `fleet.resume` | `fleet_halt` |
 | `BACKOFF` | Retrying after {seconds} s (backoff) | P1 | – | – | – |
 | `POOL_EXHAUSTED` | No free {pool} token ({free} free, {need} needed) | P1 | – | – | – |
 | `POOL_ABSENT` | The node offers no {pool} pool | P1 | – | – | – |
 | `INSUFFICIENT_CPU` | Needs {need} cores, {free} allocatable | P1 | – | – | – |
 | `INSUFFICIENT_MEM` | Needs {need} GB, {free} GB allocatable | P1 | – | – | – |
-| `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `nodes.set_caps` | – |
+| `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `settings.apply` | – |
 | `MODULE_NOT_READY` | Module {module} is not ready on this node (doctor: {health}) | P1 | – | `nodes.run_doctor` | – |
 | `MODULE_NOT_CERTIFIED` | Module {module} is not certified on this node yet | P1 | – | `nodes.recertify` | – |
 | `MODULE_DISABLED` | Module {module} is disabled | P1 | – | `modules.enable_canary` | `module_disabled` |
@@ -27,9 +28,12 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `STAGE_CAPABILITY_MISSING` | Its stage needs {capabilities}; this node's services, probes and module doctor do not provide {missing} | P1 | – | `nodes.run_doctor` | – |
 | `GPU_API_MISSING` | Needs {need}; this node provides {have} (its doctor's GPU APIs) | P1 | – | `nodes.run_doctor` | – |
 | `SECRETS_NOT_SET` | Its stage receives secrets {missing}, which have no value for this node | P1 | – | `secrets.set` | – |
+| `SETTINGS_NOT_SET` | Module {module} needs settings {missing}, which have no value for this node | P1 | – | `settings.apply` | – |
 | `DATASET_PLATFORM_MISMATCH` | Its dataset is bound to {platforms}; this node is {platform} | P1 | – | `jobs.cancel` | – |
 | `OS_VERSION_UNSUPPORTED` | Module {module} needs another OS version than {os_version} (requires.os) | P1 | – | – | – |
-| `TOOL_UNAVAILABLE` | Module {module} needs host tools the tool registry has no {os} paths for | P1 | – | `settings.tools.update` | – |
+| `TOOL_NOT_FOUND` | Module {module} needs a host tool this node does not have: {tools} | P1 | – | `tools.detect`, `tools.define` | – |
+| `TOOL_VERSION_UNMET` | Module {module} needs another version of a host tool: {tools} | P1 | – | `tools.detect` | – |
+| `TOOL_REFUSED` | Module {module} needs a host tool whose path this node refused: {tools} | P1 | – | `tools.detect` | – |
 | `FOLDER_UNAVAILABLE` | Module {module} needs folders this node does not provide (unmapped, another access, refused by the node, or awaiting the owner's signature) | P1 | – | `settings.folders.update` | – |
 | `SANDBOX_BACKEND_MISSING` | The agent on this node cannot sandbox module processes | P1 | – | – | – |
 | `CAPABILITY_NOT_ENFORCED` | The node's sandbox cannot enforce {capability}, which module {module} needs | P1 | – | – | – |
@@ -53,6 +57,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `NODE_QUARANTINED` | Quarantined: {reason} | P3 | – | `nodes.clear_quarantine` | `node_quarantined` |
 | `NODE_RETIRED` | Retired | P1 | – | – | `node_retired` |
 | `RELEASE_PENDING` | Installing release {release} | P1 | – | – | – |
+| `NO_RELEASE` | No release yet: install and enable a module | P1 | – | `modules.install`, `modules.enable` | – |
+| `RELEASE_UNSIGNED` | Release {release} for {platform} is waiting for the owner's signature: oarbank release sign {release} --promote | P1 | – | `releases.attach_signature` | – |
 | `NOT_ADMITTING` | The agent admits no new work: {why} | P1 | – | – | – |
 | `CLOCK_SKEW` | The node's clock is {offset_s} s off the coordinator's: jobs and moves use the coordinator's time, but certificates and update metadata need a correct clock; set the node's time | P3 | – | – | – |
 
@@ -111,6 +117,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `TIMEOUT` | Hit the {timeout_s} s limit | P1 | yes / yes | – | `timeout` |
 | `LEASE_EXPIRED` | Lease expired (no heartbeat for {seconds} s) | P1 | yes / no | – | `lease_expired` |
 | `AGENT_RESTARTED` | The agent restarted without the attempt | P1 | no / no | – | `agent_restart` |
+| `AGENT_STOPPED` | The agent on the node was stopped (its service stopped or restarted); released and requeued | P1 | no / no | – | `agent_stop` |
 | `RELEASE_INVALID` | Granted under a release the node no longer runs | P1 | no / no | – | `release_invalid` |
 | `STALE_GENERATION` | The job was requeued after this attempt was granted | P1 | no / no | – | `stale_generation` |
 | `LOST_RACE` | Another attempt finished first | P1 | no / no | – | `lost_race` |

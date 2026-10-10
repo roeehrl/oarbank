@@ -17,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config as C
 from . import clock
 from . import modcalls
-from . import (agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, nodeservices,
+from . import (agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, nodepolicy, nodeservices,
                ops, releases)
 from ..contracts import operations as registry
 from .db import DB, DBBusy, jl
@@ -396,9 +396,9 @@ def host_guard(app: FastAPI, reader, default_port: int | None = None):
     @app.middleware("http")
     async def _hosts(request: Request, call_next):
         port = (request.scope.get("server") or (None, default_port))[1] or default_port
-        allowed = access.allowed_hosts(port, reader.get_setting("console_hosts") or []) | access.TEST_HOSTS
+        allowed = access.allowed_hosts(port, reader.fleet_setting("console_hosts") or []) | access.TEST_HOSTS
         if not access.host_ok(request.headers.get("host"), allowed):
-            return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (setting console_hosts)"},
+            return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (Settings → Access: console_hosts)"},
                                 status_code=421)
         return await call_next(request)
 
@@ -428,7 +428,7 @@ class ReadSide:
         self._cache[key] = (time.monotonic(), v)
         return v
 
-    def get_setting(self, key, default=None):
+    def get_state(self, key, default=None):
         """Cached until any connection commits (PRAGMA data_version): an allowlist change applies at once."""
         with self.lock:
             dv = self.conn.execute("PRAGMA data_version").fetchone()[0]
@@ -436,10 +436,22 @@ class ReadSide:
         if hit and hit[0] == dv:
             v = hit[1]
         else:
-            rows = self.q("SELECT value_json FROM settings WHERE key=?", (key,))
+            rows = self.q("SELECT value_json FROM system_state WHERE key=?", (key,))
             v = json.loads(rows[0]["value_json"]) if rows else None
             self._cache[("setting", key)] = (dv, v)
         return default if v is None else v
+
+    def fleet_setting(self, key):
+        """A fleet setting's value (settings.fleet_value), cached the same way."""
+        from .settings import fleet_value
+        with self.lock:
+            dv = self.conn.execute("PRAGMA data_version").fetchone()[0]
+        hit = self._cache.get(("fleet", key))
+        if hit and hit[0] == dv:
+            return hit[1]
+        v = fleet_value(self, key)
+        self._cache[("fleet", key)] = (dv, v)
+        return v
 
 
 def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None = None, local_channel: bool = False) -> FastAPI:
@@ -507,7 +519,11 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(403, "forbidden_role", "this needs the admin role")
 
     def console_only(request: Request):
-        """Sign-in ceremonies: only the console (its per-boot secret, loopback) may ask."""
+        """Sign-in ceremonies: only the console (its per-boot secret, loopback) may ask, or the owner on the local admin
+        channel (the setup wizard proves the new account's authenticator there: the channel is already the owner's
+        credential, so it grants nothing new)."""
+        if local_channel:
+            return
         cs = request.headers.get("x-oarbank-console-secret")
         if not (console_secret and cs and hmac.compare_digest(cs.encode(), console_secret.encode())
                 and peer(request) in LOOPBACK):
@@ -629,8 +645,8 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     @app.get("/internal/state")
     def internal_state(actor=Depends(who)):
         """In-memory facts for the console (cheap: no per-request table scans)."""
-        return {"boot_id": boot_id, "now": clock.now(), "fleet_state": ro.get_setting("fleet_state", "active"),
-                "alive_at": ro.get_setting("alive_at"), "writer": db.lock.stats(), "modules": modcalls.host(db).health(),
+        return {"boot_id": boot_id, "now": clock.now(), "fleet_state": ro.get_state("fleet_state", "active"),
+                "alive_at": ro.get_state("alive_at"), "writer": db.lock.stats(), "modules": modcalls.host(db).health(),
                 "modules_disabled": sorted(modstore.disabled_names(db))}
 
     # ---------------- view models
@@ -642,10 +658,13 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         done1h = db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='completed' AND ended_at>?",
                         (n["node_id"], t - 3600))["n"]
         mods = jl(n.get("modules_json"), {}) or {}
+        from .settings.apply import flat_values
+        facts, policy = jl(n["facts_json"], {}), flat_values(n)
         return {**n, "mods": mods,
-                "facts": jl(n["facts_json"], {}), "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
-                "policy": jl(n["policy_json"], {}), "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
-                "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n)}
+                "facts": facts, "tel": tel, "cap": cap, "limits": core.node_limits(n),
+                "policy": policy, "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
+                "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n),
+                "why": nodepolicy.why(cap, tel, facts, policy, n.get("os"), n["node_id"])}
 
     def fleet_data():
         nodes = [node_view(n) for n in db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]
@@ -656,7 +675,7 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
                                "FROM jobs WHERE campaign_id=? AND kind!='call'", (c["campaign_id"],))
             c["eta_s"] = eta(c["campaign_id"])
         alerts = db.q("SELECT * FROM alerts WHERE state='open' ORDER BY opened_at DESC")
-        discovered = db.get_setting("discovered", [])
+        discovered = db.get_state("discovered", [])
         known = {n["ts_node_id"] for n in nodes if n["ts_node_id"]}
         discovered = [d for d in discovered if d["ts_node_id"] not in known]
         events = db.q("SELECT * FROM events ORDER BY event_id DESC LIMIT 25")
@@ -760,10 +779,24 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     @app.get("/api/v1/folders")
     def api_folders(actor=Depends(who)):
         """The folder registry, each node's statement (and whether it is signed) and what each node reports."""
-        from . import folders
-        return {"registry": folders.registry(db), "statements": folders.statements(db), "signing": C.RELEASE_SIGNING,
+        from . import folders, statements
+        return {"registry": folders.registry(db), "statements": statements.statements(db), "signing": C.RELEASE_SIGNING,
                 "nodes": {n["node_id"]: {"hostname": n["hostname"], "folders": folders.report(n)}
                           for n in db.q("SELECT node_id, hostname, folders_json FROM nodes WHERE lifecycle!='retired'")}}
+
+    @app.get("/api/v1/statements")
+    def api_statements(actor=Depends(who)):
+        """Each node's signed statement (statements.py: its folders and added tool paths) and whether it is signed."""
+        from . import statements
+        return {"statements": statements.statements(db), "signing": C.RELEASE_SIGNING}
+
+    @app.get("/api/v1/tools")
+    def api_tools(node: str | None = None, module: str | None = None, actor=Depends(who)):
+        """Host tools (docs/design/host-tools.md): the definitions, the paths set where nodes inherit them, and the
+        detection and resolution matrix: every node (or `node`) with what it found and each enabled module's resolution
+        per tool request, or, with `module`, that module's Nodes matrix."""
+        from . import tools
+        return tools.api(db, node, module)
 
     @app.get("/api/v1/campaigns/{cid}/artifacts")
     def api_campaign_artifacts(cid: str, actor=Depends(who)):
@@ -822,6 +855,20 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return {"installed": [{k: v for k, v in r.items() if k != "manifest"} for r in modstore.installed(db)],
                 "channels": modstore.channels(db), "pins": [{"name": n, "node_id": nd, "version": v}
                                                             for (n, nd), v in modstore.pins(db).items()]}
+
+    @app.get("/api/v1/modules/readiness")
+    def api_modules_readiness(actor=Depends(who)):
+        """Every installed module's readiness checklist (readiness.py): what stands between it and running work."""
+        from . import readiness
+        return readiness.all_modules(db)
+
+    @app.get("/api/v1/modules/{name}/readiness")
+    def api_module_readiness(name: str, actor=Depends(who)):
+        from . import readiness
+        r = readiness.module(db, name)
+        if r is None:
+            raise core.ApiError(404, "not_found", f"no module {name} is installed")
+        return r
 
     @app.get("/api/v1/modules/{name}/secrets")
     def api_module_secrets(name: str, actor=Depends(who)):
@@ -942,9 +989,100 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     def api_modules(actor=Depends(who)):
         return modcalls.catalog_rows(db)
 
+    # ---------------- settings (docs/design/settings.md): the registry, effective values, the chain, the reverse view
+    def _settings_doc(fn):
+        from .settings import SettingError
+        try:
+            out = fn()
+        except SettingError as e:
+            raise core.ApiError(404 if e.code in ("unknown_setting", "unknown_campaign", "unknown_group", "unknown_node", "unknown_module") else 400, e.code, e.detail)
+        if out is None:
+            raise core.ApiError(404, "not_found", "no such node")
+        return out
+
+    @app.get("/api/v1/settings/schema")
+    def api_settings_schema(actor=Depends(who)):
+        from .settings import registry, store
+        from .settings import resolve as V
+        snap = V.snapshot(db)
+        return {"settings": registry.schema_doc(snap.defs), "sections": {k: {"title": t, "help": h} for k, (t, h) in registry.SECTIONS.items()},
+                "groups": store.groups(db), "scopes": list(registry.SCOPES), "modules": snap.modules,
+                "module_core_keys": list(registry.MODULE_CORE_KEYS)}
+
+    @app.get("/api/v1/settings/effective")
+    def api_settings_effective(node: str = "", module: str = "", campaign: str = "", actor=Depends(who)):
+        from .settings import views
+        return _settings_doc(lambda: views.effective_doc(db, node or None, module, campaign))
+
+    @app.get("/api/v1/settings/explain")
+    def api_settings_explain(key: str, node: str = "", module: str = "", campaign: str = "", actor=Depends(who)):
+        from .settings import views
+        return _settings_doc(lambda: views.explain_doc(db, key, node or None, module, campaign))
+
+    @app.get("/api/v1/settings/export")
+    def api_settings_export(scope: str = "fleet", module: str = "", actor=Depends(who)):
+        """A scope's settings as YAML (settings/export.py): values and locks, groups, labels, tool definitions;
+        secrets as fingerprints only."""
+        from fastapi.responses import PlainTextResponse
+        from .settings import export
+        text = _settings_doc(lambda: export.export_yaml(db, scope, module))
+        name = "oarbank-settings-" + (scope.replace(":", "-") or "fleet") + (f"-{module}" if module else "") + ".yml"
+        return PlainTextResponse(text, media_type="application/yaml",
+                                 headers={"content-disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/api/v1/settings/shadowed")
+    def api_settings_shadowed(actor=Depends(who)):
+        """Values that change nothing: under a lock, the same as inherited, or with no effect (settings/reports.py)."""
+        from .settings import reports
+        return reports.shadowed(db)
+
+    @app.get("/api/v1/settings/drift")
+    def api_settings_drift(actor=Depends(who)):
+        """Nodes whose agent does not run its latest settings, refused keys, or whose managed policy tightens them."""
+        from .settings import reports
+        return reports.drift(db)
+
+    @app.get("/api/v1/settings/overrides")
+    def api_settings_overrides(key: str, module: str = "", scope: str = "", actor=Depends(who)):
+        from .settings import views
+        return _settings_doc(lambda: views.overrides_doc(db, key, module, scope))
+
+    # ---------------- node groups and labels (docs/design/settings.md, "Groups and labels")
     @app.get("/api/v1/groups")
     def api_groups(actor=Depends(who)):
-        return db.get_setting("dataset_groups", {})
+        from .settings import groups
+        return groups.view(db)
+
+    @app.get("/api/v1/groups/preview")
+    def api_group_preview(selector: str = "", members: str = "", actor=Depends(who)):
+        """Live member preview while a group is edited: which nodes a selector and members would take in, and why (a
+        read: nothing is written)."""
+        from .settings import groups, resolve as V
+        try:
+            sel = json.loads(selector) if selector.strip() else {}
+        except ValueError:
+            raise core.ApiError(400, "bad_selector", "selector: a JSON object")
+        try:
+            g = {"selector": groups.check_selector(sel),
+                 "members": groups.check_members(db, [x.strip() for x in members.split(",") if x.strip()])}
+        except groups.GroupError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+        snap = V.snapshot(db)
+        rows = db.q("SELECT node_id, hostname, os, arch, facts_json FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+        out = []
+        for n in rows:
+            m = groups.membership(g, n, snap.node_labels(n)["all"])
+            out.append({"node_id": n["node_id"], "hostname": n["hostname"], **m})
+        return {"rule": groups.describe(g, {n["node_id"]: n["hostname"] for n in rows}), "nodes": out,
+                "members": sum(1 for x in out if x["member"])}
+
+    @app.get("/api/v1/groups/{ident}")
+    def api_group(ident: str, actor=Depends(who)):
+        from .settings import groups
+        out = groups.view(db, ident)
+        if not out["groups"]:
+            raise core.ApiError(404, "unknown_group", f"no group {ident!r}")
+        return {"group": out["groups"][0], "labels": out["labels"]}
 
     @app.get("/api/v1/features")
     def api_features(actor=Depends(who)):
@@ -957,8 +1095,14 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
 
     @app.get("/api/v1/releases")
     def api_releases(actor=Depends(who)):
-        return db.q("SELECT release_id, created_at, sha256, status, seq, signature IS NOT NULL AS signed FROM releases "
-                    "ORDER BY created_at DESC LIMIT 50")
+        """The latest releases; `awaiting` names, for one the owner must sign before nodes get it, the command that
+        lets it through (releases.awaiting)."""
+        from . import releases
+        wait = {a["release_id"]: a for a in releases.awaiting(db)}
+        return [{**{k: v for k, v in r.items() if k != "composition_json"}, "modules": releases.contents(r["composition_json"]),
+                 "awaiting": wait.get(r["release_id"])} for r in db.q(
+            "SELECT release_id, platform, created_at, sha256, status, seq, signature IS NOT NULL AS signed, composition_json "
+            "FROM releases ORDER BY created_at DESC LIMIT 50")]
 
     @app.get("/api/v1/events")
     def api_events(after: int = 0, actor=Depends(who)):
@@ -1013,7 +1157,7 @@ def campaign_loop(db: DB, stop: threading.Event):
     while not stop.is_set():
         try:
             if coordmove.serving(db):
-                if db.get_setting("move_postflight_pending"):
+                if db.get_state("move_postflight_pending"):
                     modlife.postflight(db)               # once, on a coordinator that just took over
                 campaigns.tick_all(db)
                 if clock.now() - last_integrity > 3600:
@@ -1050,13 +1194,13 @@ def _check_invariants(db: DB):
     resolves it (the condition returning to True does not clear it)."""
     from . import invariants
     conds = invariants.conditions(db, clock.now())
-    prev = {c["id"]: c for c in (db.get_setting("invariant_conditions") or [])}
+    prev = {c["id"]: c for c in (db.get_state("invariant_conditions") or [])}
     for c in conds:
         c["last_transition_at"] = prev.get(c["id"], {}).get("last_transition_at", c["checked_at"]) \
             if prev.get(c["id"], {}).get("status") == c["status"] else c["checked_at"]
         if c["status"] == "False":
             core._alert(db, f"invariant:{c['id']}", "fleet", f"{c['id']} ({c['name']}): {c['message']}", priority="max")
-    db.set_setting("invariant_conditions", conds)
+    db.set_state("invariant_conditions", conds)
 
 
 def background(db: DB, stop: threading.Event):
@@ -1067,11 +1211,11 @@ def background(db: DB, stop: threading.Event):
             if not coordmove.serving(db):               # frozen for a move, a standby, or handed off: no writes
                 stop.wait(2)
                 continue
-            db.set_setting("alive_at", clock.now())      # restart outage = now - alive_at
+            db.set_state("alive_at", clock.now())      # restart outage = now - alive_at
             core.reap(db)            # campaign ticks run on their own thread (campaign_loop) so a slow module
             t = clock.now()          # can never delay lease expiry (bench/README.md bottleneck 4)
             if t - last_disc > 60:
-                db.set_setting("discovered", core.tailscale_peers())
+                db.set_state("discovered", core.tailscale_peers())
                 last_disc = t
             if t - last_views > 10:
                 from . import modviews
@@ -1079,6 +1223,8 @@ def background(db: DB, stop: threading.Event):
                 last_views = t
             if t - last_inv > 60:
                 _check_invariants(db)
+                from . import releases
+                releases.ensure_fleet(db)       # each platform's release (and which one waits for the owner)
                 last_inv = t
             if t - last_audit > 3600:
                 _audit_hourly(db)

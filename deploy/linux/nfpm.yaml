@@ -46,6 +46,10 @@ contents:
   - src: ./node-desktop.desktop
     dst: /usr/share/applications/dev.codonic.oarbank.node.desktop
     file_info: {mode: 0644}
+  # the join window's administrator prompt (pkexec): says what Oarbank Node is about to do, with its icon
+  - src: ./dev.codonic.oarbank.node.policy
+    dst: /usr/share/polkit-1/actions/dev.codonic.oarbank.node.policy
+    file_info: {mode: 0644}
   # the official artwork, as the coordinator's package installs it (coordinator-nfpm.yaml)
   - src: ${REPO}/docs/assets/logo.svg
     dst: /usr/share/icons/hicolor/scalable/apps/oarbank-node.svg

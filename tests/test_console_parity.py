@@ -133,6 +133,64 @@ def test_node_mode_sets_the_protection_mode(fleet, capsys):
     assert code == 1 and "fleet_first|moderate|strict_yield" in out
 
 
+def test_settings_commands_do_what_the_settings_pages_do(fleet, capsys):
+    """`oarbank settings` reads and writes what the node's Settings tab and Fleet Settings do: the effective values with
+    their source, set and reset at a node or the fleet (previewed: the nodes it reaches), the whole chain, the reverse
+    view; `oarbank node show` names what the node sets itself, and `node policy` / `node limits` are gone."""
+    db, nid = fleet["db"], fleet["nid"]
+    vals = lambda: json.loads(db.one("SELECT settings_json FROM nodes WHERE node_id=?", (nid,))["settings_json"])
+    code, out = oarbank(capsys, "settings", "set", "os_reserve_gb", "10", "--node", nid, "--yes")
+    assert code == 0, out
+    assert "settings.apply (T1)" in out and "Changes the effective value on 1 node (mini)" in out and "Saved · rev" in out
+    assert vals()["policy"]["os_reserve_gb"] == 10
+    code, out = oarbank(capsys, "settings", "set", "job_mem_gb", "abc", "--node", nid, "--yes")
+    assert code == 1 and "job_mem_gb: Memory per job slot: expected number" in out           # refused at the coordinator
+    code, out = oarbank(capsys, "settings", "get", "--node", "mini")
+    lines = [x.strip() for x in out.splitlines()]
+    assert any(x.startswith("os_reserve_gb") and "10 GB" in x and x.endswith("This node") for x in lines), out
+    assert any(x.startswith("user_reserve_gb") and x.endswith("Default") for x in lines)
+    code, out = oarbank(capsys, "settings", "explain", "os_reserve_gb", "--node", nid)
+    assert "Memory kept for the system (os_reserve_gb) on mini: 10 GB · This node" in out
+    assert "Default" in out and "(24 GB RAM)" in out and "<- in effect" in out
+    code, out = oarbank(capsys, "node", "show", nid)
+    assert "os_reserve_gb (Memory kept for the system): 10 GB · This node  reset: oarbank settings reset os_reserve_gb --node mini" in out
+    code, out = oarbank(capsys, "settings", "set", "user_idle_s", "60", "--yes")                  # the fleet: T2, previewed
+    assert code == 0 and "settings.apply (T2)" in out and "Changes the effective value on 1 node (mini)" in out
+    assert vals()["policy"]["user_idle_s"] == 60
+    code, out = oarbank(capsys, "settings", "overrides", "os_reserve_gb")
+    assert "node   mini" in out and "10 GB" in out
+    assert oarbank(capsys, "settings", "reset", "os_reserve_gb", "--node", nid, "--yes")[0] == 0
+    assert vals()["policy"]["os_reserve_gb"] == 4 and not db.q("SELECT 1 FROM setting_values WHERE scope='node'")
+    code, out = oarbank(capsys, "settings", "set", "services.disabled", "scorer,vm", "--module", "relay", "--node", nid,
+                        "--dry-run")
+    assert code == 2 and "plan pl_" in out and vals()["policy"]["disabled_services"] == []
+    code, out = oarbank(capsys, "settings", "set", "tile_size", "64", "--module", "relay", "--node", nid, "--yes")
+    assert code == 0 and vals()["policy"]["module_settings"]["relay"]["tile_size"] == 64      # a module's own node setting
+    code, out = oarbank(capsys, "settings", "get", "--module", "relay", "--node", nid)
+    assert any(x.split()[0] == "module.relay.tile_size" and "64" in x and "This node" in x for x in out.splitlines()), out
+    assert oarbank(capsys, "node", "policy", nid)[0] != 0 and oarbank(capsys, "node", "limits", nid)[0] != 0
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(
+        {"cpu_slots": 10, "idle_cpu_slots": 10, "slots": 10, "mem_gb_free": 14.0, "mem_binding": "in_use", "mem_in_use_gb": 6.0,
+         "user_present": False, "admit": True, "binding_limit": "auto"}), nid))
+    lines = [x.strip() for x in oarbank(capsys, "node", "show", nid)[1].splitlines()]
+    assert ("why: 10 slots (5 performance cores + 10 efficiency cores at half) · 14 GB free for jobs "
+            "(apps and the system use 6.0 GB)") in lines
+    assert "(5 performance cores + 10 efficiency cores at half)" in oarbank(capsys, "fleet")[1]
+
+
+def test_the_ntfy_token_is_write_only(fleet, capsys, monkeypatch):
+    import io
+    db = fleet["db"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO("tok-123456\n"))
+    code, out = oarbank(capsys, "settings", "set-secret", "ntfy_token")
+    assert code == 0 and "ntfy_token set: fingerprint fp:" in out and "tok-123456" not in out
+    from oarbank.coordinator import modsecrets
+    assert modsecrets.core_value(db, "ntfy_token") == "tok-123456"
+    assert "tok-123456" not in json.dumps(db.q("SELECT * FROM audit"), default=str)
+    assert oarbank(capsys, "settings", "clear-secret", "ntfy_token", "--yes")[0] == 0
+    assert modsecrets.core_state(db, "ntfy_token") == {"set": False}
+
+
 # ------------------------------------------------------------------ oarbank protection
 
 def test_protection_commands_do_what_the_protection_page_does(fleet, capsys):
@@ -145,28 +203,25 @@ def test_protection_commands_do_what_the_protection_page_does(fleet, capsys):
     assert f"protection.rules.update (T2) on {nid}:" in out and "rule zoom matches 1 process(es): 812 zoom.us" in out
     assert protection.current(db, nid)[0] == 0
     assert oarbank(capsys, "protection", "set", nid, rules, "--yes")[0] == 0
-    assert protection.current(db, nid) == (1, RULES)
+    effective = {"schema": 1, "node": {"mode": "moderate"}, "rule": RULES["rule"]}
+    assert protection.current(db, nid) == (1, effective)
     toml = tmp / "rules.toml"
     toml.write_text('schema = 1\n[node]\nmode = "fleet_first"\n[[rule]]\nid = "zoom"\nmatch = { path_contains = "zoom.us" }\n'
                     'reserve = { mem_gb = 3 }\n')
     assert oarbank(capsys, "protection", "set", nid, toml, "--yes")[0] == 0
     assert protection.current(db, nid)[1]["node"]["mode"] == "fleet_first"
-    assert oarbank(capsys, "protection", "restore", nid, "1", "--yes")[0] == 0
-    assert protection.current(db, nid) == (3, RULES)
-    assert oarbank(capsys, "protection", "canary", nid, rules, "--yes")[0] == 0
+    # the fleet's rules and a group's join the node's own: `show` names where each comes from
+    fleet_rules = tmp / "fleet.json"
+    fleet_rules.write_text(json.dumps({"schema": 1, "rule": [{"id": "slack", "match": {"path_contains": "Slack"},
+                                                              "reserve": {"mem_gb": 1}}]}))
+    assert oarbank(capsys, "protection", "set", "fleet", fleet_rules, "--yes")[0] == 0
     code, out = oarbank(capsys, "protection", "show", "mini")
-    assert code == 0 and f"protection on mini ({nid}): version 4, mode moderate" in out
-    assert re.search(r"zoom\s+not reported\s+- processes", out) and f"canary: {nid} version 4" in out and "soaking" in out
-    assert "rules.canary" in out and "rules.restore:1" in out
-    code, out = oarbank(capsys, "protection", "promote", "--yes")
-    assert code == 1 and "canary_not_promotable" in out                  # still soaking
-    code, out = oarbank(capsys, "protection", "promote", "--force", "--yes")
-    assert code == 0, out
-    assert db.get_setting(protection.CANARY_KEY) is None
-    assert db.one("SELECT target_id FROM audit WHERE operation='protection.rules.canary' ORDER BY event_id DESC LIMIT 1")["target_id"] == nid
-    assert oarbank(capsys, "protection", "promote", "--yes")[1].count("no_canary") == 1
+    assert code == 0 and f"protection on mini ({nid}): mode fleet_first · This node; history version 3" in out
+    assert re.search(r"zoom\s+not reported\s+- processes\s+from This node", out) and re.search(r"slack .* from Fleet", out)
+    assert "this node's own section: 1 rules, mode fleet_first" in out
+    assert db.one("SELECT target_id FROM audit WHERE operation='protection.rules.update' ORDER BY event_id DESC LIMIT 1")["target_id"] == "fleet"
     assert oarbank(capsys, "protection", "probe", nid)[0] == 0 and fresh(db, fleet["node"])["want_probe"] == 1
-    assert oarbank(capsys, "protection", "set", nid)[1].endswith("oarbank protection set <node> <file>")
+    assert oarbank(capsys, "protection", "set", nid)[1].endswith("oarbank protection set <node|fleet|group:G> <file>")
 
 
 # ------------------------------------------------------------------ oarbank job show | retry | cancel
@@ -294,12 +349,12 @@ def test_explain_remedies_are_buttons_that_run_their_operation(console):
 
 def test_remedies_that_need_more_than_a_target_link_to_their_form():
     from oarbank.console import views
-    doc = {"remedies": [{"op": "nodes.set_caps", "target": "n_1", "params": {"node": "n_1"}, "label": "Set caps"},
+    doc = {"remedies": [{"op": "settings.apply", "target": "n_1", "params": {"node": "n_1"}, "label": "Set caps"},
                         {"op": "secrets.set", "target": None, "params": {"job_id": 3, "module": "vault"}, "label": "Set"},
                         {"op": "secrets.set", "target": None, "params": {"node": "n_1"}, "label": "Set"},
                         {"op": "nodes.run_doctor", "target": None, "params": {"job_id": 3}, "label": "Run doctor"}]}
     acts = views.remedy_actions(doc)
-    assert [(a["href"], a["button"]) for a in acts] == [("/nodes/n_1#limits", False), ("/modules/vault/secrets", False),
+    assert [(a["href"], a["button"]) for a in acts] == [("/nodes/n_1/settings#caps", False), ("/modules/vault/secrets", False),
                                                         ("/modules", False), (None, False)]
     assert acts[3]["command"] == "oarbank op nodes.run_doctor"
     from oarbank.contracts import reason_codes
@@ -354,3 +409,32 @@ def test_module_health_shows_each_pinned_dataset_registered_waiting_or_in_confli
                  (json.dumps(man.datasets.pinned[0].dataset_files()),))
             assert "registered since" in text(c.get("/modules/depot/health").text)
 
+
+
+def test_settings_as_code_campaigns_and_reports_from_the_command_line(fleet, capsys, tmp_path):
+    """`oarbank settings export` / `import --dry-run` (exit 0: no changes), a changed file imported, a campaign's
+    override with --campaign, `settings shadowed` and `settings drift`."""
+    db, nid, sid = fleet["db"], fleet["nid"], fleet["sid"]
+    code, _ = oarbank(capsys, "settings", "set", "job_mem_gb", "2", "--yes")
+    assert code == 0
+    f = tmp_path / "fleet.yml"
+    code, out = oarbank(capsys, "settings", "export", "--out", f)
+    assert code == 0 and "job_mem_gb: 2" in f.read_text()
+    code, out = oarbank(capsys, "settings", "import", f, "--dry-run")
+    assert code == 0 and "No changes: the file matches this fleet" in out
+    f.write_text(f.read_text().replace("job_mem_gb: 2", "job_mem_gb: 3"))
+    code, out = oarbank(capsys, "settings", "import", f, "--dry-run")
+    assert code == 2 and "Memory per job slot at Fleet: 2 GB → 3 GB" in out
+    code, out = oarbank(capsys, "settings", "import", f, "--yes", "--reason", "from file")
+    assert code == 0 and "Imported 1 change" in out
+    code, out = oarbank(capsys, "settings", "set", "replica_rate", "0.5", "--campaign", sid, "--yes")
+    assert code == 0 and "its jobs get it" in out
+    code, out = oarbank(capsys, "settings", "get", "--campaign", sid)
+    assert code == 0 and "replica_rate" in out and "(set by the campaign)" in out
+    code, out = oarbank(capsys, "settings", "set", "replica_rate", "0.01", "--campaign", sid, "--yes")
+    assert code != 0 and "may only tighten" in out
+    code, out = oarbank(capsys, "settings", "set", "job_mem_gb", "3", "--node", nid, "--yes")
+    code, out = oarbank(capsys, "settings", "shadowed")
+    assert code == 0 and "the same as it inherits" in out and f"oarbank settings reset job_mem_gb --node" in out
+    code, out = oarbank(capsys, "settings", "drift")
+    assert code == 0 and ("do not run their latest settings" in out or "Every node runs" in out)

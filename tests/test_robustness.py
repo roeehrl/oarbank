@@ -6,6 +6,7 @@ import pytest
 from oarbank.coordinator import clock, core, invariants
 
 from helpers import CAPACITY, release_id, create_study, tick, SCENES, PARAMS, READY, certified_fleet, certify, enrolled_node, fresh, golden_result, make_db, relay_result
+from helpers import set_fleet
 
 RIGHT, WRONG = relay_result(score="0.850000", image="A"), relay_result(score="0.860000", image="B")
 
@@ -44,7 +45,7 @@ def test_replication_catches_a_silently_wrong_node_and_invalidates_its_work(db):
     """A node that returns plausible but wrong results is never caught by fencing or validation.
     Replicas of a sample of its jobs run elsewhere; a mismatch opens a quorum dispute; the third node
     convicts it; every canonical result it produced is recomputed."""
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     bad, good1, good2 = certified_fleet(db, ("bad", "good1", "good2"))
     study(db, SCENES[:2])
     g1, r1 = run_one(db, bad, WRONG)
@@ -175,7 +176,7 @@ def test_dispute_without_a_possible_tie_breaker_is_quarantined_and_alerted(db):
 
 
 def test_replica_match_is_recorded_and_changes_nothing(db):
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     n1, n2 = certified_fleet(db, ("n1", "n2"))
     study(db, SCENES[:1])
     g, _ = run_one(db, n1, RIGHT)
@@ -195,7 +196,7 @@ def test_platform_scoped_results_replicate_and_compare_only_within_a_platform(db
     info = modcalls.info("relay")
     man = info.manifest.model_copy(update={"results": info.manifest.results.model_copy(update={"determinism_scope": "platform"})})
     monkeypatch.setitem(modcalls.CATALOG, "relay", dataclasses.replace(info, manifest=man))
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     n1, n2 = certified_fleet(db, ("n1", "n2"))
     box = certify(db, enrolled_node(db, "box", facts=facts_for("linux-amd64", os_version="6.8"))[1])
     study(db, SCENES[:1])
@@ -279,7 +280,7 @@ def test_comparisons_use_the_platform_a_result_was_produced_on(db, monkeypatch):
     compared with it (and disputed), because results.platform is a snapshot, not the node's current platform."""
     from helpers import facts_for
     _relay_with(monkeypatch, scope="platform")
-    db.set_setting("replica_rate", 0.0)
+    set_fleet(db, "replica_rate", 0.0)
     n1, n2, n3 = certified_fleet(db, ("n1", "n2", "n3"))
     study(db, SCENES[:1])
     g1 = claim(db, n1, free=1)[0]
@@ -390,7 +391,7 @@ def test_node_giving_two_answers_for_one_job_convicts_itself(db):
 
 
 def test_F3_no_replica_without_another_eligible_node(db):
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     (n1,) = certified_fleet(db, ("n1",))
     study(db, SCENES[:1])
     run_one(db, n1, RIGHT)
@@ -398,7 +399,7 @@ def test_F3_no_replica_without_another_eligible_node(db):
 
 
 def test_F3_reaper_drops_a_replica_nobody_can_run(db):
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     n1, n2 = certified_fleet(db, ("n1", "n2"))
     study(db, SCENES[:1])
     run_one(db, n1, RIGHT)
@@ -449,7 +450,7 @@ def test_F5_node_stuck_certifying_does_not_hold_a_replica_or_dispute_open(db):
 
 def test_F5_replica_only_a_stuck_node_could_run_is_dropped(db):
     from helpers import DOCTOR_OK
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     (n1,) = certified_fleet(db, ("n1",))
     _, stuck = enrolled_node(db, "stuck")
     core.hello(db, stuck, {"release_id": release_id(db), "facts": {}, "live_attempts": [], "ready_datasets": READY})

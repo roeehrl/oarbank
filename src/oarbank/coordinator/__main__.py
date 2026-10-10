@@ -70,6 +70,8 @@ def run(a):
         raise SystemExit(f"oarbankd: {C.HOME} holds a coordinator; a standby starts empty (add --archive-home)")
     db = DB(C.DB_PATH)
     identity.ensure(db)
+    from . import statements
+    statements.refresh(db)                    # statements an earlier version issued are reissued as oarbank.node/v1
     from . import hostinfo
     hostinfo.refresh(db)
     completed_move = movepull.finish_install(db, C.HOME)
@@ -81,8 +83,8 @@ def run(a):
         standby_tls.ensure_ca(C.HOME, identity.fleet_id(db))      # the standby's own CA until the move brings the fleet's
         puller = movepull.Puller(db, C.HOME, from_url=a.from_url, code=a.pair, my_url=my_url, from_ca=a.from_ca)
         threading.Thread(target=puller.run, daemon=True, name="oarbankd-standby").start()
-    elif identity.role(db) == "active" and not db.get_setting("coordinator_url"):
-        db.set_setting("coordinator_url", my_url)
+    elif identity.role(db) == "active" and not db.get_state("coordinator_url"):
+        db.set_state("coordinator_url", my_url)
     from . import modcalls, modlife
     modlife.runtimes_ok(db)                   # module venvs an earlier coordinator build made run on its interpreter
     modcalls.use(db)                          # the module catalog comes from the store (oarbank module install)
@@ -97,7 +99,7 @@ def run(a):
     bus = EventBus()
     db.event_listeners.append(bus.notify)
     # A coordinator restart must not mass-expire healthy work: extend live leases by the outage.
-    last = db.get_setting("alive_at") or db.one("SELECT MAX(ts) m FROM events")["m"]
+    last = db.get_state("alive_at") or db.one("SELECT MAX(ts) m FROM events")["m"]
     if last:
         outage = max(0.0, time.time() - last)
         n = db.one("SELECT COUNT(*) n FROM attempts WHERE state='live'")["n"]
@@ -115,7 +117,7 @@ def run(a):
     import socket
     from urllib.parse import urlsplit
     names = [a.agent_bind, socket.gethostname(), urlsplit(my_url).hostname or "",
-             urlsplit(db.get_setting("coordinator_url") or "").hostname or ""]
+             urlsplit(db.get_state("coordinator_url") or "").hostname or ""]
     ssl_opts = tlsca.server_context(C.HOME, names)
     from . import discovery
     announce = discovery.advertise(identity.fleet_id(db), a.agent_port, tlsca.pins(C.HOME)["ca_spki_sha256"], a.agent_bind) \

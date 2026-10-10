@@ -15,10 +15,19 @@ using Microsoft.Win32;
 
 // Oarbank Node, the node's tray app on Windows (docs/design/node-enrollment.md, "Join window: files and launch
 // contract"). It shows the status document the agent writes (%ProgramData%\Oarbank\status\node.json), offers Join this
-// PC or Status (both the join window, run by the node runtime's pythonw.exe) and Start at sign-in. It never needs
+// PC or Status (both the join window, run by the node runtime's pythonw.exe), and what became of
+// container support when it was asked for (HKLM\SOFTWARE\Codonic\Oarbank\ContainerSupport, written by the task the
+// installer leaves: rust/crates/oarbank-launcher/src/container_support.rs). It never needs
 // administrator rights: the join window asks Windows (UAC) only for the join itself. One instance per session: a second
 // launch with --join or --link opens the join window itself (which reopens one already open), a plain second launch
 // asks the running instance to.
+//
+// The menu bar model of docs/design/node-enrollment.md, "Menu bar and tray": one setting, "Show Oarbank Node in the
+// notification area". On, the icon is shown and the app starts at sign-in (this user's HKCU Run value); "Hide from
+// notification area" turns it off (removes the Run value) and exits. The node is a Windows service with a lifetime of
+// its own: hiding or exiting this app never stops it. Starting Oarbank Node from the Start menu (or the installer's last
+// page) turns the setting on again. Managed policy ShowStatusIcon decides instead when set: 0 never shows the icon (a
+// start from the Start menu only opens the join window), 1 keeps it shown and hides nothing.
 //
 //   "Oarbank Node.exe" [--join | --link oarbank://join?code=... | --background | --self-test]
 //
@@ -29,15 +38,19 @@ sealed class NodeTray : Form {
     // managed policy (rust/crates/oarbank-agent/src/policy.rs; the ADMX template in deploy/windows/admx)
     const string PolicyKey = @"SOFTWARE\Policies\Codonic\Oarbank\Agent";
     const string AgentService = "dev.codonic.oarbank.agent";
+    // container support's outcome (State, Detail), written by LocalSystem only (container_support.rs)
+    const string ContainerSupportKey = @"SOFTWARE\Codonic\Oarbank\ContainerSupport";
     const int FastRefresh = 5000, SlowRefresh = 30000;
     static readonly string Root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
     readonly NotifyIcon icon = new NotifyIcon();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
     readonly ToolStripMenuItem status = new ToolStripMenuItem("Checking…");
     readonly ToolStripMenuItem managed = new ToolStripMenuItem("");
+    readonly ToolStripMenuItem containers = new ToolStripMenuItem("");
     readonly ToolStripMenuItem join = new ToolStripMenuItem("Join this PC…");
     readonly ToolStripMenuItem details = new ToolStripMenuItem("Status…");
-    readonly ToolStripMenuItem startup = new ToolStripMenuItem("Start at sign-in");
+    readonly ToolStripMenuItem hide = new ToolStripMenuItem("Hide from notification area");
+    readonly ToolStripMenuItem keepsRunning = new ToolStripMenuItem("This PC's node keeps running");
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     readonly EventWaitHandle reopen;
     volatile bool quitting;
@@ -45,14 +58,16 @@ sealed class NodeTray : Form {
     NodeTray(EventWaitHandle signal, bool selfTest) {
         reopen = signal; Text = "Oarbank Node"; ShowInTaskbar = false;
         var unused = Handle; // Marshal all callbacks through this UI thread.
-        var title = new ToolStripMenuItem("Oarbank Node"); title.Enabled = false; status.Enabled = false; managed.Enabled = false;
-        menu.Items.Add(title); menu.Items.Add(status); menu.Items.Add(managed); menu.Items.Add(new ToolStripSeparator());
+        var title = new ToolStripMenuItem("Oarbank Node"); title.Enabled = false; status.Enabled = false; managed.Enabled = false; containers.Enabled = false;
+        menu.Items.Add(title); menu.Items.Add(status); menu.Items.Add(managed); menu.Items.Add(containers); menu.Items.Add(new ToolStripSeparator());
         join.Click += (s,e) => Request(null);
         details.Click += (s,e) => Request(null);
         menu.Items.Add(join); menu.Items.Add(details); menu.Items.Add(new ToolStripSeparator());
-        startup.Click += (s,e) => ToggleStartup();
-        menu.Items.Add(startup); menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Quit Oarbank Node", null, (s,e) => Close());
+        // never "Quit": the node is not this app. Hiding turns the setting off and exits; the service keeps running.
+        hide.Click += (s,e) => HideFromNotificationArea();
+        hide.ToolTipText = "Oarbank Node leaves the notification area and stops starting at sign-in. This PC's node keeps running.";
+        keepsRunning.Enabled = false;
+        menu.Items.Add(hide); menu.Items.Add(keepsRunning);
         icon.Icon = LoadIcon();
         icon.Text = "Oarbank Node"; icon.ContextMenuStrip = menu;
         icon.MouseClick += (s,e) => { if(e.Button == MouseButtons.Left) menu.Show(Cursor.Position); };
@@ -143,13 +158,45 @@ sealed class NodeTray : Form {
         } catch { return null; }
     }
 
-    // AllowUserJoin=0 (REG_DWORD, or "false" as text, as the agent reads it) hides Join: the organization joins the PC
-    internal static bool UserJoinAllowed() {
-        var v = PolicyValue("AllowUserJoin");
+    // a boolean policy as the agent reads it: REG_DWORD (0 is false) or the words true/false, yes/no, 1/0; else unset
+    internal static bool? PolicyBool(object v) {
         if(v is int) return (int)v != 0;
         var s = v as string;
-        if(s != null) { s = s.Trim().ToLowerInvariant(); return !(s == "0" || s == "false" || s == "no"); }
-        return true;
+        if(s != null) {
+            s = s.Trim().ToLowerInvariant();
+            if(s == "1" || s == "true" || s == "yes") return true;
+            if(s == "0" || s == "false" || s == "no") return false;
+        }
+        return null;
+    }
+
+    // AllowUserJoin=0 hides Join: the organization joins the PC
+    internal static bool UserJoinAllowed() { return PolicyBool(PolicyValue("AllowUserJoin")) != false; }
+
+    // ShowStatusIcon: 0 hides the icon for everyone, 1 keeps it shown; unset, each person decides
+    internal static bool? ShowPolicy() { return PolicyBool(PolicyValue("ShowStatusIcon")); }
+
+    // Container support asked for at install (CONTAINERS=1, a code made for container jobs, oarbank-node join
+    // --containers) and not finished: the same lines as `oarbank-node status` (container_support.rs, line). Empty: nothing to say.
+    internal static string ContainerLine(string state, string detail) {
+        switch(state ?? "") {
+            case "scheduled": return "Container support installs when setup has finished";
+            case "installing": return "Installing container support…";
+            case "waiting": return "Container support waits for another installation; it continues when Windows restarts";
+            case "restart": return "Restart Windows to finish container support";
+            case "failed": return String.IsNullOrEmpty(detail) ? "Container support failed" : "Container support failed: " + detail;
+            default: return "";
+        }
+    }
+
+    static string ContainerSupport() {
+        try {
+            using(var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+            using(var key = hklm.OpenSubKey(ContainerSupportKey)) {
+                if(key == null) return "";
+                return ContainerLine(Convert.ToString(key.GetValue("State"), CultureInfo.InvariantCulture), Convert.ToString(key.GetValue("Detail"), CultureInfo.InvariantCulture));
+            }
+        } catch { return ""; }
     }
 
     static string ManagedBy(Dictionary<string,object> st) {
@@ -164,9 +211,11 @@ sealed class NodeTray : Form {
         status.Text = Describe(st, AgentServiceState());
         var org = ManagedBy(st);
         managed.Text = "Managed by " + org; managed.Available = org.Length > 0;
+        var support = ContainerSupport();
+        containers.Text = support; containers.Available = support.Length > 0;
         join.Available = !joined && UserJoinAllowed();
         details.Available = joined || (S(st, "state") != "unjoined" && S(st, "state").Length > 0);
-        try { startup.Checked = StartupEnabled(); } catch { startup.Checked = false; }
+        hide.Enabled = ShowPolicy() != true;          // a managed "shown" leaves nothing to hide
         var tip = "Oarbank Node — " + status.Text;
         icon.Text = tip.Length > 63 ? tip.Substring(0, 62) + "…" : tip; // NotifyIcon refuses more than 63 characters
     }
@@ -224,7 +273,7 @@ sealed class NodeTray : Form {
         } catch(Exception error) { Error("Could not open the join window", error.Message); }
     }
 
-    // MARK: Start at sign-in (per user, no administrator rights)
+    // MARK: Show in the notification area (per user, no administrator rights): the HKCU Run value starts it at sign-in
 
     static string StartupCommand() { return Quote(Application.ExecutablePath) + " --background"; }
     static bool StartupEnabled() {
@@ -238,9 +287,22 @@ sealed class NodeTray : Form {
             else if(String.Equals(key.GetValue(RunName) as string, StartupCommand(), StringComparison.OrdinalIgnoreCase)) key.DeleteValue(RunName, false);
         }
     }
-    void ToggleStartup() {
-        try { SetStartup(!StartupEnabled()); } catch(Exception error) { Error("Could not change Start at sign-in", error.Message); }
-        try { startup.Checked = StartupEnabled(); } catch { }
+    // the setting follows a start: the Start menu (or the installer's last page) turns it on, policy decides when set
+    static void ApplySetting(bool interactive) {
+        var managed = ShowPolicy();
+        try {
+            if(managed.HasValue) SetStartup(managed.Value);
+            else if(interactive) SetStartup(true);
+        } catch { }
+    }
+
+    void HideFromNotificationArea() {
+        if(ShowPolicy() == true) return;
+        var answer = MessageBox.Show("This PC's node keeps running and stays joined: it is a Windows service. To show Oarbank Node again, open it from the Start menu.",
+                                     "Hide Oarbank Node from the notification area?", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+        if(answer != DialogResult.OK) return;
+        try { SetStartup(false); } catch(Exception error) { Error("Could not stop Oarbank Node starting at sign-in", error.Message); }
+        Close();
     }
 
     static void Error(string title, string message) { MessageBox.Show(message, title, MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -257,8 +319,14 @@ sealed class NodeTray : Form {
 
     void SelfTest() {
         if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true") throw new InvalidOperationException("Self-test is only for disposable CI runners.");
-        Expect(menu.Items.Count == 10 && menu.Items[0].Text == "Oarbank Node" && menu.Items[4].Text == "Join this PC…" &&
-               menu.Items[5].Text == "Status…" && menu.Items[7].Text == "Start at sign-in" && menu.Items[9].Text == "Quit Oarbank Node", "Tray menu items missing.");
+        Expect(menu.Items.Count == 10 && menu.Items[0].Text == "Oarbank Node" && menu.Items[3] == containers && menu.Items[5].Text == "Join this PC…" &&
+               menu.Items[6].Text == "Status…" && menu.Items[8] == hide && menu.Items[8].Text == "Hide from notification area" &&
+               menu.Items[9].Text == "This PC's node keeps running" && !menu.Items[9].Enabled, "Tray menu items missing.");
+        Expect(PolicyBool(0) == false && PolicyBool(1) == true && PolicyBool(" False ") == false && PolicyBool("yes") == true &&
+               PolicyBool("maybe") == null && PolicyBool(null) == null, "policy booleans");
+        Expect(ContainerLine("restart", "") == "Restart Windows to finish container support" &&
+               ContainerLine("failed", "no virtualization") == "Container support failed: no virtualization" &&
+               ContainerLine("done", "") == "" && ContainerLine(null, null) == "", "container support lines");
         Expect(Describe(Doc("{\"state\":\"unjoined\"}"), 1) == "Not joined", "unjoined");
         Expect(Describe(Doc("{\"state\":\"pending\",\"user_code\":\"WDJB-MJHT\"}"), 1) == "Waiting for approval (code WDJB-MJHT)", "pending");
         Expect(Describe(Doc("{\"state\":\"connected\",\"coordinator\":\"https://build.example:7443\"}"), 1) == "Connected to build.example", "connected");
@@ -280,7 +348,8 @@ sealed class NodeTray : Form {
             SetStartup(true); Expect(StartupEnabled(), "Startup registration failed.");
             SetStartup(false); Expect(!StartupEnabled(), "Startup removal failed.");
             RefreshStatus();
-            Console.WriteLine("Native tray menu, status, links and per-user startup round-trip passed. This node: " + status.Text);
+            Console.WriteLine("Native tray menu, status, links and the notification-area setting's round-trip passed. This node: " + status.Text +
+                              (containers.Available ? "; " + containers.Text : ""));
         } finally {
             using(var key = Registry.CurrentUser.CreateSubKey(RunKey)) { if(original == null) key.DeleteValue(RunName, false); else key.SetValue(RunName, original); }
             Close();
@@ -303,6 +372,13 @@ sealed class NodeTray : Form {
             if(!created && !test) {
                 // one tray per session: this launch only does what it was asked
                 if(asked) Request(link); else if(!background) signal.Set();
+                return;
+            }
+            if(!test) ApplySetting(!background);
+            // hidden by policy, or started at sign-in with the setting off (a Run value someone else left): no icon. A start
+            // that asked for something still opens the join window, then exits.
+            if(!test && (ShowPolicy() == false || (background && !StartupEnabled()))) {
+                if(asked || !background) Request(link);
                 return;
             }
             try {
