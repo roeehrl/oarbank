@@ -485,11 +485,33 @@ def cmd_vendor_metadata(a):
 
 
 def cmd_join_code(a):
-    """oarbank join-code: a one-time code that enrolls (and approves) a new machine: oarbank-agent run --join <code>."""
-    res = run_op("nodes.join_code", None, {"label": a.label or "", "ttl_s": a.ttl}, a.reason, a.yes)
+    """oarbank join-code [revoke <id>]: a join code for new machines (node-enrollment.md): single use and approved at once
+    by default; `--uses N` makes a multi-use code whose machines wait for approval unless `--approve`."""
+    if a.action == "revoke":
+        if not a.target:
+            sys.exit("oarbank join-code revoke <id>")
+        print(json.dumps(run_op("nodes.revoke_join_code", a.target, {}, a.reason, a.yes), indent=1, default=str))
+        return
+    params = {"label": a.label or "", "ttl_s": a.ttl, "uses": a.uses, "system": a.system, "containers": a.containers}
+    if a.approve is not None:
+        params["approve"] = a.approve
+    res = run_op("nodes.join_code", None, params, a.reason, a.yes)
     r = (res or {}).get("result") or {}
     if r.get("code"):
-        print(f"{r['command']}\n(single use; expires in {a.ttl / 60:.0f} min)")
+        uses = "single use" if r["uses"] == 1 else f"up to {r['uses']} machines"
+        then = "approved at once" if r["approve"] else "each waits for your approval"
+        print(f"{r['code']}\n\n({uses}, {then}; expires in {a.ttl / 3600:.1f} h; id {r['id']})\n"
+              f"On the machine: install the Oarbank node package, then `sudo oarbank-node join` and paste the code.")
+
+
+def cmd_join_codes(a):
+    """oarbank join-codes: outstanding join codes, their uses and the machines that used them."""
+    for c in api("GET", f"/api/v1/join-codes?spent={'true' if a.all else 'false'}"):
+        print(f"{c['id']}  {c['state']:<8} {c['uses']}/{c['max_uses']} uses  "
+              f"{'auto-approve' if c['approve'] else 'needs approval'}  {c['label'] or '-'}  "
+              f"expires {time.strftime('%Y-%m-%d %H:%M', time.localtime(c['expires_at']))}")
+        for e in c["enrollments"]:
+            print(f"    {e['enrollment_id']}  {e['status']:<8} {e['node_name'] or e['hostname']}  {e['peer_ip'] or ''}")
 
 
 def cmd_alerts(a):
@@ -652,6 +674,8 @@ def cmd_node(a):
         res = run_op("nodes.confirm_identity", a.target, {}, yes=True)
     elif a.action == "approve":
         res = run_op("nodes.admit", a.target, reason=a.reason, yes=a.yes)
+    elif a.action == "approve-code":
+        res = run_op("nodes.admit_code", None, {"user_code": a.target}, a.reason, a.yes)
     elif a.action == "reject":
         res = run_op("nodes.reject_enrollment", a.target, reason=a.reason, yes=a.yes)
     elif a.action == "mode":
@@ -990,7 +1014,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("fleet").set_defaults(fn=cmd_fleet)
     n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, sandbox), "
                                     "approve, reject, state, mode, limits, policy, confirm-identity")
-    n.add_argument("action", choices=["show", "approve", "reject", "state", "mode", "limits", "policy", "confirm-identity"])
+    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "limits", "policy", "confirm-identity"])
     n.add_argument("target")
     n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES))
     n.add_argument("kv", nargs="*")
@@ -1049,13 +1073,24 @@ def parser() -> argparse.ArgumentParser:
     fo.add_argument("--reason")
     fo.add_argument("--yes", "-y", action="store_true")
     fo.set_defaults(fn=cmd_folders)
-    jc = sub.add_parser("join-code", help="a one-time join code for a new machine (it is approved when it enrolls)")
+    jc = sub.add_parser("join-code", help="a join code for new machines (single use and approved at once by default); "
+                                          "join-code revoke <id> revokes one")
+    jc.add_argument("action", nargs="?", choices=["create", "revoke"], default="create")
+    jc.add_argument("target", nargs="?", help="revoke: the code's id (oarbank join-codes)")
     jc.add_argument("--label", help="the new node's name; it keeps it whatever host name its agent reports "
-                                    "(default: the name the agent reports)")
-    jc.add_argument("--ttl", type=float, default=3600, help="seconds the code stays valid")
+                                    "(default: the name the agent reports; ignored by multi-use codes)")
+    jc.add_argument("--ttl", type=float, default=4 * 3600, help="seconds the code stays valid (default 4 h)")
+    jc.add_argument("--uses", type=int, default=1, help="how many machines may join with it (default 1)")
+    jc.add_argument("--approve", action=argparse.BooleanOptionalAction, default=None,
+                    help="approve machines at once (default: yes for a single-use code, no for a multi-use one)")
+    jc.add_argument("--system", action="store_true", help="suggest the system service (macOS: runs with no one logged in)")
+    jc.add_argument("--containers", action="store_true", help="suggest container jobs (Windows installs WSL components)")
     jc.add_argument("--reason")
     jc.add_argument("--yes", action="store_true")
     jc.set_defaults(fn=cmd_join_code)
+    jl = sub.add_parser("join-codes", help="outstanding join codes and the machines that used them")
+    jl.add_argument("--all", action="store_true", help="also codes spent more than a day ago")
+    jl.set_defaults(fn=cmd_join_codes)
     mc = sub.add_parser("cli", help="run a module's own CLI on the coordinator, sandboxed: oarbank cli <module> [args...]")
     mc.add_argument("module")
     mc.add_argument("args", nargs=argparse.REMAINDER)

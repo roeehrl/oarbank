@@ -27,6 +27,13 @@ pub fn csr_pem(key: &KeyPair, hostname: &str) -> Result<String> {
     Ok(p.serialize_request(key)?.pem()?)
 }
 
+/// `sha256:` and the first 16 hex digits of the SHA-256 of the node's public key: what the join window and the console
+/// show for a machine waiting for approval.
+pub fn fingerprint(key: &KeyPair) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{}", &hex::encode(Sha256::digest(rcgen::PublicKeyData::subject_public_key_info(key)))[..16])
+}
+
 pub fn have_cert(l: &Layout) -> bool {
     l.node_cert().exists() && l.ca_cert().exists() && l.node_key().exists()
 }

@@ -8,6 +8,7 @@ pub mod canonical;
 pub mod deps;
 pub mod egress;
 pub mod images;
+pub mod joincode;
 pub mod portable;
 mod py;
 pub mod sandbox;

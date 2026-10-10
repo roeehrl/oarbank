@@ -122,6 +122,11 @@ pub fn sc_create_args(name: &str, display: &str, program: &[String], account: Op
 /// `icacls` arguments that give a system service's home to the service's virtual account (`NT SERVICE\\<name>`, which
 /// exists once the service does) and otherwise only to Administrators and SYSTEM, named by SID so any display language
 /// works: inheritance from ProgramData (which lets every user read, and create files) is removed.
+/// The status directory (node-enrollment.md): the service may write it; everyone keeps reading it (inherited).
+pub fn icacls_status_args(name: &str, dir: &str) -> Vec<String> {
+    vec![dir.into(), "/grant".into(), format!("NT SERVICE\\{name}:(OI)(CI)M")]
+}
+
 pub fn icacls_home_args(name: &str, home: &str) -> Vec<String> {
     vec![home.into(), "/inheritance:r".into(), "/grant:r".into(), format!("NT SERVICE\\{name}:(OI)(CI)F"),
          "/grant:r".into(), "*S-1-5-32-544:(OI)(CI)F".into(), "/grant:r".into(), "*S-1-5-18:(OI)(CI)F".into()]

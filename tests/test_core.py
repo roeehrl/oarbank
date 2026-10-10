@@ -1,4 +1,5 @@
 """Coordinator logic: lifecycle, dispatch, fencing, acceptance, caps, caching, reaper."""
+import base64
 import time
 import uuid
 
@@ -334,11 +335,12 @@ def test_hello_kills_unknown_attempts_and_releases_forgotten(db):
 def test_a_join_codes_label_names_the_node_and_the_reported_hostname_does_not_rename_it(db):
     # the label went into the approval reason ("join:owner (mini-2)") and the node took the host name it reported
     from oarbank.coordinator import joincodes
-    key = "ab" * 32
+    cik = base64.b64encode(bytes(32)).decode()
 
     def join(label, hostname):
-        secret = joincodes.decode(joincodes.create(db, ["https://127.0.0.1:7443"], key, "owner", label=label)["code"])["t"]
-        e = core.enroll(db, hostname, {**FACTS, "hostname": hostname}, "127.0.0.1", node_key_and_csr()[1], join=secret)
+        token = joincodes.decode(joincodes.create(db, urls=["https://127.0.0.1:7443"], pins=["ab" * 32], cik=cik,
+                                                  actor="owner", label=label)["code"])["token"]
+        e = core.enroll(db, hostname, {**FACTS, "hostname": hostname}, "127.0.0.1", node_key_and_csr()[1], join=token)
         assert e["status"] == "approved"
         row = db.one("SELECT node_id, decided_by FROM enrollments WHERE enrollment_id=?", (e["enrollment_id"],))
         assert row["decided_by"] == "join:owner"

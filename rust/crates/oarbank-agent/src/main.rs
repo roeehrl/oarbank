@@ -5,6 +5,7 @@ mod api;
 mod broker;
 #[cfg(target_os = "linux")]
 mod cgroup;
+mod check;
 mod checkpoints;
 mod clock;
 mod config;
@@ -26,6 +27,7 @@ mod keys;
 mod moves;
 mod outbox;
 mod paths;
+mod policy;
 mod procs;
 mod prot;
 mod proxy;
@@ -43,6 +45,7 @@ mod selfupdate;
 mod services;
 mod signing;
 mod staging;
+mod status;
 mod sys;
 mod tls;
 mod tuf;
@@ -105,22 +108,50 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the agent: enroll if needed, then keep a session with the coordinator.
+    /// Run the agent: join or enroll if needed, then keep a session with the coordinator. Started with nothing to join
+    /// with, it waits (status `unjoined`) for a staged code (`--join-file`) or, with `--policy`, managed policy.
     Run {
         /// The coordinator's agent URL, https://<host>:7443 (stored in agent.json), or `discover`: the one coordinator
-        /// announcing itself on the local network.
+        /// announcing itself on the local network. Without a code the owner approves the node (by its device code).
         #[arg(long)]
         coordinator: Option<String>,
-        /// A join code from the coordinator's owner (`oarbank join-code`): it names the coordinator and approves this node.
-        #[arg(long)]
+        /// A join code (development and tests; installers stage a file instead, so the code is in no service
+        /// definition and on no command line).
+        #[arg(long, hide = true)]
         join: Option<String>,
-        /// A file holding a join code (installers and MDM): used while this node has no certificate, then deleted.
+        /// Where a join code is staged (`oarbank-node join`, installers): used while this node has not joined, then
+        /// deleted.
         #[arg(long)]
         join_file: Option<PathBuf>,
+        /// The status document to keep (node-enrollment.md): readable by everyone, no secrets.
+        #[arg(long)]
+        status_file: Option<PathBuf>,
+        /// Read managed policy (MDM profile, Group Policy, /etc/oarbank/policy.json) while not joined.
+        #[arg(long)]
+        policy: bool,
+        /// The name this node asks for when its code has no label.
+        #[arg(long)]
+        name: Option<String>,
         /// Serve session helpers, which tell host protection what this service's account may not read about the
         /// people using the machine (system installs).
         #[arg(long)]
         session_hub: bool,
+    },
+    /// Check a join code, or a coordinator address, without joining: the code's format and expiry, DNS, TCP, the
+    /// coordinator's identity and TLS certificate authority, the clock. Nothing secret is sent and nothing is written.
+    Check {
+        /// A file holding the join code.
+        #[arg(long)]
+        code_file: Option<PathBuf>,
+        /// Read the join code from standard input.
+        #[arg(long)]
+        code_stdin: bool,
+        /// Check a coordinator address instead of a code (joining by address: prints the fingerprints to compare).
+        #[arg(long)]
+        coordinator: Option<String>,
+        /// One JSON object per line: each check, then the result.
+        #[arg(long)]
+        json: bool,
     },
     /// Report this person's session to the system agent's host protection: their processes' paths and arguments,
     /// their front window and last input (each person's session runs one; system installs start it).
@@ -153,6 +184,9 @@ enum Cmd {
         #[command(subcommand)]
         action: ContainersCmd,
     },
+    /// The managed policy in force, as JSON (`oarbank-node policy-apply`; node-enrollment.md, "Managed policy keys").
+    #[command(hide = true)]
+    Policy,
     /// This node's sandbox backend and what it enforces, as JSON (the coordinator asks it on Linux and Windows).
     #[command(name = "sandbox-status", hide = true)]
     SandboxStatus,
@@ -258,8 +292,18 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Containers { action } => containers(&layout, action),
+        Cmd::Policy => {
+            let p = policy::read();
+            println!("{}", serde_json::json!({"JoinCode": p.join_code, "Coordinator": p.coordinator, "Scope": p.scope,
+                "Containers": p.containers, "Name": p.name, "AllowUserJoin": p.allow_user_join,
+                "ManagedByOrganizationName": p.managed_by}));
+            Ok(())
+        }
         Cmd::Status => rt.block_on(async {
-            let mut a = agent::Agent::open(layout, Some("https://127.0.0.1:7443"))?;
+            // a scratch home: opening the live one would point its agent.json at this placeholder coordinator
+            let _ = layout;
+            let scratch = std::env::temp_dir().join(format!("oarbank-status-{}", std::process::id()));
+            let mut a = agent::Agent::open(paths::Layout::new(scratch.clone()), Some("https://127.0.0.1:7443"))?;
             if a.directives.is_null() {
                 a.directives = serde_json::json!({"desired_state": "active", "lifecycle": "ready", "policy": {}, "limits": {}});
             }
@@ -294,7 +338,12 @@ fn main() -> anyhow::Result<()> {
             a.enroll(std::time::Duration::from_secs(2), wait.map(std::time::Duration::from_secs)).await
         }),
         Cmd::SessionHelper => Err(oarbank_protection::platform::run_session_helper().into()),
-        Cmd::Run { coordinator, mut join, join_file, session_hub } => rt.block_on(async {
+        Cmd::Check { code_file, code_stdin, coordinator, json } => {
+            let code = read_code(code_file.as_deref(), code_stdin)?;
+            let code = rt.block_on(check_cmd(code, coordinator, json));
+            std::process::exit(code)
+        }
+        Cmd::Run { coordinator, join, join_file, status_file, policy, name, session_hub } => rt.block_on(async {
             // cgroups first, while the agent has no children (cgroup.rs)
             #[cfg(target_os = "linux")]
             let _ = cgroup::root();
@@ -303,39 +352,196 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("test build: crashing on start");
                 std::process::exit(1);
             }
-            // the join secret never sits in a service definition: it is read from a file, kept in agent.json until the
-            // enrollment uses it, and the file is removed
-            let mut consumed = None;
-            if let Some(f) = join_file.filter(|f| f.exists()) {
-                if join.is_none() && !keys::have_cert(&layout) {
-                    join = Some(std::fs::read_to_string(&f)?.trim().to_string());
-                }
-                consumed = Some(f);
-            }
-            let coordinator = match coordinator.as_deref() {
-                Some("discover") => Some(discover_one()?),
-                c => c.map(str::to_string),
-            };
-            let mut a = match &join {
-                Some(code) => agent::Agent::open_with_join(layout, code).await?,
-                None => agent::Agent::open(layout, coordinator.as_deref())?,
-            };
-            if let Some(f) = consumed {
-                let _ = std::fs::remove_file(f);
-            }
-            a.session_hub = session_hub;
-            let (tx, rx) = tokio::sync::watch::channel(false);
-            tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                let _ = tx.send(true);
-            });
-            let code = a.run(rx).await?;
+            let code = serve(layout, Serve { coordinator, join, join_file, status_file, policy, name, session_hub }).await?;
             if code != 0 {
                 std::process::exit(code);
             }
             Ok(())
         }),
     }
+}
+
+/// A join code from a file or standard input (trimmed), never from the command line.
+fn read_code(file: Option<&std::path::Path>, stdin: bool) -> anyhow::Result<Option<String>> {
+    if let Some(f) = file {
+        return Ok(Some(std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()))?.trim().to_string()));
+    }
+    if stdin {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        return Ok(Some(s.trim().to_string()));
+    }
+    Ok(None)
+}
+
+/// `oarbank-agent check`: the rows as they finish, then the result; the exit code says which kind of failure.
+async fn check_cmd(code: Option<String>, coordinator: Option<String>, as_json: bool) -> i32 {
+    use check::{Fail, Row};
+    let print_row = move |r: &Row| {
+        if as_json {
+            println!("{}", r.json());
+        } else {
+            println!("  {:<5} {:<9} {}", if r.ok { "ok" } else { "FAIL" }, r.id, r.detail);
+        }
+    };
+    let finish = |res: Result<serde_json::Value, Fail>| -> i32 {
+        match res {
+            Ok(v) => {
+                if as_json { println!("{}", serde_json::json!({"result": "ok", "detail": v})); } else { println!("All checks passed."); }
+                0
+            }
+            Err(f) => {
+                if as_json {
+                    println!("{}", serde_json::json!({"result": "error", "code": f.code, "message": f.message}));
+                } else {
+                    eprintln!("{} ({})", f.message, f.code);
+                }
+                f.exit_code()
+            }
+        }
+    };
+    let mut emit = |r: Row| print_row(&r);
+    match (code, coordinator) {
+        (Some(code), _) => {
+            let c = match check::offline(&code) {
+                Ok(c) => c,
+                Err(f) => {
+                    print_row(&Row { id: "code", ok: false, detail: f.message.clone() });
+                    return finish(Err(f));
+                }
+            };
+            print_row(&check::code_row(&c));
+            let mut last = None;
+            for url in &c.urls {
+                let p = check::probe(url, &c.pins, Some(&c.cik), &mut emit).await;
+                match p.fail {
+                    None => return finish(Ok(serde_json::json!({"url": p.url, "fingerprint": p.fingerprint,
+                        "approve": c.approve(), "system": c.system(), "containers": c.containers(), "multi": c.multi(),
+                        "expires_at": c.expires_at, "host": c.host()}))),
+                    Some(f) => {
+                        let fatal = !f.retryable();
+                        last = Some(f);
+                        if fatal {
+                            break;
+                        }
+                    }
+                }
+            }
+            finish(Err(last.unwrap_or_else(|| Fail::new("E_TCP", "no address answered"))))
+        }
+        (None, Some(url)) => {
+            let p = check::probe(&url, &[], None, &mut emit).await;
+            match p.fail {
+                None => finish(Ok(serde_json::json!({"url": p.url, "fingerprint": p.fingerprint,
+                    "identity": p.cik.as_deref().map(|k| check::identity_fingerprint(k)[..16].to_string())}))),
+                Some(f) => finish(Err(f)),
+            }
+        }
+        (None, None) => finish(Err(Fail::new("E_CODE_FORMAT", "give --code-file, --code-stdin or --coordinator"))),
+    }
+}
+
+struct Serve {
+    coordinator: Option<String>,
+    join: Option<String>,
+    join_file: Option<PathBuf>,
+    status_file: Option<PathBuf>,
+    policy: bool,
+    name: Option<String>,
+    session_hub: bool,
+}
+
+/// The agent's life (node-enrollment.md, "The node's states"): with an identity (a certificate, or an enrollment
+/// waiting for approval) it keeps its session; otherwise it joins with a staged code or managed policy's code, or
+/// enrolls by address, or waits for one of those. A join that ends (a refused code, a declined machine) goes back to
+/// waiting, so a new code can be staged without reinstalling anything.
+async fn serve(layout: paths::Layout, o: Serve) -> anyhow::Result<i32> {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = tx.send(true);
+    });
+    let mut st = status::Status::new(o.status_file.clone());
+    let mut join_arg = o.join.clone();
+    let mut failed_policy_code: Option<String> = None;
+    let coordinator = match o.coordinator.as_deref() {
+        Some("discover") => Some(discover_one()?),
+        c => c.map(str::to_string),
+    };
+    loop {
+        if *rx.borrow() {
+            return Ok(0);
+        }
+        let pol = if o.policy { policy::read() } else { policy::Policy::default() };
+        if st.get("managed_by").and_then(|v| v.as_str()) != pol.managed_by.as_deref() {
+            let state = st.state().to_string();
+            st.set(if state.is_empty() { status::UNJOINED } else { &state }, serde_json::json!({"managed_by": pol.managed_by}));
+        }
+        let name = o.name.clone().or(pol.name.clone());
+        let cfg = config::Config::load(&layout.config()).ok().flatten();
+        let has_identity = keys::have_cert(&layout) || cfg.as_ref().is_some_and(|c| c.enrollment_id.is_some());
+        let staged = o.join_file.as_ref().filter(|f| f.exists()).cloned();
+        let mut a = if has_identity {
+            if let Some(f) = &staged {
+                let _ = std::fs::remove_file(f);             // a node that has joined ignores a code (leave first)
+            }
+            agent::Agent::open(paths::Layout::new(layout.home.clone()), coordinator.as_deref())?
+        } else if let Some((code, from_policy)) = join_arg.take().map(|c| (c, false))
+            .or_else(|| staged.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|c| (c.trim().to_string(), false)))
+            .or_else(|| pol.join_code.clone().filter(|c| failed_policy_code.as_deref() != Some(c.as_str())).map(|c| (c, true))) {
+            let r = join::join(&layout, &code, name.as_deref(), staged.as_deref(), &mut st).await;
+            if let Err(f) = &r {
+                if f.code == join::SUPERSEDED {
+                    continue;                                 // the new code is in the file: join with it now
+                }
+            }
+            if let Some(f) = staged.as_ref().filter(|f| std::fs::read_to_string(f).is_ok_and(|s| s.trim() == code.trim())) {
+                let _ = std::fs::remove_file(f);
+            }
+            match r {
+                Ok(a) => a,
+                Err(f) => {
+                    tracing::warn!(code = f.code, "join ended: {}", f.message);
+                    if from_policy {
+                        failed_policy_code = Some(code);
+                    }
+                    wait(&rx, 5).await;
+                    continue;
+                }
+            }
+        } else if let Some(url) = coordinator.clone().or(pol.coordinator.clone()) {
+            let mut a = agent::Agent::open(paths::Layout::new(layout.home.clone()), Some(&url))?;
+            a.cfg.name = name.clone();
+            a.cfg.save(&layout.config())?;
+            st.set(status::JOINING, serde_json::json!({"coordinator": url}));
+            a
+        } else {
+            if !matches!(st.state(), status::UNJOINED | status::ERROR) {
+                st.reset(status::UNJOINED);
+            }
+            wait(&rx, 5).await;
+            continue;
+        };
+        a.status = st.clone();
+        a.session_hub = o.session_hub;
+        let r = a.run(rx.clone()).await;
+        st = a.status.clone();
+        match r {
+            Ok(code) => return Ok(code),
+            Err(e) if e.downcast_ref::<agent::EnrollmentEnded>().is_some() => {
+                // back to waiting: this coordinator's trust and the unused key go
+                let _ = std::fs::remove_file(layout.config());
+                let _ = std::fs::remove_file(layout.node_key());
+                wait(&rx, 5).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn wait(rx: &tokio::sync::watch::Receiver<bool>, secs: u64) {
+    let mut rx = rx.clone();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(secs), rx.changed()).await;
 }
 
 /// `--coordinator discover`: exactly one coordinator must be announcing itself.

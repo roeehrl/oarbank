@@ -60,10 +60,13 @@ def test_a_join_code_names_the_coordinator_pins_its_ca_and_approves_the_node(age
     finally:
         p.terminate()
         p.communicate(timeout=10)
-    # the code works once
-    p2 = run_agent(agent_bin, tmp_path / "agent2", "run", "--join", code)
+    # the code works once: a second machine is told so (E_CODE_USED) and leaves nothing waiting on the Fleet page
+    status = tmp_path / "status2" / "node.json"
+    p2 = run_agent(agent_bin, tmp_path / "agent2", "run", "--join", code, "--status-file", str(status))
     try:
-        wait(lambda: [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"], 40)
+        st = wait(lambda: status.exists() and json.loads(status.read_text()).get("error") and json.loads(status.read_text()), 40)
+        assert (st["state"], st["error"]["code"]) == ("error", "E_CODE_USED")
+        assert not [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"]
     finally:
         p2.terminate()
         p2.communicate(timeout=10)
