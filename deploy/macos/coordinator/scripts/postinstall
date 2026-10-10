@@ -1,0 +1,25 @@
+#!/bin/sh
+# Oarbank coordinator pkg: runs as root once the payload is in place. It puts the coordinator's commands on the PATH
+# and nothing else: no service is created, started or stopped here (the browser wizard and oarbank-setup do that, as
+# the user who owns the coordinator).
+#
+#   /usr/local/bin/oarbank       -> the app's bundled CLI
+#   /usr/local/bin/oarbank-setup -> the app's guided-setup helper
+#
+# Both are shell launchers that follow the link back to the app, so they run the same as by their full path. A link
+# (an earlier package's, or one made by hand) is replaced; a regular file of the same name is someone else's and stays.
+# Only the link is created: /usr/local/bin keeps its owner and mode when it exists (a payload entry would reset them).
+# Output lands in /var/log/install.log. It always exits 0: the programs are installed whatever happens here.
+set -u
+BIN="/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin"
+LINKS="/usr/local/bin"
+/bin/mkdir -p "$LINKS"
+for name in oarbank oarbank-setup; do
+    link="$LINKS/$name"
+    if [ -e "$link" ] && [ ! -L "$link" ]; then
+        echo "Oarbank: $link is not a link and stays as it is; the coordinator's command is $BIN/$name"
+        continue
+    fi
+    /bin/ln -sfn "$BIN/$name" "$link" || echo "Oarbank: could not link $link to $BIN/$name"
+done
+exit 0

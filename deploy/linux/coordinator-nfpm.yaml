@@ -28,6 +28,10 @@ contents:
   - src: ${ROOT}
     dst: /opt/oarbank/coordinator
     type: tree
+  # The operator CLI and the setup helper on the PATH; both launchers follow the link back to the payload.
+  - src: /opt/oarbank/coordinator/bin/oarbank
+    dst: /usr/bin/oarbank
+    type: symlink
   - src: /opt/oarbank/coordinator/bin/oarbank-setup
     dst: /usr/bin/oarbank-setup
     type: symlink

@@ -92,6 +92,20 @@ try {
 }
 '@
   [IO.File]::WriteAllText("$Root\oarbank-setup.ps1", $setupBroker)
+  # `oarbank` on the PATH: the MSI adds package\cli, a folder holding only this forwarder (bin\ would also put uv.exe
+  # and the setup scripts on the PATH). It runs the CLI of the build the services use, Coordinator\current (setup points
+  # it at this package; an archive installation at its own build), and this package's own before setup. A batch file
+  # started without `call` does not come back, so the CLI's exit code is the forwarder's. CRLF, as cmd.exe expects.
+  $cliForwarder = @(
+    '@echo off',
+    'rem oarbank on the PATH: the CLI of the build the coordinator services run, else this package''s own',
+    'if not exist "%~dp0..\..\current\bin\oarbank.cmd" goto package',
+    '"%~dp0..\..\current\bin\oarbank.cmd" %*',
+    ':package',
+    '"%~dp0..\bin\oarbank.cmd" %*'
+  )
+  New-Item -ItemType Directory -Force "$Root\cli" | Out-Null
+  [IO.File]::WriteAllText("$Root\cli\oarbank.cmd", (($cliForwarder -join "`r`n") + "`r`n"))
   Copy-Item -LiteralPath "$Repo\deploy\icons\oarbank.ico" -Destination "$Root\oarbank.ico"
   $Tray = "$Root\Oarbank Coordinator.exe"
   if (-not $DryRun) {
@@ -112,7 +126,7 @@ try {
   $wixArgs = @('build', "$Repo\deploy\windows\oarbank-coordinator.wxs", '-arch', $Arch,
                '-ext', 'WixToolset.Util.wixext', '-d', "Version=$MsiVersion", '-d', "PackageDir=$Root", '-o', $Msi)
   if ($DryRun) {
-    "Validated coordinator build ($Version, $($manifest.platform)); payload includes the setup launcher."
+    "Validated coordinator build ($Version, $($manifest.platform)); payload includes the setup launcher and cli\oarbank.cmd for the PATH."
     'wix ' + (($wixArgs | ForEach-Object { '"' + $_ + '"' }) -join ' ')
     if ($env:OARBANK_SIGNTOOL_ARGS) { "Would sign $Msi with signtool." }
     return

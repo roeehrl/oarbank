@@ -130,7 +130,9 @@ worse, pass while doing something else:
     build is the upgrade (the services stop, `current` moves, they start; modules' environments made on the previous
     build's interpreter are rebuilt at start, `modlife.runtimes_ok`). `-Uninstall` removes the services, the rule and
     the programs and keeps the home. Since 2.6, `package-coordinator-windows.ps1` wraps that payload in a WiX MSI,
-    with an elevated Start menu launcher for the browser setup wizard. The MSI installs software only; the wizard
+    with an elevated Start menu launcher for the browser setup wizard and `package\cli` on the system PATH (its
+    `oarbank.cmd` forwards to `current\bin\oarbank.cmd`, or the package's own before setup). The MSI installs
+    software only; the wizard
     calls the helper's `-Installed` mode and handles account, TOTP and owner signing keys. The MSI's uninstall uses
     `-Uninstall -KeepPrograms` before Windows Installer removes its payload. POSIX native wrappers use the same
     archive/helper contract. Archives remain available for signed moves and explicit manual setup.

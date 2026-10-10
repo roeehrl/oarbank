@@ -101,6 +101,8 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("postinstall:", config)
         self.assertIn("preremove:", config)
         self.assertIn("dst: /usr/bin/oarbank-setup\n    type: symlink", config)
+        # the operator CLI on the PATH: a link to the payload's launcher, which follows it back (no install hook)
+        self.assertIn("- src: /opt/oarbank/coordinator/bin/oarbank\n    dst: /usr/bin/oarbank\n    type: symlink\n", config)
         desktop = (DEPLOY / "coordinator-desktop.desktop").read_text()
         self.assertIn("Name=Oarbank Coordinator\n", desktop)
         self.assertIn("Exec=/usr/bin/oarbank-coordinator\n", desktop)
