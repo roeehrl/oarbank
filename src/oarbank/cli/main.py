@@ -350,6 +350,7 @@ def _migrate(a) -> int:
                 home = found[0].old_home
             names = sysmigrate.export_keys(home)
             print("keys in the file store: " + (", ".join(names) or "none in the Keychain"))
+            sysmigrate.check_keys(home)          # the database's keys must all be there now (NeedsPerson otherwise)
             return 0
         if a.run:
             return sysmigrate.run_as_root(a.user, Path(a.build) if a.build else None, a.from_installer, a.dry_run)

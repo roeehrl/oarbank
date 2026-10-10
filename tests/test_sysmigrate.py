@@ -395,3 +395,18 @@ def test_a_copy_of_a_real_home_migrates(tmp_path):
     con.close()
     print(f"\nmigrated a copy of {src}: fleet {fleet}, {len(venvs)} module environment(s) dropped for rebuild, "
           f"{secrets_rows} secret row(s) set aside, steps {[s['step'] for s in doc['steps']]}")
+
+
+def test_the_export_in_the_person_s_session_runs_with_their_home(tmp_path, monkeypatch):
+    """`security` finds a person's keychains through their HOME: sudo without -H kept root's, found none and exported
+    nothing (seen on a macOS VM's package upgrade)."""
+    person, old, _, _ = per_user_home(tmp_path, "darwin")
+    lay = layout(tmp_path, "darwin")
+    [inst] = sysmigrate.find_installs(lay, people(person))
+    calls = []
+    ops = sysmigrate.Ops(lay, tmp_path / "build")
+    monkeypatch.setattr(ops, "run", lambda argv, **kw: calls.append([str(a) for a in argv]) or subprocess.CompletedProcess(argv, 0, "", ""))
+    assert ops.export_in_session(inst)
+    export = calls[-1]
+    assert export[:7] == ["/bin/launchctl", "asuser", str(os.getuid()), "/usr/bin/sudo", "-H", "-u", USER]
+    assert export[7:] == [str(tmp_path / "build/bin/oarbank"), "coordinator", "migrate", "--export-keys", "--home", str(old)]

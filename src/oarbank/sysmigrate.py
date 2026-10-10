@@ -411,7 +411,8 @@ class Ops:
         if self.layout.os != "darwin" or not self._session(inst):
             return False
         cli = self.build / "bin" / "oarbank"
-        r = self.run(["/bin/launchctl", "asuser", str(inst.uid), "/usr/bin/sudo", "-u", inst.user, cli, "coordinator",
+        # -H: the person's HOME, where `security` finds their keychain search list (root's HOME finds none)
+        r = self.run(["/bin/launchctl", "asuser", str(inst.uid), "/usr/bin/sudo", "-H", "-u", inst.user, cli, "coordinator",
                       "migrate", "--export-keys", "--home", str(inst.old_home)], check=False, timeout=90)
         return r.returncode == 0
 
@@ -517,8 +518,9 @@ class Migration:
         except NeedsPerson:
             if not (self.from_installer and self.ops.export_in_session(inst)):
                 raise
+            checked = check_keys(inst.old_home)              # NeedsPerson again when the export found nothing
             self.record.step("export", f"the keys were exported in {inst.user}'s session")
-            return check_keys(inst.old_home)
+            return checked
 
     def run(self) -> dict:
         inst, new = self.inst, self.layout.new_home
