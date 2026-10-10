@@ -8,6 +8,8 @@
 //! within 10 minutes and within three starts, or the launcher flips back to the previous version and records
 //! `rolled_back` with the reason, which the old agent reports. Updates never replace the launcher.
 
+#[cfg_attr(not(windows), allow(dead_code))]
+mod container_support;
 mod node;
 mod setup;
 #[cfg_attr(target_os = "macos", path = "svc_launchd.rs")]
@@ -315,6 +317,11 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Some("setup") => return setup::setup(home.as_deref(), &rest),
+        // Windows: container support after the installer (container_support.rs; the MSI and its task run it)
+        Some("container-support") => {
+            let code = container_support::main(&rest)?;
+            std::process::exit(code);
+        }
         Some("remove") => return setup::remove(home.as_deref(), &rest),
         #[cfg(windows)]
         Some("helper-main") => return svc::helper_main(),

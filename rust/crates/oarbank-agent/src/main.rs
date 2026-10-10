@@ -209,8 +209,13 @@ enum ContainersCmd {
         #[arg(long)]
         gpu: bool,
     },
-    /// Windows: install the WSL components the runtime needs (an administrator; exit 3010 when Windows must restart).
-    Install,
+    /// Windows: install the WSL components the runtime needs (an administrator; exit 3010 when Windows must restart,
+    /// 1618 while another Windows Installer installation runs: the WSL package is one, and never goes inside another).
+    Install {
+        /// Wait up to this many seconds for another installation to finish (default: exit 1618 at once).
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
+    },
     /// Windows: end the agent's WSL containers session and delete its storage (the WSL package stays).
     Remove,
 }
@@ -253,21 +258,37 @@ fn containers(layout: &paths::Layout, action: ContainersCmd) -> anyhow::Result<(
             std::process::exit(if ok { 0 } else { 3 })
         }
         #[cfg(windows)]
-        ContainersCmd::Install => match wslc::install() {
-            Ok(true) => {
-                println!("installed; restart Windows to finish (the Virtual Machine Platform)");
-                std::process::exit(3010)
+        ContainersCmd::Install { wait } => {
+            // never inside another installation (an MSI's custom action, Windows Update): Windows Installer runs one
+            // installation at a time, and one started inside another breaks both (docs/design/windows-containers.md)
+            if !wslc::wait_for_installer(std::time::Duration::from_secs(wait)) {
+                eprintln!("another installation is in progress (Windows Installer): run this again when it has finished");
+                std::process::exit(wslc::EXIT_INSTALLER_BUSY)
             }
-            Ok(false) => {
-                println!("nothing to install");
-                Ok(())
+            match wslc::install() {
+                Ok(wslc::Installed::Restart) => {
+                    println!("installed; restart Windows to finish (the Virtual Machine Platform)");
+                    std::process::exit(wslc::EXIT_RESTART)
+                }
+                Ok(wslc::Installed::Done) => {
+                    println!("installed the WSL components");
+                    Ok(())
+                }
+                Ok(wslc::Installed::Nothing) => {
+                    println!("nothing to install: the WSL components are in place");
+                    Ok(())
+                }
+                Err(wslc::InstallError::Busy(e)) => {
+                    eprintln!("{e}");
+                    std::process::exit(wslc::EXIT_INSTALLER_BUSY)
+                }
+                Err(wslc::InstallError::Failed(e)) => anyhow::bail!(e),
             }
-            Err(e) => anyhow::bail!(e),
-        },
+        }
         #[cfg(windows)]
         ContainersCmd::Remove => wslc::remove(&layout.home).map_err(anyhow::Error::msg),
         #[cfg(not(windows))]
-        ContainersCmd::Install | ContainersCmd::Remove => anyhow::bail!("only on Windows: this node's runtime is the host's own"),
+        ContainersCmd::Install { .. } | ContainersCmd::Remove => anyhow::bail!("only on Windows: this node's runtime is the host's own"),
     }
 }
 

@@ -21,6 +21,10 @@ PACKAGE = REPO / "scripts" / "package-windows.ps1"
 CI = REPO / "scripts" / "ci-windows-msi.ps1"
 WORKFLOW = REPO / ".github" / "workflows" / "msi.yml"
 POLICY_RS = REPO / "rust" / "crates" / "oarbank-agent" / "src" / "policy.rs"
+SUPPORT_RS = REPO / "rust" / "crates" / "oarbank-launcher" / "src" / "container_support.rs"
+SETUP_RS = REPO / "rust" / "crates" / "oarbank-launcher" / "src" / "setup.rs"
+NODE_RS = REPO / "rust" / "crates" / "oarbank-launcher" / "src" / "node.rs"
+AGENT_MAIN_RS = REPO / "rust" / "crates" / "oarbank-agent" / "src" / "main.rs"
 NS = {"w": "http://wixtoolset.org/schemas/v4/wxs", "util": "http://wixtoolset.org/schemas/v4/wxs/util"}
 GP = {"p": "http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"}
 POLICY_KEY = r"SOFTWARE\Policies\Codonic\Oarbank\Agent"
@@ -56,14 +60,17 @@ def _dialog(pkg, did):
 
 
 def _holds(condition, props):
-    """A Windows Installer condition made of property names, AND, OR, NOT and parentheses, for the properties set."""
-    tokens = re.findall(r"\(|\)|[A-Za-z_][A-Za-z0-9_.]*|\S", condition)
+    """A Windows Installer condition made of property names, PROPERTY="value" comparisons, AND, OR, NOT and parentheses,
+    for the properties set."""
+    tokens = re.findall(r'\(|\)|[A-Za-z_][A-Za-z0-9_.]*="[^"]*"|[A-Za-z_][A-Za-z0-9_.]*|\S', condition)
     py = []
     for t in tokens:
         if t in ("(", ")"):
             py.append(t)
         elif t in ("AND", "OR", "NOT"):
             py.append(t.lower())
+        elif m := re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)="([^"]*)"', t):
+            py.append(repr(props.get(m.group(1)) == m.group(2)))
         elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", t):
             py.append(repr(bool(props.get(t))))
         else:
@@ -96,8 +103,9 @@ def test_the_msi_properties_of_the_contract_and_the_code_stays_secret():
 def test_setup_actions_run_the_launcher_elevated_with_the_right_source_of_the_code():
     pkg = _pkg()
     commands = {
-        "SetupWithFile": f'{LAUNCHER} setup --scope system --or-wait --join-code-file "[JOINCODEFILE]" [NodeNameArgument]',
-        "SetupWithCode": f'{LAUNCHER} setup --scope system --or-wait --join-code "[JOINCODE]" [NodeNameArgument]',
+        # a code made for container jobs gets container support after the installer (--containers-later)
+        "SetupWithFile": f'{LAUNCHER} setup --scope system --or-wait --containers-later --join-code-file "[JOINCODEFILE]" [NodeNameArgument]',
+        "SetupWithCode": f'{LAUNCHER} setup --scope system --or-wait --containers-later --join-code "[JOINCODE]" [NodeNameArgument]',
         "SetupWithUrl": f'{LAUNCHER} setup --scope system --coordinator "[COORDINATOR]" [NodeNameArgument]',
         # the waiting service: no code, no coordinator
         "SetupWaiting": f"{LAUNCHER} setup --scope system [NodeNameArgument]",
@@ -115,8 +123,9 @@ def test_setup_actions_run_the_launcher_elevated_with_the_right_source_of_the_co
     assert name.get("Condition") == "NAME AND NOT WIX_UPGRADE_DETECTED"
     assert name.get("Id") != name.get("Id").upper()
     steps = _steps(pkg)
-    assert [steps[a].get("After") for a in ("SetupWithFile", "SetupWithCode", "SetupWithUrl", "SetupWaiting", "InstallContainers")] == \
-        ["InstallFiles", "SetupWithFile", "SetupWithCode", "SetupWithUrl", "SetupWaiting"]
+    assert [steps[a].get("After") for a in ("RollbackContainers", "SetupWithFile", "SetupWithCode", "SetupWithUrl", "SetupWaiting",
+                                            "ScheduleContainers")] == \
+        ["InstallFiles", "RollbackContainers", "SetupWithFile", "SetupWithCode", "SetupWithUrl", "SetupWaiting"]
 
 
 def test_exactly_one_setup_runs_on_a_first_install_the_plain_one_on_an_upgrade_none_on_repair():
@@ -134,11 +143,88 @@ def test_exactly_one_setup_runs_on_a_first_install_the_plain_one_on_an_upgrade_n
         assert not [a for a in setups if _holds(steps[a].get("Condition"), {**props, "Installed": True})]
 
 
-def test_container_prerequisites_stay_optional():
+def _order(steps):
+    """The execute sequence's custom actions in order, from their After/Before chains (standard actions as anchors)."""
+    anchors = {"InstallFiles": 4000, "InstallServices": 5800, "RemoveFiles": 3500}
+    pos = dict(anchors)
+    pending = dict(steps)
+    while pending:
+        progressed = False
+        for name, c in list(pending.items()):
+            ref = c.get("After") or c.get("Before")
+            if ref in pos:
+                pos[name] = pos[ref] + (0.001 if c.get("After") else -0.001) * (1 + len(pos))
+                del pending[name]
+                progressed = True
+        assert progressed, pending
+    return pos
+
+
+def test_no_custom_action_installs_container_prerequisites_inside_the_msi():
+    # the WSL package is itself a Windows Installer package: installing it from a custom action is a nested
+    # installation (error 2755/1622, status 1603 on a real PC), so nothing in the MSI runs `containers install`
     pkg = _pkg()
-    assert _set(pkg, "InstallContainers").get("Value") == '"[INSTALLFOLDER]oarbank-agent.exe" containers install'
-    assert _ca(pkg, "InstallContainers").get("Return") == "ignore"          # 3010 and VM-less machines still install
-    assert _steps(pkg)["InstallContainers"].get("Condition") == 'CONTAINERS="1" AND NOT REMOVE="ALL"'
+    commands = [e.get("Value") or "" for e in pkg.iter(f"{{{NS['w']}}}SetProperty")] + \
+        [e.get("ExeCommand") or "" for e in pkg.iter(f"{{{NS['w']}}}CustomAction")]
+    assert not [c for c in commands if "containers install" in c or "oarbank-agent.exe" in c], commands
+    assert "InstallContainers" not in _steps(pkg) and _ca(pkg, "InstallContainers") is None
+    # no nested-installation custom action types either (7, 23, 39: a package as the action's source)
+    assert not [c for c in pkg.iter(f"{{{NS['w']}}}CustomAction") if c.get("PackageRef") or c.get("ProductCode")]
+
+
+def test_container_support_is_a_task_registered_by_the_msi_cancelled_by_rollback_and_uninstall():
+    pkg = _pkg()
+    steps = _steps(pkg)
+    expected = {"ScheduleContainers": ("container-support schedule", "deferred"),
+                "RollbackContainers": ("container-support cancel", "rollback"),
+                "CancelContainers": ("container-support cancel", "deferred")}
+    for action, (command, execute) in expected.items():
+        assert _set(pkg, action).get("Value") == f"{LAUNCHER} {command}", action
+        assert _set(pkg, action).get("Before") == action and _set(pkg, action).get("Sequence") == "execute"
+        ca = _ca(pkg, action)
+        # elevated (LocalSystem registers a LocalSystem task), and never a reason for the install to fail
+        assert (ca.get("BinaryRef"), ca.get("DllEntry"), ca.get("Execute"), ca.get("Impersonate"), ca.get("Return")) == \
+            ("Wix4UtilCA_$(sys.BUILDARCHSHORT)", "WixQuietExec", execute, "no", "ignore"), action
+    when = {a: steps[a].get("Condition") for a in expected}
+    cases = {"first install": {}, "first install, CONTAINERS=1": {"CONTAINERS": "1"},
+             "upgrade, CONTAINERS=1": {"CONTAINERS": "1", "WIX_UPGRADE_DETECTED": True},
+             "repair, CONTAINERS=1": {"CONTAINERS": "1", "Installed": True},
+             "uninstall": {"Installed": True, "REMOVE": "ALL"},
+             "uninstall, CONTAINERS=1": {"Installed": True, "REMOVE": "ALL", "CONTAINERS": "1"},
+             "removed by an upgrade": {"Installed": True, "REMOVE": "ALL", "UPGRADINGPRODUCTCODE": "{X}"},
+             "CONTAINERS=0": {"CONTAINERS": "0"}}
+    runs = {name: sorted(a for a, c in when.items() if _holds(c, props)) for name, props in cases.items()}
+    assert runs == {"first install": ["RollbackContainers"],
+                    "first install, CONTAINERS=1": ["RollbackContainers", "ScheduleContainers"],
+                    "upgrade, CONTAINERS=1": ["RollbackContainers", "ScheduleContainers"],
+                    "repair, CONTAINERS=1": ["ScheduleContainers"],
+                    "uninstall": ["CancelContainers"], "uninstall, CONTAINERS=1": ["CancelContainers"],
+                    # the old product's removal during a major upgrade keeps the new product's task
+                    "removed by an upgrade": [],
+                    "CONTAINERS=0": ["RollbackContainers"]}, runs
+    order = _order(steps)
+    # the rollback comes before everything that may register the task (a code's flag in setup, CONTAINERS=1), and
+    # after the files it runs; the uninstall cancels before the node and the files go
+    for registers in ("SetupWithFile", "SetupWithCode", "ScheduleContainers"):
+        assert order["InstallFiles"] < order["RollbackContainers"] < order[registers], registers
+    assert order["CancelContainers"] < order["RemoveNode"] < order["RemoveFiles"]
+
+
+def test_the_launcher_owns_the_task_and_the_agent_never_installs_inside_another_installation():
+    rs = SUPPORT_RS.read_text(encoding="utf-8")
+    # the task's events name this package's product
+    product = re.search(r'pub const PRODUCT: &str = "([^"]+)";', rs).group(1)
+    assert _pkg().get("Name") == product
+    assert "EventID=1033 or EventID=1035" in rs and "<BootTrigger>" in rs and "<UserId>S-1-5-18</UserId>" in rs
+    assert '"containers", "install", "--wait"' in rs
+    # setup schedules it only for the installer's --containers-later; oarbank-node join installs directly, outside any MSI
+    setup = SETUP_RS.read_text(encoding="utf-8")
+    assert '"--containers-later"' in setup and "c.containers()" in setup and "container_support::schedule()" in setup
+    node = NODE_RS.read_text(encoding="utf-8")
+    assert '["containers", "install", "--wait", "600"]' in node and '"--containers-later"' not in node
+    # the agent waits for, or refuses during, another installation (Global\_MSIExecute) and exits 1618 then
+    main = AGENT_MAIN_RS.read_text(encoding="utf-8")
+    assert "wslc::wait_for_installer(" in main and "EXIT_INSTALLER_BUSY" in main
 
 
 # MARK: what it installs
@@ -201,7 +287,7 @@ def test_the_join_page_takes_the_code_in_a_password_field_and_works_without_one(
     assert name.get("Type") == "Edit" and name.get("Password") is None
     containers = page.find("w:Control[@Property='CONTAINERS']", NS)
     assert (containers.get("Type"), containers.get("CheckBoxValue")) == ("CheckBox", "1")
-    assert "installs WSL components; may need a restart" in containers.get("Text")
+    assert "installs WSL components after setup; may need a restart" in containers.get("Text")
     texts = " ".join(c.get("Text") or "" for c in page.findall("w:Control", NS))
     assert "Paste the join code from your Oarbank console, or leave it empty to join later from Oarbank Node." in texts
     install = page.find("w:Control[@Id='Install']", NS)
@@ -348,6 +434,20 @@ def test_the_tray_app_reads_the_status_document_and_policy_and_runs_the_join_win
     assert 'GetEnvironmentVariable("GITHUB_ACTIONS") != "true"' in src  # the self-test is for CI runners only
 
 
+def test_the_tray_app_tells_what_became_of_container_support_as_oarbank_node_does():
+    src = TRAY.read_text(encoding="utf-8")
+    rs = SUPPORT_RS.read_text(encoding="utf-8")
+    key = re.search(r'pub const KEY: &str = r"([^"]+)";', rs).group(1)
+    assert f'ContainerSupportKey = @"{key}"' in src and "RegistryView.Registry64" in src
+    assert 'GetValue("State")' in src and 'GetValue("Detail")' in src
+    # the same line for each state in both (container_support.rs `line`, NodeTray.cs `ContainerLine`)
+    for state in ("scheduled", "installing", "waiting", "restart"):
+        rust = re.search(rf'"{state}" => "([^"]+)"\.into\(\)', rs).group(1)
+        assert f'case "{state}": return "{rust}";' in src, state
+    assert '"Container support failed: " + detail' in src and 'format!("Container support failed: {detail}")' in rs
+    assert 'ContainerLine("restart", "") == "Restart Windows to finish container support"' in src
+
+
 def test_the_tray_app_is_csharp_5_for_the_net_framework_compiler():
     # %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe compiles C# 5 only
     code = re.sub(r'@"(?:[^"]|"")*"', '""', TRAY.read_text(encoding="utf-8"))       # verbatim strings, then the others
@@ -406,3 +506,19 @@ def test_the_msi_ci_checks_the_waiting_node_and_its_parts():
     assert '[Environment]::GetEnvironmentVariable("Path", "Machine")' in text and "status --json" in text
     assert r"HKEY_CLASSES_ROOT\oarbank" in text and '"--self-test"' in text
     assert text.count("CheckNodePartsGone") >= 3 and text.count("CheckNodeParts ") >= 3
+
+
+def test_the_msi_ci_installs_with_containers_and_checks_the_task():
+    text = CI.read_text(encoding="utf-8")
+    rs = SUPPORT_RS.read_text(encoding="utf-8")
+    assert 'Msi "/i" $First "install-containers.log" @("CONTAINERS=1", "COORDINATOR=https://127.0.0.1:9")' in text
+    assert "if ($p.ExitCode -notin 0, 3010)" in text                     # never 1603
+    task = re.search(r'pub const TASK: &str = "([^"]+)";', rs).group(1)
+    key = re.search(r'pub const KEY: &str = r"([^"]+)";', rs).group(1)
+    assert f'$SupportTask = "{task}"' in text and f'$SupportKey = "HKLM:\\{key}"' in text
+    assert "ScheduleContainers" in text and "containers install" in text
+    assert "started by itself once the installer had ended" in text
+    assert "the task deleted itself after its outcome" in text and "the task stays for the next start of Windows" in text
+    assert "no WSL installation began inside the agent's" in text
+    assert 'Msi "/x" $First "uninstall-containers.log"' in text
+    assert "the uninstall removes the container support task and its record" in text
