@@ -21,5 +21,5 @@ interrupted upload continues where it stopped, also after a reload), then regist
     <textarea name="params" id="up-params" rows="4" class="mono" style="width:100%" readonly aria-label="dataset to register"></textarea>
   {% endcall %}
 </div>
-<script src="/static/upload.js" defer></script>
+<script src="{{ asset('/static/upload.js') }}" defer></script>
 {% endblock %}

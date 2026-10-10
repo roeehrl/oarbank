@@ -32,7 +32,7 @@ def test_markup_the_loading_states_bind_to():
     assert "data-reload data-always" in base
     macro = (TEMPLATES / "_macros.html").read_text(encoding="utf-8")
     assert 'data-busy-label="Preparing review…"' in macro and 'data-stage="/stage/{{ op }}"' in macro
-    assert '<script src="/static/app.js" defer></script>' in (TEMPLATES / "login.html").read_text(encoding="utf-8")
+    assert '<script src="{{ asset(\'/static/app.js\') }}" defer></script>' in (TEMPLATES / "login.html").read_text(encoding="utf-8")
     prot = (TEMPLATES / "protection.html").read_text(encoding="utf-8")
     assert 'hx-sync="this:replace"' in prot and 'class="placeholder"' in prot
 
@@ -96,3 +96,15 @@ def test_stage_needs_the_session_and_its_csrf_header(console):
         c.headers["x-csrf-token"] = token
     c.cookies.clear()
     assert c.post("/stage/modules.install", content=b"x", headers={"x-csrf-token": token}).status_code == 403
+
+
+def test_scripts_and_stylesheets_carry_a_content_version():
+    """After an upgrade a browser must fetch the new app.js and app.css, not run the old ones from its cache: every
+    asset URL carries a version of the file's content."""
+    from oarbank.console import app as console
+    url = console.asset("/static/app.js")
+    assert url.startswith("/static/app.js?v=") and len(url.split("=", 1)[1]) == 12
+    assert console.asset("/static/no-such-file.js") == "/static/no-such-file.js"
+    for t in TEMPLATES.glob("*.html"):
+        text = t.read_text(encoding="utf-8")
+        assert 'src="/static' not in text and 'href="/static' not in text, f"{t.name} links an unversioned asset"

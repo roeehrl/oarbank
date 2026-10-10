@@ -13,6 +13,8 @@ checks; no CORS. Identity headers are never trusted.
 """
 import asyncio
 import contextlib
+import functools
+import hashlib
 import hmac
 import json
 import time
@@ -108,6 +110,19 @@ def _num(v, digits=0):
     return f"{v:.{digits}f}"
 
 
+@functools.lru_cache(maxsize=None)
+def asset(url: str) -> str:
+    """`url` with a version of its content (`?v=<sha256 prefix>`): a browser fetches a script or stylesheet again when an
+    upgrade changed it, instead of running the old one from its cache. Unknown files keep their plain URL."""
+    from oarbank_sdk.render import CSS_PATH, HERE as RENDER_HERE
+    sources = {"/static-ui/ui.css": CSS_PATH, "/static-ui/ui.js": RENDER_HERE / "static" / "ui.js"}
+    path = sources.get(url) or (HERE / "static" / url.removeprefix("/static/") if url.startswith("/static/") else None)
+    try:
+        return f"{url}?v={hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]}"
+    except (OSError, TypeError):
+        return url
+
+
 def templates() -> Jinja2Templates:
     t = Jinja2Templates(directory=str(HERE / "templates"))
     t.env.filters.update(
@@ -116,7 +131,7 @@ def templates() -> Jinja2Templates:
         fromjson=lambda s: json.loads(s) if s else {},
     )
     t.env.tests["known"] = lambda v: v is not None and not isinstance(v, jinja2.Undefined)   # reported, not missing or null
-    t.env.globals.update(new_key=lambda: uuid.uuid4().hex, OPS=registry.REGISTRY, CAMPAIGN_OPS=registry.CAMPAIGN_OPS,
+    t.env.globals.update(asset=asset, new_key=lambda: uuid.uuid4().hex, OPS=registry.REGISTRY, CAMPAIGN_OPS=registry.CAMPAIGN_OPS,
                          STAGE_OPS={op: field for op, (field, _) in STAGE.items()},
                          impact_rows=lambda i: impact.rows(i, skip=(impact.MATCHES, "why")))   # plan.html draws these two itself
     return t

@@ -6,14 +6,14 @@
 <meta name="htmx-config" content='{"allowEval": false, "allowScriptTags": false, "selfRequestsOnly": true, "historyCacheSize": 0, "includeIndicatorStyles": false, "timeout": 30000}'>
 <meta name="csrf-token" content="{{ csrf }}">
 <title>{% block title %}Oarbank{% endblock %}</title>
-<link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static-ui/ui.css">
-<link rel="stylesheet" href="/static/uplot.min.css">
-<script src="/static/htmx.min.js"></script>
-<script src="/static/htmx-sse.js"></script>
-<script src="/static/uplot.min.js"></script>
-<script src="/static/app.js" defer></script>
-<script src="/static-ui/ui.js" defer></script>
+<link rel="stylesheet" href="{{ asset('/static/app.css') }}">
+<link rel="stylesheet" href="{{ asset('/static-ui/ui.css') }}">
+<link rel="stylesheet" href="{{ asset('/static/uplot.min.css') }}">
+<script src="{{ asset('/static/htmx.min.js') }}"></script>
+<script src="{{ asset('/static/htmx-sse.js') }}"></script>
+<script src="{{ asset('/static/uplot.min.js') }}"></script>
+<script src="{{ asset('/static/app.js') }}" defer></script>
+<script src="{{ asset('/static-ui/ui.js') }}" defer></script>
 </head>
 <body hx-ext="sse" sse-connect="/sse" data-version="{{ meta.version }}" data-boot="{{ meta.boot_id }}">
 {% import "_macros.html" as m with context %}
