@@ -47,3 +47,44 @@ def test_application_launcher_compiles(tmp_path):
     build = subprocess.run(['xcrun', 'vtool', '-show-build', str(tmp_path / 'launcher')],
                            capture_output=True, text=True, check=True)
     assert 'minos 15.0' in build.stdout
+
+
+# The coordinator's interpreter runs module code: it is signed with deploy/macos/python.entitlements (library validation
+# off, so the wheels modules install load under the hardened runtime; docs/release-signing.md, "macOS code signatures")
+CHECK_SIGNING = REPO / 'scripts/check-macos-signing.py'
+
+
+def test_coordinator_builds_sign_their_interpreter_with_the_entitlements_and_check_it():
+    for name, tree in (('build-coordinator.sh', '"$ROOT"'), ('package-coordinator-macos.sh', '"$APP"')):
+        text = (REPO / 'scripts' / name).read_text(encoding='utf-8')
+        assert 'source "$REPO/scripts/macos-codesign.sh"' in text, name
+        sign = f'macos_sign_tree "$ID" {tree}'
+        assert sign in text, name
+        check = text.index('scripts/check-macos-signing.py"')
+        assert text.index(sign) < check, name
+        assert '--canary --work "$WORK/canary" "$ROOT"' in text[check:check + 200], name
+        assert '[[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)' in text, name
+        assert 'sign_with_timestamp' not in text and '--sign "$ID" "$f"' not in text, name
+    pkg = (REPO / 'scripts/package-coordinator-macos.sh').read_text(encoding='utf-8')
+    # the app is sealed before the check, and the seal is verified after the canary ran its interpreter
+    check = pkg.index('scripts/check-macos-signing.py"')
+    assert pkg.index('macos_sign "$ID" "$APP"') < check < pkg.index('codesign --verify --deep --strict "$APP"')
+    build = (REPO / 'scripts/build-coordinator.sh').read_text(encoding='utf-8')
+    assert build.index('scripts/check-macos-signing.py"') < build.index('pack-tar.py" "$TGZ"')
+
+
+@pytest.mark.skipif(sys.platform != 'darwin' or not os.environ.get('OARBANK_COORDINATOR_PKG'),
+                    reason='set OARBANK_COORDINATOR_PKG to a pkg scripts/package-coordinator-macos.sh built (needs PyPI)')
+def test_a_built_coordinator_package_interpreter_loads_a_native_wheel_it_did_not_ship(tmp_path):
+    subprocess.run(['pkgutil', '--expand-full', os.environ['OARBANK_COORDINATOR_PKG'], str(tmp_path / 'x')], check=True)
+    app = next((tmp_path / 'x').glob('*.pkg')) / 'Payload/Applications/Oarbank Coordinator.app'
+    assert subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)]).returncode == 0
+    root = app / 'Contents/Resources/coordinator'
+    info = subprocess.run(['codesign', '-dvv', str(root / 'python/bin/python3.12')], capture_output=True, text=True).stderr
+    team = [] if 'TeamIdentifier=not set' in info else ['--developer-id']
+    out = subprocess.run([sys.executable, str(CHECK_SIGNING), *team, '--canary', '--work', str(tmp_path / 'canary'), str(root)],
+                         capture_output=True, text=True, timeout=600)
+    assert out.returncode == 0, out.stderr
+    assert 'canary:' in out.stdout
+    # the canary changed nothing the app's seal covers
+    assert subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)]).returncode == 0

@@ -40,21 +40,17 @@ xcrun swiftc -O -target "$ARCH-apple-macos15.0" -framework AppKit -framework Ser
 # Remove inherited extended attributes before sealing the application.
 xattr -cr "$WORK/root"
 ID="${OARBANK_CODESIGN_IDENTITY:--}"
-sign_with_timestamp() {
-    local attempt
-    for attempt in 1 2 3; do
-        codesign --force --options runtime --timestamp --sign "$ID" "$1" && return 0
-        [[ $attempt == 3 ]] || sleep 3
-    done
-    return 1
-}
-find "$APP" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
-    file -b "$f" | grep Mach-O >/dev/null || continue
-    if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-    else sign_with_timestamp "$f"; fi
-done
-if [[ "$ID" == "-" ]]; then codesign --force --sign - "$APP"
-else sign_with_timestamp "$APP"; fi
+# every Mach-O file, the bundled interpreter with deploy/macos/python.entitlements (modules run on it and load wheels
+# signed by other teams; scripts/macos-codesign.sh, docs/release-signing.md "macOS code signatures"), then the app
+source "$REPO/scripts/macos-codesign.sh"
+macos_sign_tree "$ID" "$APP"
+macos_sign "$ID" "$APP"
+# the interpreter carries exactly that entitlement (with the hardened runtime under a Developer ID) and loads a native
+# wheel from PyPI the build did not sign, in an environment outside the app; the seal check below sees any change
+DEVELOPER_ID=()
+[[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)
+"$PY" -I -B "$REPO/scripts/check-macos-signing.py" ${DEVELOPER_ID[@]+"${DEVELOPER_ID[@]}"} --canary --work "$WORK/canary" "$ROOT"
+rm -rf "$WORK/canary"
 codesign --verify --deep --strict "$APP"
 # pkgbuild marks the bundles it finds relocatable: Installer would then update a copy of the app it finds anywhere on the
 # disk instead of installing /Applications/Oarbank Coordinator.app. Pin every bundle where the payload puts it.
@@ -108,7 +104,7 @@ XML
 PKG="$OUT/oarbank-coordinator-$VERSION-macos-$ARCH.pkg"
 SIGN=()
 [[ -z "${OARBANK_INSTALLER_IDENTITY:-}" ]] || SIGN=(--sign "$OARBANK_INSTALLER_IDENTITY" --timestamp)
-productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" "${SIGN[@]}" "$PKG"
+productbuild --quiet --distribution "$WORK/distribution.xml" --package-path "$WORK" ${SIGN[@]+"${SIGN[@]}"} "$PKG"
 if [[ -n "${OARBANK_NOTARY_PROFILE:-}" ]]; then
     [[ -n "${OARBANK_INSTALLER_IDENTITY:-}" && "$ID" != "-" ]] || { echo "notarization needs Developer ID signatures" >&2; exit 1; }
     xcrun notarytool submit "$PKG" --keychain-profile "$OARBANK_NOTARY_PROFILE" --wait

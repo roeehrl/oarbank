@@ -325,3 +325,106 @@ def test_a_built_node_package_holds_the_app_the_join_window_and_the_policy_job(t
     assert subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)]).returncode == 0
     signed = subprocess.run(["codesign", "-dv", str(app)], capture_output=True, text=True).stderr
     assert "Identifier=dev.codonic.oarbank.node" in signed
+    # the runtime's interpreter carries exactly the library-validation entitlement and, signed as shipped, loads a
+    # native wheel from PyPI that the build did not sign (needs PyPI)
+    runtime = comp / "Payload/Library/Oarbank/bin/runtime"
+    out = check_signing(*developer_id(runtime / "bin" / "python3"), "--canary", "--work", str(tmp_path / "canary"), str(runtime))
+    assert out.returncode == 0, out.stderr
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the interpreter's code signature: library validation off, so modules' third-party wheels load (docs/release-signing.md,
+# "macOS code signatures")
+
+ENTITLEMENTS = MACOS / "python.entitlements"
+CODESIGN = REPO / "scripts" / "macos-codesign.sh"
+CHECK_SIGNING = REPO / "scripts" / "check-macos-signing.py"
+darwin = pytest.mark.skipif(sys.platform != "darwin", reason="codesign")
+
+
+def check_signing(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(CHECK_SIGNING), *args], capture_output=True, text=True, timeout=600)
+
+
+def developer_id(python: Path) -> list[str]:
+    """--developer-id when the interpreter carries a team's signature (a release build), else nothing (ad hoc)."""
+    info = subprocess.run(["codesign", "-dvv", str(python)], capture_output=True, text=True).stderr
+    return [] if "TeamIdentifier=not set" in info or "TeamIdentifier=" not in info else ["--developer-id"]
+
+
+def test_the_interpreter_entitlements_turn_off_library_validation_and_nothing_else():
+    with open(ENTITLEMENTS, "rb") as f:
+        assert plistlib.load(f) == {"com.apple.security.cs.disable-library-validation": True}
+    text = ENTITLEMENTS.read_text(encoding="utf-8")
+    assert "https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.disable-library-validation" in text
+    assert "https://developer.apple.com/documentation/security/hardened-runtime" in text
+
+
+def test_the_package_signs_its_interpreter_with_the_entitlements_and_checks_it():
+    text = PACKAGE.read_text(encoding="utf-8")
+    sign = 'macos_sign_tree "$ID" "$PAYLOAD/runtime"'
+    assert 'source "$REPO/scripts/macos-codesign.sh"' in text and sign in text
+    check = text.index('scripts/check-macos-signing.py"')
+    # after the runtime is signed and before anything is packaged; a Developer ID build is checked as one, and the
+    # canary loads a wheel from PyPI outside the payload
+    assert text.index(sign) < check < text.index("pkgbuild --analyze")
+    assert "--canary --work \"$WORK/canary\" \"$PAYLOAD/runtime\"" in text[check:check + 300]
+    assert '[[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)' in text
+    # nothing else signs the runtime's files (the loop that signed the interpreter like a library is gone)
+    assert '--sign "$ID" "$f"' not in text
+    helper = CODESIGN.read_text(encoding="utf-8")
+    assert 'deploy/macos/python.entitlements"' in helper and '--entitlements "$OARBANK_PYTHON_ENTITLEMENTS"' in helper
+    assert "codesign --force --options runtime --timestamp" in helper
+    assert subprocess.run(["bash", "-n", str(CODESIGN)]).returncode == 0
+
+
+@darwin
+def test_only_the_interpreter_is_signed_with_the_entitlements_and_the_check_holds_to_exactly_that(tmp_path):
+    # a tree shaped like the runtime: the interpreter (a copy of this one), its link, and another program (uv's place)
+    root = tmp_path / "runtime"
+    (root / "bin").mkdir(parents=True)
+    python = root / "bin" / "python3.12"
+    shutil.copyfile(os.path.realpath(sys.executable), python)
+    os.symlink("python3.12", root / "bin" / "python3")
+    shutil.copyfile("/bin/echo", root / "bin" / "uv")                 # contents only: /bin's files are restricted
+    for f in (python, root / "bin" / "uv"):
+        f.chmod(0o755)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(f)], check=True, capture_output=True)
+    out = check_signing(str(root))                               # as 2.8.0 shipped it: no entitlements
+    assert out.returncode == 1 and "python3.12: entitlements none" in out.stderr, out
+    subprocess.run([str(CODESIGN), "tree", "-", str(root)], check=True)
+    out = check_signing(str(root))
+    assert out.returncode == 0, out.stderr
+    assert "com.apple.security.cs.disable-library-validation" in out.stdout
+    xml = subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", str(python)], capture_output=True, check=True).stdout
+    assert plistlib.loads(xml) == {"com.apple.security.cs.disable-library-validation": True}
+    assert subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", str(root / "bin" / "uv")],
+                          capture_output=True, check=True).stdout.strip() == b""
+    # an ad hoc signature is not a release's: no hardened runtime, no team
+    out = check_signing("--developer-id", str(root))
+    assert out.returncode == 1 and "not signed with the hardened runtime by a Developer ID" in out.stderr
+    # anything broader on the interpreter, or entitlements on another program, is refused
+    broader = tmp_path / "broader.entitlements"
+    with open(broader, "wb") as f:
+        plistlib.dump({"com.apple.security.cs.disable-library-validation": True,
+                       "com.apple.security.cs.allow-unsigned-executable-memory": True}, f)
+    subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(broader), str(python)], check=True, capture_output=True)
+    out = check_signing(str(root))
+    assert out.returncode == 1 and "allow-unsigned-executable-memory" in out.stderr
+    subprocess.run([str(CODESIGN), "tree", "-", str(root)], check=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(ENTITLEMENTS), str(root / "bin" / "uv")],
+                   check=True, capture_output=True)
+    out = check_signing(str(root))
+    assert out.returncode == 1 and "only the interpreters carry any" in out.stderr
+    # a tree without an interpreter is no runtime
+    assert "no Python interpreter found" in check_signing(str(root / "bin" / "uv")).stderr
+
+
+@darwin
+@pytest.mark.skipif(not os.environ.get("OARBANK_NODE_RUNTIME"),
+                    reason="set OARBANK_NODE_RUNTIME to a node runtime signed by scripts/macos-codesign.sh (needs PyPI)")
+def test_a_signed_node_runtime_loads_a_native_wheel_it_did_not_ship():
+    root = Path(os.environ["OARBANK_NODE_RUNTIME"])
+    out = check_signing(*developer_id(root / "bin" / "python3"), "--canary", str(root))
+    assert out.returncode == 0, out.stderr
+    assert "canary:" in out.stdout and "loaded _speedups" in out.stdout

@@ -277,7 +277,8 @@ is a named pipe only the agent's account and the module's AppContainer may open.
   deletes, never in a service definition or on a command line. The agent reports joining and its session in a status
   document every front end reads ([node-enrollment.md](node-enrollment.md)).
 - **Packages:** a macOS pkg per architecture (`scripts/package-macos.sh`: `-macos-arm64.pkg` and `-macos-x86_64.pkg`,
-  Developer ID with hardened runtime or ad hoc, a postinstall that runs the install plan;
+  Developer ID with hardened runtime or ad hoc, the interpreters that run module code with library validation off
+  ([release-signing.md](../release-signing.md#macos-code-signatures)), a postinstall that runs the install plan;
   `deploy/macos/oarbank-uninstall`), deb, rpm and a tarball through
   nFPM (`scripts/package-linux.sh`, `deploy/linux`), and a WiX MSI (`scripts/package-windows.ps1`,
   `deploy/windows/oarbank-agent.wxs`; a join page, or `JOINCODEFILE`, `JOINCODE`, `COORDINATOR` silently). Coordinator builds from
