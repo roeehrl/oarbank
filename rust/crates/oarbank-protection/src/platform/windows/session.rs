@@ -11,7 +11,7 @@ use std::sync::Arc;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND};
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientSessionId, PIPE_READMODE_BYTE,
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -20,8 +20,9 @@ use windows_sys::Win32::System::Pipes::{
 use super::front::front;
 use super::presence::{own_idle_s, own_session};
 use super::procs::{command_line, own_user, process_user, processes};
+use crate::relay::Relay;
 use crate::session::{
-    Described, FrontClaim, Principal, ProcClaim, Report, SessionHub, INTERVAL, MAX_LINE, PROTOCOL,
+    Described, FrontClaim, Principal, ProcClaim, Report, SessionHub, Watch, INTERVAL, MAX_LINE, PROTOCOL,
 };
 
 /// SYSTEM and the service's own account in full; interactive users (each session's helper) may write.
@@ -61,7 +62,7 @@ pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<()> {
             lpSecurityDescriptor: sd as PSECURITY_DESCRIPTOR,
             bInheritHandle: 0,
         };
-        let flags = PIPE_ACCESS_INBOUND
+        let flags = PIPE_ACCESS_DUPLEX
             | if first {
                 FILE_FLAG_FIRST_PIPE_INSTANCE
             } else {
@@ -120,8 +121,29 @@ pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn take_reports(hub: &SessionHub, session: u32, file: File) {
+fn take_reports(hub: &Arc<SessionHub>, session: u32, file: File) {
     let who = Principal::Session(session);
+    // the pipe proves the session, not the account: sources for a named account are filtered by the helper itself
+    hub.set_account(who, None);
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    if let Ok(mut w) = file.try_clone() {
+        let (hub, alive) = (hub.clone(), alive.clone());
+        let _ = std::thread::Builder::new().name("session-watch".into()).spawn(move || {
+            let mut seen = u64::MAX;
+            while alive.load(std::sync::atomic::Ordering::Relaxed) {
+                let gen = hub.wanted_after(seen, INTERVAL * 5);
+                if gen != seen {
+                    seen = gen;
+                    let mut line = serde_json::to_string(&Watch { v: PROTOCOL, watch: hub.all_wanted() })
+                        .unwrap_or_default();
+                    line.push('\n');
+                    if w.write_all(line.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    }
     let mut r = BufReader::new(file);
     let mut line = String::new();
     loop {
@@ -184,18 +206,38 @@ fn report(session: u32, user: Option<&[u8]>, described: &mut Described) -> Repor
 pub fn run_helper() -> ! {
     let session = own_session();
     let user = own_user();
+    let relay = Relay::own();
     loop {
-        if let Ok(mut pipe) = OpenOptions::new().write(true).open(pipe_name()) {
+        if let Ok(mut pipe) = OpenOptions::new().read(true).write(true).open(pipe_name()) {
+            if let Ok(r) = pipe.try_clone() {
+                let relay = relay.clone();
+                let _ = std::thread::Builder::new().name("session-watch".into()).spawn(move || {
+                    let mut r = BufReader::new(r);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match (&mut r).take(MAX_LINE as u64).read_line(&mut line) {
+                            Ok(n) if n > 0 && line.ends_with('\n') => {}
+                            _ => return,
+                        }
+                        if let Ok(w) = serde_json::from_str::<Watch>(&line) {
+                            if w.v == PROTOCOL {
+                                relay.set(w);
+                            }
+                        }
+                    }
+                });
+            }
             let mut described = Described::default();
             loop {
-                let mut line =
-                    serde_json::to_string(&report(session, user.as_deref(), &mut described))
-                        .unwrap_or_default();
+                let mut rep = report(session, user.as_deref(), &mut described);
+                rep.sources = relay.readings();
+                let mut line = serde_json::to_string(&rep).unwrap_or_default();
                 line.push('\n');
                 if pipe.write_all(line.as_bytes()).is_err() {
                     break;
                 }
-                std::thread::sleep(INTERVAL);
+                relay.wait(INTERVAL);
             }
         }
         std::thread::sleep(INTERVAL);

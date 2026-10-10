@@ -400,6 +400,12 @@ pub struct DuringSpec {
     pub cap_fleet: Option<CapFleet>,
     pub pause_fleet: Option<ProtectionScope>,
     pub lower_fleet: bool,
+    /// A process trigger (`source = { on_exec = { match = ..., tree = ... } }`): the phase is on while a matching
+    /// owner process runs.
+    pub on_exec: Option<(ProcessMatch, TreeScope)>,
+    /// Owner-set labels reported with the phase (`uplink`: the phase uses the site's internet line), for
+    /// coordinator-side aggregation; they change nothing on the node.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -419,6 +425,9 @@ pub struct ProtectionRule {
     pub during: Vec<DuringSpec>,
     pub enter_for_s: Option<f64>,
     pub exit_after_s: Option<f64>,
+    /// The rule's `during` phases act at once, between ticks (the event path; S25), with the phase's own exit as
+    /// the hysteresis; they also act while the rule's group is present but not yet active.
+    pub immediate: bool,
 }
 
 impl ProtectionRule {
@@ -440,6 +449,7 @@ impl ProtectionRule {
             during: vec![],
             enter_for_s: None,
             exit_after_s: None,
+            immediate: false,
         }
     }
 
@@ -525,13 +535,45 @@ impl ProtectionRule {
                 return err(format!("rule {id}: during needs a source"));
             }
             let dc = get(ds, "cap_fleet");
+            let source_json = src.cloned().unwrap_or(Value::Null);
+            let on_exec = match get(src, "on_exec") {
+                None => {
+                    if crate::sources::PhaseRule::from_json(&source_json).is_none() {
+                        return err(format!(
+                            "rule {id}: a during source needs jsonl with enter and exit events, jsonl with field and on \
+                             values, or on_exec"
+                        ));
+                    }
+                    None
+                }
+                Some(x) => {
+                    let Some(m) = get(Some(x), "match") else {
+                        return err(format!("rule {id}: during.source.on_exec needs a match"));
+                    };
+                    let tree = match str_of(get(Some(x), "tree")) {
+                        None => TreeScope::SelfOnly,
+                        Some(t) => match TreeScope::parse(t) {
+                            Some(ts) => ts,
+                            None => return err(format!("rule {id}: during.source.on_exec: unknown tree {t}")),
+                        },
+                    };
+                    Some((ProcessMatch::from_json(m)?, tree))
+                }
+            };
+            let tags = get(ds, "tags")
+                .and_then(|t| t.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
             r.during.push(DuringSpec {
-                source_json: src.cloned().unwrap_or(Value::Null),
+                source_json,
                 cap_fleet: is_object(dc).then(|| CapFleet::from_json(dc, false)),
                 pause_fleet: scope_action(get(ds, "pause_fleet")),
                 lower_fleet: present(get(ds, "lower_fleet")),
+                on_exec,
+                tags,
             });
         }
+        r.immediate = bool_of(get(j, "immediate")).unwrap_or(false);
         r.enter_for_s = f64_of(get(j, "enter_for_s"));
         r.exit_after_s = f64_of(get(j, "exit_after_s"));
         let has_action = r.reserve_cpu.is_some()
@@ -559,6 +601,9 @@ impl ProtectionRule {
     }
 }
 
+/// The values of `[node] gpu_jobs`.
+pub const GPU_JOBS: [&str; 4] = ["never", "when_no_gpu_protected", "certified", "always"];
+
 /// The bounds of `[node] max_pause_s` (spec/runner-protocol.md: a pause lasts at most 10 minutes).
 pub const MAX_PAUSE_S: f64 = 600.0;
 pub const MIN_PAUSE_S: f64 = 10.0;
@@ -576,7 +621,9 @@ pub struct ProtectionConfig {
     pub cooldown_backoff: f64,
     pub cooldown_max_s: f64,
     pub cooldown_window_s: f64,
-    /// GPU fleet jobs: never | when_no_gpu_protected | always.
+    /// GPU fleet jobs: never | when_no_gpu_protected | certified | always. `certified` (D50) lets cooperative fleet GPU
+    /// work run beside a protected GPU group only up to the duty level of a valid co-tenancy certificate for that
+    /// rule; without one it behaves as `when_no_gpu_protected`.
     pub gpu_jobs: String,
     /// moderate / strict_yield only: protect the frontmost app while the user is present, and a generic owner
     /// CPU stall signal over every unmatched owner process.
@@ -639,6 +686,9 @@ impl ProtectionConfig {
         }
         c.pause = bool_of(get(node, "pause")).unwrap_or(false);
         if let Some(g) = str_of(get(node, "gpu_jobs")) {
+            if !GPU_JOBS.contains(&g) {
+                return err(format!("node.gpu_jobs {g}: one of {}", GPU_JOBS.join(" | ")));
+            }
             c.gpu_jobs = g.to_string();
         }
         let im = get(node, "implicit");
@@ -705,9 +755,10 @@ impl ProtectionConfig {
     pub fn union(&self, o: &ProtectionConfig) -> ProtectionConfig {
         let gpu_rank = |s: &str| match s {
             "always" => 0,
-            "when_no_gpu_protected" => 1,
-            "never" => 2,
-            _ => 1,
+            "certified" => 1,
+            "when_no_gpu_protected" => 2,
+            "never" => 3,
+            _ => 2,
         };
         let ids: HashSet<&str> = self.rules.iter().map(|r| r.id.as_str()).collect();
         let mut rules = self.rules.clone();
