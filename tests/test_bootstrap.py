@@ -11,6 +11,7 @@ from oarbank.coordinator import core, datasets, effects, explain, invariants, mo
 from oarbank.coordinator.db import jl
 
 from helpers import FACTS, FIXTURES, enrolled_node, fresh, install, make_db, run_op
+from helpers import set_fleet
 
 DEPOT_DIR = FIXTURES / "depot"
 TOOL = "tool:depot-1"
@@ -77,7 +78,7 @@ def provision(db, evals=0):
 
 
 def test_a_fresh_fleet_provisions_its_datasets_with_a_bootstrap_job_and_then_certifies(db):
-    db.set_setting("replica_rate", 1.0)                 # every comparing job would get a replica
+    set_fleet(db, "replica_rate", 1.0)                 # every comparing job would get a replica
     node = fresh_node(db)
     golden = db.one("SELECT * FROM jobs WHERE kind='golden'")
     assert state(db, node) == "certifying" and json.loads(golden["datasets_json"]) == [TOOL]

@@ -743,8 +743,15 @@ impl ServiceManager {
     }
 
     /// The owner's caps (the directives' `limits`), passed to services as OARBANK_LIMITS_FILE.
+    /// The owner's caps for the services' limits file: the caps that are set (the coordinator sends every cap, null when
+    /// unset), and their enforcement only beside a cap.
     pub fn set_limits(&mut self, limits: &Value) {
-        self.limits = if limits.is_object() { limits.clone() } else { json!({}) };
+        let mut set: serde_json::Map<String, Value> =
+            limits.as_object().into_iter().flatten().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect();
+        if set.keys().all(|k| k == "enforce") {
+            set.clear();
+        }
+        self.limits = Value::Object(set);
         for c in self.modules.values() {
             if let Err(e) = std::fs::write(&c.limits_file, self.limits.to_string()) {
                 warn!(module = %c.module, error = %e, "cannot write the limits file");

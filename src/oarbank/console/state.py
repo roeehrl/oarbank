@@ -34,7 +34,7 @@ def wait_for_schema(db_path, poll_s: float = 0.5, log=print) -> None:
         try:
             conn = sqlite3.connect(uri, uri=True)
             try:
-                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone():
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_state'").fetchone():
                     return                    # oarbankd creates the whole schema in one transaction (db.py)
             finally:
                 conn.close()
@@ -47,7 +47,7 @@ def wait_for_schema(db_path, poll_s: float = 0.5, log=print) -> None:
 
 
 class Reader:
-    """A read-only SQLite connection with q/one/get_setting (the views' interface)."""
+    """A read-only SQLite connection with q/one/get_state (the views' interface)."""
 
     def __init__(self, path: str, budget_s: float | None = None):
         self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
@@ -77,8 +77,8 @@ class Reader:
         self._deadline = None
         return dict(r) if r else None
 
-    def get_setting(self, key, default=None):
-        r = self.one("SELECT value_json FROM settings WHERE key=?", (key,))
+    def get_state(self, key, default=None):
+        r = self.one("SELECT value_json FROM system_state WHERE key=?", (key,))
         return json.loads(r["value_json"]) if r else default
 
     def data_version(self) -> int:

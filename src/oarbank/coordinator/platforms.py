@@ -14,7 +14,7 @@ from oarbank_sdk import portable
 from .db import DB
 
 DEFAULT_PLATFORM = "darwin-arm64"       # the release built before any node has said what it is
-TOOL_REGISTRY = "tool_registry"          # setting: {id: {"trust": "read|code-exec", "paths": {os: [abs paths]}}}
+TOOL_REGISTRY = "tool_registry"          # setting: {id: {"paths": {os: [abs paths]}}} (trust is the module request's)
 
 
 def facts_platform(facts: dict) -> dict:
@@ -62,13 +62,14 @@ _WIN_ABS = re.compile(r"^[A-Za-z]:\\[^*?\"<>|]*$")
 
 
 def check_tool(tool_id: str, entry: dict) -> dict:
-    """A registry entry, normalized: {"trust": read|code-exec, "paths": {os: [absolute paths]}}. Paths are whole
-    directories or files (no globs), absolute for their OS; a path may not be a filesystem root."""
+    """A registry entry, normalized: {"paths": {os: [absolute paths]}}. Paths are whole directories or files (no globs),
+    absolute for their OS; a path may not be a filesystem root. Trust is not the registry's: the module's request
+    declares it, the owner approves it with the request set, and the release carries it."""
     if not TOOL_ID.fullmatch(tool_id or ""):
         raise ValueError(f"tool id {tool_id!r}: lower-case letters, digits, '_', '.', '-'")
-    trust = entry.get("trust") or "read"
-    if trust not in ("read", "code-exec"):
-        raise ValueError("trust: read or code-exec")
+    extra = set(entry) - {"paths"}
+    if extra:
+        raise ValueError(f"a tool entry has paths only, not {sorted(extra)} (trust is the module's request)")
     out = {}
     for os_, ps in (entry.get("paths") or {}).items():
         if os_ not in portable.OSES:
@@ -86,11 +87,12 @@ def check_tool(tool_id: str, entry: dict) -> dict:
             clean.append(p)
         if clean:
             out[os_] = sorted(set(clean))
-    return {"trust": trust, "paths": out}
+    return {"paths": out}
 
 
 def tool_registry(db: DB) -> dict:
-    return db.get_setting(TOOL_REGISTRY, {}) or {}
+    from .settings import fleet_value
+    return fleet_value(db, TOOL_REGISTRY) or {}
 
 
 def tool_paths(db: DB, tool_ids, os_: str) -> tuple[list[str], list[str]]:

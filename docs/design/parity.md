@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 89 operations, 2 explain kinds, 124 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 88 operations, 2 explain kinds, 124 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -19,8 +19,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `nodes.pause` | T0 | yes | `oarbank node state <nid> paused` | yes |
 | `nodes.resume` | T0 | yes | `oarbank node state <nid> active` | yes |
 | `nodes.drain` | T1 | yes | `oarbank node state <nid> draining` | yes |
-| `nodes.set_caps` | T0 | yes | `oarbank node limits <nid> ...`<br>`oarbank node limits <nid> --clear-all` | yes |
-| `nodes.set_policy` | T1 | yes | `oarbank node policy <nid> ...`<br>`oarbank node policy <nid> --reset <key>`<br>`oarbank node policy <nid> --reset-all` | yes |
 | `nodes.quarantine` | T1 | yes | `oarbank op nodes.quarantine` | yes |
 | `nodes.clear_quarantine` | T1 | yes | `oarbank op nodes.clear_quarantine` | yes |
 | `nodes.run_doctor` | T0 | yes | `oarbank op nodes.run_doctor` | yes |
@@ -80,7 +78,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `alerts.ack` | T0 | yes | `oarbank alerts ack <id> [--useful|--noise]` | yes |
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
-| `settings.notifications.update` | T2 | yes | `oarbank op settings.notifications.update` | yes |
+| `settings.apply` | T0 | yes | `oarbank settings set <key> <value> [--node <node>] [--group <group>]`<br>`oarbank settings reset <key> [--node <node>] [--group <group>]` | yes |
+| `settings.secrets.set` | T1 | yes | `oarbank settings set-secret <name>` | yes |
+| `settings.secrets.clear` | T1 | yes | `oarbank settings clear-secret <name>` | yes |
 | `settings.tools.update` | T2 | yes | `oarbank op settings.tools.update` | yes |
 | `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
 | `folders.sign` | T1 | yes | `oarbank folders sign <node>` | yes |
@@ -95,7 +95,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]` | yes |
 | `modules.cli_token` | T1 | yes | `oarbank cli <module> [args...]` | yes |
 | `access.passkeys.remove` | T1 | yes | `oarbank op access.passkeys.remove` | yes |
-| `settings.update` | T2 | yes | `oarbank op settings.update <key>`<br>`module CLIs (golden:<module>, dataset_groups)` | yes |
 | `audit.verify` | T0 | yes | `oarbank audit verify` | yes |
 
 ## Explain
@@ -113,7 +112,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `QUEUED_BEHIND` | `jobs.set_priority` |
 | `CAMPAIGN_PAUSED` | `campaigns.resume` |
 | `OARBANK_PAUSED` | `fleet.resume` |
-| `USER_CAP_BINDING` | `nodes.set_caps` |
+| `USER_CAP_BINDING` | `settings.apply` |
 | `MODULE_NOT_READY` | `nodes.run_doctor` |
 | `MODULE_NOT_CERTIFIED` | `nodes.recertify` |
 | `MODULE_DISABLED` | `modules.enable_canary` |

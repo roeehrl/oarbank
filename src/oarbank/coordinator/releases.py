@@ -62,7 +62,7 @@ def contents(comp_json: str | None) -> list[str]:
 
 def signature_required(db: DB) -> bool:
     """Releases need the owner's signature before a node may install them (signing on, an owner key pinned)."""
-    return bool(C.RELEASE_SIGNING and db.get_setting("release_pubkey"))
+    return bool(C.RELEASE_SIGNING and db.get_state("release_pubkey"))
 
 
 def any_module_enabled(db: DB) -> bool:
@@ -226,7 +226,7 @@ def sync(db: DB) -> dict:
         defaults[plat] = rel["release_id"]
         built[composition_key(composition(db, platform=plat), plat)] = rel["release_id"]
     # each platform's default release, for awaiting(): a newer build of a platform replaces (supersedes) its older one
-    db.set_setting(DEFAULTS, {**(db.get_setting(DEFAULTS) or {}), **defaults})
+    db.set_state(DEFAULTS, {**(db.get_state(DEFAULTS) or {}), **defaults})
     for n in db.q("SELECT node_id, platform, facts_json FROM nodes WHERE lifecycle NOT IN ('retired')"):
         plat = platforms.node_platform(dict(n))
         if not plat:
@@ -254,11 +254,11 @@ def ensure(db: DB, platform: str | None):
     rows = db.q("SELECT release_id, status FROM releases WHERE platform=? AND composition_json=? AND status IN ('current','candidate') "
                 "ORDER BY status='current' DESC, created_at DESC", (platform, comp))
     if any(r["status"] == "current" for r in rows) or (rows and signature_required(db)):
-        known = (db.get_setting(DEFAULTS) or {}).get(platform)
+        known = (db.get_state(DEFAULTS) or {}).get(platform)
         known_comp = (db.one("SELECT composition_json FROM releases WHERE release_id=?", (known,)) or {}).get("composition_json") \
             if known else None
         if known_comp != comp:     # built before awaiting() knew each platform's default (an upgrade): it is this one
-            db.set_setting(DEFAULTS, {**(db.get_setting(DEFAULTS) or {}), platform: rows[0]["release_id"]})
+            db.set_state(DEFAULTS, {**(db.get_state(DEFAULTS) or {}), platform: rows[0]["release_id"]})
             note_awaiting(db)
         return
     sync(db)
@@ -284,7 +284,7 @@ def awaiting(db: DB) -> list[dict]:
         return []
     out = []
     fleet = set(platforms.fleet_platforms(db))
-    for plat, rid in sorted((db.get_setting(DEFAULTS) or {}).items()):
+    for plat, rid in sorted((db.get_state(DEFAULTS) or {}).items()):
         row = db.one("SELECT status, signature, created_at, composition_json FROM releases WHERE release_id=?", (rid,))
         if plat not in fleet or not row or row["status"] == "current":
             continue
@@ -324,8 +324,8 @@ def note_awaiting(db: DB) -> list[dict]:
     alert open per awaiting release; the others resolve (signed and promoted, or replaced by a newer build)."""
     from .core import _alert, _resolve_alert
     items = awaiting(db)
-    if (db.get_setting(AWAITING) or []) != items:
-        db.set_setting(AWAITING, items)
+    if (db.get_state(AWAITING) or []) != items:
+        db.set_state(AWAITING, items)
     want = {f"release_awaiting_owner:{a['release_id']}": a for a in items}
     for al in db.q("SELECT rule, subject FROM alerts WHERE rule LIKE 'release_awaiting_owner:%' AND state IN ('open','pending')"):
         if al["rule"] not in want:
@@ -352,7 +352,7 @@ def node_release(db: DB, node: dict) -> dict:
         if node.get("release_id") == rid:
             return {"state": "installed", "release": rid, "platform": plat, "text": rid}
         return {"state": "installing", "release": rid, "platform": plat, "text": f"installing {rid}{runs}"}
-    waiting = (db.get_setting(DEFAULTS) or {}).get(plat) if plat else None
+    waiting = (db.get_state(DEFAULTS) or {}).get(plat) if plat else None
     row = db.one("SELECT status FROM releases WHERE release_id=?", (waiting,)) if waiting else None
     if row and row["status"] == "candidate" and signature_required(db):
         return {"state": "unsigned", "release": waiting, "platform": plat,
@@ -425,7 +425,7 @@ def promote(db: DB, release_id: str, actor: str):
     row = db.one("SELECT signature, platform FROM releases WHERE release_id=?", (release_id,))
     if not row:
         raise ReleaseRefused(f"unknown release {release_id}")
-    if C.RELEASE_SIGNING and db.get_setting("release_pubkey") and not row["signature"]:
+    if C.RELEASE_SIGNING and db.get_state("release_pubkey") and not row["signature"]:
         raise ReleaseRefused(f"{release_id} is unsigned; agents pinned to the release key would refuse it")
     with db.tx():
         db.x("UPDATE releases SET status='retired' WHERE status='current' AND platform=?", (row["platform"],))

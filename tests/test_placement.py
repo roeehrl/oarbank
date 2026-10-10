@@ -11,6 +11,7 @@ from oarbank_sdk.keys import job_key
 
 from helpers import (PARAMS, READY, SCENES, certify, create_study, enrolled_node, facts_for, fresh, make_db, relay_result,
                      render_artifacts, run_op)
+from helpers import set_fleet
 
 RIGHT = relay_result(score="0.850000", image="A")
 BODY = {"free_cpu": 8, "free_mem_gb": 64, "ready_datasets": READY}
@@ -129,7 +130,7 @@ def test_a_pipeline_stays_in_one_class_and_its_head_never_binds_where_its_tail_c
     stages = [s.model_copy(update={"requires": s.requires.model_copy(update={"platforms": ["darwin-arm64", "linux-amd64"]}),
                                    "placement": mf.StagePlacement(mix="same-platform")}) if s.name == "score" else s for s in info.manifest.stages]
     relay_with(monkeypatch, stages=stages)
-    db.set_setting("pipeline:relay", "split")
+    set_fleet(db, "pipeline", "split", "relay")
     sid = study(db, SCENES[:1], placement={"mix": "same-os", "bind": "first-claim"})
     head = db.one("SELECT * FROM jobs WHERE campaign_id=? AND kind='call'", (sid,))
     tail = db.one("SELECT * FROM jobs WHERE campaign_id=? AND kind='eval' AND depends_on=?", (sid, head["job_id"]))
@@ -366,7 +367,7 @@ def test_a_pipeline_unit_binds_only_where_a_node_can_run_its_tail(db, fleet, mon
     unit = "pipeline" stranded)."""
     from oarbank_sdk import manifest as mf
     relay_with(monkeypatch, placement=mf.Placement(mix="same-arch", unit="pipeline"))
-    db.set_setting("pipeline:relay", "split")
+    set_fleet(db, "pipeline", "split", "relay")
     for name in ("box", "arm"):
         core.heartbeat(db, fresh(db, fleet[name]), {"capacity": {"pools": {"scorer": 0}, "cpu_slots": 8}, "attempts": [],
                                                     "ready_datasets": READY})
@@ -387,7 +388,7 @@ def pools(db, node, scorer, slots):
 def test_capacity_binds_a_unit_only_where_every_stage_has_a_node(db, fleet):
     """box (linux-amd64) has the most free CPU but no scorer pool, which the split pipeline's score stage reserves:
     the campaign binds by capacity to arm (linux-arm64), the only class whose nodes can run both stages."""
-    db.set_setting("pipeline:relay", "split")
+    set_fleet(db, "pipeline", "split", "relay")
     pools(db, fleet["box"], 0, 64)
     pools(db, fleet["mini"], 0, 32)
     pools(db, fleet["arm"], 4, 8)
@@ -400,7 +401,7 @@ def test_capacity_binds_a_unit_only_where_every_stage_has_a_node(db, fleet):
 def test_a_unit_whose_classes_lose_a_pool_its_work_needs_is_reported_stranded(db, fleet):
     """Bound by capacity to arm, the only scorer node; then arm loses the pool too. Before the fix the unit was never
     stranded (class_has_node ignored pools) and hung silently."""
-    db.set_setting("pipeline:relay", "split")
+    set_fleet(db, "pipeline", "split", "relay")
     pools(db, fleet["box"], 0, 64)
     pools(db, fleet["mini"], 0, 32)
     pools(db, fleet["arm"], 4, 8)
@@ -500,7 +501,7 @@ def test_first_claim_never_binds_a_pipeline_where_its_tail_lacks_a_capability(db
     needs_capabilities(monkeypatch, "score", ["scorer-gpu"])
     relay_with(monkeypatch, placement=mf.Placement(mix="same-arch", unit="pipeline"))
     assert modcalls.stage_capabilities("relay", "score") == ["scorer-gpu"]
-    db.set_setting("pipeline:relay", "split")
+    set_fleet(db, "pipeline", "split", "relay")
     report(db, fleet["arm"], services=["scorer-gpu"])
     sid = study(db, SCENES[:1])
     head = db.one("SELECT * FROM jobs WHERE campaign_id=? AND kind='call' ORDER BY job_id LIMIT 1", (sid,))
@@ -515,7 +516,7 @@ def test_a_replica_needs_another_node_with_the_stages_capabilities(db, fleet, mo
     """Adaptive replication queues a replica only when another node could run it: with the capability on mini alone,
     nobody could (it would sit pending forever, TLA+ F3); once box reports it too, the replica is queued."""
     needs_capabilities(monkeypatch, "eval", ["java17"])
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     report(db, fleet["mini"], services=["java17"])
     sid = study(db, SCENES[:2])
     first, second = grants(db, fleet["mini"], free=2)

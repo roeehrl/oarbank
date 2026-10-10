@@ -139,7 +139,7 @@ class Puller:
                        plan_id=d["plan_id"], phase="paired", paired_at=time.time())
         save(self.home, self.st)
         # the same fleet: a standby presents the fleet's id (agents probing it early must not see a stranger)
-        self.db.set_setting("fleet_id", d["fleet_id"])
+        self.db.set_state("fleet_id", d["fleet_id"])
         self.db.event("coordinator_standby_paired", reason=f"{self.st['from_url']} key {identity.fingerprint(d['a_cik'])[:16]}")
 
     def staging(self) -> Path:
@@ -359,7 +359,7 @@ def verify_modules(staging: Path, move_id: str | None = None) -> dict:
                     err = f"integrity.check: {e}"
                 finally:
                     h.close()
-            skip = set((vdb.get_setting("move_rules_plan") or {}).get("skip_blobs") or [])
+            skip = set((vdb.get_state("move_rules_plan") or {}).get("skip_blobs") or [])
             m = modlife._merge(res, modfiles.core_checks(vdb, name, skip=skip), err)
             out[name] = {"ok": m["ok"], "fingerprint": m["fingerprint"], "checks": m["checks"]}
     finally:
@@ -401,22 +401,22 @@ def finish_install(db: DB, home: Path) -> bool:
     if st.get("phase") != "installed":
         return False
     with db.tx():
-        db.set_setting("coordinator_epoch", int(st["epoch"]))
-        db.set_setting("coordinator_role", "active")
-        db.set_setting("move_phase", "idle")
-        db.set_setting("move_commit_decided", None)
-        db.set_setting("coordinator_url", st["my_url"])
-        db.set_setting("reaper_grace_until", time.time() + C.LEASE_TTL + 120)
-        db.set_setting("coordinator_cik", identity.key(home).public_b64)
+        db.set_state("coordinator_epoch", int(st["epoch"]))
+        db.set_state("coordinator_role", "active")
+        db.set_state("move_phase", "idle")
+        db.set_state("move_commit_decided", None)
+        db.set_state("coordinator_url", st["my_url"])
+        db.set_state("reaper_grace_until", time.time() + C.LEASE_TTL + 120)
+        db.set_state("coordinator_cik", identity.key(home).public_b64)
         relink_external(db)
         from . import modlife
-        plan = db.get_setting("move_rules_plan") or {}
+        plan = db.get_state("move_rules_plan") or {}
         modlife.apply_move_rules(db, plan)
-        db.set_setting("move_postflight_pending", {
+        db.set_state("move_postflight_pending", {
             "move_id": st.get("move_id"), "from_url": st.get("from_url"), "epoch": int(st["epoch"]), "items": plan.get("items") or [],
             "modules": [r["name"] for r in db.q("SELECT name FROM module_channels WHERE current IS NOT NULL AND disabled=0")]})
         for k in ("move_rules_plan", "move_blockers", "move_preflight_at", "move_draining_at"):
-            db.set_setting(k, None)
+            db.set_state(k, None)
         if st.get("move_id"):
             db.x("UPDATE coordinator_moves SET state='committed', ended_at=? WHERE move_id=?", (time.time(), st["move_id"]))
             if not db.one("SELECT 1 FROM coordinator_moves WHERE move_id=?", (st["move_id"],)) and st.get("signed"):

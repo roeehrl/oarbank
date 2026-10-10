@@ -147,8 +147,12 @@ def test_tool_registry_maps_ids_per_os_and_reaches_the_release(tmp_path, db):
         planned(db, "settings.tools.update", "java17", params={"paths": {"windows": ["/opt/jdk"]}})
     with pytest.raises(Exception, match="no globs"):
         planned(db, "settings.tools.update", "java17", params={"paths": {"linux": ["/usr/lib/jvm/*"]}})
+    with pytest.raises(Exception, match="trust is the module's request"):          # the registry holds paths only
+        planned(db, "settings.tools.update", "java17", params={"trust": "code-exec", "paths": {"darwin": ["/opt/jdk"]}})
     planned(db, "settings.tools.update", "java17", reason="jdk", params={
-        "trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"], "windows": ["C:\\Program Files\\jdk-17"]}})
+        "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"], "windows": ["C:\\Program Files\\jdk-17"]}})
+    assert platforms.tool_registry(db)["java17"] == {"paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"],
+                                                             "windows": ["C:\\Program Files\\jdk-17"]}}
     assert platforms.tool_paths(db, ["java17"], "darwin") == (["/opt/homebrew/opt/openjdk@17"], [])
     assert platforms.tool_paths(db, ["java17"], "linux") == ([], ["java17"])
     from oarbank_sdk import manifest as mf

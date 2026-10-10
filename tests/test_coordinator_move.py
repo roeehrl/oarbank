@@ -168,8 +168,8 @@ def test_a_whole_move_hands_the_fleet_to_b_with_identical_data(tmp_path, db, mon
     a_counts = coordmove.invariants(Path(db.path).parent / "move" / "snapshots" /
                                     json.loads(coordmove.move(db)["final_snapshot_json"])["databases"]["oarbank.sqlite3"]["file"])["counts"]
     b_counts = {t: db_b2.one(f'SELECT COUNT(*) n FROM "{t}"')["n"] for t in a_counts}
-    assert {t: n for t, n in a_counts.items() if t not in ("settings", "events", "coordinator_moves")} == \
-           {t: n for t, n in b_counts.items() if t not in ("settings", "events", "coordinator_moves")}
+    assert {t: n for t, n in a_counts.items() if t not in ("system_state", "events", "coordinator_moves")} == \
+           {t: n for t, n in b_counts.items() if t not in ("system_state", "events", "coordinator_moves")}
     assert db_b2.one("SELECT state FROM coordinator_moves WHERE move_id=?", (m["move_id"],))["state"] == "committed"
     assert audit.verify(db_b2)["ok"]               # the chain continues across the move (handoff record included)
     # stored paths inside the home are relative, so they hold on B unchanged; the external blob moved in
@@ -288,7 +288,7 @@ def test_owner_key_sets_follow_the_root_rotation_rule(tmp_path, db, monkeypatch)
     monkeypatch.setattr(C, "RELEASE_SIGNING", True)
     (pk, bk, nk), (p, b, n) = owner_keys(tmp_path)
     fid = identity.fleet_id(db)
-    db.set_setting("release_pubkey", p)                       # a fleet already pinned to a release key
+    db.set_state("release_pubkey", p)                       # a fleet already pinned to a release key
     v1 = signing.owner_anchors_statement(fid, 1, [p, b], ["http://100.64.0.9:8080/move.json"])
     sigs = lambda st, *fs: [{"key": signing.public_key_of(f), "sig": signing.sign(st, f)} for f in fs]
     with pytest.raises(core.ApiError, match="every new key"):
@@ -370,7 +370,7 @@ def test_signing_mode_moves_install_only_a_signed_build_for_the_targets_platform
     from oarbank.coordinator import config as C, coordbuilds
     monkeypatch.setattr(C, "RELEASE_SIGNING", True)
     key = tmp_path / "owner.key"
-    db.set_setting("release_pubkey", signing.keygen(key))
+    db.set_state("release_pubkey", signing.keygen(key))
     _, node = enrolled_node(db, "mini")
     with pytest.raises(coordmove.MoveError, match="no signed coordinator build for darwin-arm64"):
         coordmove.prepare(db, "mini", "test")
@@ -397,7 +397,7 @@ def test_signing_mode_moves_install_only_a_signed_build_for_the_targets_platform
     coordmove.prepare(db, "mini", "test")
     d = json.loads(db.one("SELECT install_coordinator_json FROM nodes WHERE node_id=?", (node["node_id"],))["install_coordinator_json"])
     assert (d["kind"], d["bundle_sha256"], d["platform"]) == ("build", mac["sha256"], "darwin-arm64")
-    assert signing.verify_coordinator(d["statement"], d["signature"], db.get_setting("release_pubkey"))["platform"] == "darwin-arm64"
+    assert signing.verify_coordinator(d["statement"], d["signature"], db.get_state("release_pubkey"))["platform"] == "darwin-arm64"
     with pytest.raises(coordbuilds.BuildError):
         coordbuilds.register(db, coordbuilds.stage(b"not an archive")["sha256"], "t")
 

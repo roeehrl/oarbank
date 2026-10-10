@@ -215,27 +215,30 @@ pub struct Policy {
     pub protection: Option<Value>,
 }
 
+/// The registry's defaults (generated: `settings_table`), what a node runs with before its first heartbeat.
 impl Default for Policy {
     fn default() -> Self {
+        use crate::settings_table as T;
         Self {
-            os_reserve_gb: 4.0,
-            user_reserve_gb: 8.0,
-            max_slots: None,
-            threads_per_job: 1,
-            job_mem_gb: 1.5,
-            user_present_slots: 2,
-            user_idle_s: 300.0,
-            run_on_battery: false,
-            nice: 10,
-            screen_sharing_present: true,
-            mem_in_use_bound: true,
+            os_reserve_gb: T::OS_RESERVE_GB,
+            user_reserve_gb: T::USER_RESERVE_GB,
+            max_slots: T::MAX_SLOTS,
+            threads_per_job: T::THREADS_PER_JOB,
+            job_mem_gb: T::JOB_MEM_GB,
+            user_present_slots: T::USER_PRESENT_SLOTS,
+            user_idle_s: T::USER_IDLE_S,
+            run_on_battery: T::RUN_ON_BATTERY,
+            nice: T::NICE,
+            screen_sharing_present: T::SCREEN_SHARING_PRESENT,
+            mem_in_use_bound: T::MEM_IN_USE_BOUND,
             protection: None,
         }
     }
 }
 
 impl Policy {
-    /// Parse over `base`: only keys present (and of the right type) change it.
+    /// Read a policy section the agent already checked against the settings table (`settings::validate`): every key
+    /// is present and well-typed there; `base` only fills what a caller's partial section leaves out (tests).
     pub fn from_json(j: Option<&Value>, base: &Policy) -> Self {
         let mut p = base.clone();
         if !j.is_some_and(Value::is_object) {

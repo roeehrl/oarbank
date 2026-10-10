@@ -211,7 +211,7 @@ def classes_running(db: DB, module: str, stages, mix: str, online: bool = False,
     if cache is not None and key in cache:
         return cache[key]
     mi = modcalls.info(module)
-    sql = ("SELECT node_id, platform, release_id, modules_json, capacity_json, policy_json, doctor_json, facts_json FROM nodes "
+    sql = ("SELECT node_id, platform, release_id, modules_json, capacity_json, settings_json, doctor_json, facts_json FROM nodes "
            "WHERE lifecycle='ready' AND platform IS NOT NULL")
     args: tuple = ()
     if online:

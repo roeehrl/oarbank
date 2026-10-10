@@ -17,6 +17,7 @@ from helpers import FACTS, agent_client, enrolled_node, fresh, install, make_db,
 REEL_DIR = Path(__file__).parents[1] / "vendor" / "oarbank-sdk" / "examples" / "reel"
 sys.path.insert(0, str(REEL_DIR))
 import reel_frames as F  # noqa: E402
+from helpers import set_fleet
 
 DOCTOR = {"modules": {"reel": {"health": "healthy", "checks": []}}}
 
@@ -28,7 +29,7 @@ def db(tmp_path):
     install(d, REEL_DIR)
     modcalls.use(d)
     releases.sync(d)
-    d.set_setting("replica_rate", 0.0)
+    set_fleet(d, "replica_rate", 0.0)
     yield d
     d.conn.close()
 

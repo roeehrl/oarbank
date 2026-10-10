@@ -89,21 +89,21 @@ def key(home: Path | None = None) -> Key:
 
 
 def fleet_id(db: DB) -> str:
-    fid = db.get_setting("fleet_id")
+    fid = db.get_state("fleet_id")
     if not fid:
         fid = "fleet_" + secrets.token_hex(8)
-        db.set_setting("fleet_id", fid)
+        db.set_state("fleet_id", fid)
     return fid
 
 
 def epoch(db: DB) -> int:
-    return int(db.get_setting("coordinator_epoch", 1) or 1)
+    return int(db.get_state("coordinator_epoch", 1) or 1)
 
 
 def role(db: DB) -> str:
     if marker_path(db).exists():
         return "handed_off"
-    r = db.get_setting("coordinator_role", os.environ.get("OARBANKD_ROLE", "active"))
+    r = db.get_state("coordinator_role", os.environ.get("OARBANKD_ROLE", "active"))
     return r if r in ROLES else "active"
 
 
@@ -118,13 +118,13 @@ def set_role(db: DB, r: str):
         p = marker_path(db)
         p.write_text(json.dumps({"at": time.time(), "epoch": epoch(db)}) + "\n", encoding="utf-8", newline="\n")
         files.seal(p)
-    db.set_setting("coordinator_role", r)
+    db.set_state("coordinator_role", r)
 
 
 def ensure(db: DB) -> dict:
     """Called at start: the key and fleet id exist; the CIK fingerprint is published as a setting."""
     k = key(Path(db.path).parent)
-    db.set_setting("coordinator_cik", k.public_b64)
+    db.set_state("coordinator_cik", k.public_b64)
     return {"fleet_id": fleet_id(db), "cik": k.public_b64, "fingerprint": k.fingerprint, "epoch": epoch(db), "role": role(db)}
 
 

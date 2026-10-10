@@ -12,6 +12,7 @@ from oarbank.coordinator import clock, core, explain, invariants, modcalls, mods
 from oarbank_sdk import manifest as mf
 
 from helpers import PARAMS, READY, SCENES, certify, create_study, enrolled_node, facts_for, fresh, make_db, relay_result
+from helpers import set_fleet
 
 BODY = {"free_cpu": 8, "free_mem_gb": 64, "ready_datasets": READY}
 METAL = {"host": ["metal", "opencl"], "containers": ["vulkan"]}
@@ -192,7 +193,7 @@ def test_a_replica_needs_another_node_with_the_api(db, fleet, monkeypatch):
     """Adaptive replication queues a replica only when another node could run it: with CUDA on box alone nobody could;
     once arm reports it too, the replica is queued."""
     runner_gpu(monkeypatch, use="shared", apis_any=["cuda"])
-    db.set_setting("replica_rate", 1.0)
+    set_fleet(db, "replica_rate", 1.0)
     sid = study(db, SCENES[:2])
     first, second = grants(db, fleet["box"], free=2)
     assert core.complete(db, fresh(db, fleet["box"]), first["attempt_id"], relay_result(score="0.850000", image="A"))["canonical"]

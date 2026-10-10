@@ -6,6 +6,7 @@ use crate::jobs::Table;
 use crate::paths::Layout;
 use crate::{host, procs};
 use oarbank_protection as P;
+use oarbank_protection::settings_table as T;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -112,13 +113,13 @@ impl Protection {
         let thermal = host::thermal();
         let on_battery = host::on_battery();
         // unknown presence counts as someone present (S19); nobody logged in is idle for ever
-        self.presence.set_screen_sharing_present(policy["screen_sharing_present"].as_bool().unwrap_or(true));
+        self.presence.set_screen_sharing_present(policy["screen_sharing_present"].as_bool().unwrap_or(T::SCREEN_SHARING_PRESENT));
         let presence = self.presence.read();
         let idle = presence.effective_idle_s();
         inputs.fleet_pids = fleet_pids.clone();
         inputs.thermal = thermal;
         inputs.on_battery = on_battery;
-        inputs.run_on_battery = policy["run_on_battery"].as_bool().unwrap_or(false);
+        inputs.run_on_battery = policy["run_on_battery"].as_bool().unwrap_or(T::RUN_ON_BATTERY);
         inputs.jobs = jobs;
         inputs.services = inputs_services;
         inputs.user_idle_s = idle;
@@ -134,7 +135,7 @@ impl Protection {
         let mut ci = P::CapacityInputs::new(m.ram_gb, perf, eff, P::Policy::from_json(Some(policy), &base), limits);
         ci.in_schedule = in_schedule;
         ci.constraint = r.constraint.clone();
-        ci.user_present = idle < policy["user_idle_s"].as_f64().unwrap_or(300.0);
+        ci.user_present = idle < policy["user_idle_s"].as_f64().unwrap_or(T::USER_IDLE_S);
         ci.thermal = thermal;
         ci.desired_state = d["desired_state"].as_str().unwrap_or("active").into();
         ci.fleet_rss_gb = fleet_rss;

@@ -30,8 +30,8 @@ def db(tmp_path, signing_on):
     d = make_db(tmp_path / "oarbank.sqlite3", modules=())
     d.x("DELETE FROM releases")                                # make_db's empty release: a fresh install has none
     d.x("DELETE FROM events WHERE kind LIKE 'release_%'")
-    d.set_setting(releases.DEFAULTS, {})
-    d.set_setting("release_pubkey", signing.keygen(tmp_path / "keys" / "release.key"))
+    d.set_state(releases.DEFAULTS, {})
+    d.set_state("release_pubkey", signing.keygen(tmp_path / "keys" / "release.key"))
     d.key = tmp_path / "keys" / "release.key"
     yield d
     d.conn.close()
@@ -116,7 +116,7 @@ def test_awaiting_releases_raise_one_alert_each_that_clears_when_signed_or_super
     releases.sync(db)
     wait = {a["platform"]: a for a in releases.awaiting(db)}
     assert set(wait) == {"darwin-arm64", "windows-amd64"} and wait["darwin-arm64"]["nodes"] == ["mac"]
-    assert db.get_setting(releases.AWAITING) == releases.awaiting(db)        # what the console reads
+    assert db.get_state(releases.AWAITING) == releases.awaiting(db)        # what the console reads
     alerts = {a["rule"]: a for a in db.q("SELECT * FROM alerts WHERE state IN ('open','pending')")}
     mac_rule = f"release_awaiting_owner:{wait['darwin-arm64']['release_id']}"
     assert set(alerts) == {f"release_awaiting_owner:{a['release_id']}" for a in wait.values()}
@@ -151,8 +151,8 @@ def test_an_upgraded_fleet_learns_its_waiting_releases_without_a_rebuild(db):
     enrolled_node(db, "mac")
     install(db, TOY_DIR)
     releases.sync(db)
-    db.set_setting(releases.DEFAULTS, {})
-    db.set_setting(releases.AWAITING, [])
+    db.set_state(releases.DEFAULTS, {})
+    db.set_state(releases.AWAITING, [])
     releases.ensure_fleet(db)
     assert len(built(db)) == 1 and [a["platform"] for a in releases.awaiting(db)] == ["darwin-arm64"]
 
@@ -248,8 +248,9 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     sign_items = [i for i in s["signed"]["items"] if i.get("sign")]
     assert s["signed"]["status"] == "blocked" and {i["command"] for i in sign_items} == {
         f"oarbank release sign {wait['darwin-arm64']} --promote", f"oarbank release sign {wait['windows-amd64']} --promote"}
-    assert s["tools"]["status"] == "blocked" and s["tools"]["actions"][0]["href"] == "/settings?tool=java17&trust=code-exec#tools"
+    assert s["tools"]["status"] == "blocked" and s["tools"]["actions"][0]["href"] == "/settings?tool=java17#tools"
     assert "settings.tools.update java17" in s["tools"]["items"][0]["command"]
+    assert '"trust"' not in s["tools"]["items"][0]["command"]                     # the registry holds paths only
     nodes = s["nodes"]
     assert nodes["status"] == "blocked"
     every = nodes["items"][0]
@@ -270,7 +271,8 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     # the owner fixes it: signs, maps the tool, the Mac installs the release and reports java17 and a container runtime
     for rid in wait.values():
         sign(db, rid)
-    db.set_setting("tool_registry", {"java17": {"trust": "code-exec", "paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"]}}})
+    from helpers import set_fleet
+    set_fleet(db, "tool_registry", {"java17": {"paths": {"darwin": ["/opt/homebrew/opt/openjdk@17"]}}})
     hello(db, mac, wait["darwin-arm64"])
     core.heartbeat(db, fresh(db, mac), {"doctor": {"capabilities": ["java17"], "modules": {name: {"health": "healthy", "checks": []}}},
                                         "attempts": [], "capacity": {"cpu_slots": 4, "pools": {"containers": 2}}})
@@ -343,12 +345,12 @@ def test_console_names_waiting_releases_and_the_readiness_checklist(db, tmp_path
             page = c.get(f"/modules/{r['name']}")
             assert page.status_code == 200 and "script-src 'self'" in page.headers["content-security-policy"]
             html = page.text
-            assert "Getting this module running" in html and "/settings?tool=java17&amp;trust=code-exec#tools" in html
+            assert "Getting this module running" in html and "/settings?tool=java17#tools" in html
             assert "not a platform it supports (pc): no JVM build for Windows" in html
             assert "no container runtime reported: install Colima and Docker" in html
             assert 'action="/do/mod.javatoy.set_favorite"' in html and "oarbank op mod.javatoy.queue_sums" in html
-            settings = c.get("/settings", params={"tool": "java17", "trust": "code-exec"}).text
-            assert 'value="java17"' in settings and '<option value="code-exec" selected>' in settings
+            settings = c.get("/settings", params={"tool": "java17"}).text
+            assert 'value="java17"' in settings and 'name="trust"' not in settings      # trust is approved with the module
             assert "needs your signature" in settings and "Build releases" in settings
             assert f"{r['name']}@{r['version']}" in settings and "(no module)" in settings      # each release's contents
             assert 'value="x&lt;y"' not in c.get("/settings", params={"tool": "x<y"}).text   # only a tool id is prefilled

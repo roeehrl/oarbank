@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..contracts import impact, operations as registry
+from ..coordinator.settings.store import fleet_value
 from . import forms, views
 from .state import ConsoleState
 
@@ -212,9 +213,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         if A.via_funnel(request.headers):
             return JSONResponse({"error": "forbidden", "detail": "requests from Tailscale Funnel are refused"}, status_code=403)
         port = (request.scope.get("server") or (None, None))[1]
-        if not A.host_ok(request.headers.get("host"), A.allowed_hosts(port, state.reader.get_setting("console_hosts") or [])
+        if not A.host_ok(request.headers.get("host"), A.allowed_hosts(port, fleet_value(state.reader, "console_hosts") or [])
                          | A.TEST_HOSTS):
-            return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (setting console_hosts)"},
+            return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (Settings → Access: console_hosts)"},
                                 status_code=421)
         path = request.url.path
         sid = request.cookies.get(SESSION_COOKIE)
@@ -476,6 +477,57 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                                    {"node": {"id": nid, "node_id": nid, "online": d["n"]["online"]}})
         return render(request, "node.html", {**d, "actor": actor})
 
+    async def node_settings_ctx(nid: str, request: Request, errors: list | None = None, form=None):
+        """The node's Settings tab; after a refused save, the refusals (an error summary per section, each beside its
+        field) and the values the person typed."""
+        d = await drill(views.node_settings_page, nid)
+        if d is None:
+            return None
+        d["explain"] = request.query_params.get("explain") or ""
+        _saved(d, request)
+        _with_errors(d["sections"], errors, form)
+        return d
+
+    def _saved(d: dict, request) -> None:
+        """After a save, its message sits in the saved section's own status line (one announcement, not two)."""
+        d["saved"] = request.query_params.get("saved") or ""
+        if d["saved"] and request.query_params.get("flash"):
+            d["saved_flash"], d["saved_kind"], d["flash"] = request.query_params["flash"], request.query_params.get("kind", "ok"), None
+
+    def _with_errors(sections: list, errors: list | None, form) -> None:
+        by_key: dict = {}
+        for e in errors or []:
+            by_key.setdefault(e.get("key") or "", []).append(e.get("message") or "")
+        for sec in sections:
+            sec["form_errors"] = []
+            for r in sec["rows"] + sec["advanced"]:
+                msgs = by_key.get(r["key"])
+                if not msgs:
+                    continue
+                r["form_errors"] = msgs
+                sec["form_errors"] += [{"key": r["key"], "label": r["label"], "message": m} for m in msgs]
+                if form is not None and form.get(f"o.{r['key']}"):
+                    r["form_value"], r["typed"] = form.get(f"v.{r['key']}") or "", True
+            if not sec["form_errors"] and errors and form is not None and form.get("section") == sec["id"]:
+                sec["form_errors"] = [{"key": e.get("key") or "", "label": e.get("key") or "", "message": e.get("message")}
+                                      for e in errors]
+
+    @app.get("/nodes/{nid}/settings", response_class=HTMLResponse)
+    async def node_settings(nid: str, request: Request):
+        actor = who(request)
+        d = await node_settings_ctx(nid, request)
+        if d is None:
+            return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
+        return render(request, "node_settings.html", {**d, "actor": actor, "tab": "settings"})
+
+    @app.get("/settings/overrides", response_class=HTMLResponse)
+    async def settings_overrides(request: Request, key: str = "", module: str = ""):
+        actor = who(request)
+        d = await drill(views.overrides_page, key, module)
+        if d is None:
+            return render(request, "error.html", {"message": f"no setting {key!r}", "actor": actor}, 404)
+        return render(request, "settings_overrides.html", {"o": d, "actor": actor})
+
     @app.get("/nodes/{nid}/protection", response_class=HTMLResponse)
     async def node_protection(nid: str, request: Request):
         actor = who(request)
@@ -631,17 +683,24 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         actor = who(request)
         return render(request, "audit.html", {**(await drill(views.audit_page, op, target, before) or {}), "actor": actor})
 
+    async def settings_ctx(request, actor) -> dict:
+        d = await drill(views.settings_page) or {"s": {}, "releases": [], "dscount": [],
+                                                 "fs": {"node_defaults": [], "fleet": [], "nodes": 0, "groups": []}}
+        # a readiness checklist's "Map <tool> in Settings → Tools" link opens the tool's form, its current paths filled in
+        tool = request.query_params.get("tool") or ""
+        d["prefill_tool"] = tool if tool and len(tool) <= 64 and tool.replace("_", "").replace(".", "").replace("-", "").isalnum() else ""
+        mods = await coordinator_json("GET", "/api/v1/modules", actor)
+        d["modules"] = mods.json() if mods.status_code == 200 else []
+        d["explain"] = request.query_params.get("explain") or ""
+        _saved(d, request)
+        for sec in d["fs"]["node_defaults"] + d["fs"]["fleet"]:
+            sec.setdefault("form_errors", [])
+        return d
+
     @app.get("/settings", response_class=HTMLResponse)
     async def settings(request: Request):
         actor = who(request)
-        d = await drill(views.settings_page) or {"s": {}, "releases": [], "dscount": []}
-        # a readiness checklist's "Map <tool> in Settings → Tools" link opens the tool form with the tool filled in
-        tool = request.query_params.get("tool") or ""
-        d["prefill_tool"] = tool if tool and len(tool) <= 64 and tool.replace("_", "").replace(".", "").replace("-", "").isalnum() else ""
-        d["prefill_trust"] = "code-exec" if request.query_params.get("trust") == "code-exec" else "read"
-        mods = await coordinator_json("GET", "/api/v1/modules", actor)
-        d["modules"] = mods.json() if mods.status_code == 200 else []
-        return render(request, "settings.html", {**d, "actor": actor})
+        return render(request, "settings.html", {**(await settings_ctx(request, actor)), "actor": actor})
 
     @app.get("/explain/{kind}/{ident}", response_class=HTMLResponse)
     async def explain_page(kind: str, ident: str, request: Request):
@@ -657,7 +716,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         actor = who(request)
 
         def load(r):
-            return {"conds": r.get_setting("invariant_conditions") or [],
+            return {"conds": r.get_state("invariant_conditions") or [],
                     "alerts": r.q("SELECT * FROM alerts WHERE rule LIKE 'invariant:%' ORDER BY opened_at DESC LIMIT 50")}
         return render(request, "verify.html", {**(await drill(load) or {"conds": [], "alerts": []}), "actor": actor})
 
@@ -954,8 +1013,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
 
     # ------------------------------------------------------------------ operations
     def back(url: str, msg: str, kind: str = "ok"):
-        sep = "&" if "?" in url else "?"
-        return RedirectResponse(f"{url}{sep}flash={quote(msg)}&kind={kind}", status_code=303)
+        base, _, frag = url.partition("#")            # the flash goes in the query, before a section's fragment
+        sep = "&" if "?" in base else "?"
+        return RedirectResponse(f"{base}{sep}flash={quote(msg)}&kind={kind}" + (f"#{frag}" if frag else ""), status_code=303)
 
     @app.post("/do/{op}")
     async def do(op: str, request: Request):
@@ -999,23 +1059,50 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             form = {**{k: form.get(k) for k in form.keys() if k != "bundle"}, "p.sha256": up.json()["sha256"]}
         try:
             params = forms.params_for(op, form, {})
+        except forms.FieldErrors as e:               # a settings section: its error summary, on its own page
+            return await settings_refused(request, actor, form, e.errors, return_to)
         except ValueError as e:                      # e.g. malformed JSON in an object/array field
             return back(return_to, f"{op}: invalid input: {e}", "bad")
         reason = (form.get("reason") or "").strip() or None
         headers = state.coordinator_headers(actor)
         if form.get("idem"):
             headers["idempotency-key"] = form["idem"]
-        if entry.tier in ("T2", "T3"):
+        tier = entry.tier
+        if op == "settings.apply":
+            # the tier follows what the change set touches; a fleet or group change always shows who it reaches first
+            from ..coordinator.settings import change_tier
+            tier = change_tier(params.get("changes") if isinstance(params.get("changes"), list) else [])
+            if any(isinstance(c, dict) and c.get("scope") in ("fleet", "group") for c in params.get("changes") or []):
+                tier = "T2" if tier in ("T0", "T1") else tier
+        if tier in ("T2", "T3"):
             r = await http.post(f"/api/v1/ops/{op}", json={"target": target, "params": params, "dry_run": True}, headers=headers)
+            if r.status_code != 200 and op == "settings.apply" and (r.json() or {}).get("errors"):
+                return await settings_refused(request, actor, form, r.json()["errors"], return_to)
             if r.status_code != 200:
                 return back(return_to, f"{op}: {r.json().get('detail') or r.text}", "bad")
             return render(request, "plan.html", {"plan": r.json()["plan"], "entry": entry, "return_to": return_to,
                                                  "reason": reason or "", "actor": actor})
         body = {"target": target, "params": params, "reason": reason}
-        if op == "secrets.set":
+        if op in ("secrets.set", "settings.secrets.set"):
             body["secret"] = form.get("secret") or ""        # beside params: never in a plan, the audit or a log
         r = await http.post(f"/api/v1/ops/{op}", json=body, headers=headers)
+        if r.status_code == 400 and op == "settings.apply" and (r.json() or {}).get("errors"):
+            return await settings_refused(request, actor, form, r.json()["errors"], return_to)
         return await _result(op, r, return_to, request)
+
+    async def settings_refused(request, actor, form, errors: list, return_to: str):
+        """A refused settings save: the section's page again, with a GOV.UK-style error summary that takes focus, each
+        error beside its field, and what the person typed (docs/design/settings.md, "Accessibility")."""
+        page = form.get("page") or ""
+        if page.startswith("node:"):
+            d = await node_settings_ctx(page[5:], request, errors, form)
+            if d is not None:
+                return render(request, "node_settings.html", {**d, "actor": actor, "tab": "settings"}, 400)
+        if page == "fleet":
+            d = await settings_ctx(request, actor)
+            _with_errors(d["fs"]["node_defaults"] + d["fs"]["fleet"], errors, form)
+            return render(request, "settings.html", {**d, "actor": actor}, 400)
+        return back(return_to, "settings.apply: " + "; ".join(e.get("message") or "" for e in errors)[:300], "bad")
 
     @app.post("/stage/{op}")
     async def stage(op: str, request: Request):
