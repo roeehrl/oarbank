@@ -6,7 +6,8 @@ the SDK read-only; `<home>/modules/data/<name>` and `<home>/tmp/modules/<name>` 
 paths, no GPU (verbs are pure and reach state only through host callbacks). The module host refuses a process that
 is not confined after its handshake.
 
-Node-side grants (`[sandbox]`: network, host tools, GPU, written-file execution, containers, folders) are approved per module version by an operator.
+Node-side grants (`[sandbox]`: network, host tools, GPU, written-file execution, containers, folders, inbound listeners)
+are approved per module version by an operator.
 A version that requests anything cannot be enabled, canaried, pinned or promoted until its exact requests (by digest)
 are approved. Releases then carry the approved grants to agents, which enforce them.
 """
@@ -205,6 +206,9 @@ def requests(manifest, bundle) -> dict:
         out["container_gpu"] = True
     if sb.folders:
         out["folders"] = sorted(({"id": f.id, "access": f.access} for f in sb.folders), key=lambda f: f["id"])
+    if getattr(sb.net, "inbound", None):              # inbound listeners (docs/design/inbound-listeners.md): a grant of its own
+        from .releases import inbound_entries
+        out["inbound"] = sorted(inbound_entries(sb), key=lambda x: x["name"])
     return out
 
 
@@ -280,7 +284,19 @@ def describe(req: dict) -> str:
                    f"SHA256:{s['key_sha256'][:16]}" + (f", listed in index {s['index']}" if s.get("index") else ""))
     if req.get("container_gpu"):
         out.append("GPU passthrough to containers")
+    for x in req.get("inbound") or []:
+        out.append("accepts connections from the internet on nodes the owner assigns: " + _listener_text(x))
     for f in req.get("folders") or []:
         out.append(f"reads folder {f['id']} (on Windows its files are executable)" if f["access"] == "read" else
                    f"writes into folder {f['id']} (files it creates may replace files there)")
     return "; ".join(out)
+
+
+def _listener_text(x: dict) -> str:
+    """One inbound listener as its approval reads (docs/design/inbound-listeners.md, manifest rule 4)."""
+    port = f"port {x['port_hint']} wanted" if x.get("port_hint") else "any port"
+    sock = ", handed over as a listening socket" if x.get("handover") == "listen_fd" else ""
+    cap = f", at most {x['max_bytes_per_s']:g} bytes a second" if x.get("max_bytes_per_s") else ""
+    return (f"listener {x['name']} ({x.get('protocol', 'tcp').upper()}, {port}, {x.get('port_policy', 'stable')}{sock}; "
+            f"at most {x['max_conns']} connections, {x['max_conns_per_ip']} per address, "
+            f"{x['new_conns_per_ip_per_s']:g} new a second per address, idle {x['idle_timeout_s']:g} s{cap})")

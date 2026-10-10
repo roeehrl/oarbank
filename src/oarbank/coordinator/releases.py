@@ -131,12 +131,18 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                           "reserves_host_memory": sv.reserves_host_memory, "yieldable": sv.yieldable, "freeze_ok": sv.freeze_ok,
                           # endpoint and gpu only when set, so other entries keep their bytes
                           **({"endpoint": True} if sv.endpoint else {}),
+                          # the inbound listeners whose connections it serves (only when set, so other entries keep their bytes)
+                          **({"listeners": list(sv.listeners)} if getattr(sv, "listeners", None) else {}),
                           **({"gpu": sv.gpu.model_dump()} if sv.gpu.use != "none" or sv.gpu.apis_any else {})}
                          for sv in on(m.services)],
             "probes": [{"name": pr.name, "exec": list(pr.exec), "period_s": pr.period_s} for pr in on(m.probes)],
             # the module sandbox (spec/sandbox.md): the node-side grants, operator-approved before this version could
             # be enabled, canaried, pinned or promoted (modsandbox); the agent enforces exactly these
-            "sandbox": {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": list(sb.net.allow)},
+            "sandbox": {"contract": sb.contract,
+                        # inbound listeners (docs/design/inbound-listeners.md; only when declared, so other entries keep
+                        # their bytes): the module's ceilings; the owner's per-node entries are in the node statement
+                        "net": {"mode": sb.net.mode, "allow": list(sb.net.allow),
+                                **({"inbound": inbound_entries(sb)} if getattr(sb.net, "inbound", None) else {})},
                         "tools": [{"id": t.id, "trust": t.trust, "version": t.version, "arch": t.arch} for t in sb.tools],
                         "devices": {"gpu": sb.devices.gpu}, "exec_writable": sb.exec_writable,
                         "containers": [{"image": c.image, "platform": c.platform} for c in sb.containers],
@@ -144,6 +150,17 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                         **({"container_sets": modimages.release_sets(m, path)} if sb.container_sets else {}),
                         # folders: ids only; where they are on each node is the node's signed statement
                         **({"folders": [{"id": f.id, "access": f.access} for f in sb.folders]} if sb.folders else {})}}
+
+
+def inbound_entries(sb) -> list[dict]:
+    """`[sandbox].net.inbound` as the release (and the grant approval) carries it: every field explicit, `proxy_protocol`
+    resolved (absent in the manifest: on for `listen_fd`, else off)."""
+    return [{"name": x.name, "protocol": x.protocol, "port_hint": x.port_hint, "port_policy": x.port_policy, "tls": x.tls,
+             "handover": getattr(x, "handover", "connections"),
+             "proxy_protocol": x.proxy() if hasattr(x, "proxy") else bool(x.proxy_protocol),
+             "max_conns": x.max_conns, "max_conns_per_ip": x.max_conns_per_ip,
+             "new_conns_per_ip_per_s": x.new_conns_per_ip_per_s, "idle_timeout_s": x.idle_timeout_s,
+             "max_bytes_per_s": x.max_bytes_per_s} for x in sb.net.inbound]
 
 
 def _tar(out: Path, root: Path, modes: dict):

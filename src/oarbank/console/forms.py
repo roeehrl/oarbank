@@ -202,6 +202,26 @@ def tool_definition(form) -> dict:
     return out
 
 
+LISTENER_LIMITS = ("max_conns", "max_conns_per_ip", "new_conns_per_ip_per_s", "idle_timeout_s", "max_bytes_per_s")
+
+
+def listener_entry(form) -> dict:
+    """The node page's listener form (templates/_node_network.html): `key`, the entry's fields (an empty one returns to
+    its default), the lowered limits (`limit.<key>`; empty: the module's) and the allowed addresses (one CIDR per line
+    or comma-separated; empty: everyone). A `params` field (a button) is the request itself."""
+    if form.get("params"):
+        return json.loads(form["params"])
+    out = {"key": (form.get("key") or "").strip()}
+    for k in ("external_port", "internal_port"):
+        v = (form.get(k) or "").strip()
+        out[k] = int(v) if v.isdigit() else (v or None)
+    for k in ("fallback", "mapping", "ipv6", "bind"):
+        out[k] = (form.get(k) or "").strip() or None
+    out["limits"] = {k: _coerce(v) for k in LISTENER_LIMITS if (v := (form.get(f"limit.{k}") or "").strip())}
+    out["allow"] = [x for x in (form.get("allow") or "").replace(",", " ").split() if x]
+    return out
+
+
 JOIN_TTLS = {3600, 4 * 3600, 86400, 7 * 86400, 30 * 86400}     # the Add machine form's lifetimes, in seconds
 MANY_MIN, MANY_MAX, ONE_MAX_TTL = 2, 10000, 7 * 86400
 
@@ -263,6 +283,7 @@ MAPPERS = {
     "secrets.clear": lambda f, ctx: {"name": f.get("p.name") or "", **({"node": f.get("p.node")} if f.get("p.node") else {}),
                                      **({"group": f.get("p.group")} if f.get("p.group") else {})},
     "jobs.set_priority": lambda f, ctx: {"priority": int(f.get("priority") or 0)},
+    "listeners.configure": lambda f, ctx: listener_entry(f),
 }
 
 

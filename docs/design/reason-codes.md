@@ -61,6 +61,13 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `RELEASE_UNSIGNED` | Release {release} for {platform} is waiting for the owner's signature: oarbank release sign {release} --promote | P1 | – | `releases.attach_signature` | – |
 | `NOT_ADMITTING` | The agent admits no new work: {why} | P1 | – | – | – |
 | `CLOCK_SKEW` | The node's clock is {offset_s} s off the coordinator's: jobs and moves use the coordinator's time, but certificates and update metadata need a correct clock; set the node's time | P3 | – | – | – |
+| `LISTENER_UNAVAILABLE` | Listener {listener} is not open on this node: {why} | P1 | – | `listeners.configure` | – |
+| `PORT_TAKEN` | Listener {listener}: the router forwards its external port to another device: {text} | P3 | – | `listeners.configure` | – |
+| `DOUBLE_NAT` | Listener {listener}: this machine is behind two routers: {text} | P3 | – | – | – |
+| `CGNAT` | Listener {listener}: the provider shares one public address among many customers: {text} | P3 | – | – | – |
+| `NO_MAPPING_PROTOCOL` | Listener {listener}: the router accepts no automatic port mapping: {text} | P3 | – | `listeners.configure` | – |
+| `MAPPED_UNREACHABLE` | Listener {listener}: mapped, but connections from outside do not arrive: {text} | P3 | – | `listeners.probe` | – |
+| `FIREWALL_BLOCKED` | Listener {listener}: this machine's firewall blocks incoming connections: {text} | P3 | – | – | – |
 
 ## protection
 

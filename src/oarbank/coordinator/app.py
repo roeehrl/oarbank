@@ -235,7 +235,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
 
     @app.post("/v1/agent/heartbeat")
     async def heartbeat(request: Request, node=Depends(node_dep)):
-        return await run_in_threadpool(core.heartbeat, db, node, await request.json())
+        return await run_in_threadpool(core.heartbeat, db, node, await request.json(), peer(request))
 
     @app.post("/v1/agent/claim")
     async def claim(request: Request, node=Depends(node_dep)):
@@ -949,6 +949,28 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         if d is None:
             raise core.ApiError(404, "not_found", f"node {nid}")
         return d
+
+    # ---------------- inbound listeners (docs/design/inbound-listeners.md): what `oarbank listener list|show|mappings` print
+    @app.get("/api/v1/listeners")
+    def api_listeners(node: str | None = None, actor=Depends(who)):
+        """Every node's listeners, router mappings, network view and reachability (or one node's)."""
+        from . import listeners
+        return listeners.fleet_doc(db, node)
+
+    @app.get("/api/v1/nodes/{nid}/listeners/{key:path}")
+    def api_node_listener(nid: str, key: str, actor=Depends(who)):
+        """One listener of a node. Looking at it asks the node for its top client addresses for the next 10 minutes
+        (`send_listener_talkers`); they show once the node sends them."""
+        from . import listeners
+        n = db.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+        if n is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+        listeners.want_talkers(db, n["node_id"])
+        doc = listeners.node_doc(db, db.one("SELECT * FROM nodes WHERE node_id=?", (n["node_id"],)))
+        row = next((x for x in doc["listeners"] if x["key"] == key), None)
+        if row is None:
+            raise core.ApiError(404, "not_found", f"{n['hostname']} has no listener {key}")
+        return {**{k: v for k, v in doc.items() if k != "listeners"}, "listener": row}
 
     @app.get("/api/v1/jobs/{jid}")
     def api_job(jid: int, actor=Depends(who)):

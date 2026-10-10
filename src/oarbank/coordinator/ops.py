@@ -412,8 +412,15 @@ def _pinned_open(db, nid) -> list[int]:
     return [r["job_id"] for r in db.q("SELECT job_id FROM jobs WHERE target_node=? AND state IN ('pending','leased')", (nid,))]
 
 
+def _retire_impact(db, r) -> dict:
+    from . import listeners
+    out = {"live_attempts": _live_on(db, _nid(db, r)), "pinned_jobs_cancelled": len(_pinned_open(db, _nid(db, r)))}
+    warn = listeners.retire_warning(db, _nid(db, r))          # an offline node cannot release its router mappings
+    return {**out, "warning": warn} if warn else out
+
+
 @handler("nodes.retire", target_type="node", snapshot=_node_snap, name=lambda db, r: _node(db, r.target)["hostname"],
-         impact=lambda db, r: {"live_attempts": _live_on(db, _nid(db, r)), "pinned_jobs_cancelled": len(_pinned_open(db, _nid(db, r)))})
+         impact=_retire_impact)
 def _retire(db, req):
     nid = _nid(db, req)
     db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL WHERE node_id=?", (nid,))
@@ -1915,6 +1922,125 @@ def _sign_statement(db, req):
         return statements.sign(db, req.target or "", req.params.get("statement") or "", req.params.get("signature") or "")
     except statements.StatementError as e:
         raise core.ApiError(422, "bad_statement_signature", str(e))
+
+
+# ------------------------------------------------------------------ inbound listeners (docs/design/inbound-listeners.md)
+
+def _listener_req(db, req) -> tuple[dict, str, dict]:
+    """(the target node, the listener key `<module>/<listener>`, the entry's fields)."""
+    node = _node(db, req.target)
+    p = dict(req.params or {})
+    key = p.pop("key", None)
+    if not isinstance(key, str) or not key:
+        raise core.ApiError(400, "missing_key", "params.key: the listener as <module>/<listener>")
+    return node, key.strip(), p
+
+
+def _listener_err(fn):
+    def run(*a, **kw):
+        from . import listeners
+        try:
+            return fn(*a, **kw)
+        except listeners.ListenerError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+    return run
+
+
+def _listener_snap(db, req):
+    from . import listeners
+    n = db.one("SELECT node_id, listeners_disabled FROM nodes WHERE node_id=? OR hostname=?", (req.target, req.target))
+    key = (req.params or {}).get("key")
+    return {"fleet_disabled": bool(db.get_state(listeners.FLEET_DISABLED, False)),
+            **({"node_disabled": bool(n["listeners_disabled"]),
+                "entry": listeners.node_config(db, n["node_id"]).get(key) if key else None} if n else {})}
+
+
+@_listener_err
+def _configure_impact(db, r):
+    from . import listeners
+    node, key, p = _listener_req(db, r)
+    entry, lst, ver = listeners.check_entry(db, node, key, p)
+    res = listeners.resolve(entry, lst)
+    limits = {k: getattr(lst, k) for k in listeners.LIMIT_KEYS}
+    eff = {k: res["limits"].get(k, v) for k, v in limits.items()}
+    lim = (f"at most {eff['max_conns']:g} connections, {eff['max_conns_per_ip']:g} per address, "
+           f"{eff['new_conns_per_ip_per_s']:g} new a second per address, idle {eff['idle_timeout_s']:g} s"
+           + (f", {eff['max_bytes_per_s']:g} bytes a second" if eff.get("max_bytes_per_s") else ""))
+    lowered = ", ".join(f"{k} {res['limits'][k]:g} (module {limits[k]:g})" if limits[k] is not None
+                        else f"{k} {res['limits'][k]:g} (module: none)" for k in res["limits"])
+    approved = listeners.granted(db, node["node_id"], key)
+    then = ("the node gets a new statement with this entry"
+            + (f"; sign the node statement (oarbank node sign {node['hostname']}) before the node applies it" if _signing() else "")
+            if approved else f"kept, but not in the node statement until the sandbox grants of {key.split('/')[0]} {ver} are "
+                             f"approved (oarbank module approve {key.split('/')[0]}@{ver})")
+    return {"node": f"{node['hostname']} ({node['node_id']})", "module": f"{key.split('/')[0]} {ver}", "listener": key,
+            "external_port": res["external_port"] or "the internal port", "fallback": res["fallback"],
+            "mapping": res["mapping"], "ipv6": res["ipv6"], "bind": res["bind"], "internal_port": res["internal_port"],
+            "limits": lim, "limits_lowered": lowered or None, "allow": res["allow"] or "everyone",
+            "replaces": listeners.describe_entry(key, listeners.resolve(listeners.node_config(db, node["node_id"])[key], lst))
+            if key in listeners.node_config(db, node["node_id"]) else None,
+            "then": then}
+
+
+@handler("listeners.configure", target_type="node", impact=_configure_impact, snapshot=_listener_snap)
+@_listener_err
+def _listeners_configure(db, req):
+    """Assign a module's inbound listener to a node, or change its entry (fields given as null return to their default;
+    `limits` and `allow` replace what was set). The node's statement is rebuilt; in signing mode the owner signs it before
+    the node applies it."""
+    from . import listeners, statements
+    node, key, p = _listener_req(db, req)
+    entry, lst, ver = listeners.check_entry(db, node, key, p)
+    listeners.set_entry(db, node["node_id"], key, entry)
+    changed = statements.refresh(db, [node["node_id"]])
+    res = listeners.resolve(entry, lst)
+    db.event("listener_configured", actor=req.actor, node_id=node["node_id"], module=key.split("/")[0],
+             reason=listeners.describe_entry(key, res)[:300])
+    return {"node": node["node_id"], "key": key, "entry": res, "statements": changed,
+            "in_statement": listeners.granted(db, node["node_id"], key)}
+
+
+@handler("listeners.remove", target_type="node", snapshot=_listener_snap)
+def _listeners_remove(db, req):
+    """Remove a listener's entry from a node: the new statement no longer lists it, and the agent closes the listener
+    and removes its router mapping once it applies it (a key that is not configured: nothing to do)."""
+    from . import listeners, statements
+    node, key, _ = _listener_req(db, req)
+    if key not in listeners.node_config(db, node["node_id"]):
+        return {"node": node["node_id"], "key": key, "removed": False, "statements": []}
+    listeners.set_entry(db, node["node_id"], key, None)
+    changed = statements.refresh(db, [node["node_id"]])
+    db.event("listener_removed", actor=req.actor, node_id=node["node_id"], module=key.split("/")[0], reason=key)
+    return {"node": node["node_id"], "key": key, "removed": True, "statements": changed}
+
+
+def _kill_switch(on: bool):
+    def apply(db, req):
+        from . import listeners
+        if req.target in (None, "", "fleet", "all"):
+            db.set_state(listeners.FLEET_DISABLED, on)
+            db.event("listeners_disabled" if on else "listeners_resumed", actor=req.actor, reason=f"fleet: {req.reason or ''}".strip())
+            return {"scope": "fleet", "listeners_disabled": on}
+        nid = _nid(db, req)
+        db.x("UPDATE nodes SET listeners_disabled=? WHERE node_id=?", (1 if on else 0, nid))
+        db.event("listeners_disabled" if on else "listeners_resumed", actor=req.actor, node_id=nid, reason=req.reason)
+        return {"scope": "node", "node": nid, "listeners_disabled": on,
+                "fleet_disabled": bool(db.get_state(listeners.FLEET_DISABLED, False))}
+    return apply
+
+
+HANDLERS["listeners.disable"] = Handler(target_type="node", apply=_kill_switch(True), snapshot=_listener_snap)
+HANDLERS["listeners.resume"] = Handler(target_type="node", apply=_kill_switch(False), snapshot=_listener_snap)
+
+
+@handler("listeners.probe", target_type="node", snapshot=_node_snap)
+@_listener_err
+def _listeners_probe(db, req):
+    """Check a listener from outside now (Check now): a dial-back probe by a fleet node on another network, at the
+    external address the node's router reported; at most one a minute per listener."""
+    from . import listeners
+    node, key, _ = _listener_req(db, req)
+    return listeners.schedule(db, node["node_id"], key)
 
 
 def _origins_impact(db, r):

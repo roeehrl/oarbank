@@ -520,7 +520,17 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         d["panels"] = await panels("node.detail.panel", request, actor,
                                    {"node": {"id": nid, "node_id": nid, "online": d["n"]["online"]}})
+        d["listener_focus"] = await listener_focus(nid, request.query_params.get("listener"), actor)
         return render(request, "node.html", {**d, "actor": actor})
+
+    async def listener_focus(nid: str, key: str | None, actor: str) -> str | None:
+        """A listener's detail on the node page (?listener=<module>/<listener>): looking at it asks the node for its top
+        client addresses for 10 minutes (oarbankd's GET /api/v1/nodes/{node}/listeners/{key})."""
+        if not key:
+            return None
+        from urllib.parse import quote
+        await coordinator_json("GET", f"/api/v1/nodes/{quote(nid)}/listeners/{quote(key, safe='/')}", actor)
+        return key
 
     async def node_settings_ctx(nid: str, request: Request, errors: list | None = None, form=None):
         """The node's Settings tab; after a refused save, the refusals (an error summary per section, each beside its
@@ -1073,8 +1083,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
         r = await coordinator_json("GET", f"/api/v1/tools?module={name}", actor)
         doc = r.json() if r.status_code == 200 else None
+        from ..coordinator import listeners           # its inbound listeners per node (docs/design/inbound-listeners.md)
+        lrows = await drill(listeners.module_rows, name) if man.sandbox.net.inbound else []
         return render(request, "module_nodes.html", {"name": name, "man": man, "tab": "nodes", "actor": actor,
-                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200]})
+                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200],
+                                                      "listener_rows": lrows or []})
 
     @app.get("/modules/{name}/health", response_class=HTMLResponse)
     async def module_page(name: str, request: Request):

@@ -37,6 +37,9 @@ Safety (must hold after every committed transaction):
       payload, and artifacts that each hold one pin's files (reads the catalogue's manifests)
   S23 an attempt that resumed from a checkpoint resumed from one recorded by an earlier attempt of the same job under the
       same job generation
+  S24 every listener and router mapping a node reports belongs to an approved grant (the module version the node runs
+      requests that inbound listener, its grants approved by digest), an assignment (the node's statement lists it) and
+      the statement the node applied (listeners.py)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -377,13 +380,20 @@ def s23_resume_from_own_checkpoint(db: DB):
     return out
 
 
+def s24_listeners_granted_and_assigned(db: DB):
+    """S24 (docs/design/inbound-listeners.md): a listener or router mapping a node reports is granted, assigned by the
+    node's statement and part of the statement it applied."""
+    from . import listeners
+    return listeners.s24_violations(db)
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
-          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint]
+          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s24_listeners_granted_and_assigned]
 
 
 def check_all(db: DB) -> list[str]:

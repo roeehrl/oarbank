@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 94 operations, 2 explain kinds, 128 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 99 operations, 2 explain kinds, 135 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -90,6 +90,11 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `tools.detect` | T0 | yes | `oarbank tools detect <node>` | yes |
 | `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
 | `nodes.sign_statement` | T1 | yes | `oarbank node sign <node>` | yes |
+| `listeners.configure` | T2 | yes | `oarbank listener set <node> <key>` | yes |
+| `listeners.remove` | T1 | yes | `oarbank listener remove <node> <key>` | yes |
+| `listeners.disable` | T0 | yes | `oarbank listener disable --node <node>`<br>`oarbank listener disable --all` | yes |
+| `listeners.resume` | T1 | yes | `oarbank listener resume --node <node>`<br>`oarbank listener resume --all` | yes |
+| `listeners.probe` | T0 | yes | `oarbank listener probe <node> <key>` | yes |
 | `access.accounts.create` | T2 | yes | `oarbank account create <name>` | yes |
 | `access.accounts.update` | T2 | yes | `oarbank op access.accounts.update` | yes |
 | `access.accounts.reset_totp` | T2 | yes | `oarbank op access.accounts.reset_totp` | yes |
@@ -142,4 +147,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |
 | `NO_RELEASE` | `modules.install`, `modules.enable` |
 | `RELEASE_UNSIGNED` | `releases.attach_signature` |
+| `LISTENER_UNAVAILABLE` | `listeners.configure` |
+| `PORT_TAKEN` | `listeners.configure` |
+| `NO_MAPPING_PROTOCOL` | `listeners.configure` |
+| `MAPPED_UNREACHABLE` | `listeners.probe` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

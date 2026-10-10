@@ -27,6 +27,10 @@ pub const DEFS: &[Def] = &[
     Def { key: "vm_cpus", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
     Def { key: "disk_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
     Def { key: "staging_mbps", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "inbound_listeners", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "true", tighten: Tighten::Lower, managed: true },
+    Def { key: "listener_port_range", section: Section::Policy, kind: Kind::Text, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "\"41000-41999\"", tighten: Tighten::None, managed: false },
+    Def { key: "listener_probe_endpoint", section: Section::Policy, kind: Kind::Text, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::None, managed: false },
+    Def { key: "listener_stun_server", section: Section::Policy, kind: Kind::Text, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::None, managed: false },
     Def { key: "disabled_services", section: Section::Policy, kind: Kind::Strings, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "[]", tighten: Tighten::None, managed: false },
     Def { key: "module_settings", section: Section::Policy, kind: Kind::Object, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "{}", tighten: Tighten::None, managed: false },
     Def { key: "protection", section: Section::Policy, kind: Kind::Object, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::None, managed: false },
@@ -45,3 +49,4 @@ pub const THREADS_PER_JOB: i64 = 1;
 pub const MAX_SLOTS: Option<i64> = None;
 pub const NICE: i64 = 10;
 pub const HARD_LIMITS: bool = false;
+pub const INBOUND_LISTENERS: bool = true;

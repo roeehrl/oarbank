@@ -216,7 +216,7 @@ owner still lowers caps from the console. The keys and which way each tightens:
 
 | Key | Type | Stricter |
 |---|---|---|
-| `run_on_battery` | boolean | off |
+| `run_on_battery`, `inbound_listeners` | boolean | off |
 | `screen_sharing_present`, `mem_in_use_bound`, `hard_limits` | boolean | on |
 | `user_present_slots`, `max_slots`, `jobs`, `vm_cpus` | integer | lower |
 | `cpu_cores`, `mem_gb`, `vm_mem_gb`, `disk_gb`, `staging_mbps` | number | lower |

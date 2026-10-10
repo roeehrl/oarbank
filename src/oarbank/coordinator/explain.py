@@ -238,6 +238,7 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
         summary.append(X.SummaryRow(code="CLOCK_SKEW", detail={"offset_s": n["clock_offset_s"]}))   # a condition: work goes on
     # what host protection cannot read or do there now, and the fail-safe default it applies instead
     summary += [X.SummaryRow(code=c["code"], detail=c["values"]) for c in protection.runtime_conditions(jl(n["telemetry_json"], {}) or {})]
+    summary += _listener_rows(n)
     head = X.Headline(code="OK", text="Admitting work") if ff is None else \
         X.Headline(code=ff.code, text=f"Not admitting: {ff.predicate} (observed {ff.observed}, required {ff.required})")
     if ff is not None and ff.code in RELEASE_CODES:      # say which release, and what lets it through
@@ -252,6 +253,12 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
         remedies=_remedies([head.code] + [s.code for s in summary], {"node": n["node_id"]}),
         evidence=[X.Evidence(event_id=e["event_id"], kind=e["kind"]) for e in
                   db.q("SELECT event_id, kind FROM events WHERE node_id=? ORDER BY event_id DESC LIMIT 10", (n["node_id"],))])
+
+
+def _listener_rows(n: dict) -> list:
+    """The node's listener conditions (listeners.explain_rows): a listener the agent refused, a doctor result to fix."""
+    from . import listeners
+    return [X.SummaryRow(code=c["code"], detail=c["detail"]) for c in listeners.explain_rows(n)]
 
 
 def explain(db: DB, kind: str, ident: str) -> X.ExplainDocument | None:
