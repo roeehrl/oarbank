@@ -40,12 +40,12 @@
   {% if ch.canary %}<div class="small">canary nodes: {% for c in s.canary_state %}<span class="chip {{ 'ok' if c.state == 'certified' else 'warn' }}">{{ c.hostname }}: {{ c.state or 'installing' }}</span>{% endfor %}</div>{% endif %}
   <table class="small" style="margin-top:6px"><tr><th>version</th><th>digest</th><th>bundle</th><th>installed and sandbox grants</th><th><span class="sr-only">actions</span></th></tr>
   {% for v in s.versions %}<tr><td class="mono">{{ v.version }}</td><td class="mono" title="{{ v.content_digest }}">{{ v.content_digest[:15] }}…</td>
-    <td>{{ v.bundle_files }} files ({{ (v.bundle_bytes / 1e6) | round(1) }} MB)</td>
+    <td class="nowrap">{{ v.bundle_files }} files ({{ (v.bundle_bytes / 1e6) | round(1) }} MB)</td>
     <td class="mut">{{ v.installed_at | ago }} by {{ v.installed_by }}
       {% if v.sandbox.requests %}<div class="small">sandbox: {{ v.sandbox.requests }}
         {% if v.sandbox.approved %}<span class="chip ok">approved</span>{% else %}<span class="chip warn">needs approval</span>
         {{ m.op_form("modules.approve", s.name ~ "@" ~ v.version, "Review grants…", cls="pri") }}{% endif %}</div>{% endif %}</td>
-    <td class="row">
+    <td class="actions">
       {% if not ch.current %}{{ m.op_form("modules.enable", s.name ~ "@" ~ v.version, "Enable", cls="pri", confirm="Enable " ~ s.name ~ " " ~ v.version ~ " on every node?") }}
       {% elif v.version != ch.current and v.version != ch.canary %}
         {% call m.op_form("modules.enable_canary", s.name ~ "@" ~ v.version, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes" size="1">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}

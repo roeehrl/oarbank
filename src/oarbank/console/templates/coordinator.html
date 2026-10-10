@@ -55,7 +55,7 @@ coordinator again. Running work continues through the move; dispatch pauses for 
     <td class="mono">{% if n.cik_pinned %}{{ n.cik_pinned[:16] }}{% if n.cik_pinned != fp %} <span class="chip bad">differs</span>{% endif %}{% else %}<span class="mut">not yet</span>{% endif %}</td>
     <td>{% if n.cik_confirmed == fp %}<span class="chip ok">confirmed</span>{% else %}<span class="mut">no</span>{% endif %}</td>
     <td>{{ (n.move or {}).state or '–' }} <span class="mut">{{ ((n.move or {}).error or '')[:100] }}</span></td>
-    <td>{% if n.cik_pinned == fp and n.cik_confirmed != fp %}{{ m.op_form("nodes.confirm_identity", n.node_id, "Confirm " ~ n.cik_pinned[:8], confirm="Confirm that " ~ n.hostname ~ " pinned key " ~ fp[:16] ~ "?") }}{% endif %}</td>
+    <td class="actions">{% if n.cik_pinned == fp and n.cik_confirmed != fp %}{{ m.op_form("nodes.confirm_identity", n.node_id, "Confirm " ~ n.cik_pinned[:8], confirm="Confirm that " ~ n.hostname ~ " pinned key " ~ fp[:16] ~ "?") }}{% endif %}</td>
   </tr>{% else %}<tr><td colspan="5" class="mut">No machines enrolled.</td></tr>{% endfor %}
 </table>
 

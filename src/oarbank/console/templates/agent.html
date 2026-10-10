@@ -58,7 +58,7 @@ or is not confirmed within 10 minutes, is rolled back on that node automatically
     <td class="mono">{{ b.version }}</td><td class="mono">{{ b.platforms | join(', ') }}</td><td class="mono" title="{{ b.sha256 }}">{{ b.sha256[:12] }}…</td>
     <td>{{ (b.size / 1048576) | round(1) }} MB</td><td class="mut">{{ b.uploaded_at | ago }} by {{ b.uploaded_by }}</td>
     <td>{% if b.signed %}seq {{ b.seq }}{% else %}<span class="mut">no</span>{% endif %}</td>
-    <td class="row">
+    <td class="actions">
       {% set fits = nodes | selectattr("platform", "in", b.platforms) | list %}
       {% if fits %}
       {% call m.op_form("agent.canary", b.sha256, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes for {{ b.version }}" size="1">{% for n in fits %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}

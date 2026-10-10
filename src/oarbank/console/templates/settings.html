@@ -3,7 +3,7 @@
 {% block title %}Settings · Oarbank{% endblock %}
 {% block body %}
 <h1>Settings</h1>
-<div class="grid">
+<div class="grid dense stack">
 <div class="card">
   <b>Notifications (ntfy)</b>
   {% call m.op_form("settings.notifications.update", "ntfy", "Save…", inline=False) %}
@@ -75,15 +75,17 @@
     <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ ((s.dataset_origins or {}).get('hosts') or []) | join('\n') }}</textarea></label>
   {% endcall %}</details>
 </div>
-<div class="card">
-  <b>Releases</b> {{ m.op_form("releases.build", "release", "Build release", confirm="Build a release bundle from the installed modules? It is not deployed until promoted.") }}
-  <table class="small">{% for r in releases %}<tr><td class="mono">{{ r.release_id }}</td><td class="mono">{{ r.platform }}</td><td>{{ r.status }}</td><td class="mut">{{ r.created_at | ago }}</td>
-  <td>{% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
+<div class="card wide">
+  <div class="row"><b>Releases</b><span class="sp"></span>{{ m.op_form("releases.build", "release", "Build release", confirm="Build a release bundle from the installed modules? It is not deployed until promoted.") }}</div>
+  <table class="small"><tr><th>release</th><th>platform</th><th>status</th><th>built</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for r in releases %}<tr><td class="mono nowrap">{{ r.release_id }}</td><td class="mono nowrap">{{ r.platform }}</td><td>{{ r.status }}</td><td class="mut nowrap">{{ r.created_at | ago }}</td>
+  <td class="actions">{% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
     <details class="small"><summary>signature</summary>
     {% call m.op_form("releases.attach_signature", r.release_id, "Attach", inline=False) %}
       <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" placeholder="from: oarbank release sign {{ r.release_id }}"></textarea></label>
       <label>signature <input name="p.signature" class="mono" style="width:100%"></label>
-    {% endcall %}</details></td></tr>{% endfor %}</table>
+    {% endcall %}</details></td></tr>
+  {% else %}<tr><td colspan="5" class="mut">No releases built yet.</td></tr>{% endfor %}</table>
   <details class="small"><summary>Release signing key (optional, D6)</summary>
   {% call m.op_form("releases.pin_key", "release-key", "Pin key…", inline=False, reason_prompt=True) %}
     <label>base64 Ed25519 public key <input name="p.pubkey" class="mono" style="width:100%" placeholder="oarbank release keygen"></label>
@@ -107,16 +109,17 @@
     <label class="small">value <input name="pj.value" class="mono" required></label>
   {% endcall %}
 </div>
-<div class="card">
+<div class="card wide">
   <b>Job modules</b>
-  <table class="small"><tr><th>module</th><th>v</th><th>stages</th><th>requires</th><th>host</th><th><span class="sr-only">actions</span></th></tr>
-  {% for x in modules %}<tr><td><a href="/modules/{{ x.name }}">{{ x.name }}</a></td><td>{{ x.version }}</td><td>{{ x.stages | join(', ') }}</td><td>{{ x.requires | join(', ') }}</td>
+  <table class="small"><tr><th>module</th><th>v</th><th>stages</th><th>requires</th><th>host</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for x in modules %}<tr><td class="nowrap"><a href="/modules/{{ x.name }}">{{ x.name }}</a></td><td class="nowrap">{{ x.version }}</td><td>{{ x.stages | join(', ') }}</td><td>{{ x.requires | join(', ') }}</td>
   <td><span class="chip {{ 'ok' if x.host.state == 'ready' else ('bad' if x.host.state == 'fault' else '') }}" title="{{ x.host.last_error or '' }}">{{ x.host.state or 'stopped' }}</span>
-    <span class="mut">{{ x.host.calls or 0 }} calls, p99 {{ x.host.latency_p99_ms | num(1) }} ms</span></td>
-  <td>{{ m.op_form("modules.restart_host", x.name, "Restart") }}
+    <span class="mut nowrap">{{ x.host.calls or 0 }} calls, p99 {{ x.host.latency_p99_ms | num(1) }} ms</span></td>
+  <td class="actions">{{ m.op_form("modules.restart_host", x.name, "Restart") }}
       {% if x.stages | length > 1 %}{% call m.op_form("modules.set_pipeline", x.name, "Pipeline…") %}<select name="mode" aria-label="pipeline mode"><option>single</option><option>split</option></select>{% endcall %}{% endif %}
       {% if x.enabled %}{{ m.op_form("modules.disable", x.name, "Disable", confirm="Disable " ~ x.name ~ "? Dispatch stops fleet-wide and live attempts are requeued.") }}
-      {% else %}{{ m.op_form("modules.enable", x.name, "Enable", confirm="Re-enable " ~ x.name ~ "?") }}{% endif %}</td></tr>{% endfor %}</table>
+      {% else %}{{ m.op_form("modules.enable", x.name, "Enable", confirm="Re-enable " ~ x.name ~ "?") }}{% endif %}</td></tr>
+  {% else %}<tr><td colspan="6" class="mut">No job modules enabled.</td></tr>{% endfor %}</table>
 </div>
 </div>
 {% endblock %}

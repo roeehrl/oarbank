@@ -3,7 +3,8 @@
 The console is how the owner sees and changes the fleet. Three choices shape it (PLAN D9–D21): it runs as its own
 read-only process, every change goes through one operation registry in oarbankd, and every "why" is answered by the
 same predicate code the scheduler runs. Module pages are drawn by the console from declarations (D22–D24, D41; the SDK's
-`spec/ui-contract.md`, [module-gui-1.2.md](module-gui-1.2.md)).
+`spec/ui-contract.md`, [module-gui-1.2.md](module-gui-1.2.md)). Page layout follows
+[console-layout.md](console-layout.md).
 
 ## Read-path isolation
 
