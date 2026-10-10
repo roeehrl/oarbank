@@ -386,7 +386,8 @@ def test_the_installer_verifies_and_never_puts_the_code_on_a_command_line():
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "sha256sum" in text and "shasum -a 256" in text and "cannot be verified" in text
     assert "printf '%s' \"$code\" | \"$node\" \"$@\" --code-stdin --no-input" in text
-    assert '"$node" "$@" < /dev/tty' in text
+    # a piped script never asks for the code: only a terminal on its own standard input lets oarbank-node ask
+    assert '"$node" "$@" < /dev/tty' not in text and 'elif [ -t 0 ]; then\n' in text
     assert "--code " not in text and "--join-code" not in text
     # the asset names the package scripts write
     assert "SHA256SUMS-agent-$OB_VERSION-$platform" in text
@@ -539,6 +540,15 @@ def test_a_mac_installs_the_pkg_for_its_architecture(tmp_path):
     assert i.pm()["bytes"] == "the pkg"
 
 
+def test_the_consoles_containers_variable_counts_like_the_option(inst):
+    # the console's commands set OARBANK_CONTAINERS=1 rather than passing --containers
+    inst.tool("dpkg", "apt-get")
+    r = inst.run(env={"OARBANK_JOIN_CODE": SECRET, "OARBANK_CONTAINERS": "1", "FAKE_NODE_RC": "0"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    [node] = inst.log("node.jsonl")
+    assert node["argv"] == ["join", "--containers", "--code-stdin", "--no-input"]
+
+
 def test_a_package_that_does_not_match_its_sum_is_never_installed(inst):
     inst.tool("dpkg", "apt-get")
     (inst.rel / f"oarbank-agent_{VERSION}_amd64.deb").write_bytes(b"tampered")
@@ -571,34 +581,95 @@ def test_it_needs_root_and_refuses_other_systems(inst):
     assert r.returncode == 2
 
 
-def test_without_a_code_or_a_terminal_it_installs_and_says_how_to_join(inst):
-    inst.tool("dpkg", "apt-get")
-    r = inst.run()
-    assert r.returncode == 0, r.stderr
-    assert inst.log("node.jsonl") == [] and "sudo oarbank-node join" in r.stdout
+HINT = ("Installed. Join this computer with: sudo oarbank-node join\n"
+        "(or run the command from the console's Add machine page, which has the code in it)\n")
 
 
-def test_on_a_terminal_oarbank_node_prompts_there_not_on_the_piped_script(inst):
-    # curl | sudo sh: the shell's standard input is the script, so oarbank-node must read /dev/tty
-    import fcntl
-    import termios
-    inst.tool("dpkg", "apt-get")
-    master, slave = os.openpty()
-    name = os.ttyname(slave)
+class Terminal:
+    """A pseudo-terminal for the installer: its controlling terminal (what /dev/tty opens), and its standard input
+    when asked (sudo sh oarbank-install.sh) rather than the piped script (curl ... | sudo sh)."""
 
-    def ctty():
-        fd = os.open(name, os.O_RDWR)
+    def __enter__(self):
+        self.master, self.slave = os.openpty()
+        self.name = os.ttyname(self.slave)
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.master)
+        os.close(self.slave)
+
+    def ctty(self):
+        import fcntl
+        import termios
+        fd = os.open(self.name, os.O_RDWR)
         fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
 
-    try:
-        r = inst.run("--name", "n1", input="the script itself\n", start_new_session=True,
-                     preexec_fn=ctty)
-    finally:
-        os.close(master)
-        os.close(slave)
+    def run(self, inst, *args, stdin_is_terminal=False, **kw):
+        if stdin_is_terminal:
+            kw["stdin"] = self.slave
+        else:
+            kw.setdefault("input", "the script itself\n")
+        return inst.run(*args, start_new_session=True, preexec_fn=self.ctty, **kw)
+
+
+def test_piped_without_a_code_or_a_terminal_it_installs_and_says_how_to_join(inst):
+    inst.tool("dpkg", "apt-get")
+    r = inst.run("--name", "n1", input="the script itself\n")
+    assert r.returncode == 0, r.stderr
+    assert inst.log("node.jsonl") == [] and r.stdout.endswith(HINT)
+
+
+def test_piped_on_a_terminal_it_never_asks_for_the_code(inst):
+    # ssh -t host 'curl ... | sudo sh': there is a terminal, but sudo (use_pty) leaves it echoing, so no prompt at all
+    inst.tool("dpkg", "apt-get")
+    with Terminal() as t:
+        r = t.run(inst, "--name", "n1")
+    assert r.returncode == 0, r.stderr
+    assert inst.log("node.jsonl") == [] and r.stdout.endswith(HINT)
+
+
+def test_piped_on_a_terminal_a_code_still_goes_by_printf(inst):
+    inst.tool("dpkg", "apt-get")
+    with Terminal() as t:
+        r = t.run(inst, "--name", "n1", env={"OARBANK_JOIN_CODE": SECRET, "FAKE_NODE_RC": "0"})
+    assert r.returncode == 0, r.stderr
+    [node] = inst.log("node.jsonl")
+    assert node["argv"] == ["join", "--name", "n1", "--code-stdin", "--no-input"] and node["stdin"] == SECRET
+    assert node["env_code"] is None and SECRET not in r.stdout + r.stderr
+
+
+def test_run_as_a_file_on_a_terminal_oarbank_node_asks_there(inst):
+    # sudo sh oarbank-install.sh: standard input is the terminal, which sudo puts in raw mode, so the prompt is hidden
+    inst.tool("dpkg", "apt-get")
+    with Terminal() as t:
+        r = t.run(inst, "--name", "n1", stdin_is_terminal=True)
     assert r.returncode == 0, r.stderr
     [node] = inst.log("node.jsonl")
     assert node["argv"] == ["join", "--name", "n1"] and node["tty"] is True
+    assert "Installed. Join" not in r.stdout
+
+
+def test_a_coordinator_confirms_its_fingerprint_on_the_terminal_or_joins_without_input(inst):
+    # device code: nothing secret is typed, only y/N to the fingerprint, so a piped script may ask it on the terminal
+    inst.tool("dpkg", "apt-get")
+    url = {"OARBANK_COORDINATOR": "https://coord.example:7443"}
+    with Terminal() as t:
+        r = t.run(inst, env=url)
+    assert r.returncode == 0, r.stderr
+    r = inst.run(env=url, input="the script itself\n")
+    assert r.returncode == 0, r.stderr
+    on_terminal, no_terminal = inst.log("node.jsonl")
+    assert on_terminal["argv"] == ["join", "--coordinator", url["OARBANK_COORDINATOR"]] and on_terminal["tty"] is True
+    assert no_terminal["argv"] == ["join", "--coordinator", url["OARBANK_COORDINATOR"], "--no-input"]
+    assert no_terminal["tty"] is False and no_terminal["stdin"] == ""
+
+
+def test_no_join_installs_and_says_how_to_join_even_on_a_terminal(inst):
+    inst.tool("dpkg", "apt-get")
+    with Terminal() as t:
+        r = t.run(inst, "--no-join", stdin_is_terminal=True)
+    assert r.returncode == 0, r.stderr
+    assert inst.log("node.jsonl") == [] and r.stdout.endswith("Installed. Join this computer with: sudo oarbank-node join\n")
 
 
 # ---------------------------------------------------------------------------------------------------------------------

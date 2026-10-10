@@ -4,13 +4,15 @@
 #   curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh | sudo sh
 #   curl -fsSL .../oarbank-install.sh | sudo sh -s -- --containers --name build-07
 #   curl -fsSL .../oarbank-install.sh | sudo --preserve-env=OARBANK_JOIN_CODE sh
-#       (scripts: OARBANK_JOIN_CODE exported from a secret store, never typed on a command line; no prompt)
+#       (scripts: OARBANK_JOIN_CODE exported from a secret store, never typed on a command line)
 #
 # It downloads this release's package for the machine (macOS pkg; Linux deb where apt is, rpm where dnf or yum is) and
 # its SHA256SUMS file from the release, refuses a package whose SHA-256 does not match (and refuses to go on when no
-# SHA-256 tool is at hand: it never skips the check), installs it, and runs `oarbank-node join`, which asks for the code
-# on the terminal with hidden input (or reads OARBANK_JOIN_CODE). The code is never on a command line: it goes to
-# oarbank-node on standard input, written by the shell's builtin printf. The script exits with oarbank-node's exit code.
+# SHA-256 tool is at hand: it never skips the check) and installs it. Given a code (OARBANK_JOIN_CODE, the console's
+# command), it then runs `oarbank-node join` with it: the code is never on a command line, it goes to oarbank-node on
+# standard input, written by the shell's builtin printf, and the script exits with oarbank-node's exit code. Without
+# one, piped like the lines above, it never asks for the code: it installs and says to run `sudo oarbank-node join`.
+# Only a script run as a file (sudo sh oarbank-install.sh) lets oarbank-node ask, on its standard input.
 #
 #   --containers   container jobs on this node (passed to oarbank-node join)
 #   --name NAME    the node's name when the code has no label
@@ -33,6 +35,8 @@ oarbank_install() {
     OB_BASE="${OB_BASE%/}"
 
     containers="" name="" join=1
+    # the console's commands set OARBANK_CONTAINERS=1 (the variable the Linux package reads too)
+    case "${OARBANK_CONTAINERS:-}" in 1|[Tt]rue|TRUE|[Yy]es|YES|[Oo]n|ON) containers=1 ;; esac
     while [ $# -gt 0 ]; do
         case "$1" in
             --containers) containers=1 ;;
@@ -150,7 +154,7 @@ oarbank_install() {
     fi
 
     if [ -z "$join" ]; then
-        echo "Installed. Join this machine with: sudo oarbank-node join"
+        echo "Installed. Join this computer with: sudo oarbank-node join"
         return 0
     fi
     node="$(command -v oarbank-node 2>/dev/null || true)"
@@ -166,8 +170,10 @@ oarbank_install() {
     [ -n "$name" ] && set -- "$@" --name "$name"
     code="${OARBANK_JOIN_CODE:-}"
     unset OARBANK_JOIN_CODE
-    # When piped from curl, this shell's standard input is the script itself: oarbank-node reads the code from standard
-    # input when it is not a terminal, so it gets the code by printf or the terminal (/dev/tty), never the script.
+    # Nothing here asks for the code unless this shell's standard input is a terminal. Piped (curl ... | sudo sh), its
+    # standard input is the script, and sudo 1.9.14 and later (use_pty) runs the shell on a pseudo-terminal of its own
+    # while it leaves the person's terminal as it was, echoing, because sudo's own standard input is not a terminal: a
+    # prompt that hides input on sudo's terminal would show the pasted code on the person's.
     rc=0
     if [ -n "$code" ]; then
         printf '%s' "$code" | "$node" "$@" --code-stdin --no-input || rc=$?
@@ -175,15 +181,22 @@ oarbank_install() {
     elif [ -n "${OARBANK_JOIN_CODE_FILE:-}" ]; then
         "$node" "$@" --code-file "$OARBANK_JOIN_CODE_FILE" --no-input < /dev/null || rc=$?
     elif [ -n "${OARBANK_COORDINATOR:-}" ]; then
-        if (: < /dev/tty) 2>/dev/null; then
+        # device code: no secret is typed, the terminal only answers whether the coordinator's fingerprint is the one
+        # the console shows (y/N), so a piped script may ask it on the terminal
+        if [ -t 0 ]; then
+            "$node" "$@" --coordinator "$OARBANK_COORDINATOR" || rc=$?
+        elif (: < /dev/tty) 2>/dev/null; then
             "$node" "$@" --coordinator "$OARBANK_COORDINATOR" < /dev/tty || rc=$?
         else
             "$node" "$@" --coordinator "$OARBANK_COORDINATOR" --no-input < /dev/null || rc=$?
         fi
-    elif (: < /dev/tty) 2>/dev/null; then
-        "$node" "$@" < /dev/tty || rc=$?
+    elif [ -t 0 ]; then
+        # run as a file (sudo sh oarbank-install.sh): sudo's standard input is the terminal, which sudo puts in raw
+        # mode while it relays it, so oarbank-node's hidden prompt is hidden
+        "$node" "$@" || rc=$?
     else
-        echo "Installed. There is no terminal to ask for the join code on; join with: sudo oarbank-node join"
+        echo "Installed. Join this computer with: sudo oarbank-node join"
+        echo "(or run the command from the console's Add machine page, which has the code in it)"
         return 0
     fi
     return "$rc"
