@@ -98,7 +98,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('arch: "amd64"', config)
         self.assertIn(json.dumps(str(root)), config)
         self.assertNotIn("${", config)
-        self.assertNotIn("postinstall:", config)
+        # install and upgrade refresh or migrate an existing coordinator (coordinator-system-service.md); removal stops it
+        self.assertIn(f"postinstall: {json.dumps(str(DEPLOY / 'coordinator-postinstall.sh'))}", config)
         self.assertIn("preremove:", config)
         self.assertIn("dst: /usr/bin/oarbank-setup\n    type: symlink", config)
         # the operator CLI on the PATH: a link to the payload's launcher, which follows it back (no install hook)
@@ -200,13 +201,32 @@ class PackagingTests(unittest.TestCase):
         interpreter = self.base / "failed-cleanup"
         interpreter.write_text("#!/bin/sh\nexit 17\n")
         interpreter.chmod(0o755)
+        installer = self.base / "installer.sh"
+        installer.write_text('echo "installer $*" >> "$(dirname "$0")/calls"\n')
         hook = self.base / "preremove.sh"
         hook.write_text((DEPLOY / "coordinator-preremove.sh").read_text().replace(
-            "/opt/oarbank/coordinator/python/bin/python3", json.dumps(str(interpreter))))
+            "/opt/oarbank/coordinator/python/bin/python3", json.dumps(str(interpreter))).replace(
+            "/opt/oarbank/coordinator/install-oarbankd.sh", json.dumps(str(installer))))
         for arg in ("remove", "deconfigure", "0"):
             with self.subTest(arg=arg):
                 result = subprocess.run(["sh", str(hook), arg], capture_output=True)
                 self.assertEqual(result.returncode, 17)
+        # the system services go first, keeping the payload for the package manager to remove
+        self.assertEqual((self.base / "calls").read_text().splitlines(), ["installer --uninstall --keep-programs"] * 3)
+        for arg in ("upgrade", "1"):
+            self.assertEqual(subprocess.run(["sh", str(hook), arg], capture_output=True).returncode, 0)
+        self.assertEqual(len((self.base / "calls").read_text().splitlines()), 3)
+        # a failed service removal fails the transaction before the files go
+        installer.write_text("exit 5\n")
+        self.assertEqual(subprocess.run(["sh", str(hook), "remove"], capture_output=True).returncode, 5)
+
+    def test_install_hook_refreshes_or_migrates_and_never_fails(self):
+        text = (DEPLOY / "coordinator-postinstall.sh").read_text()
+        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        self.assertIn('/bin/bash "$ROOT/install-oarbankd.sh" --refresh', code)
+        self.assertIn('"$ROOT/bin/oarbank" coordinator migrate --run --from-installer --build "$ROOT"', code)
+        self.assertNotIn("set -e", code)
+        self.assertTrue(text.rstrip().endswith("exit 0"))
 
     @unittest.skipUnless(shutil.which("nfpm"), "nFPM is unavailable; no tools are installed by these tests")
     def test_real_nfpm_builds_both_formats_without_installing(self):
