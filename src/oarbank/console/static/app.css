@@ -162,3 +162,11 @@ form[aria-busy="true"] input, form[aria-busy="true"] select, form[aria-busy="tru
   .topbar.is-done, .topbar.is-done > i { transition:none }
   .live[data-state="reconnecting"] .dot, .waiting::before { animation:none }
 }
+
+/* the section links: one row; on a phone it scrolls sideways instead of wrapping the header to four rows */
+header .main-nav { display:flex; gap:16px; min-width:0 }
+@media (max-width: 760px) {
+  header { flex-wrap:wrap }
+  header .main-nav { order:2; flex:1 0 100%; overflow-x:auto; gap:14px; padding-bottom:2px; scrollbar-width:thin }
+  header .main-nav a { white-space:nowrap }
+}
