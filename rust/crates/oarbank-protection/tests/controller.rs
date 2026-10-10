@@ -983,3 +983,69 @@ fn an_unreadable_process_matches_only_once_it_is_seen_again() {
     assert_eq!(pids(&t.snapshot(&by_path, &HashSet::new(), 8.0).unwrap()), vec![5, 7, 8]);
     assert_eq!(pids(&t.snapshot(&by_path, &HashSet::new(), 10.0).unwrap()), vec![5, 7, 8, 9]);
 }
+
+/// A process table whose processes exec: what `argv` returns is whatever each process runs now.
+struct Execing {
+    procs: Arc<Mutex<Vec<RawProcess>>>,
+    argv: Arc<Mutex<HashMap<i32, Vec<String>>>>,
+    reads: Arc<Mutex<usize>>,
+}
+
+impl ProcessSource for Execing {
+    fn list(&mut self, _: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError> {
+        Ok(self.procs.lock().unwrap().clone())
+    }
+    fn argv(&mut self, pid: i32, _: u64) -> Option<Vec<String>> {
+        *self.reads.lock().unwrap() += 1;
+        self.argv.lock().unwrap().get(&pid).cloned()
+    }
+    fn signing(&mut self, _: i32) -> SigningIdentity {
+        SigningIdentity::default()
+    }
+    fn satisfies(&mut self, _: i32, _: &str) -> bool {
+        false
+    }
+    fn bundle_id(&mut self, _: &str) -> Option<String> {
+        None
+    }
+}
+
+/// The arguments of a process are those of the program it runs now: a child listed between its fork and its exec has
+/// its parent's (same pid and start time ever after), so an argv rule would never match the app it became if the first
+/// reading were kept. A new path or short name (an exec) resolves the process again, and the first reading is checked
+/// once more on the next sighting (an exec that keeps both, a program re-executing itself); after that the arguments
+/// stay cached.
+#[test]
+fn a_process_that_execs_after_it_was_listed_matches_by_its_new_arguments() {
+    let shell = |pid: i32, path: &str, comm: &str| RawProcess { comm: comm.into(), ..raw(pid, 1, path, 0.0) };
+    let procs = Arc::new(Mutex::new(vec![shell(20, "/bin/zsh", "zsh"), shell(21, "/bin/zsh", "zsh")]));
+    let argv = Arc::new(Mutex::new(HashMap::from([(20, vec!["-zsh".to_string()]), (21, vec!["-zsh".to_string()])])));
+    let reads = Arc::new(Mutex::new(0));
+    let mut t = ProcessTable::new(Box::new(Execing { procs: procs.clone(), argv: argv.clone(), reads: reads.clone() }));
+    let cfg = ProtectionConfig::from_json(&json!({"rule": [{"id": "r", "match": {"argv_regex": "render-app"}, "pause_fleet": {}}]}),
+                                          "central").unwrap();
+    let matched = |s: &Snapshot| {
+        let mut v: Vec<i32> = matcher::group(&s.procs, &cfg.rules[0].match_, cfg.rules[0].tree).iter().map(|p| p.pid).collect();
+        v.sort();
+        v
+    };
+    // both forked from the shell, listed before their exec: the shell's arguments
+    assert_eq!(matched(&t.snapshot(&cfg, &HashSet::new(), 0.0).unwrap()), Vec::<i32>::new());
+    // 20 execs the app (a new path and name); 21 execs itself again with the app's arguments (same path and name)
+    procs.lock().unwrap()[0] = shell(20, "/opt/app/bin/render", "render");
+    argv.lock().unwrap().insert(20, vec!["/opt/app/bin/render".into(), "--render-app".into()]);
+    argv.lock().unwrap().insert(21, vec!["zsh".into(), "-c".into(), "render-app".into()]);
+    assert_eq!(matched(&t.snapshot(&cfg, &HashSet::new(), 2.0).unwrap()), vec![20, 21]);
+    // 20's new program is read once more on its next sighting; then both are settled: no more reads
+    assert_eq!(matched(&t.snapshot(&cfg, &HashSet::new(), 4.0).unwrap()), vec![20, 21]);
+    let before = *reads.lock().unwrap();
+    assert_eq!(matched(&t.snapshot(&cfg, &HashSet::new(), 5.0).unwrap()), vec![20, 21]);
+    assert_eq!(*reads.lock().unwrap(), before);
+    // a later exec of a settled process (another program) is read again
+    procs.lock().unwrap()[0] = shell(20, "/usr/bin/true", "true");
+    argv.lock().unwrap().insert(20, vec!["true".into()]);
+    assert_eq!(matched(&t.snapshot(&cfg, &HashSet::new(), 6.0).unwrap()), vec![21]);
+    // the process picker sees the same arguments
+    let rows = t.summary(10, &HashSet::new(), 8.0).unwrap();
+    assert_eq!(rows.iter().find(|r| r.pid == 20).unwrap().argv, Some(vec!["true".to_string()]));
+}

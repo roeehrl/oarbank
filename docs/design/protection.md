@@ -99,7 +99,10 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
   the processes it matched that way (`unreadable`). Such a process takes part from its second sighting on (the next
   tick): an owner's process whose facts fail to read is nearly always one exiting between the listing and the read,
-  and on a busy machine those would otherwise switch every such rule on every few ticks. The console's process picker
+  and on a busy machine those would otherwise switch every such rule on every few ticks. Identity is read once per
+  process and program: an exec keeps the pid and start time, so a new path or short name reads the process again, and
+  the arguments of a process seen for the first time are read once more on its next sighting (a child listed between
+  its fork and its exec still carries its parent's arguments, and an argv rule would miss the app it becomes). The console's process picker
   writes the matcher from the processes a node reports, and its preview uses a Python matcher held equal to the
   agent's by shared test vectors (`fixtures/protection-match-vectors.json`).
 - **Trees:** `self`, `descendants` (pid and parent tracking) or `same_team` (helpers signed by the same team).
