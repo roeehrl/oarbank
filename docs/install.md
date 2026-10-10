@@ -69,6 +69,10 @@ which is what lets their `oarbank` reach the coordinator without a token; add an
 `sudo dseditgroup -o edit -a <user> -t user _oarbankadmin` (macOS) or `sudo usermod -aG oarbank-admin <user>` (Linux,
 effective at that person's next login).
 
+Choose an agent address that exists before anyone logs in: a LAN address, or a tailnet address from a Tailscale that
+runs at boot (on macOS the `tailscaled` variant, such as Homebrew's `tailscale` service; the App Store and Standalone
+apps connect only after a login). Until the address exists the coordinator retries every 10 seconds.
+
 With FileVault on, a Mac that lost power waits at the disk unlock screen until someone types a password: nothing on
 the disk runs before that, the coordinator included. Restarts that unlock the disk for you (macOS updates that do,
 `sudo fdesetup authrestart`) bring the coordinator back with nobody logged in.

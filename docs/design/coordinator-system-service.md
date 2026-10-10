@@ -144,6 +144,15 @@ no program on it runs before. The release notes and the move preflight say so.
     fleet-wide banner ("runs only while <user> is logged in; move it to a system service"), with the pending migration
     if one is recorded.
 
+13. **The agent address must exist before anyone logs in.** oarbankd binds the address agents reach at start; when the
+    interface is not up yet it exits with a failure (uvicorn's startup failure, 3) and launchd or systemd starts it
+    again 10 s later, until the address is there. A LAN address is there at boot. A tailnet address is there before
+    login only with a Tailscale that runs before login: on macOS the `tailscaled` variant (Homebrew's
+    `homebrew.mxcl.tailscale` daemon, or the open-source build), not the App Store or Standalone apps, which connect
+    once someone logs in ([Tailscale's variants](https://tailscale.com/docs/concepts/macos-variants)); on Linux
+    `tailscaled.service`. With those apps the coordinator still starts from boot, and binds its address once the
+    tailnet is up. (The development Mac runs Homebrew's `tailscaled` as a LaunchDaemon.)
+
 ## Migration from the per-user form
 
 The 2.9.0 package migrates a per-user coordinator when it upgrades one, and the app finishes the job when the
