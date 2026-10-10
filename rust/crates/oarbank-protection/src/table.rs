@@ -86,6 +86,8 @@ struct Identity {
     bundle_id: Option<String>,
     argv: Option<Vec<String>>,
     requirements: HashMap<String, bool>,
+    /// A fact a rule needs (path or arguments) was unreadable when this process was last listed.
+    unreadable_seen: bool,
 }
 
 fn non_empty(s: &Option<String>) -> Option<String> {
@@ -165,6 +167,10 @@ impl ProcessTable {
             .rules
             .iter()
             .any(|r| r.match_.needs_argv() || r.match_.path_contains.is_some());
+        let need_path = config
+            .rules
+            .iter()
+            .any(|r| r.match_.path_prefix.is_some() || r.match_.path_contains.is_some());
         let requirements: Vec<String> = {
             let mut v: Vec<String> = config
                 .rules
@@ -195,6 +201,14 @@ impl ProcessTable {
                     id.requirements.insert(r.clone(), ok);
                 }
             }
+            // A process whose path or arguments cannot be read matches every rule keyed on them (fail-safe). Among
+            // the owner's own processes that is nearly always one exiting between the listing and the read (the
+            // kernel no longer answers for it): on a busy machine some do every tick, and each would switch on
+            // every such rule. So an unreadable process is listed from its second sighting on: one unreadable for
+            // good (another account's) is protected a tick later, one that was dying never matches.
+            let unreadable = (need_argv && id.argv.is_none()) || (need_path && rp.path.is_none());
+            let held_back = unreadable && !id.unreadable_seen;
+            id.unreadable_seen = unreadable;
             let rec = ProcessRecord {
                 pid: rp.pid,
                 ppid: rp.ppid,
@@ -222,6 +236,10 @@ impl ProcessTable {
                 }
             }
             self.last_cpu.insert(key, (now, rec.cpu_s));
+            if held_back {
+                snap.cpu_cores.remove(&key);
+                continue;
+            }
             snap.procs.push(rec);
         }
         self.identities.retain(|k, _| seen.contains(k));

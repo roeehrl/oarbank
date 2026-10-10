@@ -930,3 +930,56 @@ fn a_job_paused_past_the_nodes_max_pause_is_released() {
     let default = evicted_at(json!({"mode": "fleet_first"})).expect("released");
     assert!((600.0..=606.0).contains(&default), "released at {default}");
 }
+
+/// A process table whose arguments read back only for the pids in `readable`.
+struct Unreadable {
+    procs: Arc<Mutex<Vec<RawProcess>>>,
+    readable: HashSet<i32>,
+}
+
+impl ProcessSource for Unreadable {
+    fn list(&mut self, _: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError> {
+        Ok(self.procs.lock().unwrap().clone())
+    }
+    fn argv(&mut self, pid: i32, _: u64) -> Option<Vec<String>> {
+        self.readable.contains(&pid).then(|| vec![format!("p{pid}")])
+    }
+    fn signing(&mut self, _: i32) -> SigningIdentity {
+        SigningIdentity::default()
+    }
+    fn satisfies(&mut self, _: i32, _: &str) -> bool {
+        false
+    }
+    fn bundle_id(&mut self, _: &str) -> Option<String> {
+        None
+    }
+}
+
+/// A process whose arguments (or path) cannot be read counts as matching an argv (or path) rule, but only from its
+/// second sighting: one of the owner's processes caught exiting between the listing and the read, as some are every
+/// tick on a busy machine, never switches the rule on, while one that stays unreadable is still protected a tick later.
+#[test]
+fn an_unreadable_process_matches_only_once_it_is_seen_again() {
+    let procs = Arc::new(Mutex::new(vec![raw(5, 1, "/bin/app", 0.0), raw(6, 1, "/bin/dying", 0.0)]));
+    let mut t = ProcessTable::new(Box::new(Unreadable { procs: procs.clone(), readable: HashSet::from([5]) }));
+    let cfg = ProtectionConfig::from_json(&json!({"rule": [{"id": "r", "match": {"argv_regex": "^p7$"}, "pause_fleet": {}}]}), "central").unwrap();
+    let pids = |s: &Snapshot| s.procs.iter().map(|p| p.pid).collect::<Vec<_>>();
+    let matched = |s: &Snapshot| matcher::group(&s.procs, &cfg.rules[0].match_, cfg.rules[0].tree).len();
+    let s = t.snapshot(&cfg, &HashSet::new(), 0.0).unwrap();
+    assert_eq!((pids(&s), matched(&s)), (vec![5], 0)); // 6 is unreadable: not listed yet
+    procs.lock().unwrap().retain(|p| p.pid != 6); // it was exiting: gone by the next tick
+    procs.lock().unwrap().push(raw(7, 1, "/bin/other", 0.0));
+    let s = t.snapshot(&cfg, &HashSet::new(), 2.0).unwrap();
+    assert_eq!((pids(&s), matched(&s)), (vec![5], 0));
+    let s = t.snapshot(&cfg, &HashSet::new(), 4.0).unwrap();
+    assert_eq!((pids(&s), matched(&s)), (vec![5, 7], 1)); // 7 stays unreadable: it counts, fail-safe
+    // without a rule that needs arguments, nothing is held back
+    let none = ProtectionConfig::from_json(&json!({"rule": [{"id": "r", "match": {"name": "x"}, "pause_fleet": {}}]}), "central").unwrap();
+    procs.lock().unwrap().push(raw(8, 1, "/bin/new", 0.0));
+    assert_eq!(pids(&t.snapshot(&none, &HashSet::new(), 6.0).unwrap()), vec![5, 7, 8]);
+    // an unreadable path holds back the same way for a path rule
+    let by_path = ProtectionConfig::from_json(&json!({"rule": [{"id": "r", "match": {"path_prefix": "/bin/"}, "pause_fleet": {}}]}), "central").unwrap();
+    procs.lock().unwrap().push(RawProcess { path: None, ..raw(9, 1, "", 0.0) });
+    assert_eq!(pids(&t.snapshot(&by_path, &HashSet::new(), 8.0).unwrap()), vec![5, 7, 8]);
+    assert_eq!(pids(&t.snapshot(&by_path, &HashSet::new(), 10.0).unwrap()), vec![5, 7, 8, 9]);
+}

@@ -97,9 +97,11 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   prefix or substring, and an argv pattern. A signature survives updates and relocation; a path does not; argv is the
   only way to tell one interpreter's script from another's. A key whose fact the agent cannot read (another account's
   path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
-  the processes it matched that way (`unreadable`). The console's process picker writes the matcher from the
-  processes a node reports, and its preview uses a Python matcher held equal to the agent's by shared test vectors
-  (`fixtures/protection-match-vectors.json`).
+  the processes it matched that way (`unreadable`). Such a process takes part from its second sighting on (the next
+  tick): an owner's process whose facts fail to read is nearly always one exiting between the listing and the read,
+  and on a busy machine those would otherwise switch every such rule on every few ticks. The console's process picker
+  writes the matcher from the processes a node reports, and its preview uses a Python matcher held equal to the
+  agent's by shared test vectors (`fixtures/protection-match-vectors.json`).
 - **Trees:** `self`, `descendants` (pid and parent tracking) or `same_team` (helpers signed by the same team).
 - **Activity:** `present`, or thresholds on CPU cores (`cpu_cores_gt`), footprint (`footprint_gb_gt`) or GPU activity
   (`gpu_active = { min_busy = 0.05 }`), or `frontmost` (true: the app in front is one of the group's processes; false:

@@ -229,6 +229,9 @@ def test_a_render_paused_past_the_limit_moves_to_another_node_and_finishes_from_
                     "a person's session (docs/design/windows-coordinator.md)")
     frames, seed = 40, 5
     install_module(coordinator, REEL, tmp_path)
+    # every node only yields to rules, never to load: on a busy host, moderate mode's budget would hold A's
+    # certification or B's resume back for as long as the owner's other work runs
+    planned(coordinator, "protection.rules.update", "fleet", {"config": {"schema": 1, "node": {"mode": "fleet_first"}}})
     log, procs = [], []
     app_tag = f"oarbank-e2e-app-{secrets.token_hex(4)}"
     try:
@@ -239,18 +242,31 @@ def test_a_render_paused_past_the_limit_moves_to_another_node_and_finishes_from_
         planned(coordinator, "protection.rules.update", nid_a, {"config": {
             "schema": 1, "node": {"mode": "fleet_first", "max_pause_s": 10},    # only the rule pauses, never load
             "rule": [{"id": "e2e-app", "match": {"argv_regex": app_tag}, "active_when": {"for_s": 0}, "pause_fleet": {}}]}})
-        op(coordinator, "mod.reel.queue_render", params={"renders": [{"frames": frames, "seed": seed, "step_ms": 1000,
-                                                                       "every": 100}], "campaign_id": "c_move"})
-        # the render is under way on A: then the protected app starts and the render pauses
-        wait(lambda: db_rows(coordinator, "SELECT 1 FROM attempts t JOIN attempt_phases p ON p.attempt_id=t.attempt_id "
-                                          "WHERE t.node_id=? AND p.phase='render'", (nid_a,)), timeout=120)
-        time.sleep(4)                                                # a few frames rendered
-        app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(900)", app_tag])
-        procs.append(app)
 
         def telemetry():
             n = next(n for n in coordinator.api("GET", "/api/v1/fleet")["nodes"] if n["node_id"] == nid_a)
             return json.loads(n.get("telemetry_json") or "{}").get("protection") or {}
+
+        def rule():
+            return next((r for r in telemetry().get("rules") or [] if r.get("id") == "e2e-app"), None)
+        # A runs the rule before the render is queued: nothing of the render depends on when the policy arrives
+        wait(lambda: telemetry().get("mode") == "fleet_first" and rule(), timeout=60)
+        op(coordinator, "mod.reel.queue_render", params={"renders": [{"frames": frames, "seed": seed, "step_ms": 1000,
+                                                                       "every": 100}], "campaign_id": "c_move"})
+        # the render is under way on A (frames on disk, so its checkpoint will hold some), and nothing has paused it:
+        # the rule matches no process until the protected app starts (not one of the owner's processes exiting under
+        # load, whose arguments can no longer be read)
+        render = wait(lambda: db_rows(coordinator, "SELECT t.attempt_id FROM attempts t JOIN jobs j ON j.job_id=t.job_id "
+                                                   "WHERE t.node_id=? AND j.campaign_id='c_move' ORDER BY t.attempt_id",
+                                      (nid_a,)), timeout=120)[0]
+        out = tmp_path / "agent-a" / "work" / str(render["attempt_id"]) / "out" / "frames"
+        wait(lambda: len(list(out.glob("*.png"))) >= 2, timeout=120)
+        assert not rule()["active"], rule()
+        (live,) = db_rows(coordinator, "SELECT state, phase FROM attempts WHERE attempt_id=?", (render["attempt_id"],))
+        assert live["state"] == "live" and live["phase"] != "paused", live
+        app_started = time.time()
+        app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(900)", app_tag])
+        procs.append(app)
         try:
             wait(lambda: any(r.get("id") == "e2e-app" and r.get("active") for r in telemetry().get("rules") or []), timeout=60)
         except AssertionError:
@@ -258,7 +274,11 @@ def test_a_render_paused_past_the_limit_moves_to_another_node_and_finishes_from_
         ckpt = wait(lambda: db_rows(coordinator, "SELECT * FROM checkpoints"), timeout=120)[0]
         first = wait(lambda: [r for r in db_rows(coordinator, "SELECT * FROM attempts WHERE node_id=?", (nid_a,))
                               if r["state"] != "live" and r["attempt_id"] == ckpt["attempt_id"]], timeout=120)[0]
-        assert first["state"] != "completed"
+        assert first["attempt_id"] == render["attempt_id"] and first["end_reason"] == "preempt_protection", first
+        # the rule came on only once the app ran
+        on = wait(lambda: db_rows(coordinator, "SELECT min(t) AS t FROM protection_decisions WHERE node_id=? AND "
+                                               "kind='rule_active' AND rule='e2e-app'", (nid_a,))[0]["t"])
+        assert on >= app_started - 1, (on, app_started)
         stop(a, log)                                                  # A is gone: only B can take the job now
         b = start_agent(agent_bin, tmp_path / "agent-b", coordinator)
         procs.append(b)
