@@ -230,18 +230,40 @@ running per-user and the app offers the one-click move.
 
 Residual: root reads everything (as on any Unix); an owner-group member is an owner, as the coordinator's account was.
 
-## Testing
+## Testing and what was verified
 
-- Unit level everywhere: the installer's dry run renders the plists and units exactly (accounts, groups, socket
-  directory, environment, keep-alive, `AssociatedBundleIdentifiers`); the service record round-trips through
-  `--refresh`; `hostinfo` parses launchd's and systemd's answers for both domains; the admin channel admits a group.
-- The migration runs end to end on a copy of a real per-user home (path-parametrized roots, a throwaway keychain in
-  the test's directory holding fake keys with the same item names, recorded launchctl/chown calls): export, preflight
-  checks, clone, verify against the database, finish, the rollback after a failed start, and idempotency.
-- The Linux form in a container (systemd as PID 1): package install, accounts, units, the socket's group, migration of
-  a user unit.
-- What only a real Mac shows (no administrator prompt is allowed on the development Mac; listed in the release
-  checklist): the pkg postinstall creating `_oarbankd` and `_oarbankadmin`, the daemons starting at boot with FileVault
-  before login, Allow in the Background listing them as Oarbank Coordinator, dynamic group membership reaching the
-  socket without logging out, the `launchctl asuser` export in the person's session, and the AppleScript prompt from
-  the wizard and the app.
+- **Unit level, every platform's suite:** the installer's dry run renders the daemons and units exactly (accounts,
+  groups, socket directory, environment, keep-alive, `AssociatedBundleIdentifiers`, the standby), `--refresh` writes
+  the same units from the record, `--prepare` makes only the account and directories; `hostinfo` parses launchd's and
+  systemd's answers for both domains; a server on the system socket answers through the owners' group directory; the
+  wizard's elevated argv; the package hooks (`test_packaging`, `test_coordinator_native_macos`,
+  `test_coordinator_linux_packages`, `test_coordinator_host`, `test_coordinator_system_service`).
+- **The migration on copies** (`test_sysmigrate`): a per-user home made by the coordinator's own code, a throwaway
+  keychain file holding the keys under their real item names, recorded service-manager calls: the export, the key
+  checks, the copy, the rollback after a failed start (the old home byte for byte as it was), an interrupted copy, the
+  pin when the person is needed, idempotency. With `OARBANK_MIGRATION_HOME_COPY`, on an APFS clone of the development
+  Mac's live 2.8 home (211 MB, one module environment, a 2.8 schema): it migrated, and oarbankd of this branch then
+  started on the copy with the file-store audit key, rebuilt the module environment, upgraded the schema and verified
+  the audit chain. Nothing the coordinator works from names the old home's path (only event history and agents' own
+  host facts do).
+- **Linux, a systemd container (Ubuntu 24.04):** a 2.8-style per-user coordinator under user units with lingering,
+  migrated by the deb postinstall's command: units run as `oarbankd`, the socket directory `oarbankd:oarbank-admin`
+  0750, the person's CLI works after a new login without a token, another account is told how to join; `--refresh`,
+  a second run (a no-op), and a restart of the container with lingering off and nobody logged in: both services up,
+  the console healthy. A failure (an account missing, then a build not root's alone) rolled back twice to the running
+  per-user coordinator. A fresh install made a new fleet in `/var/lib/oarbank/coordinator`.
+- **macOS 26.4, lume VMs, the real packages:** the released 2.8.0 pkg and a per-user coordinator whose audit and
+  module-secrets keys were in the logged-in person's Keychain (an audit digest signed, as on the development Mac),
+  then this branch's ad hoc pkg installed with `installer`:
+  - the package exported the keys in the person's session and moved the coordinator by itself: daemons running as
+    `_oarbankd`, `_oarbankd` (uid 498, hidden, `/usr/bin/false`) and `_oarbankadmin` (with the person) created, the
+    same audit public key, the chain verifying with a new digest signed from the file store, the LaunchAgents removed,
+    the old home renamed, the app's status `system`; installing the package again refreshed and restarted the daemons;
+  - on the first build the export found nothing (`sudo` without `-H`, fixed): the package pinned the per-user
+    coordinator to its Keychain and recorded `needs-person`; the person's half (`oarbank coordinator migrate
+    --export-keys`) and the root half then moved it, the guided step without its prompt;
+  - after a restart with auto-login off, both daemons ran with nobody logged in and the console answered.
+- **Not verified:** Developer ID signing (Allow in the Background listed the ad hoc daemons as "Unknown Developer";
+  `AssociatedBundleIdentifiers` needs a Team ID), FileVault's unlock path, the AppleScript administrator prompt from
+  the wizard and the app (no one can answer it in a headless VM), dynamic group membership for an already-running
+  wizard, Linux's pkexec prompt, the deb/rpm built by nFPM (not installed here), Intel Macs.
