@@ -377,7 +377,7 @@ def test_join_reports_a_refusal_and_linux_has_no_scope_flag(env, monkeypatch):
 
 @pytest.mark.parametrize("change", [{"scope": "root"}, {"containers": "yes"}, {"name": "-x"}, {"name": "a" * 64},
                                     {"name": "a b"}, {"code": "OB2-0000"}, {"code": make_code(ttl=-60)},
-                                    {"code": CODE[:-1] + ("0" if CODE[-1] != "0" else "1")}, {"extra": True}])
+                                    {"code": CODE[:20] + ("0" if CODE[20] != "0" else "1") + CODE[21:]}, {"extra": True}])
 def test_bad_join_requests_run_nothing(env, change):
     with serving(env.window()) as server:
         r = post(server, "/join", {**JOIN, **change})
