@@ -177,6 +177,31 @@ accepts (the lowest JDK LTS: `brew install openjdk@17`, `sudo apt install openjd
 EclipseAdoptium.Temurin.17.JDK`; the newest Python: `brew install python@3.13`, …), **Re-detect**, **Set path on this
 node** and **Add a search path for <OS>**.
 
+### Installing a tool
+
+Oarbank does not install tools itself. The failure's first fix is the exact command for the node's own package manager
+(macOS Homebrew; on Linux by the distribution the agent reports, `platform.distro`: apt for Debian and Ubuntu, dnf for
+Fedora and the RHEL family, zypper for openSUSE, pacman for Arch; winget on Windows), with "then Re-detect". The
+machine's admin runs it; **Re-detect** (`tools.detect`) records when it was asked (`nodes.detect_requested_at`), and
+the node's Host tools section says "waiting for the node's next heartbeat" (or that it is offline) until the node
+reports a detection made after the request, then "Detected again". `oarbank tools detect <node> --wait [S]` does the
+same from a terminal and prints what the node found and each module's resolution.
+
+**Deferred: a managed install.** The spec's later step is a T2 operation, with the node owner's consent, that
+downloads a pinned, digest-checked JDK into an Oarbank-managed tools directory (Jenkins' auto-installer pattern). It
+is not built, because a safe version needs decisions the owner has not made:
+
+- **Consent on the node.** The coordinator alone must not be able to put executables on a machine. Who consents (a
+  managed policy key such as `AllowManagedToolInstall`, a prompt in Oarbank Node, a local file) is undecided.
+- **Where the pins come from and who updates them.** Temurin's release metadata (the Adoptium API) gives a SHA-256 per
+  archive; the coordinator would have to pin a version and digest per OS and architecture and keep them current
+  (security releases every quarter), shipped with Oarbank or fetched and pinned by an admin operation.
+- **Running a package manager.** Homebrew, apt, dnf and winget need an admin (sudo, UAC); the agent runs as a service
+  account or as the user and must not hold that right. An archive install into an Oarbank-owned directory avoids it,
+  but then updates, removal and disk use become Oarbank's.
+- **Signing and verification on the node.** The agent would verify the digest before unpacking, unpack into a private
+  directory, refuse anything outside it, then let its detector verify the installation like any other.
+
 ## Operations, API, CLI
 
 | Endpoint / op | Purpose |
@@ -236,8 +261,7 @@ One shot, at upgrade (`DB.__init__`):
 
 - Owner groups with ranks (phase 4): `tool.<id>.path` already resolves through every group a node is in, but search
   paths are per platform group only.
-- A managed install (a T2 operation with the node owner's consent that downloads a pinned, digest-checked JDK into an
-  Oarbank-managed tools directory, Jenkins' auto-installer pattern) (phase 5).
+- A managed install: deferred, see [Installing a tool](#installing-a-tool) for what a safe version needs decided.
 - An SDK core-version gate for `version` and `arch` (`requires.core >= 2.9`): the SDK's rule for keys older cores
   ignore, deferred until the integration branch reports core 2.9.0 (today it still reports 2.8.0, so every module using
   them would be refused at install).

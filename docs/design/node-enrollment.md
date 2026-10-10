@@ -162,6 +162,7 @@ prompt.
 | `AllowUserJoin` | boolean | `false` hides Join and Leave in the app |
 | `ManagedByOrganizationName` | string | Shown in the app and status |
 | `ShowStatusIcon` | boolean (Windows DWORD) | `false` hides Oarbank Node's menu bar (macOS) or notification-area (Windows) icon on every account and keeps it from opening at login; `true` keeps it shown. Set either way, the app's setting is greyed out ("Managed by …"). No effect on Linux (no node tray) or on the node itself. 2.9 and later |
+| `Settings` | dictionary (Windows: the `Settings` subkey) | Settings keys that tighten what the coordinator sends on this machine, never loosen it: the registry's `managed` keys (docs/design/settings.md, "Managed on this machine"; docs/install.md, "MDM"). 2.9 and later |
 
 A managed node is always the system service. Values are never logged. On macOS a root launchd job (`dev.codonic.oarbank.agent.policy`, `WatchPaths` on the
 managed-preferences file) applies policy, so a profile delivered before or after the pkg both work. On Linux and

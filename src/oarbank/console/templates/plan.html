@@ -13,20 +13,33 @@
   {% if I._diff %}<table class="small"><caption class="sr-only">Nodes whose effective value changes</caption>
   <tr><th scope="col">node</th><th scope="col">setting</th><th scope="col">now</th><th scope="col">after saving</th><th scope="col">from</th></tr>
   {% for x in I._diff %}<tr><td>{{ x.hostname }}</td><td>{{ x.label }}</td><td class="mono">{{ x.old_text }}</td><td class="mono"><b>{{ x.new_text }}</b></td><td>{{ x.source }}</td></tr>{% endfor %}</table>{% endif %}
+  {% if I.campaign %}<ul class="small">{% for x in I.campaign %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+  {% if not I._diff and I.nodes_changed %}<details class="small" open><summary>{{ I.nodes_changed | length }} change{{ 's' if I.nodes_changed | length != 1 }} on nodes</summary>
+    <ul>{% for x in I.nodes_changed %}<li>{{ x }}</li>{% endfor %}</ul></details>{% endif %}
   {% if I._unaffected %}<details class="small"><summary>{{ I._unaffected | length }} node{{ 's' if I._unaffected | length != 1 }} keep{{ 's' if I._unaffected | length == 1 }} their value</summary>
   <table class="small"><tr><th scope="col">node</th><th scope="col">keeps</th><th scope="col">why</th></tr>
   {% for x in I._unaffected %}<tr><td>{{ x.hostname }}</td><td class="mono">{{ x.value_text }}</td><td>{{ x.why }}{% if not x.why.startswith('locked') %} ({{ x.source }}){% endif %}</td></tr>{% endfor %}</table></details>{% endif %}
   <p class="small mut">{{ I.then }}.</p>
+  {% elif plan.op == 'settings.import' %}{% set I = plan.impact %}
+  <p role="status"><b>{{ I.summary }}.</b></p>
+  {% for title, items in (("Groups", I.groups), ("Labels", I.labels), ("Tools", I.tools), ("Values", I.changes)) if items %}
+  <h2 class="small-h">{{ title }}</h2><ul class="small">{% for c in items %}<li>{{ c }}</li>{% endfor %}</ul>{% endfor %}
+  {% if I.lock_notes %}<div class="flash warn small" role="note"><b>A lock in the file overrides values set below it</b>:
+    <ul>{% for x in I.lock_notes %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
+  {% if I.nodes_changed %}<details class="small"{% if I.nodes_changed | length < 12 %} open{% endif %}><summary>{{ I.nodes_changed | length }} node value{{ 's' if I.nodes_changed | length != 1 }} change</summary>
+    <ul>{% for x in I.nodes_changed %}<li>{{ x }}</li>{% endfor %}</ul></details>{% endif %}
+  {% if I.notes %}<div class="small" role="note"><b>Not imported</b><ul>{% for x in I.notes %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
+  {% if not I.empty %}<p class="small mut">{{ I.then }}.</p>{% endif %}
   {% endif %}
   <div class="kv small">
     <span class="mut">operation</span><span class="mono">{{ plan.op }} ({{ plan.tier or entry.tier }})</span>
     {% if plan.target %}<span class="mut">target</span><span class="mono">{{ plan.target }}</span>{% endif %}
-    {% if plan.params and plan.op not in ('settings.apply', 'settings.promote') %}<span class="mut">change</span><pre>{{ plan.params | tojson(indent=1) }}</pre>{% endif %}
+    {% if plan.params and plan.op not in ('settings.apply', 'settings.promote', 'settings.import') %}<span class="mut">change</span><pre>{{ plan.params | tojson(indent=1) }}</pre>{% endif %}
     {% if plan.impact.matches is defined %}<span class="mut">live matches</span><span><table class="small">
       {% for r in plan.impact.matches %}<tr><td class="mono">{{ r.rule }}</td><td class="num">{{ r.processes | length }}</td>
       <td class="mono small">{% for q in r.processes[:8] %}{{ q.pid }} {{ (q.path or '').rsplit('/', 1)[-1] }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endfor %}</table></span>{% endif %}
     {% if plan.impact.why is defined and plan.impact.why %}<span class="mut">not promotable</span><span>{% for w in plan.impact.why %}<div class="chip bad">{{ w }}</div>{% endfor %}</span>{% endif %}
-    {% for row in (impact_rows(plan.impact) if plan.op not in ('settings.apply', 'settings.promote') else []) %}<span class="mut">{{ row.label }}</span><span>{% if row['items'] | length == 1 %}{{ row['items'][0] }}{% else %}<ul style="margin:0;padding-left:1.1em">{% for x in row['items'] %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}</span>
+    {% for row in (impact_rows(plan.impact) if plan.op not in ('settings.apply', 'settings.promote', 'settings.import') else []) %}<span class="mut">{{ row.label }}</span><span>{% if row['items'] | length == 1 %}{{ row['items'][0] }}{% else %}<ul style="margin:0;padding-left:1.1em">{% for x in row['items'] %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}</span>
     {% endfor %}
     <span class="mut">as JSON</span><details><summary class="small">the plan's impact, as stored</summary><pre>{{ plan.impact | tojson(indent=1) }}</pre></details>
     {% if plan.versions %}<span class="mut">versions read</span><span class="mono">{{ plan.versions | tojson }}</span>{% endif %}

@@ -397,8 +397,8 @@ def campaign_section(r, cid: str) -> dict | None:
     for x in rows:
         x["chain"] = [y for y in x["chain"] if y["scope"] != "node"]
     sec = {"id": "campaign-settings", "title": "While this campaign runs",
-           "blurb": f"Settings {c['name'] or cid}'s jobs get instead of the fleet's while it runs. A lock at the fleet or a "
-                    "group holds against them; safety settings may only be tightened.",
+           "blurb": f"Values the jobs of {c['name'] or cid} get instead of the fleet's while it runs. A lock at the fleet "
+                    "or a group holds against them; safety settings may only be tightened.",
            "rows": [x for x in rows if not x["advanced"]], "advanced": [x for x in rows if x["advanced"]],
            "changed": sum(1 for x in rows if x["overridden_here"]),
            "advanced_changed": sum(1 for x in rows if x["advanced"] and x["overridden_here"])}

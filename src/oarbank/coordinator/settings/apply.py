@@ -386,20 +386,20 @@ def _campaign_impact(before: V.Snap, after: V.Snap, nodes: list[dict], camp: lis
         mod = m if d.qualifier else ""
         if d.applies == "coordinator" or "node" not in d.scopes:
             b, a = V.resolve(before, None, c["key"], mod, cid), V.resolve(after, None, c["key"], mod, cid)
-            lines.append(f"{name}'s jobs: {d.label} {R.show(c['key'], b['value'], d)} → {R.show(c['key'], a['value'], d)} "
+            lines.append(f"Jobs of {name}: {d.label} {R.show(c['key'], b['value'], d)} → {R.show(c['key'], a['value'], d)} "
                          f"({V.badge(a)})")
             continue
         for n in nodes:
             b, a = V.resolve(before, n, c["key"], mod, cid), V.resolve(after, n, c["key"], mod, cid)
             if not R.same(b["value"], a["value"]):
                 moved_hosts.add(n["hostname"])
-                changed.append(f"{n['hostname']}: {d.label} for {name}'s jobs {R.show(c['key'], b['value'], d)} → "
+                changed.append(f"{n['hostname']}: {d.label} for the jobs of {name} {R.show(c['key'], b['value'], d)} → "
                                f"{R.show(c['key'], a['value'], d)}")
             elif not c["reset"]:
                 lay = next((x for x in a["chain"] if x["scope"] == "campaign"), {})
                 why = ("locked" if lay.get("role") == "ignored" else "its own value is stricter" if lay.get("role") == "looser"
                        else "same value")
-                kept.append(f"{n['hostname']}: {name}'s jobs keep {R.show(c['key'], a['value'], d)} ({why}: {V.badge(a)})")
+                kept.append(f"{n['hostname']}: the jobs of {name} keep {R.show(c['key'], a['value'], d)} ({why}: {V.badge(a)})")
     names = sorted({(after.campaigns.get(c["scope_id"]) or {}).get("name") or c["scope_id"] for c in camp})
     summary = (f"While {', '.join(names)} runs: changes what its jobs get" +
                (f" on {len(moved_hosts)} node{'s' if len(moved_hosts) != 1 else ''}" if moved_hosts else "")

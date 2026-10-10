@@ -3,8 +3,9 @@
 Oarbank's owner settings are one model: a **registry** declared in code, one **sparse store** of the values an owner
 set, and one **resolver** that says, for every node and key, what is in effect and where it comes from. This note is
 the model's reference; the code is `src/oarbank/coordinator/settings/` (registry.py, store.py, resolve.py, apply.py,
-views.py, migrate.py, rustgen.py, and for modules modkeys.py and modcore.py) and the agent's side `rust/crates/oarbank-protection/src/settings.rs` over the
-generated `settings_table.rs`.
+views.py, migrate.py, rustgen.py, for modules modkeys.py and modcore.py, export.py and yamlish.py for settings as code,
+reports.py) and the agent's side `rust/crates/oarbank-protection/src/settings.rs` over the generated
+`settings_table.rs`.
 
 It replaces the stores whose scope was fixed by where a value happened to be written: per-node copies of a default
 policy (`nodes.policy_json`), per-node caps (`nodes.limits_json`) and owner keys in a key/value table they shared with
@@ -34,6 +35,9 @@ Each key is one `Setting` (registry.py):
 | `validator` | A module's own key: its property's whole JSON Schema checks the value (the core keys use the `schema` subset) |
 | `effects` | Hooks run on the nodes whose effective value changed (`redoctor`: a module's `services.disabled` changes its role on a node, so that module is re-doctored and re-certified there; `module_enabled`: a module turned off releases its live attempts there; `pipeline`: split splits its queued jobs) |
 | `hardware` | `cores` or `ram`: a node's own value may not exceed its hardware |
+| `campaign` | A campaign may override it while it runs ([Campaign overrides](#campaign-overrides)) |
+| `tighten` | A safety key's stricter direction, `lower` or `higher` (a boolean: off < on; a choice: `order`; none, an unset cap or no bound, is the loosest value); a `min` or `max` merge implies it. A campaign and a machine's managed policy may only move a safety key that way |
+| `managed` | A machine's managed policy (MDM) may set it, tighten-only ([Managed on this machine](#managed-on-this-machine)) |
 
 The keys, by section:
 
@@ -102,6 +106,10 @@ For one node, key and optional module (resolve.py):
 2. The **fleet**'s value.
 3. Each **group** the node belongs to, lowest rank first (a built-in group's own value counts as set there).
 4. The **node**'s own value.
+5. For a campaign's jobs, the **campaign**'s value, while it runs ([Campaign overrides](#campaign-overrides)): a safety
+   key only where it is stricter, any other key outright; a lock ignores it.
+6. **On this machine (managed)**: what the machine's managed policy sets, as its agent reports it, where it is stricter,
+   under a lock too ([Managed on this machine](#managed-on-this-machine)).
 
 A **lock** (an enforced fleet or group value) is found first: the fleet's before any group's, a higher rank before a
 lower. It wins outright and the values below it are ignored. Otherwise the merge rule decides: `replace` takes the most
@@ -289,15 +297,127 @@ while it holds: "locked by the group Laptops: change it there". A node may still
 fleet or group row has a **lock** toggle beside its value, and a locked row on a node shows the value read-only with a
 "Locked" disclosure naming who locked it and linking there.
 
-**Campaigns** come under locks too. A campaign override (phase 5) goes through `apply.campaign_refusals(db, campaign,
-key)`, which refuses a value where the fleet or a group any of the campaign's nodes belongs to locks it, naming the
-lock, and then a key not declared campaign-overridable (`Setting.campaign`). The resolver already takes a campaign
-layer on top of the node (`resolve(..., campaign=)`), for campaign-overridable keys only, and a lock ignores it.
+**Campaigns** come under locks too: a campaign's override goes through `apply.campaign_refusals(db, campaign, key)`,
+which refuses a value where the fleet or a group any of the campaign's nodes belongs to locks it, naming the lock, and
+then a key not declared campaign-overridable; the resolver ignores a campaign's value under a lock
+([Campaign overrides](#campaign-overrides)).
 
 The phase-4 exit test (`tests/test_settings_groups.py`): a Laptops group (selector `battery: true`) with a locked
 `run_on_battery = false` holds on a laptop that had chosen `true`, refuses the node's override with the group named,
 refuses a campaign override the same way, ignores a campaign value written anyway, and gives the node back its own
 choice when the lock goes.
+
+## Campaign overrides
+
+A campaign may override a few settings for its own jobs while it runs: the time-boxed layer on top of the chain.
+
+- **Which keys.** Core keys the registry declares `campaign`: `replica_rate` (merge `max`: a campaign can only raise
+  verification), `jobs` (a cap), `run_on_battery` and `user_present_slots`; and a module's own keys its manifest
+  declares `"x-oarbank": {"campaign": true}` (oarbank-sdk `spec/manifest.md`, "Settings"), for that module's campaigns.
+- **Tighten-only for safety keys.** A key with a `tighten` direction is a safety key. A campaign value looser than
+  the fleet's is refused at write ("a campaign may only tighten Run jobs on battery (off is stricter): the fleet's value
+  is off"); and the resolver applies a campaign's value of a safety key only where it is stricter than what the node
+  would otherwise get, so a node whose own value is stricter keeps it (role "not applied: looser" in Explain). A
+  module's own keys are preferences: the campaign's value is its jobs' value.
+- **Writes.** `settings.apply` takes `{"scope": "campaign", "scope_id": "<campaign id>", "key": …}` (the module is the
+  campaign's; a module's own key by its short name); a module sets them with `campaigns.create` or `campaigns.update`
+  `settings: {key: value | null}` (host capability `campaign_settings.v1`), through the same checks: locks first, then
+  the overridable check, then tighten-only, and one refusal refuses the module's whole effect (`bad_settings`). A
+  campaign change keeps its key's tier; the console previews it like a fleet change.
+- **While it runs.** A campaign's layer applies while it is running or paused; once it is done or cancelled its rows
+  are kept and shown ("inactive") but apply to nothing.
+- **Where it applies.** The replica rate when its jobs finish (`core._maybe_replicate` resolves with the job's
+  campaign); claim, for the keys a node applies (`resolve.campaign_rules`: at most `jobs` of the node's running jobs,
+  none while it runs on battery when `run_on_battery` is off, at most `user_present_slots` while someone uses it; a
+  job held there waits with `CAMPAIGN_SETTING_HOLDS`, which explain shows); a module's own `node` keys reach its jobs'
+  runners in the grant (`settings`, merged over the node's values in `OARBANK_SETTINGS_FILE`); every key reaches the
+  module's coordinator side in `campaign.tick` (`campaign.settings`, and `campaign.overrides`).
+- **Reads.** `GET /api/v1/settings/effective?campaign=C[&node=N]`, `explain?key=K&campaign=C[&node=N]`; `oarbank
+  settings get --campaign C`, `oarbank settings set replica_rate 0.2 --campaign C`, `oarbank settings reset jobs
+  --campaign C`. The campaign page has a **While this campaign runs** section (the same `setting_row` macro, Override and
+  Reset, locks and the tighten-only note, Explain with the campaign's layer) with a "while this campaign runs" banner.
+- A campaign's `priority`, `weight` and `placement` stay the campaign's own properties (`campaigns.set_*`), not
+  settings: no per-campaign setting existed before that this layer replaces.
+
+## Managed on this machine
+
+A machine's managed policy may tighten settings on that machine, enforced by its agent: the BOINC-style "on this
+machine" layer, in the safe direction only.
+
+- **Where.** The `Settings` dictionary of the managed policy the agent already reads (macOS: the managed-preferences
+  domain `dev.codonic.oarbank.agent`; Windows: values under `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings`,
+  REG_DWORD or REG_SZ, the release's ADMX template has one policy per key; Linux: `"Settings"` in
+  `/etc/oarbank/policy.json`), keyed by the settings' raw keys ([install.md](../install.md), "MDM").
+- **Which keys.** The registry's `managed` keys: `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` (higher is
+  stricter), `mem_in_use_bound`, `screen_sharing_present`, `hard_limits` (on is stricter), `user_present_slots`,
+  `max_slots`, `run_on_battery` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
+  `staging_mbps`: lower) and `enforce` (hard is stricter). Anything else (`job_mem_gb`, a schedule, protection) is
+  refused and reported: protection already has its own tighten-only local file.
+- **Enforcement.** The agent applies each managed value only where it is stricter than what the coordinator sends (and
+  over the table's defaults before the first heartbeat), re-reading the policy at most once a minute; a looser value
+  has no effect. Its heartbeat reports them: `"settings": {…, "managed": [{key, value, binding}], "managed_refused":
+  [{key, reason}], "managed_by": "<organization>"}` ([protocol.md](../protocol.md)).
+- **What the coordinator shows.** It keeps the report (`nodes.settings_managed_json`; a change records
+  `settings_managed` and refreshes the node's settings) and folds each value into the node's resolution as the layer
+  "On this machine (managed)", where it is stricter, under a lock too: the row's badge names it ("On this machine
+  (managed) · Example Org"), a "Managed on this machine: off (applies)" chip sits beside the row, the preview of a fleet
+  change says the node keeps its value, and the drift report lists the machines whose policy tightens settings.
+
+## Settings as code
+
+`oarbank settings export [--scope fleet|group:<g>|node:<n>] [--module m] [--out FILE]` (`GET
+/api/v1/settings/export`, the console's **Export and import** page) writes a scope's settings as YAML:
+
+```yaml
+oarbank: settings/v1
+scope: fleet
+fleet:
+  settings:
+    job_mem_gb: 2
+    user_idle_s: !locked 600          # a lock at this scope
+  modules:
+    relay: {goldens: […]}
+groups:
+  laptops: {name: Laptops, rank: 100, selector: {"battery": true}, members: [], settings: {run_on_battery: !locked false}}
+nodes:
+  mini: {node_id: n_…, labels: ["render"], settings: {jobs: 3, schedule: {"start": "22:00", "end": "07:00"}}}
+tools:
+  samtools: {"kind": "executable", "search": {"darwin": […]}, "version": {…}}
+secrets:
+  ntfy_token: {fleet: "<fingerprint>"}
+written_by_their_operations:
+  dataset_origins: […]
+```
+
+The fleet's export has the fleet's values, every group (an owner group's name, selector, listed members by name, rank
+and description; a built-in group only when it sets values), every node's owner labels and values, the host tool
+definitions and protection (its settings). A group or node export has that scope only; `--module` keeps one module's
+keys. Secrets are fingerprints, never values. The YAML is a strict subset (yamlish.py: block mappings and lists, JSON
+flow values, `!reset` and `!locked` tags) that the coordinator reads and writes without a YAML library.
+
+`oarbank settings import FILE [--dry-run]` (operation `settings.import`, T2; T3 when the file adds or changes a lock;
+admin) compares the file with this fleet and applies only the differences, as one operation: groups created or
+changed (ranked as the file says when it lists every owner group), node labels (a `labels` list is the node's whole
+owner set), tool definitions (the releases are rebuilt), then every value as one `settings.apply` change set, checked
+and tiered as usual. **Absence inherits**: a key the file leaves out is never touched; `key: !reset` deletes a value.
+Nodes match by `node_id`, then by name; a node or group the file names that is not here refuses the import. Secret
+fingerprints that differ, and the folder registry or dataset origins, are reported, never written. The dry run returns
+the same diff, and its per-node impact comes from running the change in a transaction that is rolled back. The exit
+test of phase 5: exporting the fleet and importing it with `--dry-run` reports "No changes: the file matches this
+fleet" (`oarbank settings import --dry-run` exits 0 then, 2 when there are changes).
+
+## Reports
+
+- **Shadowed values** (`GET /api/v1/settings/shadowed`, `/settings/shadowed`, `oarbank settings shadowed [--yes]`):
+  values that change no node's effective value: set under a lock (ignored while it holds), the same as what that scope
+  inherits (a fleet value equal to the default included), or with no effect (a node cap above a stricter fleet cap, a
+  group whose members all get their value elsewhere). Each row has a Reset; "Reset all" (or `--yes`) resets them as one
+  change set. A value equal to the inherited one is still a choice: nothing is reset by itself. A group with no members
+  yet and a lock are never listed.
+- **Applied drift** (`GET /api/v1/settings/drift`, `/settings/drift`, `oarbank settings drift`): per node, the revision
+  the coordinator sent and the one its agent applied, since when it lags (`nodes.settings_changed_at`), the keys it
+  refused and what its machine's managed policy tightens. Neither report raises an alert: the spec keeps drift a
+  visible node state on the row and these pages.
 
 ## Bulk changes
 
@@ -376,6 +496,11 @@ stayed per node.
 - **The why line** on the node page cites the settings it rests on with their value and source ("Run jobs on battery:
   off · Default"), each linked to its Explain row.
 - **A module's Settings tab** and the node tab's per-module sections: [Module settings](#module-settings).
+- **A campaign's page**: its **While this campaign runs** section ([Campaign overrides](#campaign-overrides)).
+- **Fleet Settings** links to **Shadowed values** (`/settings/shadowed`), **Applied drift** (`/settings/drift`) and
+  **Export and import** (`/settings/import`: a scope and module to download, a file to upload or paste, then the
+  import's preview) ([Settings as code](#settings-as-code), [Reports](#reports)).
+- **Managed on this machine**: a row the machine's policy tightens carries a chip saying so, and whether it applies.
 
 ## The CLI
 
@@ -392,6 +517,12 @@ oarbank groups update <G> ... | rank <G> up|down|top|bottom | delete <G>
 oarbank node label <node> <a,b> [--remove]
 oarbank settings schema                                           the registry
 oarbank settings set-secret ntfy_token / clear-secret ntfy_token  the write-only ntfy token
+oarbank settings get|explain [<key>] --campaign C [--node N]      what a campaign's jobs get
+oarbank settings set|reset <key> [<value>] --campaign C           a campaign's override (tighten-only for safety keys)
+oarbank settings export [--scope fleet|group:G|node:N] [--module M] [--out FILE]
+oarbank settings import FILE [--dry-run]                          one change; absent keys inherit, !reset deletes
+oarbank settings shadowed [--yes]                                 values that change nothing (--yes resets them)
+oarbank settings drift                                            nodes not running their latest settings
 ```
 
 `set` and `reset` always preview (the per-node impact), then apply; without a scope they act on the fleet.
@@ -427,9 +558,8 @@ On the owner's fleet (six nodes whose policies differed only in the RAM-computed
 `{}` and `disabled_services` `[]` everywhere, no caps, no owner keys, minos-gatk 4.0.0 installed and current) this
 yields no rows at all, only minos-gatk's registration: the old model stored copies, not choices.
 
-## Later phases
+## Deferred
 
-- **Host tools**: tool definitions, node-side detection reported in `tools_json`, per-node overrides in a signed node
-  statement, module version constraints, per-node tool reason codes.
-- **Campaigns, settings as code, drift**: campaign-overridable keys (tighten-only for safety keys), per-scope YAML
-  export and import, shadowed-override and applied-drift reports.
+- **Managed tool install** ([host-tools.md](host-tools.md), "Installing a tool"): Oarbank shows the exact install
+  command for the node's package manager and a Re-detect that reports when the node has looked again; it never installs
+  anything itself yet.
