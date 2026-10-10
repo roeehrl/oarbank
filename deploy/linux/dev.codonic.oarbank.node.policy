@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  The join window's administrator prompt on Linux (docs/design/node-enrollment.md, "Join window"): it runs
+  `pkexec /usr/lib/oarbank/oarbank-launcher join …` or `… leave …`, and pkexec picks the action whose exec.path names
+  that program and whose exec.argv1 names its first argument. The prompt then says what Oarbank Node is about to do,
+  with its icon (/usr/share/icons/hicolor/scalable/apps/oarbank-node.svg), instead of pkexec's generic "Authentication
+  is needed to run `/usr/lib/oarbank/oarbank-launcher' as the super user". An administrator authenticates every time
+  (auth_admin, never kept); anything else the launcher does as root stays a terminal's `sudo oarbank-node …`, with
+  pkexec's own default action. Installed to /usr/share/polkit-1/actions/ by deploy/linux/nfpm.yaml.
+-->
+<policyconfig>
+  <vendor>Codonic</vendor>
+  <vendor_url>https://codonic.dev</vendor_url>
+  <icon_name>oarbank-node</icon_name>
+  <action id="dev.codonic.oarbank.node.join">
+    <description>Join this computer to an Oarbank fleet</description>
+    <message>Oarbank Node wants to join this computer to an Oarbank fleet.</message>
+    <icon_name>oarbank-node</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/oarbank/oarbank-launcher</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">join</annotate>
+  </action>
+  <action id="dev.codonic.oarbank.node.leave">
+    <description>Make this computer leave its Oarbank fleet</description>
+    <message>Oarbank Node wants to make this computer leave its Oarbank fleet.</message>
+    <icon_name>oarbank-node</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/oarbank/oarbank-launcher</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">leave</annotate>
+  </action>
+</policyconfig>

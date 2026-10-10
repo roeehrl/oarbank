@@ -123,6 +123,39 @@ def test_the_desktop_entry_opens_the_join_window_and_handles_oarbank_links():
     assert c["/usr/lib/oarbank/runtime"]["type"] == "tree"
 
 
+def test_the_polkit_actions_brand_the_join_windows_administrator_prompt():
+    # the join window runs `pkexec /usr/lib/oarbank/oarbank-launcher join|leave …`: pkexec picks the action whose
+    # exec.path and exec.argv1 match, and shows its message and icon instead of its generic "run … as the super user"
+    import xml.etree.ElementTree as ET
+    policy = LINUX / "dev.codonic.oarbank.node.policy"
+    e = by_dst()["/usr/share/polkit-1/actions/dev.codonic.oarbank.node.policy"]
+    assert e["src"] == "./dev.codonic.oarbank.node.policy" and "0644" in e["file_info"]
+    text = policy.read_text(encoding="utf-8")
+    assert '"-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"' in text
+    root = ET.fromstring(text.encode())
+    assert root.tag == "policyconfig" and root.findtext("vendor") == "Codonic" and root.findtext("icon_name") == "oarbank-node"
+    actions = {a.get("id"): a for a in root.findall("action")}
+    assert set(actions) == {"dev.codonic.oarbank.node.join", "dev.codonic.oarbank.node.leave"}
+    messages = {"join": "Oarbank Node wants to join this computer to an Oarbank fleet.",
+                "leave": "Oarbank Node wants to make this computer leave its Oarbank fleet."}
+    for op, message in messages.items():
+        a = actions[f"dev.codonic.oarbank.node.{op}"]
+        assert a.findtext("message") == message and a.findtext("icon_name") == "oarbank-node" and a.findtext("description")
+        # an administrator every time, never kept (auth_admin_keep would let the next request through unasked)
+        assert {d.tag: d.text for d in a.find("defaults")} == {"allow_any": "auth_admin", "allow_inactive": "auth_admin",
+                                                               "allow_active": "auth_admin"}
+        notes = {n.get("key"): n.text for n in a.findall("annotate")}
+        assert notes == {"org.freedesktop.policykit.exec.path": "/usr/lib/oarbank/oarbank-launcher",
+                         "org.freedesktop.policykit.exec.argv1": op}
+    # the program and the icon it names are what the package installs, and the program is the one the desktop entry
+    # hands the join window
+    c = by_dst()
+    assert "/usr/lib/oarbank/oarbank-launcher" in c and "/usr/share/icons/hicolor/scalable/apps/oarbank-node.svg" in c
+    assert "--launcher /usr/lib/oarbank/oarbank-launcher" in DESKTOP.read_text(encoding="utf-8")
+    window = (REPO / "deploy/node/join-window.py").read_text(encoding="utf-8")
+    assert "return [pkexec, *argv]" in window
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # maintainer scripts
 

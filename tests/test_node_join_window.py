@@ -73,10 +73,13 @@ FAKE = textwrap.dedent(r'''
             print(json.dumps(r))
         print("diagnostic noise on stderr", file=sys.stderr)
     elif args[0] == "join":
-        f = opt("--code-file")
-        st, dst = os.stat(f), os.stat(os.path.dirname(f))
-        record.update(code=open(f).read(), file_mode=stat.S_IMODE(st.st_mode), dir_mode=stat.S_IMODE(dst.st_mode),
-                      code_file=f)
+        if "--code-stdin" in args:
+            record.update(code=sys.stdin.read())
+        else:
+            f = opt("--code-file")
+            st, dst = os.stat(f), os.stat(os.path.dirname(f))
+            record.update(code=open(f).read(), file_mode=stat.S_IMODE(st.st_mode), dir_mode=stat.S_IMODE(dst.st_mode),
+                          code_file=f)
         with open(opt("--progress-file"), "a") as p:
             p.write(json.dumps({"type": "row", "row": "tls", "ok": True, "detail": "matches the code"}) + "\n")
             p.write(json.dumps({"type": "state", "status": {"state": "joining", "coordinator": "https://coord.example.net:7443"}}) + "\n")
@@ -333,14 +336,14 @@ def test_check_failure_and_a_launcher_that_quotes_the_code(env, monkeypatch):
 # ---------------------------------------------------------------- join
 def test_join_uses_a_private_code_file_deleted_after_the_launcher_exits(env, monkeypatch):
     monkeypatch.setenv("FAKE_SLEEP", ".6")
-    window = env.window(root=False)  # macOS "only while I'm logged in": runs without elevation
+    window = env.window(platform="linux")  # root: runs without elevation (pkexec passes the file, not stdin)
     with serving(window) as server:
-        r = post(server, "/join", {**JOIN, "name": "build-07"})
-        assert r.status_code == 200 and r.json()["elevated"] is False and r.json()["scope"] == "personal"
+        r = post(server, "/join", {**JOIN, "scope": "system", "name": "build-07"})
+        assert r.status_code == 200 and r.json()["elevated"] is False and r.json()["scope"] == "system"
         assert CODE not in r.text
         job = window.job
         assert job.code_file.read_text() == CODE  # present while the launcher runs
-        assert post(server, "/join", JOIN).status_code == 409  # one run at a time
+        assert post(server, "/join", {**JOIN, "scope": "system"}).status_code == 409  # one run at a time
         assert post(server, "/leave").status_code == 409
         p, lines = wait_done(server)
         assert not job.code_file.exists()
@@ -350,16 +353,34 @@ def test_join_uses_a_private_code_file_deleted_after_the_launcher_exits(env, mon
         # following the status document after the run: no more lines, the same status
         again = post(server, "/progress", {"offset": p["offset"]}).json()
         assert again["lines"] == [] and again["done"] and again["status"]["key_fingerprint"] == "sha256:1234"
-        assert post(server, "/state").json()["job"] == {"kind": "join", "scope": "personal", "running": False}
+        assert post(server, "/state").json()["job"] == {"kind": "join", "scope": "system", "running": False}
     (call,) = env.calls()
     argv = call["argv"]
     assert CODE not in json.dumps(argv) and call["code"] == CODE
     assert argv[:2] == ["join", "--code-file"] and Path(argv[2]) == job.code_file
     assert argv[3:6] == ["--no-input", "--no-wait", "--progress-file"]
-    assert argv[7:] == ["--scope", "personal", "--name", "build-07"]
+    assert argv[7:] == ["--name", "build-07"]  # Linux has one scope: no --scope
     if os.name == "posix":
         assert call["file_mode"] == 0o600 and call["dir_mode"] == 0o700
     assert not job.dir.exists()  # the window's close removed its private directory
+
+
+def test_macos_gives_the_code_on_stdin_and_writes_no_code_file(env, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", ".3")
+    window = env.window(root=False)  # macOS "only while I'm logged in": runs without elevation
+    with serving(window) as server:
+        r = post(server, "/join", {**JOIN, "name": "build-07"})
+        assert r.status_code == 200 and r.json()["elevated"] is False and r.json()["scope"] == "personal"
+        job = window.job
+        assert job.code_file is None and [f.name for f in job.dir.iterdir()] == ["progress.jsonl"]
+        p, lines = wait_done(server)
+        assert p["result"]["ok"] and p["exit"] == 0 and not p["cancelled"]
+        assert job.stdin_code is None  # forgotten once the launcher exited
+    (call,) = env.calls()
+    argv = call["argv"]
+    assert CODE not in json.dumps(argv) and call["code"] == CODE
+    assert argv[:5] == ["join", "--code-stdin", "--no-input", "--no-wait", "--progress-file"]
+    assert Path(argv[5]).name == "progress.jsonl" and argv[6:] == ["--scope", "personal", "--name", "build-07"]
 
 
 def test_join_reports_a_refusal_and_linux_has_no_scope_flag(env, monkeypatch):
@@ -412,29 +433,59 @@ def test_leave_runs_the_launcher_for_the_joined_scope(env):
 
 
 def test_a_dismissed_prompt_is_cancelled_not_failed(env, monkeypatch):
-    window = env.window(platform="linux")
-    monkeypatch.setattr(window, "command", lambda args, scope: [sys.executable, "-c", "import sys; sys.exit(126)"])
+    for platform in ("linux", "macos"):
+        window = env.window(platform=platform)
+        monkeypatch.setattr(window, "command", lambda args, scope: [sys.executable, "-c", "import sys; sys.exit(126)"])
+        with serving(window) as server:
+            assert post(server, "/join", {**JOIN, "scope": "system"}).status_code == 200
+            p, lines = wait_done(server)
+            assert p["cancelled"] and p["result"] is None and lines == [] and p["exit"] == 126
+        assert window.job.code_file is None or not window.job.code_file.exists()
+
+
+def test_a_failure_before_the_launcher_ran_shows_the_line_the_app_wrote(env, monkeypatch):
+    # Oarbank Node --elevate writes a result line to the progress file when the launcher never ran (not an
+    # administrator, no helper): the page shows it like the launcher's own
+    window = env.window(platform="macos")
+    line = json.dumps({"type": "result", "ok": False, "exit": 8, "code": "E_PRIVILEGE", "message": "Only an administrator of this Mac can do this."})
+    def command(args, scope):
+        progress = args[args.index("--progress-file") + 1]
+        return [sys.executable, "-c", f"import sys; open({progress!r}, 'a').write({line!r} + '\\n'); sys.exit(8)"]
+    monkeypatch.setattr(window, "command", command)
     with serving(window) as server:
         assert post(server, "/join", {**JOIN, "scope": "system"}).status_code == 200
         p, lines = wait_done(server)
-        assert p["cancelled"] and p["result"] is None and lines == [] and p["exit"] == 126
-    assert not window.job.code_file.exists()
+        assert not p["cancelled"] and p["exit"] == 8 and p["result"]["code"] == "E_PRIVILEGE"
 
 
 # ---------------------------------------------------------------- elevation commands
-def test_macos_administrator_prompt_quotes_paths():
-    argv = ["/Library/Oar bank/bin/oarbank-launcher", "join", "--code-file", "/tmp/it's \"here\"/code", "--name", "a\\b"]
-    cmd = jw.elevated_command(argv, "macos", True)
-    assert cmd[:2] == ["/usr/bin/osascript", "-e"] and len(cmd) == 3
-    script = cmd[2]
-    assert script.startswith('do shell script "') and script.endswith("with administrator privileges")
-    # AppleScript unescapes the literal back to exactly the shell-quoted command
-    literal = script[len("do shell script "):script.index(" with prompt")]
-    inner = literal[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-    import shlex
-    assert shlex.split(inner) == argv
-    assert "'/Library/Oar bank/bin/oarbank-launcher'" in inner
-    assert jw.elevated_command(argv, "macos", False) == argv
+def test_macos_elevates_through_oarbank_node_never_osascript():
+    app = "/Applications/Oarbank Node.app/Contents/MacOS/Oarbank Node"
+    argv = ["/Library/Oarbank/bin/oarbank-launcher", "join", "--code-stdin", "--no-input", "--no-wait", "--progress-file",
+            "/private/var/folders/x y/T/oarbank-join-501/oarbank-join-1/progress.jsonl", "--scope", "system", "--name", "a.b"]
+    # the app's executable, its --elevate mode, the launcher's own arguments (each one argv entry: no shell, no quoting)
+    assert jw.elevated_command(argv, "macos", True, elevator=app) == [app, "--elevate", *argv[1:]]
+    assert jw.elevated_command(["/x/oarbank-launcher", "leave", "--progress-file", "/p"], "macos", True, elevator=app) == \
+        [app, "--elevate", "leave", "--progress-file", "/p"]
+    assert jw.elevated_command(argv, "macos", False, elevator=app) == argv
+    # without the app there is no administrator prompt to fall back on: a terminal's sudo, never osascript
+    with pytest.raises(jw.WindowError, match="sudo oarbank-node join") as e:
+        jw.elevated_command(argv, "macos", True, elevator=None)
+    assert e.value.code == "E_PRIVILEGE" and e.value.status == 409
+    source = (ROOT / "deploy" / "node" / "join-window.py").read_text(encoding="utf-8")
+    assert "/usr/bin/osascript" not in source and "administrator privileges\"" not in source and "do shell script" not in source
+    assert jw.MACOS_ELEVATOR == app and jw.CANCELLED_EXIT == 126
+
+
+def test_the_elevator_is_found_where_the_app_says_or_the_pkg_puts_it(tmp_path):
+    app = tmp_path / "Oarbank Node"
+    app.write_text("#!/bin/sh\n")
+    app.chmod(0o755)
+    assert jw.find_elevator("macos", env={}, given=str(app)) == str(app)
+    assert jw.find_elevator("macos", env={"OARBANK_NODE_ELEVATOR": str(app)}) == str(app)
+    assert jw.find_elevator("linux", env={"OARBANK_NODE_ELEVATOR": str(app)}, given=str(app)) is None
+    missing = jw.find_elevator("macos", env={}, given=str(tmp_path / "nope"))
+    assert missing in (None, jw.MACOS_ELEVATOR)  # this machine may have the pkg's app
 
 
 def test_linux_pkexec_and_missing_pkexec():
@@ -458,7 +509,8 @@ def test_windows_uac_quotes_arguments():
     assert arglist.startswith("'") and arglist.endswith("'")
     assert "O''Brien" in arglist and "p\u2019\u2019s" in arglist and '"lab pc"' in arglist
     assert jw.cancelled("windows", 1223, b"") and not jw.cancelled("windows", 1, b"")
-    assert jw.cancelled("macos", 1, b"execution error: User canceled. (-128)") and not jw.cancelled("macos", 1, b"other")
+    assert jw.cancelled("macos", 126) and not jw.cancelled("macos", 1, b"execution error: User canceled. (-128)")
+    assert not jw.cancelled("macos", 8)  # not an administrator: a failure the app explains, not a dismissal
     assert jw.cancelled("linux", 126, b"") and not jw.cancelled("linux", 127, b"")
 
 
@@ -467,7 +519,10 @@ def test_root_needs_no_elevation(env):
     assert window.command(["leave"], "system")[-1] == "leave" and window.command(["leave"], "system")[0] == sys.executable
     window = env.window(platform="macos", root=False)
     assert window.command(["leave"], "personal")[0] == sys.executable
-    assert window.command(["leave"], "system")[0] == "/usr/bin/osascript"
+    with pytest.raises(jw.WindowError):
+        window.command(["leave"], "system")  # no Oarbank Node.app given
+    window.elevator = "/Applications/Oarbank Node.app/Contents/MacOS/Oarbank Node"
+    assert window.command(["leave"], "system") == [window.elevator, "--elevate", "leave"]
 
 
 # ---------------------------------------------------------------- where things are
@@ -601,7 +656,7 @@ def test_main_prints_the_link_and_exits_when_idle(env, monkeypatch, capsys, tmp_
     real = jw.WindowServer
     monkeypatch.setattr(jw, "WindowServer", lambda w, port: real(w, port, idle_timeout=.2))
     window = env.window()
-    monkeypatch.setattr(jw, "Window", lambda launcher, prefill=None, workdir=None: setattr(window, "prefill", prefill) or window)
+    monkeypatch.setattr(jw, "Window", lambda launcher, prefill=None, workdir=None, elevator=None: setattr(window, "prefill", prefill) or window)
     # what the native front ends pass: macOS `--launcher /Library/Oarbank/bin/oarbank-launcher [--link URL]`, Windows
     # `--launcher <INSTALLFOLDER>oarbank-node.exe`, Linux `--link %u` (a bare --link when opened from the menu)
     launcher = tmp_path / "Program Files" / "Oarbank" / "oarbank-node.exe"
