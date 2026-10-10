@@ -3,8 +3,11 @@ import ServiceManagement
 
 // Oarbank Coordinator: the coordinator's menu bar companion (docs/design/coordinator-desktop.md), run as the person who
 // owns the coordinator. Only the explicit Open web app action runs the setup wizard or opens the console. The
-// coordinator itself (oarbankd and the console) runs as this account's LaunchAgents with a lifetime of their own: this
-// app neither starts nor stops them, and quitting it leaves them running.
+// coordinator itself (oarbankd and the console) runs as system services, launchd daemons run by the _oarbankd account
+// from boot (docs/design/coordinator-system-service.md), with a lifetime of their own: this app neither starts nor
+// stops them, and quitting it leaves them running. Where this account still has an earlier release's per-user
+// coordinator (LaunchAgents), the app offers to move it to the system service (the only time it asks for an
+// administrator besides setup).
 //
 // The menu bar model is the node app's (deploy/macos/shared/MenuBar.swift, docs/design/node-enrollment.md "Menu bar and
 // tray"): one setting, "Show Oarbank Coordinator in the menu bar" (on: the item is shown and the app opens at login;
@@ -14,9 +17,12 @@ import ServiceManagement
 // Launch contract: `--open-web` opens the web app at once (Oarbank Node's Open Console); `--settings`, or a launch with
 // the item hidden, opens the settings window; reopening the app opens the web app, or the window while the item is hidden.
 
-let coordinatorJobPlists = ["oarbankd", "console"].map {
-    FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/dev.codonic.oarbank.\($0).plist").path
-}
+/// The coordinator's launchd daemons (install-oarbankd.sh writes them; their AssociatedBundleIdentifiers name this app).
+let coordinatorJobPlists = ["oarbankd", "console"].map { "/Library/LaunchDaemons/dev.codonic.oarbank.\($0).plist" }
+/// An earlier release's per-user coordinator in this account, until it moves to the system service.
+let perUserCoordinatorPlist = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/LaunchAgents/dev.codonic.oarbank.oarbankd.plist").path
+let perUserMessage = "This coordinator runs only while you are logged in: after a restart your fleet has no coordinator until you log in. Move it to a system service so it starts with the Mac."
 let coordinatorSwitchedOffMessage = "The coordinator is turned off in Login Items → Allow in the Background. Turn Oarbank Coordinator back on there."
 
 final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -32,12 +38,15 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var nodeSwitchedOffItems: [NSMenuItem] = []
     private var nodeJoinItems: [NSMenuItem] = []
     private var hideItems: [NSMenuItem] = []
+    private var moveItems: [NSMenuItem] = []         // "Move the Coordinator to a System Service…", per-user only
+    private var moveTask: Process?
     // the window: "This Mac's coordinator" and "Menu bar"
     private var window: NSWindow?
     private let serviceLabel = bodyLabel()
     private let stateLabel = bodyLabel()
     private let switchedOffLabel = bodyLabel(coordinatorSwitchedOffMessage)
     private var switchedOffButton: NSButton!
+    private var moveButton: NSButton!
     private var showToggle: NSButton!
     private let menuBarNote = bodyLabel(secondary: true)
     private var approvalButton: NSButton!
@@ -94,6 +103,10 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         off.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "Warning")
         menu.addItem(off)
         menu.addItem(.separator())
+        let move = row("Move the Coordinator to a System Service…", \.moveItems, action: #selector(moveToSystemService))
+        move.toolTip = perUserMessage; move.isHidden = true
+        move.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "Warning")
+        menu.addItem(move)
         let web = NSMenuItem(title: "Open Web App", action: #selector(openWeb), keyEquivalent: "o"); web.target = self
         menu.addItem(web)
         // This Mac's node: Oarbank Node shows no item of its own where the coordinator's is
@@ -135,7 +148,8 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func process(_ operation: String) -> Process {
         let task = Process(); task.executableURL = root.appendingPathComponent("python/bin/python3.12")
-        task.arguments = ["-I", "-B", "-c", "import sys; from oarbank.desktop import main; sys.exit(main())", "--root", root.path] + (operation == "status" ? ["--status"] : [])
+        task.arguments = ["-I", "-B", "-c", "import sys; from oarbank.desktop import main; sys.exit(main())", "--root", root.path]
+            + (operation == "status" ? ["--status"] : operation == "migrate" ? ["--migrate"] : [])
         task.standardError = FileHandle.nullDevice
         return task
     }
@@ -161,6 +175,8 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let switchedOff = switchedOffInLoginItems(coordinatorJobPlists)
         for item in stateItems { item.title = stateText }
         for item in switchedOffItems { item.isHidden = !switchedOff }
+        let perUser = FileManager.default.fileExists(atPath: perUserCoordinatorPlist)
+        for item in moveItems { item.isHidden = !perUser; item.isEnabled = moveTask == nil }
         statusItem?.button?.toolTip = "Oarbank Coordinator — \(switchedOff ? "turned off in Login Items" : stateText)"
         // This Mac's node, when Oarbank Node is installed here
         let nodeHere = Oarbank.app(Oarbank.nodeBundleID) != nil
@@ -177,10 +193,14 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func refreshWindow() {
         guard let window else { return }
         let switchedOff = switchedOffInLoginItems(coordinatorJobPlists)
-        serviceLabel.stringValue = FileManager.default.fileExists(atPath: coordinatorJobPlists[0])
-            ? "Running as background services for your account — they start when you log in, and keep running when this app quits."
+        let perUser = FileManager.default.fileExists(atPath: perUserCoordinatorPlist)
+        serviceLabel.stringValue = perUser ? perUserMessage
+            : FileManager.default.fileExists(atPath: coordinatorJobPlists[0])
+            ? "Runs as a system service — starts with the Mac, before anyone logs in, as _oarbankd, and keeps running when this app quits."
             : "Not set up on this Mac yet. Open the web app to set it up."
+        serviceLabel.textColor = perUser ? .systemOrange : .labelColor
         serviceLabel.isHidden = switchedOff
+        moveButton.isHidden = !perUser; moveButton.isEnabled = moveTask == nil
         switchedOffLabel.isHidden = !switchedOff; switchedOffButton.isHidden = !switchedOff
         stateLabel.stringValue = stateText
         showToggle.state = setting.isOn ? .on : .off
@@ -218,6 +238,31 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         do { try task.run(); child = task } catch { ask("Could not open the coordinator", "The application is incomplete. Reinstall the coordinator package.") }
     }
 
+    /// The per-user coordinator moves to the system service: the keys are exported as this person (their Keychain), then
+    /// the migration runs as root through the system's administrator prompt (oarbank.desktop --migrate, sysmigrate.py).
+    @objc private func moveToSystemService() {
+        guard moveTask == nil else { return }
+        guard ask("Move the coordinator to a system service?",
+                  "It then starts with the Mac, before anyone logs in, and keeps running when you log out. macOS asks for an administrator. The coordinator restarts once; nodes reconnect by themselves and running jobs continue.",
+                  buttons: ["Move", "Cancel"]) else { return }
+        let task = process("migrate"), output = Pipe(); task.standardOutput = output; moveTask = task
+        stateText = "Moving the coordinator to a system service…"; refreshMenu(); refreshWindow()
+        task.terminationHandler = { process in
+            let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let last = text.split(separator: "\n").last.map(String.init) ?? ""
+            DispatchQueue.main.async {
+                self.moveTask = nil
+                if process.terminationStatus == 0 {
+                    ask("The coordinator is a system service", "It starts with the Mac and keeps running with nobody logged in. Your earlier coordinator folder is kept beside it until you delete it.")
+                } else {
+                    ask("The coordinator was not moved", (last.isEmpty ? "" : last + "\n\n") + "It keeps running as before. /Library/Application Support/Oarbank/coordinator-migration.json records each step.")
+                }
+                self.refreshStatus(); self.refreshMenu(); self.refreshWindow()
+            }
+        }
+        do { try task.run() } catch { moveTask = nil; ask("Could not move the coordinator", "The application is incomplete. Reinstall the coordinator package.") }
+    }
+
     @objc private func joinNode() { Oarbank.open(Oarbank.nodeBundleID, arguments: ["--join"]) }
     @objc private func openNode() { Oarbank.open(Oarbank.nodeBundleID) }
     @objc private func showWindowAction() { showWindow() }
@@ -228,7 +273,9 @@ final class CoordinatorDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             switchedOffLabel.textColor = .systemOrange
             stateLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
             let web = NSButton(title: "Open Web App", target: self, action: #selector(openWeb))
-            let coordinator = group([serviceLabel, switchedOffLabel, switchedOffButton, stateLabel, buttonRow([web])])
+            moveButton = NSButton(title: "Move to a System Service…", target: self, action: #selector(moveToSystemService))
+            moveButton.setAccessibilityHelp("Moves this Mac's coordinator to a system service that starts with the Mac. Asks for an administrator.")
+            let coordinator = group([serviceLabel, moveButton, switchedOffLabel, switchedOffButton, stateLabel, buttonRow([web])])
             showToggle = NSButton(checkboxWithTitle: "Show Oarbank Coordinator in the menu bar", target: self, action: #selector(toggleMenuBar))
             showToggle.setAccessibilityHelp("When on, Oarbank Coordinator is in the menu bar and opens when you log in.")
             approvalButton = NSButton(title: "Open Login Items…", target: self, action: #selector(openLoginItems))

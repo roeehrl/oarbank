@@ -2,6 +2,14 @@
 
 The build root and installer are trusted command-line inputs, never HTTP inputs. A
 private journal permits recovery; setup.complete.json is written only after TOTP.
+
+On macOS and Linux the coordinator is a system service with a home only its account may
+enter (docs/design/coordinator-system-service.md): the wizard runs as the person, starts
+the services through the installer as root (the system's administrator prompt, the one
+privileged step), and then works through the local admin channel, which the person reaches
+as one of the coordinator's owners. Its journal lives in the person's setup directory
+(paths.setup_dir()); a home that is not the system service's (tests, development, the
+elevated Windows wizard) keeps it in the home.
 """
 import argparse
 import contextlib
@@ -151,16 +159,23 @@ class Backend:
         return None
 
     def install(self, root, address):
+        terminal = sys.stdin.isatty()
         if sys.platform == "win32":
             command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
                        str(root / "install-oarbankd.ps1"), "-Installed", str(root), "-AgentBind", address]
         else:
-            command = ["bash", str(root / "install-oarbankd.sh"), "--installed", str(root), "--agent-bind", address]
+            # The system services are root's to create: the system's administrator prompt (or sudo in a terminal).
+            import getpass
+            from .sysmigrate import elevated
+            command = elevated(["/bin/bash", str(root / "install-oarbankd.sh"), "--installed", str(root),
+                                "--agent-bind", address, "--owner", getpass.getuser()],
+                               "Oarbank Coordinator needs an administrator to start the coordinator as a system service.",
+                               terminal)
         # Nothing from a request except the validated IP reaches argv. No password
         # is in argv, stdin, environment or subprocess output logs.
         try:
-            r = subprocess.run(command, cwd=root, stdin=subprocess.DEVNULL,
-                               capture_output=True, timeout=180, check=False)
+            r = subprocess.run(command, cwd=root, stdin=None if terminal and command[0] == "sudo" else subprocess.DEVNULL,
+                               capture_output=True, timeout=600, check=False)
         except subprocess.TimeoutExpired:
             raise SetupError("The service installer timed out. Retry setup to check readiness.", 503) from None
         if r.returncode:
@@ -179,19 +194,24 @@ class Backend:
     def confirm(self, name, password, code):
         # The existing access.password_login ceremony verifies both factors,
         # records replay protection and failures, and never changes credentials.
-        secret = (self.home / "console.secret").read_text(encoding="utf-8").strip()
         import httpx
-        # Sign-in ceremonies check the loopback TCP peer even when the owner
-        # channel is available, so use TCP explicitly for this one ceremony.
-        with httpx.Client(trust_env=False) as client:
-            r = client.post(self.cli.URL + "/api/v1/access/login",
-                            json={"name": name, "password": password, "code": code},
-                            headers={"x-oarbank-console-secret": secret}, timeout=5)
+        from .platform import localchannel
+        if localchannel.reachable(self.home):
+            # The owner's local admin channel may run the ceremony (it is already
+            # the owner's credential); the system service's home is not readable here.
+            client, headers = httpx.Client(transport=localchannel.transport(self.home), base_url="http://oarbank"), {}
+            url = ""
+        else:
+            # Sign-in ceremonies check the loopback TCP peer and the console's secret.
+            secret = (self.home / "console.secret").read_text(encoding="utf-8").strip()
+            client, headers, url = httpx.Client(trust_env=False), {"x-oarbank-console-secret": secret}, self.cli.URL
+        with client:
+            r = client.post(url + "/api/v1/access/login", json={"name": name, "password": password, "code": code},
+                            headers=headers, timeout=5)
             if r.status_code != 200:
                 raise SetupError("Wrong password or authenticator code, or the account is locked.", 403)
             # This wizard does not retain or expose the session minted by the ceremony.
-            client.post(self.cli.URL + "/api/v1/access/logout", json={"sid": r.json()["sid"]},
-                        headers={"x-oarbank-console-secret": secret}, timeout=5)
+            client.post(url + "/api/v1/access/logout", json={"sid": r.json()["sid"]}, headers=headers, timeout=5)
 
     def login_url(self):
         try:
@@ -214,10 +234,11 @@ class Wizard:
         if not (self.root / helper).is_file():
             raise SetupError(f"The build is missing {helper}.")
         self.home = Path(home or os.environ.get("OARBANKD_HOME") or paths.coordinator_home())
+        self.state_dir = journal_dir(self.home)
         self.primary = Path(primary or paths.release_key())
         self.backup = self.primary.with_name("release-ed25519-backup.key")
-        self.pending_path = self.home / "setup.pending.json"
-        self.marker = self.home / "setup.complete.json"
+        self.pending_path = self.state_dir / "setup.pending.json"
+        self.marker = self.state_dir / "setup.complete.json"
         self.backend = backend or Backend(self.root)
         self.ready_timeout = ready_timeout
         self.capability = secrets.token_urlsafe(32)
@@ -236,7 +257,11 @@ class Wizard:
     def _disk_configured(self):
         # Be conservative when services are stopped: do not reconfigure an old
         # installation simply because its readiness probe cannot connect.
-        return any((self.home / n).exists() for n in ("oarbank.sqlite3", "admin.token", "console.secret"))
+        try:
+            return any((self.home / n).exists() for n in ("oarbank.sqlite3", "admin.token", "console.secret"))
+        except PermissionError:
+            # the system service's home: its database is there once it has run
+            return True
 
     def existing(self):
         if self.complete:
@@ -255,6 +280,11 @@ class Wizard:
             if state:
                 return state
             if time.monotonic() >= deadline:
+                from .platform import localchannel
+                why = localchannel.unreachable_reason(self.home)
+                if why:
+                    raise SetupError(f"The coordinator runs, but this account cannot reach it yet: {why}. "
+                                     "Then open the web app again.", 503)
                 raise SetupError("Services are not ready. Retry setup once the coordinator and console are running.", 503)
             time.sleep(.25)
 
@@ -358,9 +388,10 @@ class Wizard:
             changed = marker.get("root") != str(self.root) or marker.get("version") != self.version
             if state and state["fleet"] != marker["fleet"]:
                 raise SetupError("The coordinator fleet changed. Open the console to review it.", 409)
-            if changed or not state:
-                # Refresh only after an upgrade, relocation or stopped services.
-                # Ordinary app openings must not interrupt active work.
+            if not state or (changed and sys.platform == "win32"):
+                # Refresh only after stopped services, or a Windows upgrade or
+                # relocation (the macOS and Linux packages refresh the system
+                # services themselves). Ordinary openings must not interrupt work.
                 self.backend.install(self.root, address)
                 state = self._wait()
             if state["fleet"] != marker["fleet"]:
@@ -550,9 +581,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.last_activity = time.monotonic()
 
 
+def journal_dir(home) -> Path:
+    """Where the wizard keeps its journal for `home`: the person's setup directory for the macOS and Linux system
+    service (whose home only its account may enter), the home itself otherwise."""
+    home = Path(home)
+    if sys.platform != "win32":
+        try:
+            if home.resolve() == paths.coordinator_home().resolve():
+                return paths.setup_dir()
+        except OSError:
+            pass
+    return home
+
+
 @contextlib.contextmanager
 def setup_lock(home):
-    """Serialize wizard processes, including exclusive key creation in cmd_owner."""
+    """Serialize wizard processes, including exclusive key creation in cmd_owner (`home`: the journal directory)."""
     files.private_dir(home)
     lock = home / "setup.lock"
     if not lock.exists():
@@ -607,7 +651,7 @@ def main(argv=None):
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
     try:
-        home = Path(os.environ.get("OARBANKD_HOME") or paths.coordinator_home())
+        home = journal_dir(os.environ.get("OARBANKD_HOME") or paths.coordinator_home())
         url = running_setup(home)
         if url:
             print(f"Open this private setup link on this computer: {url}", flush=True)
@@ -615,7 +659,7 @@ def main(argv=None):
                 webbrowser.open(url)
             return 0
         wizard = Wizard(args.root)
-        with setup_lock(wizard.home):
+        with setup_lock(wizard.state_dir):
             if wizard.existing():
                 url = wizard.reopen()
                 if not args.no_browser:
@@ -624,7 +668,7 @@ def main(argv=None):
                 return 0
             with SetupServer(wizard, args.port) as server:
                 url = server.origin + "/#" + wizard.capability
-                active_path = wizard.home / "setup.active.json"
+                active_path = wizard.state_dir / "setup.active.json"
                 files.write_private(active_path, json.dumps({"origin": server.origin, "capability": wizard.capability}))
                 # The capability is a URL fragment: not in HTTP requests, referers
                 # or access logs. Printing this local launch link permits no-browser use.
