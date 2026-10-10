@@ -379,7 +379,7 @@ def test_depot_passes_the_conformance_kit_its_fetch_proven_against_the_pins(tmp_
         (tmp_path / "tool" / path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / "tool" / path).write_bytes(body)
     rep = conform(DEPOT_DIR, {"datasets": {TOOL: {"kind": "tool", "attrs": {"version": "1"}, "dir": str(tmp_path / "tool")}},
-                              "settings": {"token": "secret"},
+                              "settings": {"mirror": "https://mirror.example/secret"},
                               "runner_specs": [{"name": "fetch", "stage": "fetch", "payload": {"fetch": TOOL},
                                                 "expect": {"artifacts": ["tool"]}}]})
     assert rep.ok, rep.text()
