@@ -144,7 +144,7 @@ change reaches and which keep their own value, before anything is written.</p>
   <td><span class="chip {{ 'ok' if x.host.state == 'ready' else ('bad' if x.host.state == 'fault' else '') }}" title="{{ x.host.last_error or '' }}">{{ x.host.state or 'stopped' }}</span>
     <span class="mut nowrap">{{ x.host.calls or 0 }} calls, p99 {{ x.host.latency_p99_ms | num(1) }} ms</span></td>
   <td class="actions">{{ m.op_form("modules.restart_host", x.name, "Restart") }}
-      {% if x.stages | length > 1 %}{% call m.op_form("modules.set_pipeline", x.name, "Pipeline…") %}<select name="mode" aria-label="pipeline mode"><option>single</option><option>split</option></select>{% endcall %}{% endif %}
+      {% if x.stages | length > 1 %}<a href="/modules/{{ x.name }}/settings#s-pipeline">Pipeline…</a>{% endif %}
       {% if x.enabled %}{{ m.op_form("modules.disable", x.name, "Disable", confirm="Disable " ~ x.name ~ "? Dispatch stops fleet-wide and live attempts are requeued.") }}
       {% else %}{{ m.op_form("modules.enable", x.name, "Enable", confirm="Re-enable " ~ x.name ~ "?") }}{% endif %}</td></tr>
   {% else %}<tr><td colspan="6" class="mut">No job modules enabled.</td></tr>{% endfor %}</table>

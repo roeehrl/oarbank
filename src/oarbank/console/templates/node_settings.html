@@ -14,9 +14,10 @@
 <div class="settings-sections">
 {% for sec in sections %}{{ S.section_form(sec, "node", n.node_id, "node:" ~ n.node_id, "/nodes/" ~ n.node_id ~ "/settings", n.hostname, explain) }}{% endfor %}
 </div>
-{% if module_settings %}<section class="card small" aria-labelledby="h-modset"><h2 id="h-modset">Module settings on this node</h2>
-<p class="mut">Handed to each module's runners and services here (<span class="mono">OARBANK_SETTINGS_FILE</span>); set with
-<code>oarbank settings set module.node_settings '{…}' --module &lt;module&gt; --node {{ n.hostname }}</code>.</p>
-<table class="small"><tr><th scope="col">module</th><th scope="col">settings</th></tr>
-{% for mod, v in module_settings | dictsort %}<tr><td>{{ mod }}</td><td class="mono">{{ v | tojson }}</td></tr>{% endfor %}</table></section>{% endif %}
+{% if modules %}<h2 class="settings-group-title" id="modules">Modules on this node</h2>
+<p class="small mut">Per module: whether it runs here, the services it does not run here, and its own node settings. A value set
+here reaches only that module's runners and services on {{ n.hostname }}.</p>
+<div class="settings-sections">
+{% for sec in modules %}{{ S.section_form(sec, "node", n.node_id, "node:" ~ n.node_id, "/nodes/" ~ n.node_id ~ "/settings", sec.module ~ " on " ~ n.hostname, explain) }}{% endfor %}
+</div>{% endif %}
 {% endblock %}

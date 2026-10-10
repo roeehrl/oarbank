@@ -7,13 +7,14 @@
 {% import "_macros.html" as m with context %}
 
 {% macro value_input(r, described) -%}
-{% set i = r.input %}{% set k = r.key %}
-{% if i.kind == 'checkbox' %}<input type="hidden" name="v.{{ k }}" value="0"><label class="small"><input type="checkbox" id="v-{{ k }}" name="v.{{ k }}" value="1"{% if r.form_value %} checked{% endif %} aria-describedby="{{ described }}"> on</label>
-{%- elif i.kind == 'select' %}<select id="v-{{ k }}" name="v.{{ k }}" aria-describedby="{{ described }}">{% for c in i.choices %}<option{% if c == r.form_value %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
-{%- elif i.kind == 'list' %}<textarea id="v-{{ k }}" name="v.{{ k }}" rows="2" class="mono" aria-describedby="{{ described }}" placeholder="one per line">{{ r.form_value }}</textarea>
-{%- elif i.kind == 'schedule' %}{% set sv = (r.own.value if r.own else r.inherited.value) or {} %}<span class="row"><input type="time" id="v-{{ k }}" name="v.{{ k }}.start" value="{{ sv.start or '22:00' }}" aria-label="{{ r.label }} start" aria-describedby="{{ described }}"> to <input type="time" name="v.{{ k }}.end" value="{{ sv.end or '07:30' }}" aria-label="{{ r.label }} end">
+{% set i = r.input %}{% set k = r.key %}{% set dom = r.dom or k %}
+{% if i.kind == 'checkbox' %}<input type="hidden" name="v.{{ k }}" value="0"><label class="small"><input type="checkbox" id="v-{{ dom }}" name="v.{{ k }}" value="1"{% if r.form_value %} checked{% endif %} aria-describedby="{{ described }}"> on</label>
+{%- elif i.kind == 'select' %}<select id="v-{{ dom }}" name="v.{{ k }}" aria-describedby="{{ described }}">{% for c in i.choices %}<option{% if c | string == r.form_value %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+{%- elif i.kind == 'list' %}<textarea id="v-{{ dom }}" name="v.{{ k }}" rows="2" class="mono" aria-describedby="{{ described }}" placeholder="one per line">{{ r.form_value }}</textarea>
+{%- elif i.kind == 'json' %}<textarea id="v-{{ dom }}" name="v.{{ k }}" rows="3" class="mono wide-input" aria-describedby="{{ described }}" placeholder="JSON">{{ r.form_value }}</textarea>
+{%- elif i.kind == 'schedule' %}{% set sv = (r.own.value if r.own else r.inherited.value) or {} %}<span class="row"><input type="time" id="v-{{ dom }}" name="v.{{ k }}.start" value="{{ sv.start or '22:00' }}" aria-label="{{ r.label }} start" aria-describedby="{{ described }}"> to <input type="time" name="v.{{ k }}.end" value="{{ sv.end or '07:30' }}" aria-label="{{ r.label }} end">
   {% for d in range(7) %}<label class="small"><input type="checkbox" name="v.{{ k }}.days" value="{{ d }}"{% if not sv.days or d in sv.days %} checked{% endif %}>{{ ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d] }}</label>{% endfor %}</span>
-{%- else %}<input id="v-{{ k }}" name="v.{{ k }}" value="{{ r.form_value }}"{% if i.kind == 'number' %} type="text" inputmode="decimal"{% elif i.kind == 'url' %} type="url" class="wide-input"{% endif %}{% if i.nullable %} placeholder="none"{% endif %} aria-describedby="{{ described }}"{% if r.form_errors %} aria-invalid="true"{% endif %}>{% if r.unit %} <span class="mut">{{ r.unit }}</span>{% endif %}
+{%- else %}<input id="v-{{ dom }}" name="v.{{ k }}" value="{{ r.form_value }}"{% if i.kind == 'number' %} type="text" inputmode="decimal"{% elif i.kind == 'url' %} type="url" class="wide-input"{% endif %}{% if i.nullable %} placeholder="none"{% endif %} aria-describedby="{{ described }}"{% if r.form_errors %} aria-invalid="true"{% endif %}>{% if r.unit %} <span class="mut">{{ r.unit }}</span>{% endif %}
 {%- endif %}
 {%- endmacro %}
 
@@ -27,19 +28,21 @@
 {%- endmacro %}
 
 {% macro setting_row(r, explain="") -%}
-{% set k = r.key %}{% set described = 'h-' ~ k ~ ' src-' ~ k ~ (' e-' ~ k if r.form_errors or r.errors else '') %}
-<div class="setting{{ ' changed' if r.overridden_here }}{{ ' invalid' if r.form_errors }}" id="s-{{ k }}">
-  <input type="hidden" name="keys" value="{{ k }}"><input type="hidden" name="t.{{ k }}" value="{{ r.input.kind }}">
+{% set k = r.key %}{% set dom = r.dom or k %}{% set described = 'h-' ~ dom ~ ' src-' ~ dom ~ (' e-' ~ dom if r.form_errors or r.errors or r.missing else '') %}
+<div class="setting{{ ' changed' if r.overridden_here }}{{ ' invalid' if r.form_errors }}" id="s-{{ dom }}">
+  <input type="hidden" name="keys" value="{{ k }}"><input type="hidden" name="t.{{ k }}" value="{{ r.input.kind }}{{ 'num' if r.input.numeric }}">{% if r.input.nullable %}<input type="hidden" name="null.{{ k }}" value="1">{% endif %}
   {% if r.overridden_here %}<input type="hidden" name="had.{{ k }}" value="1"><input type="hidden" name="cur.{{ k }}" value="{{ r.own.value | tojson | forceescape }}">{% endif %}
   <div class="setting-head row">
-    <label for="v-{{ k }}" class="setting-label"><b>{{ r.label }}</b>{% if r.unit %} <span class="mut">({{ r.unit }})</span>{% endif %}</label>
-    <span class="chip{{ ' acc' if r.overridden_here }}" id="src-{{ k }}">{{ r.badge }}</span>
+    <label for="v-{{ dom }}" class="setting-label"><b>{{ r.label }}</b>{% if r.unit %} <span class="mut">({{ r.unit }})</span>{% endif %}</label>
+    <span class="chip{{ ' acc' if r.overridden_here }}" id="src-{{ dom }}">{{ r.badge }}</span>
     {% if r.overridden_here %}<span class="chip acc">changed here</span>{% endif %}
-    <span class="sp"></span><code class="mono small" id="key-{{ r.scope }}-{{ k }}">{{ k }}</code><button type="button" class="small" data-copy="key-{{ r.scope }}-{{ k }}" aria-label="Copy the key {{ k }}">Copy</button>
+    {% if r.missing %}<span class="chip bad">required: not set</span>{% elif r.required %}<span class="chip">required</span>{% endif %}
+    <span class="sp"></span><code class="mono small" id="key-{{ r.scope }}-{{ dom }}">{{ ('[' ~ r.module ~ '] ' if r.module and not k.startswith('module.') else '') ~ k }}</code><button type="button" class="small" data-copy="key-{{ r.scope }}-{{ dom }}" aria-label="Copy the key {{ k }}">Copy</button>
   </div>
-  <div class="small mut" id="h-{{ k }}">{{ r.help }}{% if r.note %} <b>{{ r.note }}</b>{% endif %}{% if r.merge_note %} ({{ r.merge_note }}){% endif %}{% if r.hw_note %} · {{ r.hw_note }}{% endif %}</div>
-  {% if r.form_errors %}<div class="field-error small" id="e-{{ k }}"><span class="sr-only">Error:</span> {{ r.form_errors | join('; ') }}</div>
-  {% elif r.errors %}<div class="field-error small" id="e-{{ k }}"><span class="sr-only">Error:</span> on this node: {{ r.errors | join('; ') }}</div>{% endif %}
+  <div class="small mut" id="h-{{ dom }}">{{ r.help }}{% if r.note %} <b>{{ r.note }}</b>{% endif %}{% if r.merge_note %} ({{ r.merge_note }}){% endif %}{% if r.hw_note %} · {{ r.hw_note }}{% endif %}</div>
+  {% if r.form_errors %}<div class="field-error small" id="e-{{ dom }}"><span class="sr-only">Error:</span> {{ r.form_errors | join('; ') }}</div>
+  {% elif r.errors %}<div class="field-error small" id="e-{{ dom }}"><span class="sr-only">Error:</span> on this node: {{ r.errors | join('; ') }}</div>
+  {% elif r.missing %}<div class="field-error small" id="e-{{ dom }}"><span class="sr-only">Error:</span> required: {{ r.module }}'s work waits until it has a value{{ ' here' if r.scope == 'node' }}</div>{% endif %}
   <div class="setting-value row">
     {% if r.locked_by %}
     <span class="mono">{{ r.value_text }}</span>
@@ -54,8 +57,8 @@
   </div>
   <div class="row small">
     {% if r.applied %}<span class="chip {{ r.applied.tone }}">{{ r.applied.text }}</span>{% endif %}
-    {% if r.override_count is not none %}{% if r.override_count %}<a href="/settings/overrides?key={{ k }}">Overridden on {{ r.override_count }} node{{ 's' if r.override_count != 1 }}</a>{% else %}<span class="mut">no node overrides it</span>{% endif %}{% endif %}
-    {% if r.scope == 'node' and not r.overridden_here and not r.locked_by %}<a href="/settings?explain={{ k }}#s-{{ k }}">Configure fleet default</a>{% endif %}
+    {% if r.override_count is not none and 'node' in (r.scopes or ['node']) %}{% if r.override_count %}<a href="/settings/overrides?key={{ k }}{{ '&module=' ~ r.module if r.module }}">Overridden on {{ r.override_count }} node{{ 's' if r.override_count != 1 }}</a>{% else %}<span class="mut">no node overrides it</span>{% endif %}{% endif %}
+    {% if r.scope == 'node' and not r.overridden_here and not r.locked_by %}{% if r.module %}<a href="/modules/{{ r.module }}/settings?explain={{ k }}#s-{{ dom }}">Configure {{ r.module }}'s fleet value</a>{% else %}<a href="/settings?explain={{ k }}#s-{{ k }}">Configure fleet default</a>{% endif %}{% endif %}
   </div>
   <details class="small explain"{% if explain == k %} open{% endif %}><summary>Explain</summary>
     <p class="small">In effect: <b class="mono">{{ r.value_text }}</b> from <b>{{ r.badge }}</b>{% if r.locked_by %}, locked by {{ r.locked_by.name }}{% endif %}.
@@ -74,11 +77,12 @@
                   confirm=('Save ' ~ sec.title | lower ~ ' for ' ~ subject ~ '? A change to its services re-checks and re-certifies it.' if scope == 'node' else none)) %}
   <input type="hidden" name="scope" value="{{ scope }}"><input type="hidden" name="scope_id" value="{{ scope_id }}">
   <input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="section" value="{{ sec.id }}">
+  {% if sec.module %}<input type="hidden" name="module" value="{{ sec.module }}">{% endif %}
   <fieldset class="settings-fieldset">
     <legend id="h-{{ scope }}-{{ sec.id }}"><h2>{{ sec.title }}{% if sec.changed %} <span class="chip acc">{{ sec.changed }} changed here</span>{% endif %}</h2></legend>
     {% if sec.form_errors %}<div class="error-summary" role="alert" tabindex="-1" data-focus-on-load aria-labelledby="es-{{ scope }}-{{ sec.id }}">
       <h3 id="es-{{ scope }}-{{ sec.id }}">There is a problem</h3>
-      <ul>{% for e in sec.form_errors %}<li><a href="#v-{{ e.key }}">{{ e.label }}: {{ e.message }}</a></li>{% endfor %}</ul></div>{% endif %}
+      <ul>{% for e in sec.form_errors %}<li><a href="#v-{{ e.dom or e.key }}">{{ e.label }}: {{ e.message }}</a></li>{% endfor %}</ul></div>{% endif %}
     <p class="small mut">{{ sec.blurb }}</p>
     {% for r in sec.rows %}{{ setting_row(r, explain) }}{% endfor %}
     {% if sec.advanced %}<details class="advanced"{% if sec.advanced_changed or sec.form_errors or explain in (sec.advanced | map(attribute='key') | list) %} open{% endif %}><summary>Advanced{% if sec.advanced_changed %} · {{ sec.advanced_changed }} changed{% endif %}</summary>

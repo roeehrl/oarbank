@@ -2,7 +2,8 @@
 {% import "_macros.html" as m with context %}
 {% block title %}{{ o.label }} overrides · Oarbank{% endblock %}
 {% block body %}
-<p class="small"><a href="/settings#s-{{ o.key }}">← Settings</a></p>
+{% set dom = (o.module ~ '-' if o.module else '') ~ o.key | replace('.', '-') %}
+<p class="small">{% if o.module %}<a href="/modules/{{ o.module }}/settings#s-{{ dom }}">← {{ o.module }} settings</a>{% else %}<a href="/settings#s-{{ o.key }}">← Settings</a>{% endif %}</p>
 <h1>{{ o.label }} <span class="mono small mut">{{ o.key }}{% if o.module %} [{{ o.module }}]{% endif %}</span></h1>
 <div class="card small">
   <p>Fleet value: <b class="mono">{{ o.fleet.value_text }}</b> ({{ o.fleet.source }}).
@@ -10,12 +11,12 @@
 </div>
 <h2>Values set below the fleet</h2>
 <table class="small"><tr><th scope="col">scope</th><th scope="col">name</th><th scope="col">value</th><th scope="col">changed</th><th class="actions"><span class="sr-only">actions</span></th></tr>
-{% for v in o["values"] %}<tr><td>{{ v.scope }}</td><td>{% if v.scope == 'node' %}<a href="/nodes/{{ v.id }}/settings?explain={{ o.key }}#s-{{ o.key }}">{{ v.name or v.id }}</a>{% else %}{{ v.name }}{% endif %}</td>
+{% for v in o["values"] %}<tr><td>{{ v.scope }}</td><td>{% if v.scope == 'node' %}<a href="/nodes/{{ v.id }}/settings?explain={{ o.key }}#s-{{ dom }}">{{ v.name or v.id }}</a>{% else %}{{ v.name }}{% endif %}</td>
   <td class="mono">{{ v.value_text }}{% if v.enforced %} <span class="chip warn">locked</span>{% endif %}</td>
   <td class="mut">rev {{ v.rev }} · {{ v.by }} · {{ v.at | ago }}{% if v.comment %} · “{{ v.comment }}”{% endif %}</td>
-  <td class="actions">{{ m.op_form("settings.apply", v.id, "Reset to inherited", params={"changes": [{"scope": v.scope, "scope_id": v.id, "module": o.module, "key": o.key, "reset": true}]}, confirm="Reset " ~ o.label ~ " on " ~ (v.name or v.id) ~ "? It inherits again.", tier="T1", return_to="/settings/overrides?key=" ~ o.key) }}</td></tr>
+  <td class="actions">{{ m.op_form("settings.apply", v.id, "Reset to inherited", params={"changes": [{"scope": v.scope, "scope_id": v.id, "module": o.module, "key": o.key, "reset": true}]}, confirm="Reset " ~ o.label ~ " on " ~ (v.name or v.id) ~ "? It inherits again.", tier="T1", return_to="/settings/overrides?key=" ~ o.key ~ ("&module=" ~ o.module if o.module else "")) }}</td></tr>
 {% else %}<tr><td colspan="5" class="mut">No group or node sets it.</td></tr>{% endfor %}</table>
 {% if o.nodes %}<h2>Nodes not on the fleet value</h2>
 <table class="small"><tr><th scope="col">node</th><th scope="col">value</th><th scope="col">from</th></tr>
-{% for x in o.nodes %}<tr><td><a href="/nodes/{{ x.node_id }}/settings?explain={{ o.key }}#s-{{ o.key }}">{{ x.hostname }}</a></td><td class="mono">{{ x.value_text }}</td><td>{{ x.source }}</td></tr>{% endfor %}</table>{% endif %}
+{% for x in o.nodes %}<tr><td><a href="/nodes/{{ x.node_id }}/settings?explain={{ o.key }}#s-{{ dom }}">{{ x.hostname }}</a></td><td class="mono">{{ x.value_text }}</td><td>{{ x.source }}</td></tr>{% endfor %}</table>{% endif %}
 {% endblock %}
