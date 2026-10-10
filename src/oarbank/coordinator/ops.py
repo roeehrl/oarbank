@@ -1039,13 +1039,16 @@ def _prepare_impact(db, r):
                   "AND lifecycle!='retired'", (t, t))
     facts = jl(node["facts_json"], {}) if node else {}
     plat = platforms.node_platform(dict(node)) if node else None
-    return {"target": t, "kind": "enrolled node: its agent installs the standby coordinator" if node else "a host you start by hand",
+    return {"target": t, "kind": "enrolled node: its agent fetches and verifies the standby coordinator; its system service is "
+                    "installed as root on the target (a node's agent is unprivileged: it names the command)" if node
+                    else "a host where you install the standby as root (install-oarbankd.sh --pair)",
             "target_stable_id": node["ts_node_id"] if node else None,
             "target_platform": plat or "reported by the standby when it pairs",
             "blocking_modules": modlife.platform_blockers(db, plat) or "none",
             "warnings": [w for w in (
-                "the target has FileVault on and no auto-login: after a power loss it serves nothing until someone logs in"
-                if facts.get("filevault") == "on" and not facts.get("autologin") else None,
+                "the target has FileVault on: after a power loss it serves nothing until someone unlocks its disk at the Mac "
+                "(restarts with `fdesetup authrestart`, and macOS updates that unlock the disk, come back by themselves)"
+                if facts.get("filevault") == "on" else None,
                 "this coordinator's checkout has uncommitted changes: the bundle installed on the target carries tracked "
                 "files as they are on disk and no untracked ones (commit first)" if node and _bundle_dirty() else None) if w],
             "this_coordinator": {"fingerprint": identity.key(coordmove.home(db)).fingerprint[:16], "epoch": identity.epoch(db)},
