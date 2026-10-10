@@ -90,11 +90,18 @@ Sign $Msi
 Copy-Item "$Bin\oarbank-agent.exe" "$Out\oarbank-agent-$Version-windows-$Arch.exe"
 # the Group Policy template (deploy/windows/admx: oarbank.admx, en-US\oarbank.adml) for PolicyDefinitions or the Central
 # Store; the same for every architecture. Windows' own tar (bsdtar, not a Git for Windows tar earlier on PATH) writes the
-# zip, with forward slashes in its entry names (Windows PowerShell's Compress-Archive wrote backslashes)
+# zip, with forward slashes in its entry names (Windows PowerShell's Compress-Archive wrote backslashes). Both
+# architectures publish this one file, so it must be byte-identical: the entries get a fixed time, not the checkout's.
 $Admx = "$Out\oarbank-agent-$Version-windows-admx.zip"
 Remove-Item -LiteralPath $Admx -Force -ErrorAction SilentlyContinue
-& "$env:SystemRoot\System32\tar.exe" -a -c -f $Admx -C "$Repo\deploy\windows\admx" oarbank.admx en-US
-if ($LASTEXITCODE) { throw "zipping the Group Policy template failed" }
+$AdmxSrc = Join-Path ([IO.Path]::GetTempPath()) "oarbank-admx-$PID"
+Remove-Item -LiteralPath $AdmxSrc -Recurse -Force -ErrorAction SilentlyContinue
+Copy-Item -Recurse "$Repo\deploy\windows\admx" $AdmxSrc
+Get-ChildItem -LiteralPath $AdmxSrc -Recurse | ForEach-Object { $_.LastWriteTimeUtc = [DateTime]::new(2000, 1, 1, 0, 0, 0, 'Utc') }
+& "$env:SystemRoot\System32\tar.exe" -a -c -f $Admx -C $AdmxSrc oarbank.admx en-US/oarbank.adml
+$AdmxExit = $LASTEXITCODE
+Remove-Item -LiteralPath $AdmxSrc -Recurse -Force -ErrorAction SilentlyContinue
+if ($AdmxExit) { throw "zipping the Group Policy template failed" }
 # collect the hashes before writing: the sums file matches the same pattern
 $Sums = @(Get-ChildItem "$Out\oarbank-agent-$Version-windows-$Arch*" | Where-Object Extension -ne ".wixpdb") + @(Get-Item -LiteralPath $Admx) |
   Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
