@@ -1,0 +1,36 @@
+[package]
+name = "oarbank-portmap"
+description = "Router port mapping for inbound listeners: PCP and NAT-PMP clients, UPnP IGD through igd-next, the mapping lifecycle with its write-ahead journal, NAT classification, the dial-back probe and STUN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# in-process fake gateways (PCP, NAT-PMP, UPnP IGD) for tests, and the `oarbank-fake-gateway` test binary; never in a
+# shipped build
+fake = []
+
+[[bin]]
+name = "oarbank-fake-gateway"
+path = "src/bin/fake_gateway.rs"
+required-features = ["fake"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+hex.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+rand = "0.10.3"
+tracing = "0.1.44"
+tokio = { version = "1.53.1", features = ["net", "time", "sync", "macros", "rt", "io-util"] }
+socket2 = { version = "0.6.5", features = ["all"] }
+# UPnP IGD v1/v2 discovery and SOAP (MIT); its tokio client, and the IPv6 firewall service for pinholes
+igd-next = { version = "0.18.0", default-features = false, features = ["aio_tokio", "ipv6"] }
+# the default route: gateway and the interface's addresses, on macOS, Linux and Windows (MIT)
+netdev = { version = "0.46.3", default-features = false, features = ["gateway"] }
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oarbank-core", "crates/oarbank-core-py", "crates/oarbank-protection", "crates/oarbank-agent", "crates/oarbank-launcher"]
+members = ["crates/oarbank-core", "crates/oarbank-core-py", "crates/oarbank-protection", "crates/oarbank-agent", "crates/oarbank-launcher", "crates/oarbank-portmap"]
 
 [workspace.package]
 version = "2.8.0"
