@@ -15,6 +15,7 @@ from pathlib import Path
 
 from oarbank_sdk import manifest as mf
 
+from .settings.store import fleet_value
 from .modulehost import ModuleError, ModuleHost, ModuleSpec, ModuleUnavailable  # noqa: F401  (re-exported)
 
 _hosts: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
@@ -202,7 +203,7 @@ def payload_problem(name: str, version: str | None, payload) -> str | None:
 
 
 def split_enabled(db, name: str) -> bool:
-    return name in CATALOG and info(name).splittable and db.get_setting(f"pipeline:{name}", "single") == "split"
+    return name in CATALOG and info(name).splittable and fleet_value(db, "pipeline", name) == "split"
 
 
 # ------------------------------------------------------------------ host per database
@@ -293,7 +294,7 @@ def host_callbacks(db) -> dict:
         return {"exists": bool(r), "size": r["size"] if r else None}
 
     def settings_get(module, p):
-        return {"value": (_db().get_setting(f"module_settings:{module}", {}) or {}).get(p.get("key"))}
+        return {"value": (fleet_value(_db(), "module.settings", module) or {}).get(p.get("key"))}
 
     def secrets_get(module, p):
         from . import modsecrets
@@ -466,7 +467,8 @@ def node_class(node: dict | None, name: str) -> dict:
     names for the module (services and healthy probes, such as a tool probe) and its enabled services'."""
     import json as _json
     from .predicates import node_capabilities, node_gpu_apis
-    disabled = (_json.loads((node or {}).get("policy_json") or "{}") or {}).get("disabled_services") or [] if node else []
+    from .core import node_disabled_services
+    disabled = node_disabled_services(node) if node else []
     facts = _json.loads((node or {}).get("facts_json") or "{}") or {} if node else {}
     reported = (_json.loads((node or {}).get("capacity_json") or "{}") or {}).get("pools") or {} if node else {}
     off = pools_of_disabled(disabled)

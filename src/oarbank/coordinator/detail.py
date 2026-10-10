@@ -3,7 +3,7 @@ GET /api/v1/nodes/{id} and /api/v1/jobs/{id}) and what the console's node and jo
 on its own read connection (D10). One function per document, so the CLI and the console never say different
 things (docs/design/console-parity.md).
 
-Every function here is pure over a reader (q/one/get_setting): oarbankd's DB or the console's query-only pool. Module
+Every function here is pure over a reader (q/one/get_state): oarbankd's DB or the console's query-only pool. Module
 manifests come from the caller (`manifest_for`), since only oarbankd holds the active versions in memory and the console
 has the catalogue it fetched.
 """
@@ -73,12 +73,17 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
     """The node's detail document, by node id or hostname: `oarbank node show` prints it (GET /api/v1/nodes/{id}) and the
     console's node page renders its GPU API, enforcement and folder sections. `services` are the agent's per-service
     report (nodeservices.rows), the rows of the node page's Services table; `why` explains its slots and memory and
-    `policy` is its Policy table (nodepolicy.py)."""
+    `settings` are its effective settings, each with its source and whether the node applied it (settings/views.py)."""
     n = r.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
     if not n:
         return None
     facts, mods = jl(n["facts_json"], {}) or {}, jl(n.get("modules_json"), {}) or {}
-    policy = jl(n["policy_json"], {}) or {}
+    from .settings import resolve as V, views as SV
+    from .settings.apply import flat_values
+    policy = flat_values(n)
+    snap = V.snapshot(r)
+    eff = V.effective(snap, n)
+    sources = {k: V.badge(x) for k, x in eff.items()}
     hb, doc = n["last_heartbeat_at"] or 0, jl(n["doctor_json"])
     return {
         "node": {"node_id": n["node_id"], "hostname": n["hostname"], "platform": platforms.node_platform(n),
@@ -88,9 +93,11 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),
         "services": nodeservices.rows(n), "services_at": n.get("services_at"), "folders": folder_grants(r, n),
         "sandbox": enforcement(facts, sorted(mods), manifest_for),
-        # why it has the slots and memory it has, and its settings with this node's defaults (nodepolicy.py)
-        "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os")),
-        "policy": nodepolicy.rows(policy, facts, r.get_setting("default_worker_disabled_services"))}
+        # why it has the slots and memory it has, citing the settings it rests on with their source (nodepolicy.py)
+        "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os"),
+                              n["node_id"], sources),
+        # its effective settings with their source and applied state (settings/views.py)
+        "settings": SV.effective_doc(r, n["node_id"])}
 
 
 def job(r, jid: int) -> dict | None:

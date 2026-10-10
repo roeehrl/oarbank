@@ -146,8 +146,9 @@ def s10_failure_accounting(db: DB):
 
 def s11_hard_job_caps(db: DB):
     out = []
-    for n in db.q("SELECT node_id, limits_json FROM nodes"):
-        lim = jl(n["limits_json"], {}) or {}
+    from .core import node_limits
+    for n in db.q("SELECT node_id, settings_json FROM nodes"):
+        lim = node_limits(n)
         if lim.get("jobs") is None or lim.get("enforce") != "hard":
             continue
         live = db.one("SELECT COUNT(*) c FROM attempts WHERE node_id=? AND state='live'", (n["node_id"],))["c"]
@@ -223,8 +224,8 @@ def _rule_at(db: DB, node_id: str, rule_id: str, t: float) -> dict | None:
     if r:
         cfg = json.loads(r["config_json"])
     else:
-        n = db.one("SELECT policy_json FROM nodes WHERE node_id=?", (node_id,))
-        cfg = ((jl(n["policy_json"], {}) or {}).get("protection") or {}) if n else {}
+        n = db.one("SELECT protection_json FROM nodes WHERE node_id=?", (node_id,))
+        cfg = (jl(n["protection_json"], {}) or {}) if n else {}
     return next((x for x in cfg.get("rule") or [] if x.get("id") == rule_id), None)
 
 
@@ -420,7 +421,7 @@ def health(db: DB, now: float) -> list[str]:
     stale = db.one("SELECT COUNT(*) n FROM attempts WHERE state='live' AND expires_at < ?", (now - 60,))["n"]
     if stale:
         out.append(f"{stale} live attempts past their lease by >60 s (reaper not running?)")
-    alive = db.get_setting("alive_at")
+    alive = db.get_state("alive_at")
     if alive and now - float(alive) > 60:
         out.append(f"oarbankd background loop last ran {int(now - float(alive))} s ago")
     return out

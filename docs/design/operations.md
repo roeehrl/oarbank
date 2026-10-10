@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-89 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+88 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -24,8 +24,6 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `nodes.pause` — Stop leasing to a node; running attempts finish | T0 | optional | – | operator | declarative | nodes.resume | `POST /api/v1/ops/{op}` (op=nodes.pause)<br>`POST /do/{op}` (op=nodes.pause) | oarbank node state <nid> paused |
 | `nodes.resume` — Resume leasing to a node | T0 | optional | – | operator | declarative | nodes.pause | `POST /api/v1/ops/{op}` (op=nodes.resume)<br>`POST /do/{op}` (op=nodes.resume) | oarbank node state <nid> active |
 | `nodes.drain` — Finish running attempts, take no new ones (used by rolling upgrades) | T1 | prompted | – | operator | declarative | nodes.resume | `POST /api/v1/ops/{op}` (op=nodes.drain)<br>`POST /do/{op}` (op=nodes.drain) | oarbank node state <nid> draining |
-| `nodes.set_caps` — Set or clear the owner's hard caps (cpu, memory, jobs, VM, disk, staging, schedule) | T0 (T1 when lowering a cap below current usage (attempts would be released)) | optional | – | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.set_caps)<br>`POST /do/{op}` (op=nodes.set_caps) | oarbank node limits <nid> ...<br>oarbank node limits <nid> --clear-all |
-| `nodes.set_policy` — Edit node policy (reserves, VM scoring role, yield settings) or reset settings to the node's defaults; re-doctors and re-certifies on role changes | T1 | prompted | – | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.set_policy)<br>`POST /do/{op}` (op=nodes.set_policy) | oarbank node policy <nid> ...<br>oarbank node policy <nid> --reset <key><br>oarbank node policy <nid> --reset-all |
 | `nodes.quarantine` — Stop all work on a node and revoke its live attempts | T1 | prompted | – | operator | natural | nodes.clear_quarantine | `POST /api/v1/ops/{op}` (op=nodes.quarantine)<br>`POST /do/{op}` (op=nodes.quarantine) | – |
 | `nodes.clear_quarantine` — Clear quarantine; the node re-doctors and re-certifies | T1 | prompted | – | operator | natural | nodes.quarantine | `POST /api/v1/ops/{op}` (op=nodes.clear_quarantine)<br>`POST /do/{op}` (op=nodes.clear_quarantine) | – |
 | `nodes.run_doctor` — Ask the agent to re-run every module doctor | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=nodes.run_doctor)<br>`POST /do/{op}` (op=nodes.run_doctor) | – |
@@ -138,11 +136,12 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
 |---|---|---|---|---|---|---|---|---|
-| `settings.notifications.update` — Edit ntfy and notification settings | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.notifications.update)<br>`POST /do/{op}` (op=settings.notifications.update) | – |
-| `settings.tools.update` — Map a host tool id to its paths per OS in the tool registry (modules request tools by id) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.tools.update)<br>`POST /do/{op}` (op=settings.tools.update) | – |
+| `settings.apply` — Set or reset owner settings at the fleet, a group or a node, as one change set (policy, caps, notifications, access, verification); the preview names every node whose effective value changes | T0 (from each key's danger tier and scope: a node change keeps the key's tier (caps T0, policy T1), a fleet or group change is one tier up, a lock is T3) | optional | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.apply)<br>`POST /do/{op}` (op=settings.apply) | oarbank settings set <key> <value> [--node <node>] [--group <group>]<br>oarbank settings reset <key> [--node <node>] [--group <group>] |
+| `settings.secrets.set` — Set a core secret (the ntfy token): write-only, shown only as a fingerprint | T1 | prompted | – | admin | declarative | settings.secrets.clear | `POST /api/v1/ops/{op}` (op=settings.secrets.set)<br>`POST /do/{op}` (op=settings.secrets.set) | oarbank settings set-secret <name> |
+| `settings.secrets.clear` — Remove a core secret's value (the ntfy token) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=settings.secrets.clear)<br>`POST /do/{op}` (op=settings.secrets.clear) | oarbank settings clear-secret <name> |
+| `settings.tools.update` — Map a host tool id to its paths per OS in the tool registry (modules request tools by id and trust) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.tools.update)<br>`POST /do/{op}` (op=settings.tools.update) | – |
 | `settings.folders.update` — Map a folder id to a path on each node in the folder registry (modules request folders by id) | T2 | required | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=settings.folders.update)<br>`POST /do/{op}` (op=settings.folders.update) | oarbank folders map <id> --access read|write --node <node>=<path> |
 | `folders.sign` — Attach the owner's signature to a node's folder statement (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=folders.sign)<br>`POST /do/{op}` (op=folders.sign) | oarbank folders sign <node> |
-| `settings.update` — Write a raw setting (goldens, dataset groups) | T2 | required | yes | admin | declarative | – | `POST /api/v1/ops/{op}` (op=settings.update)<br>`POST /do/{op}` (op=settings.update) | oarbank op settings.update <key><br>module CLIs (golden:<module>, dataset_groups) |
 
 ## access
 

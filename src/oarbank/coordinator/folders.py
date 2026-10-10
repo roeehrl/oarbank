@@ -33,7 +33,8 @@ class FolderError(ValueError):
 
 
 def registry(db: DB) -> dict:
-    return db.get_setting(REGISTRY, {}) or {}
+    from .settings import fleet_value
+    return fleet_value(db, REGISTRY) or {}
 
 
 def check_path(path: str, os_: str | None) -> str:
@@ -77,7 +78,7 @@ def mapping_for(db: DB, node_id: str) -> dict:
 
 
 def statements(db: DB) -> dict:
-    return db.get_setting(STATEMENTS, {}) or {}
+    return db.get_state(STATEMENTS, {}) or {}
 
 
 def statement(db: DB, node_id: str) -> dict | None:
@@ -102,7 +103,7 @@ def refresh(db: DB, node_ids=None) -> list[str]:
         sts[nid] = {"seq": seq, "statement": stmt, "signature": None}
         changed.append(nid)
     if changed:
-        db.set_setting(STATEMENTS, sts)
+        db.set_state(STATEMENTS, sts)
     return changed
 
 
@@ -112,7 +113,7 @@ def sign(db: DB, node_id: str, stmt: str, signature: str) -> dict:
     cur = statement(db, node_id)
     if not cur or cur["statement"] != stmt:
         raise FolderError(f"that is not {node_id}'s current folder statement (it changed: sign it again)")
-    key = db.get_setting("release_pubkey")
+    key = db.get_state("release_pubkey")
     if not key:
         raise FolderError("no release key is pinned (oarbank owner set): nothing can verify the signature")
     try:
@@ -121,7 +122,7 @@ def sign(db: DB, node_id: str, stmt: str, signature: str) -> dict:
         raise FolderError(str(e)) from None
     sts = statements(db)
     sts[node_id] = {**cur, "signature": signature}
-    db.set_setting(STATEMENTS, sts)
+    db.set_state(STATEMENTS, sts)
     return {"node_id": node_id, "seq": cur["seq"]}
 
 

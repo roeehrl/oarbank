@@ -26,5 +26,5 @@ def refresh(db: DB) -> dict:
     doc = {"platform": portable.host_platform(), "manager": service.manager(), "pid": os.getpid(),
            "managed": any(s["pid"] == os.getpid() for s in services), "services": services, "sandbox": sandbox,
            "at": time.time()}
-    db.set_setting(SETTING, doc)
+    db.set_state(SETTING, doc)
     return doc

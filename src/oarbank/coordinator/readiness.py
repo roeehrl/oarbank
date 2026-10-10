@@ -275,11 +275,13 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
             paths, missing = platforms.tool_paths(db, [t.id], os_)
             if missing:
                 unmapped.append(t.id)
+                # the whole entry: the paths other OSes already have, plus an example for this one
+                have = (platforms.tool_registry(db).get(t.id) or {}).get("paths") or {}
                 cmd = ("oarbank op settings.tools.update " + t.id + " --json '" +
-                       json.dumps({"trust": t.trust, "paths": {os_: [TOOL_EXAMPLE.get(os_, "/path/to/" + t.id)]}}) + "'")
+                       json.dumps({"paths": {**have, os_: [TOOL_EXAMPLE.get(os_, "/path/to/" + t.id)]}}) + "'")
                 titems.append({"status": "blocked", "text": f"{t.id} ({t.trust}): no {OS_NAMES.get(os_, os_)} path in the tool "
                                f"registry, so no {OS_NAMES.get(os_, os_)} node can be granted it",
-                               "href": f"/settings?tool={t.id}&trust={t.trust}#tools", "command": cmd})
+                               "href": f"/settings?tool={t.id}#tools", "command": cmd})
             else:
                 titems.append({"status": "done", "text": f"{t.id} on {OS_NAMES.get(os_, os_)}: {', '.join(paths)}"})
     if not tools:
@@ -289,8 +291,8 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
         needs.append(f"map {', '.join(ids)}")
         steps.append(_step("tools", "Host tools mapped", "blocked",
                            "it asks for host tools by id; the tool registry says where each lives on each OS (install the tool on "
-                           "the nodes too)", [_act(f"Map {i} in Settings → Tools", href=f"/settings?tool={i}&trust="
-                                                   f"{next(t.trust for t in tools if t.id == i)}#tools") for i in ids], titems))
+                           "the nodes too)", [_act(f"Map {i} in Settings → Tools", href=f"/settings?tool={i}#tools") for i in ids],
+                           titems))
     else:
         steps.append(_step("tools", "Host tools mapped", "done", "every host tool it asks for has a path on each OS", items=titems))
 

@@ -36,8 +36,10 @@ def _own_campaign(db: DB, module: str, cid: str) -> dict:
     return c
 
 
-def settings_key(module: str) -> str:
-    return f"module_settings:{module}"
+def module_settings(db, module: str) -> dict:
+    """The module's own fleet-wide settings (settings key `module.settings`, set for the module)."""
+    from .settings import fleet_value
+    return fleet_value(db, "module.settings", module) or {}
 
 
 def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
@@ -106,8 +108,9 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
         raise EffectError(502, "undeclared_effect", f"{module} asked for {kind!r}, which it did not declare")
     rec = {"kind": kind}
     if kind == "module_settings.update":
-        cur = db.get_setting(settings_key(module), {}) or {}
-        db.set_setting(settings_key(module), {**cur, **a})
+        from .settings import write_fleet
+        write_fleet(db, "module.settings", {**module_settings(db, module), **a}, f"module:{module}", module,
+                    comment=f"{module}'s own operation")
         rec["keys"] = sorted(a)
     elif kind == "campaigns.create":
         cid = a.get("campaign_id", "")

@@ -396,9 +396,9 @@ def host_guard(app: FastAPI, reader, default_port: int | None = None):
     @app.middleware("http")
     async def _hosts(request: Request, call_next):
         port = (request.scope.get("server") or (None, default_port))[1] or default_port
-        allowed = access.allowed_hosts(port, reader.get_setting("console_hosts") or []) | access.TEST_HOSTS
+        allowed = access.allowed_hosts(port, reader.fleet_setting("console_hosts") or []) | access.TEST_HOSTS
         if not access.host_ok(request.headers.get("host"), allowed):
-            return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (setting console_hosts)"},
+            return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (Settings → Access: console_hosts)"},
                                 status_code=421)
         return await call_next(request)
 
@@ -428,7 +428,7 @@ class ReadSide:
         self._cache[key] = (time.monotonic(), v)
         return v
 
-    def get_setting(self, key, default=None):
+    def get_state(self, key, default=None):
         """Cached until any connection commits (PRAGMA data_version): an allowlist change applies at once."""
         with self.lock:
             dv = self.conn.execute("PRAGMA data_version").fetchone()[0]
@@ -436,10 +436,22 @@ class ReadSide:
         if hit and hit[0] == dv:
             v = hit[1]
         else:
-            rows = self.q("SELECT value_json FROM settings WHERE key=?", (key,))
+            rows = self.q("SELECT value_json FROM system_state WHERE key=?", (key,))
             v = json.loads(rows[0]["value_json"]) if rows else None
             self._cache[("setting", key)] = (dv, v)
         return default if v is None else v
+
+    def fleet_setting(self, key):
+        """A fleet setting's value (settings.fleet_value), cached the same way."""
+        from .settings import fleet_value
+        with self.lock:
+            dv = self.conn.execute("PRAGMA data_version").fetchone()[0]
+        hit = self._cache.get(("fleet", key))
+        if hit and hit[0] == dv:
+            return hit[1]
+        v = fleet_value(self, key)
+        self._cache[("fleet", key)] = (dv, v)
+        return v
 
 
 def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None = None, local_channel: bool = False) -> FastAPI:
@@ -629,8 +641,8 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     @app.get("/internal/state")
     def internal_state(actor=Depends(who)):
         """In-memory facts for the console (cheap: no per-request table scans)."""
-        return {"boot_id": boot_id, "now": clock.now(), "fleet_state": ro.get_setting("fleet_state", "active"),
-                "alive_at": ro.get_setting("alive_at"), "writer": db.lock.stats(), "modules": modcalls.host(db).health(),
+        return {"boot_id": boot_id, "now": clock.now(), "fleet_state": ro.get_state("fleet_state", "active"),
+                "alive_at": ro.get_state("alive_at"), "writer": db.lock.stats(), "modules": modcalls.host(db).health(),
                 "modules_disabled": sorted(modstore.disabled_names(db))}
 
     # ---------------- view models
@@ -642,12 +654,13 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         done1h = db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='completed' AND ended_at>?",
                         (n["node_id"], t - 3600))["n"]
         mods = jl(n.get("modules_json"), {}) or {}
-        facts, policy = jl(n["facts_json"], {}), jl(n["policy_json"], {})
+        from .settings.apply import flat_values
+        facts, policy = jl(n["facts_json"], {}), flat_values(n)
         return {**n, "mods": mods,
-                "facts": facts, "tel": tel, "cap": cap, "limits": jl(n["limits_json"], {}),
+                "facts": facts, "tel": tel, "cap": cap, "limits": core.node_limits(n),
                 "policy": policy, "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
                 "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n),
-                "why": nodepolicy.why(cap, tel, facts, policy, n.get("os"))}
+                "why": nodepolicy.why(cap, tel, facts, policy, n.get("os"), n["node_id"])}
 
     def fleet_data():
         nodes = [node_view(n) for n in db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]
@@ -658,7 +671,7 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
                                "FROM jobs WHERE campaign_id=? AND kind!='call'", (c["campaign_id"],))
             c["eta_s"] = eta(c["campaign_id"])
         alerts = db.q("SELECT * FROM alerts WHERE state='open' ORDER BY opened_at DESC")
-        discovered = db.get_setting("discovered", [])
+        discovered = db.get_state("discovered", [])
         known = {n["ts_node_id"] for n in nodes if n["ts_node_id"]}
         discovered = [d for d in discovered if d["ts_node_id"] not in known]
         events = db.q("SELECT * FROM events ORDER BY event_id DESC LIMIT 25")
@@ -958,9 +971,40 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
     def api_modules(actor=Depends(who)):
         return modcalls.catalog_rows(db)
 
-    @app.get("/api/v1/groups")
-    def api_groups(actor=Depends(who)):
-        return db.get_setting("dataset_groups", {})
+    # ---------------- settings (docs/design/settings.md): the registry, effective values, the chain, the reverse view
+    def _settings_doc(fn):
+        from .settings import SettingError
+        try:
+            out = fn()
+        except SettingError as e:
+            raise core.ApiError(404 if e.code == "unknown_setting" else 400, e.code, e.detail)
+        if out is None:
+            raise core.ApiError(404, "not_found", "no such node")
+        return out
+
+    @app.get("/api/v1/settings/schema")
+    def api_settings_schema(actor=Depends(who)):
+        from .settings import registry, store
+        return {"settings": registry.schema_doc(), "sections": {k: {"title": t, "help": h} for k, (t, h) in registry.SECTIONS.items()},
+                "groups": store.groups(db), "scopes": list(registry.SCOPES)}
+
+    @app.get("/api/v1/settings/effective")
+    def api_settings_effective(node: str = "", module: str = "", campaign: str = "", actor=Depends(who)):
+        from .settings import views
+        if campaign:
+            raise core.ApiError(400, "not_yet", "campaign overrides are not settings yet: placement, priority and weight are "
+                                                "the campaign's own (campaigns.set_*)")
+        return _settings_doc(lambda: views.effective_doc(db, node or None, module))
+
+    @app.get("/api/v1/settings/explain")
+    def api_settings_explain(key: str, node: str = "", module: str = "", actor=Depends(who)):
+        from .settings import views
+        return _settings_doc(lambda: views.explain_doc(db, key, node or None, module))
+
+    @app.get("/api/v1/settings/overrides")
+    def api_settings_overrides(key: str, module: str = "", scope: str = "", actor=Depends(who)):
+        from .settings import views
+        return _settings_doc(lambda: views.overrides_doc(db, key, module, scope))
 
     @app.get("/api/v1/features")
     def api_features(actor=Depends(who)):
@@ -1035,7 +1079,7 @@ def campaign_loop(db: DB, stop: threading.Event):
     while not stop.is_set():
         try:
             if coordmove.serving(db):
-                if db.get_setting("move_postflight_pending"):
+                if db.get_state("move_postflight_pending"):
                     modlife.postflight(db)               # once, on a coordinator that just took over
                 campaigns.tick_all(db)
                 if clock.now() - last_integrity > 3600:
@@ -1072,13 +1116,13 @@ def _check_invariants(db: DB):
     resolves it (the condition returning to True does not clear it)."""
     from . import invariants
     conds = invariants.conditions(db, clock.now())
-    prev = {c["id"]: c for c in (db.get_setting("invariant_conditions") or [])}
+    prev = {c["id"]: c for c in (db.get_state("invariant_conditions") or [])}
     for c in conds:
         c["last_transition_at"] = prev.get(c["id"], {}).get("last_transition_at", c["checked_at"]) \
             if prev.get(c["id"], {}).get("status") == c["status"] else c["checked_at"]
         if c["status"] == "False":
             core._alert(db, f"invariant:{c['id']}", "fleet", f"{c['id']} ({c['name']}): {c['message']}", priority="max")
-    db.set_setting("invariant_conditions", conds)
+    db.set_state("invariant_conditions", conds)
 
 
 def background(db: DB, stop: threading.Event):
@@ -1089,11 +1133,11 @@ def background(db: DB, stop: threading.Event):
             if not coordmove.serving(db):               # frozen for a move, a standby, or handed off: no writes
                 stop.wait(2)
                 continue
-            db.set_setting("alive_at", clock.now())      # restart outage = now - alive_at
+            db.set_state("alive_at", clock.now())      # restart outage = now - alive_at
             core.reap(db)            # campaign ticks run on their own thread (campaign_loop) so a slow module
             t = clock.now()          # can never delay lease expiry (bench/README.md bottleneck 4)
             if t - last_disc > 60:
-                db.set_setting("discovered", core.tailscale_peers())
+                db.set_state("discovered", core.tailscale_peers())
                 last_disc = t
             if t - last_views > 10:
                 from . import modviews

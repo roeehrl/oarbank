@@ -16,7 +16,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `POOL_ABSENT` | The node offers no {pool} pool | P1 | – | – | – |
 | `INSUFFICIENT_CPU` | Needs {need} cores, {free} allocatable | P1 | – | – | – |
 | `INSUFFICIENT_MEM` | Needs {need} GB, {free} GB allocatable | P1 | – | – | – |
-| `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `nodes.set_caps` | – |
+| `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `settings.apply` | – |
 | `MODULE_NOT_READY` | Module {module} is not ready on this node (doctor: {health}) | P1 | – | `nodes.run_doctor` | – |
 | `MODULE_NOT_CERTIFIED` | Module {module} is not certified on this node yet | P1 | – | `nodes.recertify` | – |
 | `MODULE_DISABLED` | Module {module} is disabled | P1 | – | `modules.enable_canary` | `module_disabled` |

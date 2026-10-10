@@ -23,6 +23,7 @@ from oarbank.sim import _cfg
 import helpers
 from helpers import (create_study, SCENES, MODE, PARAMS, READY, certify, enrolled_node, facts_for, fresh, golden_result,
                      make_db, relay_result)
+from helpers import settings_apply
 
 FLEET = (("mini", None), ("box", "linux-amd64"), ("arm", "linux-arm64"))
 
@@ -139,7 +140,8 @@ class CoordinatorMachine(RuleBasedStateMachine):
     def hard_cap(self, i, cap):
         """User sets a hard jobs cap; the agent releases youngest attempts to fit (its contract)."""
         n = self.node(i)
-        core.set_limits(self.db, n["node_id"], {"jobs": cap, "enforce": "hard"}, "prop")
+        settings_apply(self.db, {"scope": "node", "scope_id": n["node_id"], "key": "jobs", "value": cap},
+                       {"scope": "node", "scope_id": n["node_id"], "key": "enforce", "value": "hard"})
         live = self.db.q("SELECT attempt_id FROM attempts WHERE node_id=? AND state='live' ORDER BY granted_at DESC, attempt_id DESC",
                          (n["node_id"],))
         for a in live[:max(0, len(live) - cap)]:
@@ -147,7 +149,10 @@ class CoordinatorMachine(RuleBasedStateMachine):
 
     @rule(i=st.integers(0, 2))
     def clear_caps(self, i):
-        core.set_limits(self.db, self.node(i)["node_id"], {}, "prop", clear_all=True)
+        nid = self.node(i)["node_id"]
+        if self.db.one("SELECT 1 FROM setting_values WHERE scope='node' AND scope_id=? AND key='jobs'", (nid,)):
+            settings_apply(self.db, {"scope": "node", "scope_id": nid, "key": "jobs", "reset": True},
+                           {"scope": "node", "scope_id": nid, "key": "enforce", "reset": True})
 
     # ------------------------------------------------------------------ time + coordinator
     @rule(dt=st.floats(1, 200))

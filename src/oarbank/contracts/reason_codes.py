@@ -49,7 +49,7 @@ CODES: list[ReasonCode] = [
     C("POOL_ABSENT", "job_pending", "The node offers no {pool} pool"),
     C("INSUFFICIENT_CPU", "job_pending", "Needs {need} cores, {free} allocatable"),
     C("INSUFFICIENT_MEM", "job_pending", "Needs {need} GB, {free} GB allocatable"),
-    C("USER_CAP_BINDING", "job_pending", "Owner cap {cap} is binding", remedies=["nodes.set_caps"]),
+    C("USER_CAP_BINDING", "job_pending", "Owner cap {cap} is binding", remedies=["settings.apply"]),
     C("MODULE_NOT_READY", "job_pending", "Module {module} is not ready on this node (doctor: {health})", remedies=["nodes.run_doctor"]),
     C("MODULE_NOT_CERTIFIED", "job_pending", "Module {module} is not certified on this node yet", remedies=["nodes.recertify"]),
     C("MODULE_DISABLED", "job_pending", "Module {module} is disabled", remedies=["modules.enable_canary"], wire=["module_disabled"]),
