@@ -80,10 +80,11 @@ def ask(prompt: str, flag: str) -> str:
 
 
 def run_op(op, target=None, params=None, reason=None, yes=False, confirm=None, if_match=None, dry_run=False, out=print,
-           secret=None):
-    """One operation through POST /api/v1/ops/<op>: T2/T3 preview first, print the impact, ask (unless
-    --yes), then apply the plan; creations get an Idempotency-Key. Exit codes: 0 applied / no-op,
-    2 changes previewed but not applied, 1 error (Terraform's -detailed-exitcode convention)."""
+           secret=None, preview=False):
+    """One operation through POST /api/v1/ops/<op>: T2/T3 (and `preview`: settings changes) preview first, print the
+    impact, ask (unless --yes), then apply the plan; creations get an Idempotency-Key. The plan's tier decides the
+    questions (a settings change set's tier follows its keys and scopes). Exit codes: 0 applied / no-op, 2 changes
+    previewed but not applied, 1 error (Terraform's -detailed-exitcode convention)."""
     import uuid
     info = {o["id"]: o for o in api("GET", "/api/v1/ops")}.get(op)
     if info is None:
@@ -102,24 +103,28 @@ def run_op(op, target=None, params=None, reason=None, yes=False, confirm=None, i
         r = http_request("POST", f"{URL}/api/v1/ops/{op}", json=b, headers={**headers, **auth_headers()}, timeout=3600)
         return r.status_code, (r.json() if r.text else {})
 
-    if info["tier"] in ("T2", "T3") or dry_run:
+    if info["tier"] in ("T2", "T3") or dry_run or preview:
         code, res = post({**body, "dry_run": True})
         if code >= 400:
+            if res.get("errors"):
+                sys.exit(f"{op} refused:\n" + "\n".join(f"  {e.get('key') or ''}: {e.get('message')}" for e in res["errors"]))
             sys.exit(f"{op}: {code} {res}")
         plan = res["plan"]
+        tier = plan.get("tier") or info["tier"]
         from ..contracts import impact
+        from ..contracts.operations import DEFAULT_REASON
         on = plan.get("target") or target
-        out(f"{op} ({info['tier']})" + (f" on {on}" if on else "") + ":")
+        out(f"{op} ({tier})" + (f" on {on}" if on else "") + ":")
         for line in impact.lines(plan["impact"]):
             out(line)
         if dry_run:
             out(f"plan {plan['plan_id']} (expires in 30 min)")
             sys.exit(2)
-        if not yes and ask("apply? [y/N] ", "--yes").strip().lower() != "y":
+        if tier != "T0" and not yes and ask("apply? [y/N] ", "--yes").strip().lower() != "y":
             sys.exit(2)
-        if info["tier"] == "T3" and not confirm:
+        if tier == "T3" and not confirm:
             confirm = ask(f"type {plan['confirm_name']!r} to confirm: ", f"--confirm {plan['confirm_name']!r}").strip()
-        if info["reason_policy"] == "required" and not reason:
+        if (info["reason_policy"] if tier == info["tier"] else DEFAULT_REASON[tier]) == "required" and not reason:
             reason = ask("reason: ", "--reason").strip()
         body = {"plan_id": plan["plan_id"], "reason": reason, "confirm": confirm}
     elif info["tier"] == "T1" and not yes and sys.stdin.isatty():
@@ -701,10 +706,15 @@ def node_show(target: str, as_json: bool = False):
         who = f", keeps out {', '.join(c['blocks'])}" if c["blocks"] else \
             f", needed by {', '.join(c['needed_by'])}" if c["needed_by"] else ""
         print(f"    {c['capability']}: {c['state']}{who}")
-    from ..coordinator.nodepolicy import show
-    for p in d.get("policy") or []:
-        print(f"  policy {p['key']} ({p['label']}): {show(p['key'], p['value'])}, {p['default_text']}"
-              + ("  CHANGED: oarbank node policy " + n["node_id"] + " --reset " + p["key"] if p["changed"] else ""))
+    st = d.get("settings") or {}
+    if st:
+        print(f"  settings: {st['applied']['text']}; groups {', '.join(st.get('groups') or []) or 'none'}")
+        for x in st["settings"]:
+            if (x.get("source") or {}).get("scope") in ("node", "group") or x.get("errors"):
+                print(f"    {x['key']} ({x['label']}): {x['value_text']} · {x['badge']}"
+                      + (f"  reset: oarbank settings reset {x['key']} --node {n['hostname']}" if x["source"]["scope"] == "node" else "")
+                      + "".join(f"\n      error: {e}" for e in x.get("errors") or []))
+        print(f"    everything else inherited: oarbank settings get --node {n['hostname']}")
 
 
 def cmd_node(a):
@@ -726,29 +736,119 @@ def cmd_node(a):
         if a.value not in NODE_STATE_OPS:
             sys.exit(f"oarbank node state <node> {'|'.join(NODE_STATE_OPS)}")
         res = run_op(NODE_STATE_OPS[a.value], a.target, reason=a.reason, yes=a.yes)
-    elif a.action == "limits":
-        if a.clear_all:
-            res = run_op("nodes.set_caps", a.target, {"clear_all": True}, a.reason, a.yes)
-        else:
-            patch = {}
-            for k in ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps"):
-                v = getattr(a, k)
-                if v is not None:
-                    patch[k] = None if v in ("off", "none") else float(v)
-            if a.enforce:
-                patch["enforce"] = a.enforce
-            res = run_op("nodes.set_caps", a.target, {"patch": patch}, a.reason, a.yes)
-    else:
-        patch = {}
-        for kv in ([a.value] if a.value else []) + a.kv:
-            k, _, v = kv.partition("=")
-            try:
-                patch[k] = json.loads(v)
-            except json.JSONDecodeError:
-                patch[k] = v
-        reset = "all" if a.reset_all else (a.reset or None)
-        res = run_op("nodes.set_policy", a.target, {"patch": patch, **({"reset": reset} if reset else {})}, a.reason, a.yes)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
+
+
+def _setting_value(key: str, raw: str):
+    """A value from the command line: JSON when it parses (true, 2, 1.5, null, ["a"]), a list from commas for a list
+    setting, else the text."""
+    from ..coordinator.settings import REGISTRY
+    d = REGISTRY.get(key)
+    try:
+        v = json.loads(raw)
+    except json.JSONDecodeError:
+        v = raw
+    if d is not None and d.schema.get("type") == "array" and isinstance(v, str):
+        v = [x.strip() for x in v.split(",") if x.strip()]
+    return v
+
+
+def _scope(a) -> tuple[str, str]:
+    if a.node and a.group:
+        sys.exit("give --node or --group, not both")
+    return ("node", a.node) if a.node else ("group", a.group) if a.group else ("fleet", "")
+
+
+def print_explain_setting(x: dict) -> None:
+    where = f" on {x['node']['hostname']}" if x.get("node") else " (fleet)"
+    print(f"{x['label']} ({x['key']}{' [' + x['module'] + ']' if x.get('module') else ''}){where}: {x['value_text']} · {x['badge']}")
+    print(f"  {x['help']}")
+    if x.get("locked_by"):
+        print(f"  locked by {x['locked_by']['name']}")
+    for c in x["chain"]:
+        role = {"winner": "<- in effect", "shadowed": "(overridden below)", "ignored": "(ignored: locked above)",
+                "merged": f"(also applies: {x['merge']})"}.get(c.get("role") or "", "")
+        when = f"  rev {c['rev']} by {c['by']} at {_when(c['at'])}" + (f" \"{c['comment']}\"" if c.get("comment") else "") if c.get("rev") else ""
+        print(f"  {c['name']:<26} {c['value_text']:<22}{' (' + c['reason'] + ')' if c.get('reason') else ''} {role}{when}")
+    for e in x.get("errors") or []:
+        print(f"  error: {e}")
+    if x.get("applied"):
+        print(f"  {x['applied']['text']}")
+
+
+def cmd_settings(a):
+    """oarbank settings get|set|reset|overrides|explain|schema|set-secret|clear-secret (docs/design/settings.md)."""
+    q = lambda **kw: "&".join(f"{k}={v}" for k, v in kw.items() if v)
+    if a.action == "schema":
+        d = api("GET", "/api/v1/settings/schema")
+        if a.json:
+            print(json.dumps(d, indent=1))
+            return
+        for s in d["settings"]:
+            dflt = s["computed_default"] or json.dumps(s["default"])
+            print(f"{s['key']:<22} {s['label']:<42} scopes {','.join(s['scopes']):<17} {s['merge']:<7} {s['danger']}  default {dflt}"
+                  + (f"  (written by {s['writer']})" if s["writer"] else ""))
+        return
+    if a.action in ("set-secret", "clear-secret"):
+        if not a.key:
+            sys.exit(f"oarbank settings {a.action} <name>  (ntfy_token)")
+        if a.action == "clear-secret":
+            print(json.dumps(run_op("settings.secrets.clear", a.key, {}, a.reason, a.yes)["result"], default=str))
+            return
+        if sys.stdin.isatty():
+            import getpass
+            value = getpass.getpass(f"{a.key}: ")
+            if getpass.getpass("again: ") != value:
+                sys.exit("the two entries differ; nothing was set")
+        else:
+            value = sys.stdin.read()
+            value = value[:-1] if value.endswith("\n") else value
+        res = run_op("settings.secrets.set", a.key, {}, a.reason, True, secret=value)["result"]
+        print(f"{a.key} set: fingerprint {res['fingerprint']}")
+        return
+    if a.action in ("explain", "overrides", "set", "reset") and not a.key:
+        sys.exit(f"oarbank settings {a.action} <key>")
+    if a.action == "get" and not a.key:
+        d = api("GET", "/api/v1/settings/effective?" + q(node=a.node or "", module=a.module or ""))
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        if d.get("node"):
+            print(f"{d['node']['hostname']}: {d['applied']['text']}; groups {', '.join(d.get('groups') or []) or 'none'}")
+        for x in d["settings"]:
+            print(f"  {x['key']:<22} {x['label']:<42} {x['value_text']:<16} {x['badge']}"
+                  + (f"  [{x['applied']['text']}]" if x.get("applied") and x["applied"]["state"] == "rejected" else "")
+                  + "".join(f"\n      error: {e}" for e in x.get("errors") or []))
+        return
+    if a.action in ("explain", "get"):                    # one key: its value and the whole chain behind it
+        d = api("GET", "/api/v1/settings/explain?" + q(key=a.key, node=a.node or "", module=a.module or ""))
+        return print(json.dumps(d, indent=1, default=str)) if a.json else print_explain_setting(d)
+    if a.action == "overrides":
+        d = api("GET", "/api/v1/settings/overrides?" + q(key=a.key, module=a.module or ""))
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        print(f"{d['label']} ({d['key']}): fleet {d['fleet']['value_text']} · {d['fleet']['source']}")
+        for v in d["values"]:
+            print(f"  {v['scope']:<6} {v['name'] or v['id']:<24} {v['value_text']}{' (locked)' if v['enforced'] else ''}"
+                  f"  rev {v['rev']} by {v['by']}")
+        if not d["values"]:
+            print("  no group or node sets it")
+        return
+    scope, sid = _scope(a)
+    change = {"scope": scope, "scope_id": sid, "key": a.key, **({"module": a.module} if a.module else {})}
+    if a.action == "set":
+        if a.value is None:
+            sys.exit("oarbank settings set <key> <value> [--node N | --group G]")
+        change["value"] = _setting_value(a.key, a.value)
+        if a.enforce:
+            change["enforce"] = True
+    else:
+        change["reset"] = True
+    params = {"changes": [change], **({"comment": a.comment} if a.comment else {})}
+    res = run_op("settings.apply", sid or scope, params, a.reason, a.yes, a.confirm, dry_run=a.dry_run, preview=True)
+    r = (res or {}).get("result") or {}
+    print(r.get("message") or json.dumps(r, indent=1, default=str))
 
 
 def print_job(d: dict) -> None:
@@ -1084,23 +1184,33 @@ def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="oarbank")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fleet").set_defaults(fn=cmd_fleet)
-    n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, sandbox), "
-                                    "approve, reject, state, mode, limits, policy, confirm-identity")
-    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "limits", "policy", "confirm-identity"])
+    n = sub.add_parser("node", help="a node: show (doctor, GPU APIs with evidence, containers, services, folders, sandbox, "
+                                    "settings it sets), approve, reject, state, mode, confirm-identity (its settings: oarbank settings)")
+    n.add_argument("action", choices=["show", "approve", "approve-code", "reject", "state", "mode", "confirm-identity"])
     n.add_argument("target")
     n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES))
-    n.add_argument("kv", nargs="*")
     n.add_argument("--json", action="store_true", help="show: the node's detail document as JSON")
-    for k in ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps"):
-        n.add_argument("--" + k.replace("_", "-"), dest=k, help="number, or 'off' to remove this cap")
-    n.add_argument("--enforce", choices=["soft", "hard"])
-    n.add_argument("--clear-all", action="store_true", help="remove every cap")
-    n.add_argument("--reset", action="append", metavar="KEY", help="policy: put this setting back to the node's default "
-                                                                  "(repeatable)")
-    n.add_argument("--reset-all", action="store_true", help="policy: put every setting back to the node's defaults")
     n.add_argument("--reason")
     n.add_argument("--yes", action="store_true")
     n.set_defaults(fn=cmd_node)
+    st = sub.add_parser("settings", help="owner settings: get (effective values and where they come from), set, reset, "
+                                         "overrides (who overrides a fleet default), explain (the whole chain), schema, "
+                                         "set-secret / clear-secret (the ntfy token)")
+    st.add_argument("action", choices=["get", "set", "reset", "overrides", "explain", "schema", "set-secret", "clear-secret"])
+    st.add_argument("key", nargs="?", help="a setting's key (oarbank settings schema lists them), or a core secret's name")
+    st.add_argument("value", nargs="?", help="set: JSON (true, 2, 1.5, null, [\"a\"]) or text; a list setting also takes a,b")
+    st.add_argument("--node", help="a node (id or name): its own value; get/explain: the value in effect on it")
+    st.add_argument("--group", help="a group (id or name): built in are macOS, Linux, Windows, Coordinator host")
+    st.add_argument("--module", help="the module of a module's own setting")
+    st.add_argument("--enforce", action="store_true", help="set at the fleet or a group: lock it (lower scopes may not set it)")
+    st.add_argument("--explain", action="store_true", help="get: the whole chain for the key")
+    st.add_argument("--comment", help="kept with the value (the reason is the audit's)")
+    st.add_argument("--dry-run", action="store_true", help="set/reset: show what it would change on each node, change nothing")
+    st.add_argument("--json", action="store_true")
+    st.add_argument("--reason")
+    st.add_argument("--confirm")
+    st.add_argument("--yes", "-y", action="store_true")
+    st.set_defaults(fn=cmd_settings)
     jb = sub.add_parser("job", help="a job: show (attempts, checkpoint, results, why), retry, cancel")
     jb.add_argument("action", choices=["show", "retry", "cancel"])
     jb.add_argument("id")
