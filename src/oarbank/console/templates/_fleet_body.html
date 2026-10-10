@@ -101,7 +101,7 @@
   <td class="num">{{ c.uses }} / {{ c.max_uses }}</td>
   <td>{{ 'automatic' if c.approve else 'you approve' }}{% if c.enrollments | selectattr('status', 'equalto', 'pending') | list %} <span class="chip warn">{{ c.enrollments | selectattr('status', 'equalto', 'pending') | list | length }} waiting</span>{% endif %}</td>
   <td>{{ c.expires_at | ts }}</td><td><span class="chip ok">{{ c.state }}</span></td>
-  <td>{{ m.op_form("nodes.revoke_join_code", c.id, "Revoke", cls="danger", return_to="/", confirm="Revoke join code " ~ (c.label or c.id) ~ "? Machines that already joined with it stay.") }}</td></tr>
+  <td class="actions">{{ m.op_form("nodes.revoke_join_code", c.id, "Revoke", cls="danger", return_to="/", confirm="Revoke join code " ~ (c.label or c.id) ~ "? Machines that already joined with it stay.") }}</td></tr>
 {% endfor %}</table>
 {% endif %}
 

@@ -201,7 +201,8 @@ rules, the memory guard, heat, battery and a present user). A cap can only lower
 <table class="small"><tr><th>attempt</th><th>job</th><th>dataset</th><th>state</th><th>phase</th><th class="num">cpu s</th><th>reason</th><th>granted</th></tr>
 {% for a in attempts %}<tr><td>{{ a.attempt_id }}</td><td><a href="/jobs/{{ a.job_id }}">{{ a.job_id }}</a> <span class="mut">{{ a.kind }}</span></td>
 <td class="mono">{{ a.dataset_id }}</td><td>{{ a.state }}</td><td>{{ a.phase or '' }}</td><td class="num">{{ a.cpu_s | num(0) }}</td>
-<td>{{ a.end_reason or '' }}</td><td class="mut">{{ a.granted_at | ago }}</td></tr>{% endfor %}</table>
+<td>{{ a.end_reason or '' }}</td><td class="mut">{{ a.granted_at | ago }}</td></tr>
+{% else %}<tr><td colspan="8" class="mut">no attempts on this node yet</td></tr>{% endfor %}</table>
 
 <h2>Failures (24 h)</h2>
 <div class="row">{% for f in fails %}<span class="chip bad">{{ f.end_reason }} × {{ f.n }}</span>{% else %}<span class="mut">none</span>{% endfor %}</div>
