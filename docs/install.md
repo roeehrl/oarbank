@@ -327,7 +327,10 @@ each node's **Host tools** section show what was found, what each module gets an
 
 - **Nodes** update themselves: `oarbank agent upload <binary>`, `oarbank agent sign <build>`, then
   `canary --node <node>` and `promote`. The launcher keeps the previous version and rolls back a build that does not
-  confirm itself within 10 minutes. Installing a newer pkg replaces the launcher and restarts the service.
+  confirm itself within 10 minutes. Installing a newer package (pkg, deb or rpm) replaces the launcher, renders the
+  agent's service definition again with the new launcher's settings (`oarbank-launcher service refresh`: from 2.9 the
+  launchd job's `ExitTimeOut` and the systemd unit's `TimeoutStopSec` give the agent 60 s to stop its jobs), and
+  restarts the service. A newer MSI runs `oarbank-launcher setup --scope system` again, which creates the service anew.
 - **The coordinator**: run the installer again with the new build; `current` moves and the services restart (agents
   reconnect by themselves), and modules' Python environments made by the previous build are rebuilt on the new
   build's interpreter when it starts. Earlier builds stay beside it for going back.
