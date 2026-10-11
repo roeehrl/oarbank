@@ -2071,6 +2071,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Whether the workload is paused (`want`) or running again. Linux: its cgroup container (named after its leader,
+    /// the daemon a member) reports `frozen 1`, since the cgroup v2 freezer parks tasks in an interruptible wait that
+    /// `ps` shows as S; without a container, and on macOS, both are stopped (T).
+    fn frozen(leader: i32, daemon: i32, want: bool) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(c) = crate::cgroup::container(leader) {
+            let member = crate::cgroup::pids(leader).is_some_and(|p| p.contains(&daemon));
+            let on = std::fs::read_to_string(c.join("cgroup.events")).unwrap_or_default().lines().any(|l| l == "frozen 1");
+            return member && on == want;
+        }
+        (state(daemon).starts_with('T') && state(leader).starts_with('T')) == want
+    }
+
     fn state(pid: i32) -> String {
         let o = std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
         String::from_utf8_lossy(&o.stdout).trim().to_string()
@@ -2130,11 +2143,10 @@ mod tests {
         let mut plans = BTreeMap::new();
         plans.insert("mod/w".to_string(), WorkloadAction { admit: true, paused: true, ..Default::default() });
         m.apply(&plans);
-        assert!(until(10.0, || state(daemon).starts_with('T') && state(leader).starts_with('T')),
-                "not frozen: daemon {} leader {}", state(daemon), state(leader));
+        assert!(until(10.0, || frozen(leader, daemon, true)), "not frozen: daemon {} leader {}", state(daemon), state(leader));
         plans.insert("mod/w".to_string(), WorkloadAction { admit: true, ..Default::default() });
         m.apply(&plans);
-        assert!(until(10.0, || !state(daemon).starts_with('T')));
+        assert!(until(10.0, || frozen(leader, daemon, false)));
         // the health check answers
         assert!(until(20.0, || {
             m.tick();
