@@ -327,6 +327,30 @@ def test_refusals(tmp_path):
         sysmigrate.Migration(lay, Recorder(lay, tmp_path / "b"), inst).run()
 
 
+def test_a_dry_run_changes_nothing_and_says_what_blocks(tmp_path, monkeypatch):
+    """`oarbank coordinator migrate --dry-run` (as the person) and `--run --dry-run` print the plan only: no key leaves
+    the Keychain into the old home, no administrator prompt, no file written."""
+    person, old, _, _ = per_user_home(tmp_path, "darwin", keys_in_files=False)
+    lay = layout(tmp_path, "darwin")
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    monkeypatch.setattr(sysmigrate, "export_keys", lambda *a, **k: pytest.fail("a dry run exported keys"))
+    monkeypatch.setattr(sysmigrate, "elevate", lambda *a, **k: pytest.fail("a dry run asked for an administrator"))
+    printed = []
+    assert sysmigrate.run_as_person(dry_run=True, out=printed.append, layout=lay, people=people(person)) == 0
+    doc = json.loads(printed[-1])
+    assert doc["would_migrate"]["old_home"] == str(old) and doc["to"] == str(lay.new_home)
+    assert doc["keys_in_file_store"] == [] and doc["blockers"] == [] and "login Keychain" in doc["keys_to_export"]
+    (old / "setup.pending.json").write_text("{}")
+    monkeypatch.setattr(sysmigrate, "find_installs", lambda layout, people=None: [sysmigrate._from_plist(
+        layout, USER, os.getuid(), os.getgid(), person)])
+    printed.clear()
+    assert sysmigrate.run_as_root(dry_run=True, layout=lay, out=printed.append) == 0
+    assert any("setup is unfinished" in b for b in json.loads(printed[-1])["blockers"])
+    (old / "setup.pending.json").unlink()
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+    assert sysmigrate.read_record(lay) is None
+
+
 def test_the_elevation_quotes_every_argument_for_applescript(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     if os.geteuid() == 0:
