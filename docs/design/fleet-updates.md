@@ -1,6 +1,6 @@
 # Fleet updates: whole packages on every node, and the coordinator itself
 
-Status: designed for **core 2.10.0** (PLAN D56–D62; invariants S29–S31; TLA+ `specs/OarbankRollout.tla`).
+Status: built, ships in **core 2.10.0** (PLAN D56–D62; invariants S29–S31; TLA+ `specs/OarbankRollout.tla`).
 
 ## The problem
 
@@ -644,6 +644,32 @@ node runs the new version confirmed or the previous one).
   - **macOS:** an unsigned pkg upgrade through `update-run` on the macOS runner (sudo), with the team pin off.
 - **Regression.** The agent-only self-update suite still passes. A node without an updater keeps self-updating its
   agent. A manual package install now also makes the package's agent current: the package is the unit (D57).
+
+## Implementation status (core 2.10)
+
+Built as designed, with these refinements found while building it:
+
+- **The runner's trust** is the owner keys root pinned, plus the native signature pins a build carries
+  (`OARBANK_TEAM_ID` for the pkg's Developer ID Installer team, `OARBANK_AUTHENTICODE_SUBJECT`). The launcher embeds no
+  vendor TUF root yet, so the runner does not check vendor targets; agents still check them for agent binaries.
+- **Who restarts the agent.** The agent exits 75 whenever `result.json` says `installed` and it is not the release's
+  version, for every format: a package's postinstall can restart the service before `current` moves. An agent whose
+  request no runner took within 30 minutes reports `failed` and claims again, so a node never stays drained.
+- **Knowing an updater exists.** `update-trust` writes a world-readable marker, `<system data>/update/available`. The
+  state directory is 0711 and the files in it are root's. `oarbank-launcher install` clears a staged agent-only
+  self-update, so the launcher's trial never undoes a package's agent.
+- **Rings.** A failed or rolled-back node within the ring's budget counts as finished, or a ring with budget 1 could
+  never finish after its one failure. With no `update_ring` set anywhere, the broad ring takes one node at a time with
+  budget 0 until the first one is done: it acts as the canary.
+- **The coordinator's runner** is `bin/oarbank-coordupdate` in a coordinator build (compiled builds cannot run
+  `python -m`). `install-oarbankd --installed` and `--refresh --installed` point `PROGRAMS/current` at the build, so a
+  package upgrade after a self-update runs the package's build. The coordinator grants no leases while its update runs,
+  because a failed probation restores the database. Its prepare (snapshot and the new build's self-test) runs on a
+  thread with its own connection.
+- **Managed policy.** `update_auto` and `update_hold` are in the agent's settings table as a `Coordinator` section: the
+  agent checks and reports them, and the coordinator applies them.
+- **Windows.** After a coordinator self-update on Windows, a later manual MSI install keeps the `current` junction on the
+  self-updated build. The MSI's uninstall snapshot does not include the scheduled task.
 
 ## Owner-verified (needs the owner's machines)
 
