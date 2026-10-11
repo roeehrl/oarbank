@@ -490,6 +490,11 @@ fn a_gpu_bound_progress_rate_group_gates_gpu_work() {
     }
     duty.clear();
     let _ = host;
+    // gpu_jobs = always: a progress_rate group never holds GPU work back
+    let (mut ctl, host, _) = trainer("always");
+    advance(&mut ctl, &host, 0.0, &jobs, &duty, &|_, _| 0.0);
+    let r = advance(&mut ctl, &host, 2.0, &jobs, &duty, &|_, _| 0.0);
+    assert!(!r.paused.contains(&1), "gpu_jobs = always runs GPU work beside it");
 }
 
 #[test]

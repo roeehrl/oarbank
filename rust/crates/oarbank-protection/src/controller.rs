@@ -987,11 +987,10 @@ impl ProtectionController {
                     max_slowdown: p.max_slowdown,
                     gpu_bound,
                 });
-                // a group using the GPU gates GPU work when its rule protects its GPU share or its progress (the GPU
-                // trainer a certificate is earned against, D50)
-                if matches!(p.metric.as_str(), "gpu_share" | "progress_rate")
-                    && m.and_then(|m| m.gpu_share).is_some_and(|g| g > 0.05)
-                {
+                // a group using the GPU gates GPU work when its rule protects its GPU share, or its progress (the GPU
+                // trainer a certificate is earned against, D50) unless the owner said gpu_jobs = always
+                let gates = p.metric == "gpu_share" || (p.metric == "progress_rate" && cfg.gpu_jobs != "always");
+                if gates && m.and_then(|m| m.gpu_share).is_some_and(|g| g > 0.05) {
                     di.gpu_protected_active = true;
                     gate_rules.push(rule.id.clone());
                 }
