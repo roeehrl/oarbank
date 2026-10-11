@@ -123,7 +123,7 @@ The node statement (`oarbank.node/v1`, docs/protocol.md "Node statement") gains 
 | Key | Values | Default | Meaning |
 |---|---|---|---|
 | `external_port` | 1024–65535 | the manifest's `port_hint`, else the internal port | the port to ask the router for |
-| `fallback` | `refuse`, `next_free:<a>-<b>`, `router_choice` | `refuse` for `port_policy = "stable"`, `next_free:<p>-<p+15>` for `flexible` | what happens when the router says the port is taken: `refuse` stops and reports `PORT_TAKEN` with the router's account of who holds it; `next_free` walks the range in order and takes the first port that maps and verifies (the same inputs always give the same port, so a restart lands on the same one while it is free); `router_choice` takes the port the router assigns (IGDv2 `AddAnyPortMapping`, NAT-PMP and PCP substitution) |
+| `fallback` | `refuse`, `next_free:<a>-<b>`, `router_choice` | `refuse` for `port_policy = "stable"`, `next_free:<p>-<p+15>` for `flexible` | what happens when the router says the port is taken: `refuse` stops and reports `PORT_TAKEN` with the router's account of who holds it; `next_free` walks the range in order and takes the first port that maps and verifies (the same inputs always give the same port, so a restart lands on the same one while it is free); `router_choice` takes any free port: the one NAT-PMP or PCP substitutes, or with UPnP the first free port up from the wanted one (never `AddAnyPortMapping`, whose port a lost answer would leave unjournaled) |
 | `mapping` | `auto`, `pcp`, `natpmp`, `upnp`, `manual`, `none` | `auto` | `auto` probes PCP, NAT-PMP and UPnP; `manual`: the owner forwarded the port on the router by hand, the agent only verifies reachability; `none`: the machine has a public address and nothing is mapped |
 | `ipv6` | `auto`, `off` | `auto` | `auto`: when the node has a global IPv6 address on the default route, the listener also accepts on it and asks the router for an IPv6 pinhole (PCP, or IGDv2 `WANIPv6FirewallControl`) |
 | `bind` | `default_route`, an IP address | `default_route` | the address the listener binds: the node's address on the default route (re-bound when the network changes), or a literal address |
@@ -233,7 +233,7 @@ One lifecycle per listener and address family, run by the agent's port-mapping m
 - **Conflicts.** UPnP 718 `ConflictInMappingEntry`, a NAT-PMP or PCP substitution, or `CANNOT_PROVIDE_EXTERNAL`
   follow the listener's `fallback`. With `refuse`, the listener's mapping stops with `PORT_TAKEN` and the router's
   account of who holds the port (UPnP lists the internal client). With `next_free`, the next port of the range. With
-  `router_choice`, the assigned port. The module is told the external port either way.
+  `router_choice`, the assigned (NAT-PMP, PCP) or next free (UPnP) port. The module is told the external port either way.
 - **Cleanup.** A mapping is deleted when its listener is no longer wanted, when the agent stops, when Oarbank is
   uninstalled (the launcher's uninstall runs `oarbank-agent portmap release-all`) and when the node is retired (the agent
   releases everything when the coordinator answers `node_retired`). At start the agent reads its journal and deletes
