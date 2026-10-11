@@ -23,6 +23,7 @@ pub mod dynamic;
 pub mod evaluator;
 pub mod events;
 pub mod gpu;
+pub mod gpu_duty;
 pub mod harness;
 pub mod journal;
 pub mod matcher;
@@ -64,6 +65,7 @@ pub use evaluator::{
     CombinedConstraint, ConstraintVector, ProtectionEvent, RuleEvaluator, RuleReport, RuleState,
 };
 pub use gpu::{GpuBusy, GpuTimes};
+pub use gpu_duty::{DutyEvent, DutyGovernor, DutyInputs, DutyOutputs, DutySignal, DutyUnit};
 pub use journal::{
     Clock, DecisionJournal, FileJournalSink, JournalRecord, JournalSink, SystemClock,
 };

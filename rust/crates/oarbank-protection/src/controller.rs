@@ -17,6 +17,7 @@ use crate::evaluator::{
     CombinedConstraint, ConstraintVector, ProtectionEvent, RuleEvaluator, RuleReport,
 };
 use crate::gpu::{GpuBusy, GpuTimes};
+use crate::gpu_duty::{DutyGovernor, DutyInputs, DutySignal, DutyUnit};
 use crate::journal::DecisionJournal;
 use crate::json::{obj, opt_num, opt_str, rounded, strings};
 use crate::matcher;
@@ -45,6 +46,9 @@ pub struct FleetJobView {
     pub name: String,
     /// The runner declares `cooperative_throttle`: it honours `threads` and `gpu_duty` in its control document.
     pub duty: bool,
+    /// Every process of the job (its group's members): whose GPU time the duty governor checks against `gpu_duty`.
+    /// Empty: the group leader (`pgid`) alone.
+    pub pids: Vec<i32>,
 }
 
 impl FleetJobView {
@@ -278,6 +282,10 @@ pub struct ProtectionController {
     last_not_certified: Option<String>,
     /// The last tick's battery state (the harness excludes a block when it changes).
     on_battery: bool,
+    /// The GPU duty governor (D50): the AIMD budget under the certified ceiling and the compliance check.
+    pub duty: DutyGovernor,
+    /// Each process's GPU busy fraction over the last sample (the compliance check reads it; None: unknown).
+    last_busy: Option<GpuBusy>,
 }
 
 /// Stop `svc` (once) and release every attempt using it with the same reason.
@@ -359,6 +367,8 @@ impl ProtectionController {
             gpu_budget: None,
             last_not_certified: None,
             on_battery: false,
+            duty: DutyGovernor::new(),
+            last_busy: None,
         }
     }
 
@@ -563,6 +573,7 @@ impl ProtectionController {
         let front = reading.as_ref().map_or(Front::Unknown, |r| r.front);
         self.last_front = reading;
         let gpu = self.read_gpu(i.now);
+        self.last_busy = gpu.clone();
         // evaluate first (it decides which rules are active), then measure the active groups
         let r =
             self.evaluate_with_metrics(i, &snap.procs, &snap.cpu_cores, front, gpu.as_ref(), None);
@@ -575,7 +586,7 @@ impl ProtectionController {
     /// a `protect` rule (whether its group is GPU-bound decides which proxies may grow) or `gpu_jobs =
     /// when_no_gpu_protected`. None: unknown (the source is unavailable, or this is the first reading).
     fn read_gpu(&mut self, now: f64) -> Option<GpuBusy> {
-        let need = self.config.gpu_jobs == "when_no_gpu_protected"
+        let need = matches!(self.config.gpu_jobs.as_str(), "when_no_gpu_protected" | "certified")
             || self
                 .config
                 .rules
@@ -976,7 +987,10 @@ impl ProtectionController {
                     max_slowdown: p.max_slowdown,
                     gpu_bound,
                 });
-                if p.metric == "gpu_share" && m.and_then(|m| m.gpu_share).is_some_and(|g| g > 0.05)
+                // a group using the GPU gates GPU work when its rule protects its GPU share or its progress (the GPU
+                // trainer a certificate is earned against, D50)
+                if matches!(p.metric.as_str(), "gpu_share" | "progress_rate")
+                    && m.and_then(|m| m.gpu_share).is_some_and(|g| g > 0.05)
                 {
                     di.gpu_protected_active = true;
                     gate_rules.push(rule.id.clone());
@@ -1019,30 +1033,98 @@ impl ProtectionController {
                 }
             }
         }
-        // gpu_jobs = certified (D50): GPU work that honours gpu_duty may run beside the gated groups up to the
-        // smallest certified duty among them; without a valid certificate for every one, the gate holds as in
-        // when_no_gpu_protected
+        // gpu_jobs = certified (D50): GPU work that honours gpu_duty may run beside the gated groups at the duty
+        // governor's budget, an AIMD loop on their progress under the smallest certified duty among them, while it holds
+        // the duty it is asked; without a valid certificate for every one, the gate holds as in when_no_gpu_protected.
+        // While a harness run measures GPU work, the governor stands down and the run alone decides what runs.
         self.gpu_budget = None;
         let mut duty_of: BTreeMap<i64, f64> = BTreeMap::new();
-        if cfg.gpu_jobs == "certified" && di.gpu_protected_active {
-            gate_rules.sort();
-            gate_rules.dedup();
-            let duties: Vec<(String, Option<f64>)> =
-                gate_rules.iter().map(|r| (r.clone(), self.certified_duty(r, now))).collect();
-            let missing: Vec<String> = duties.iter().filter(|d| d.1.is_none()).map(|d| d.0.clone()).collect();
-            if missing.is_empty() {
-                let d = duties.iter().filter_map(|d| d.1).fold(1.0f64, f64::min);
-                let coop: Vec<i64> = i.jobs.iter().filter(|j| j.gpu && j.duty).map(|j| j.attempt_id).collect();
-                for id in &coop {
-                    di.gpu_gate_exempt.insert(*id);
-                    duty_of.insert(*id, d / coop.len().max(1) as f64);
+        let certified = cfg.gpu_jobs == "certified" && di.gpu_protected_active;
+        let harness_gpu = self.harness.as_ref().is_some_and(|h| !h.finished() && h.work.includes_gpu());
+        gate_rules.sort();
+        gate_rules.dedup();
+        let duties: Vec<(String, Option<f64>)> = if certified {
+            gate_rules.iter().map(|r| (r.clone(), self.certified_duty(r, now))).collect()
+        } else {
+            vec![]
+        };
+        let missing: Vec<String> = duties.iter().filter(|d| d.1.is_none()).map(|d| d.0.clone()).collect();
+        let ceiling = (certified && missing.is_empty()).then(|| duties.iter().filter_map(|d| d.1).fold(1.0f64, f64::min));
+        let signals: Vec<DutySignal> = if certified {
+            gate_rules
+                .iter()
+                .filter_map(|id| self.config.rules.iter().find(|r| &r.id == id))
+                .map(|r| {
+                    let p = r.protect.as_ref();
+                    let has_source = p.is_some_and(|p| p.metric == "progress_rate" && p.source_json.is_some());
+                    let progress = self.progress.get(&r.id).copied().flatten();
+                    let readable = self.sources.progress_status(&r.id).map_or(progress.is_some(), |st| st.0);
+                    DutySignal {
+                        rule: r.id.clone(),
+                        has_source,
+                        progress,
+                        readable: !has_source || readable,
+                        max_slowdown: p.and_then(|p| p.max_slowdown).unwrap_or(0.05),
+                    }
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        let units: Vec<DutyUnit> = i
+            .jobs
+            .iter()
+            .filter(|j| j.gpu)
+            .map(|j| {
+                let pids: Vec<i32> = if j.pids.is_empty() { j.pgid.into_iter().collect() } else { j.pids.clone() };
+                DutyUnit {
+                    id: j.attempt_id,
+                    key: if j.name.is_empty() { j.module.clone() } else { format!("{}/{}", j.module, j.name) },
+                    cooperative: j.duty,
+                    pausable: j.pausable,
+                    busy: self.last_busy.as_ref().filter(|_| !pids.is_empty()).and_then(|g| g.group(pids.iter().copied())),
                 }
-                self.gpu_budget = Some(serde_json::json!({"duty": d, "rules": gate_rules, "jobs": coop.len(),
-                                                          "per_job": if coop.is_empty() { d } else { d / coop.len() as f64 }}));
+            })
+            .collect();
+        let dout = self.duty.step(&DutyInputs {
+            now,
+            gating: certified && !harness_gpu,
+            ceiling,
+            signals,
+            guard_clear: cache.guard_level == GuardLevel::Clear,
+            units,
+        });
+        for e in &dout.events {
+            let d = match &e.detail {
+                Value::Object(m) => m.clone(),
+                _ => Map::new(),
+            };
+            self.journal(e.kind, e.reason, e.rule.as_deref(), d);
+        }
+        for (id, d) in &dout.duty {
+            di.gpu_gate_exempt.insert(*id);
+            duty_of.insert(*id, *d);
+        }
+        if certified {
+            if missing.is_empty() {
+                let n = dout.duty.len();
+                let d = dout.budget.unwrap_or(0.0);
+                let mut b = serde_json::json!({"duty": d, "rules": gate_rules, "jobs": n,
+                                               "per_job": if n == 0 { d } else { d / n as f64 }});
+                if harness_gpu {
+                    b["state"] = Value::from("harness");
+                }
+                if let (Some(o), Value::Object(g)) = (b.as_object_mut(), self.duty.telemetry(now)) {
+                    for (k, v) in g {
+                        o.entry(k).or_insert(v);
+                    }
+                }
+                self.gpu_budget = Some(b);
                 self.last_not_certified = None;
             } else {
                 let why = missing.join(",");
-                self.gpu_budget = Some(serde_json::json!({"duty": 0.0, "rules": gate_rules, "not_certified": missing}));
+                self.gpu_budget = Some(serde_json::json!({"duty": 0.0, "rules": gate_rules, "not_certified": missing,
+                                                          "state": "not_certified"}));
                 if self.last_not_certified.as_deref() != Some(&why) {
                     self.journal("gpu_gate", "GPU_NOT_CERTIFIED", missing.first().map(String::as_str),
                                  obj([("rules", Value::from(missing.clone()))]));
@@ -1050,6 +1132,8 @@ impl ProtectionController {
                 }
             }
         }
+        let governed = dout.duty.clone();
+        let duty_evict = dout.evict;
         // the harness (D52): which arm the work under test is in, on top of everything above
         let mut harness_off: BTreeSet<i64> = BTreeSet::new();
         let mut harness_evict: Vec<i64> = vec![];
@@ -1191,11 +1275,12 @@ impl ProtectionController {
                 });
             }
         }
-        for id in harness_evict {
+        for id in harness_evict.into_iter().chain(duty_evict) {
             if !r.evicts(id) {
                 r.evictions.push(Eviction { attempt_id: id, reason: "preempt_protection".into() });
             }
         }
+        self.duty.observe(&governed, &r.paused, now);
         if arm_now != self.last_arm {
             if let Some((run, arm)) = &arm_now {
                 let reason = match arm {
