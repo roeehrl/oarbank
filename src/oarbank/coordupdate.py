@@ -639,7 +639,7 @@ class Runner:
                 out.close()
         finally:
             src.close()
-        with open(tmp, "rb") as f:
+        with open(tmp, "r+b") as f:                    # Windows flushes only a handle open for writing (EBADF)
             os.fsync(f.fileno())
         os.replace(tmp, dest)
         if os.name == "posix":
