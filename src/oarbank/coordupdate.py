@@ -283,11 +283,8 @@ class WindowsServices(Services):
     whole refresh (install-oarbankd.ps1)."""
 
     def current_root(self) -> Path | None:
-        cur = self.programs / "current"
-        try:
-            return Path(os.readlink(cur))
-        except OSError:
-            return None
+        name = link_name(self.programs / "current", self.programs)
+        return None if name is None else self.programs / name if not Path(name).is_absolute() else Path(name)
 
     def _state(self, name: str) -> str:
         out = self.run(["sc.exe", "query", name], check=False).stdout
@@ -508,7 +505,7 @@ class Runner:
         j.doc["active"] = {"id": r["id"], "version": r["version"], "seq": seq, "sha256": r["sha256"], "archive": str(copy),
                            "from_version": prev_version or (r.get("from_version") if isinstance(r.get("from_version"), str) else None),
                            "previous_root": str(prev_root) if prev_root else None,
-                           "previous_current": os.readlink(cur) if cur.is_symlink() or _is_junction(cur) else None,
+                           "previous_current": link_name(cur, self.programs),
                            "started_at": time.time(), "step": "verified"}
         j.save()
         req.unlink(missing_ok=True)                    # journaled first: a crash from here on resumes from the journal
@@ -832,6 +829,28 @@ class Runner:
                                                        "state": how, "why": a.get("why"), "at": time.time()}]
         j.doc["active"] = None
         j.save()
+
+
+def link_name(cur: Path, programs: Path) -> str | None:
+    """Where PROGRAMS/current points, as the flip wrote it: a sibling build by its name, else the absolute path. A
+    Windows junction holds an absolute target that os.readlink returns in its `\\\\?\\` form; a POSIX symlink holds the
+    name. None when it is no link."""
+    try:
+        t = os.readlink(cur)
+    except OSError:
+        return None
+    for prefix in ("\\\\?\\", "\\??\\"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+    p = Path(t)
+    if p.is_absolute():
+        try:
+            if os.path.normcase(os.path.realpath(p.parent)) == os.path.normcase(os.path.realpath(programs)):
+                return p.name
+        except OSError:
+            pass
+        return str(p)
+    return t
 
 
 def _is_junction(p: Path) -> bool:

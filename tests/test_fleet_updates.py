@@ -77,11 +77,15 @@ def artifact_bytes(name: str) -> bytes:
     return f"package {name}\n".encode() * 50
 
 
+# a platform neither the test nodes (darwin-arm64) nor this coordinator run: a release's artifacts nobody needs
+SPARE = next(p for p in ("windows-amd64", "linux-arm64") if p != F.coordinator_platform())
+
+
 def write_release(d: Path, version=NEW, seq=None, platforms=None, stops=(), agent_min=OLD, tamper=None, expires=None,
                   short=None) -> Path:
     """A release directory as CI writes it: oarbank-fleet-<v>.json (canonical) beside its artifacts."""
     d.mkdir(parents=True, exist_ok=True)
-    platforms = platforms or sorted({"darwin-arm64", "windows-amd64", F.coordinator_platform()})
+    platforms = platforms or sorted({"darwin-arm64", SPARE, F.coordinator_platform()})
     arts = []
     for p in platforms:
         for role, fmt, name in (("node", "tar", f"oarbank-agent-{version}-{p}.tar.gz"),
@@ -276,18 +280,18 @@ def test_import_checks_every_artifact_and_skips_platforms_no_node_runs(db, tmp_p
     rel = imported(db, tmp_path)
     assert rel["state"] == "ready"
     skipped = {m["platform"] for m in rel["missing"]}
-    assert "windows-amd64" in skipped and "darwin-arm64" not in skipped
+    assert SPARE in skipped and "darwin-arm64" not in skipped
     stored = [a for a in rel["artifacts"] if a["present"]]
     assert stored and all((db.root / "updates" / "artifacts" / a["sha256"]).exists() for a in stored)
-    assert all(a["platform"] != "windows-amd64" for a in stored)
+    assert all(a["platform"] != SPARE for a in stored)
     again = imported(db, tmp_path)                                   # idempotent
     assert again["manifest_sha256"] == rel["manifest_sha256"]
-    win = node(db, "w", platform="windows-amd64", install={**INSTALL, "format": "msi"})
+    win = node(db, "w", platform=SPARE, install={**INSTALL, "format": "msi"})
     with db.tx():
         F.refresh(db)
     assert F.release(db, NEW)["state"] == "ready"   # the release has no msi: the windows node is skipped, never waited for
     assert F.artifact_for(db, NEW, win)[0] is None
-    win2 = node(db, "w2", platform="windows-amd64")
+    win2 = node(db, "w2", platform=SPARE)
     with db.tx():
         F.refresh(db)
     assert F.release(db, NEW)["state"] == "incomplete"               # a tar node there now: its package was skipped

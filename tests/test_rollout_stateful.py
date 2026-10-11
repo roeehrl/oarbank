@@ -60,6 +60,8 @@ class RolloutMachine(RuleBasedStateMachine):
         F.coordinator_version = lambda: self.coord
         RO._spawn = lambda fn: None                       # the periodic check never reaches the network here
         fake = types.ModuleType("oarbank.coordinator.coordself")
+        from oarbank.coordinator.coordself import SCHEMA
+        fake.SCHEMA = SCHEMA                    # a DB opened on another thread makes its table
         fake.current = None
 
         def request(db, version, actor):

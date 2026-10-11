@@ -280,7 +280,9 @@ def test_oarbankd_self_test_migrates_a_copy_and_checks_it(tmp_path):
     code, out = _self_test(home)
     assert code == 0 and out["ok"] and out["integrity"] == "ok" and out["invariants"] == [], out
     assert out["version"] == oarbank.__version__
-    cols = {r[1] for r in sqlite3.connect(home / "oarbank.sqlite3").execute("PRAGMA table_info(nodes)")}
+    con = sqlite3.connect(home / "oarbank.sqlite3")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(nodes)")}
+    con.close()                                                     # Windows: an open file cannot be rewritten
     assert "tools_json" in cols                                     # the migrations ran on the copy
     assert sorted(p.name for p in home.iterdir() if not p.name.startswith("oarbank.sqlite3")) == []   # never served
     (home / "oarbank.sqlite3").write_bytes(b"not a database" * 100)
@@ -492,7 +494,7 @@ class Machine:
         return req
 
     def runner(self, **kw):
-        return coordupdate.Runner(self.home, self.state, self.programs, svc=self.svc, probation_s=kw.pop("probation_s", 1.5),
+        return coordupdate.Runner(self.home, self.state, self.programs, svc=self.svc, probation_s=kw.pop("probation_s", 6.0),
                                   hold_s=kw.pop("hold_s", 0.3), poll_s=0.05, platform=PLATFORM, log=lambda line: None, **kw)
 
     def result(self) -> dict:
@@ -502,7 +504,7 @@ class Machine:
         return json.loads((self.state / "journal.json").read_text())
 
     def current(self) -> str:
-        return os.readlink(self.programs / "current")
+        return coordupdate.link_name(self.programs / "current", self.programs)
 
 
 @pytest.fixture
@@ -521,7 +523,7 @@ def machine(tmp_path):
 def test_a_healthy_new_version_is_committed(machine):
     m = machine()
     req = m.request()
-    assert m.runner().once() == "done"
+    assert m.runner().once() == "done", m.result()
     new = f"2.11.0-{m.sha[:12]}"
     assert m.result()["state"] == "done" and m.result()["id"] == "cu_1" and m.result()["error"] is None
     assert m.svc.calls == ["stop", ("install", new)] and m.current() == new

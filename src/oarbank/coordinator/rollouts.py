@@ -443,11 +443,15 @@ _PREPARING: dict = {}                 # rollout id -> the coordinator update's p
 
 
 def _prepare(cs, path, version: str, actor: str, job: dict):
+    db = None
     try:
-        cs.request(DB(path), version, actor)
+        db = DB(path)
+        cs.request(db, version, actor)
     except Exception as e:                  # coordself.UpdateError, or a prepare that failed
         job["err"] = str(e)[:300] or type(e).__name__
     finally:
+        if db is not None:
+            db.conn.close()                 # Windows keeps an open database file from being moved or removed
         job["done"].set()
 
 
