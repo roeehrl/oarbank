@@ -12,6 +12,7 @@
 mod container_support;
 mod node;
 mod setup;
+mod update;
 #[cfg_attr(target_os = "macos", path = "svc_launchd.rs")]
 #[cfg_attr(windows, path = "svc_windows.rs")]
 #[cfg_attr(all(unix, not(target_os = "macos")), path = "svc_systemd.rs")]
@@ -364,6 +365,12 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Some("remove") => return setup::remove(home.as_deref(), &rest),
+        // the node update runner and its trust (update.rs; docs/design/fleet-updates.md, D57)
+        Some("update-run") => {
+            let code = update::update_run(&rest[1..])?;
+            std::process::exit(code);
+        }
+        Some("update-trust") => return update::update_trust(&rest[1..]),
         // an upgrade's postinstall: the installed service definition, rendered again (it names its own home)
         Some("service") if rest.get(1).map(String::as_str) == Some("refresh") => return svc::refresh(&rest[2..]),
         #[cfg(windows)]

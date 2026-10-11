@@ -6,12 +6,20 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+# the node update runner's tarball format (update.rs)
+flate2 = "1.1.10"
 hex.workspace = true
 libc = "0.2.190"
 oarbank-core = { path = "../oarbank-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+tar = "0.4.46"
+
+[dev-dependencies]
+# tests' scratch directories: a fresh name each, removed when dropped
+tempfile = "3.27.0"
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Services", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Shell", "Win32_Security", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_NetworkManagement_WindowsFirewall", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Rpc", "Win32_System_Memory", "Win32_System_RemoteDesktop", "Win32_System_Environment", "Win32_System_Registry"] }
