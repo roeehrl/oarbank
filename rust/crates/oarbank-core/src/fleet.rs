@@ -524,9 +524,14 @@ impl Spool {
     }
 
     /// The request is taken (the agent may have withdrawn it meanwhile).
+    /// Never left in place: a request that stays would start the runner again and again (a systemd path unit stops
+    /// at its start limit). What cannot be removed (not a file) is moved aside to `request.rejected-<ts>.json`.
     fn remove_request(&self) -> Result<(), Halt> {
         match std::fs::remove_file(self.request()) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                std::fs::rename(self.request(), self.agent.join(format!("request.rejected-{ts}.json"))).map_err(|_| io(e))
+            }
             _ => Ok(()),
         }
     }
@@ -669,8 +674,9 @@ impl<I: Installer, C: Clock> Runner<I, C> {
             Ok(Some(b)) => b,
             Ok(None) => return Ok(Ran::Idle),
             Err(e) => {
-                let _ = std::fs::remove_file(self.spool.request());
-                self.result(None, None, "refused", Some(&format!("the request is unreadable: {e}")), false, false)?;
+                let wrote = self.result(None, None, "refused", Some(&format!("the request is unreadable: {e}")), false, false);
+                self.spool.remove_request()?;
+                wrote?;
                 return Ok(Ran::Finished { id: String::new(), state: "refused".into() });
             }
         };
@@ -683,12 +689,16 @@ impl<I: Installer, C: Clock> Runner<I, C> {
             Err(e) => {
                 let _ = std::fs::remove_file(self.spool.incoming());
                 let release = Request::parse(&raw).ok().map(|r| r.release);
-                self.result(id.as_deref(), release.as_deref(), "refused", Some(&e), false, false)?;
-                if let Some(id) = &id {
-                    j.finish(id);
-                    self.spool.write_journal(&j)?;
-                }
+                // the refusal is written and journaled first, and the request consumed whatever happens to those
+                let wrote = self.result(id.as_deref(), release.as_deref(), "refused", Some(&e), false, false).and_then(|_| match &id {
+                    Some(id) => {
+                        j.finish(id);
+                        self.spool.write_journal(&j)
+                    }
+                    None => Ok(()),
+                });
                 self.spool.remove_request()?;
+                wrote?;
                 Ok(Ran::Finished { id: id.unwrap_or_default(), state: "refused".into() })
             }
             Ok(v) => {

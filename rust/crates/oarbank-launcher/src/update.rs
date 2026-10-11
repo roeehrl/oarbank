@@ -386,7 +386,7 @@ fn fingerprint(k: &str) -> String {
     use base64::Engine;
     let raw = base64::engine::general_purpose::STANDARD.decode(k).unwrap_or_default();
     let h = fleet::sha256_hex(&raw);
-    h[..32].as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" ")
+    h.as_bytes()[..32].chunks(4).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" ")
 }
 
 /// Write the trust and the readable marker beside it.
@@ -532,7 +532,11 @@ mod tests {
         }
         assert!(prefix.join("versions/2.10.0/oarbank-agent-2.10.0-linux-amd64/oarbank-agent").is_file());
         assert!(i.point_agent("tar", "2.9.0").unwrap_err().contains("no oarbank-agent"), "2.9.0 was never unpacked");
+        // an agent-only update staged before the package came: the package's agent wins
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        std::fs::write(home.join("state/upgrade.json"), json!({"state": "staged", "target": "versions/x/oarbank-agent"}).to_string()).unwrap();
         i.point_agent("tar", "2.10.0").unwrap();
+        assert!(!home.join("state/upgrade.json").exists());
         let cur = i.current_agent().unwrap();
         assert!(cur.starts_with("versions/2.10.0-"), "{cur}");
         assert_eq!(std::fs::read(home.join(&cur)).unwrap(), agent);

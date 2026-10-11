@@ -98,6 +98,11 @@ fn install(home: &Home, binary: &Path) -> Result<String> {
     }
     std::fs::rename(&tmp, &dst)?;
     home.point(&format!("{rel}/{name}"))?;
+    // an agent-only self-update staged or on trial would put its own build back over this one at the next start
+    // (before_start): the installed agent wins, and the coordinator offers that update again if it still applies
+    if home.read_upgrade().is_some_and(|u| matches!(u["state"].as_str(), Some("staged" | "trial"))) {
+        let _ = std::fs::remove_file(home.upgrade());
+    }
     Ok(rel)
 }
 

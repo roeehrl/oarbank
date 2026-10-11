@@ -354,6 +354,12 @@ fn every_refusal_installs_nothing() {
     assert_eq!(w.run(), finished("refused", ""));
     assert_eq!(w.result()["state"], "refused");
     assert!(!w.spool().request().exists());
+    // one it cannot even delete is moved aside: a request left in place would start the runner again and again
+    std::fs::create_dir(w.spool().request()).unwrap();
+    assert_eq!(w.run(), finished("refused", ""));
+    assert!(!w.spool().request().exists());
+    assert!(std::fs::read_dir(&w.spool().agent).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("request.rejected-")));
+    assert_eq!(w.run(), Ran::Idle);
     #[cfg(unix)]
     {
         let w = World::new("deb", false);
