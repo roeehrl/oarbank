@@ -92,11 +92,14 @@ def test_a_rollout_updates_the_package_and_a_release_that_cannot_start_is_rolled
                            capture_output=True, text=True)
     assert trust.returncode == 0, trust.stderr
     env = {**agent_env(), "OARBANK_INSTALL_FORMAT": "tar", "OARBANK_UPDATE_TRIGGER": "external"}
+    # output to files, not pipes: nobody reads a pipe until the end, and a full one (a few KB on Windows) blocks the agent
+    logs = {"agent": tmp_path / "agent.log", "runner": tmp_path / "runner.log"}
+    sinks = {k: f.open("wb") for k, f in logs.items()}
     agent = subprocess.Popen([str(launcher), "--home", str(home), "run", "--coordinator", coordinator.url], env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                             stdout=sinks["agent"], stderr=subprocess.STDOUT)
     runner = subprocess.Popen([str(launcher), "update-run", "--agent-home", str(home), "--state", str(state),
                                "--prefix", str(prefix), "--probation-s", "45"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                              stdout=sinks["runner"], stderr=subprocess.STDOUT)
     try:
         pending = wait(lambda: [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"])
         coordinator.admit(pending[0]["enrollment_id"])
@@ -130,8 +133,10 @@ def test_a_rollout_updates_the_package_and_a_release_that_cannot_start_is_rolled
         print(diagnose(home, state))
         raise
     finally:
-        out = ""
         for p in (agent, runner):
             stop_tree(p.pid)
-            out += p.communicate(timeout=20)[0][-4000:]
-        print(out)
+            p.wait(20)
+        for f in sinks.values():
+            f.close()
+        for name, f in logs.items():
+            print(f"--- {name}\n" + f.read_text(errors="replace")[-4000:])
