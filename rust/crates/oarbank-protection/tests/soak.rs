@@ -335,3 +335,75 @@ fn seventy_two_hours_of_dynamic_protection() {
         "{transitions} transitions in 72 h"
     );
 }
+
+/// 24 hours (2 s ticks) of workloads mixed with jobs and services: a protected process whose pause rule comes and goes,
+/// an evict rule now and then, memory pressure spikes that pick victims, workloads starting, being held and coming back.
+/// Checked every tick: a workload never appears among the attempts acted on; a held one is neither paused, lowered,
+/// throttled nor admitted; one that cannot pause is never paused; none stays paused past its tolerance (plus a tick);
+/// and once every cause is gone every workload is admitted again within a few minutes.
+#[test]
+fn a_day_of_workloads_beside_jobs_and_services() {
+    let mut ctl = ProtectionController::new(None, Host::unavailable());
+    ctl.apply(Some(&json!({"schema": 1, "node": {"mode": "fleet_first", "defaults": {"cooldown": {"base_s": 4, "max_s": 8}}},
+        "rule": [{"id": "trainer", "match": {"name": "trainer"}, "active_when": {"for_s": 0}, "pause_fleet": {}, "exit_after_s": 0},
+                 {"id": "backup", "match": {"name": "backup"}, "active_when": {"for_s": 0}, "evict": {}, "exit_after_s": 0}]})),
+              &LocalProtection::Absent);
+    let mut rng = SeededRandom::new(20261011);
+    let mut wl: Vec<FleetWorkloadView> = (0..4).map(|i| FleetWorkloadView {
+        key: format!("m/w{i}"), running: true, footprint_gb: 1.0 + i as f64, started_at: 1.0, cpu_cores: 2.0,
+        pause_tolerance_s: [0.0, 10.0, 30.0, 60.0][i], pausable: i > 0, cooperative_throttle: i % 2 == 0,
+        hard_cap: true, gpu: i == 3 }).collect();
+    let (mut trainer, mut backup) = (false, false);
+    let mut paused_since: BTreeMap<String, f64> = BTreeMap::new();
+    let (mut holds, mut pauses) = (0, 0);
+    let mut t = 0.0;
+    let end = 86_400.0;
+    while t < end + 600.0 {
+        let quiet = t >= end;                                         // the last ten minutes: every cause gone
+        if !quiet {
+            if rng.int(0, 99) < 2 { trainer = !trainer; }
+            if rng.int(0, 999) < 3 { backup = !backup; }
+        } else {
+            trainer = false;
+            backup = false;
+        }
+        let mut procs = vec![];
+        if trainer { procs.push(ProcessRecord { comm: "trainer".into(), ..ProcessRecord::new(10, 1, 100, "/opt/trainer") }); }
+        if backup { procs.push(ProcessRecord { comm: "backup".into(), ..ProcessRecord::new(11, 1, 101, "/opt/backup") }); }
+        let used = if !quiet && rng.int(0, 999) < 4 { 63.0 } else { 20.0 };
+        let mut i = TickInputs { workloads: wl.clone(), allocatable_cores: 8.0,
+                                 ..TickInputs::new(t, MemorySignals::new(64.0, used, 0)) };
+        i.jobs = vec![FleetJobView { pausable: true, ..FleetJobView::new(1, Some(500), 2.0, 1.0, 2.0) }];
+        i.services = vec![FleetServiceView { key: "m/svc".into(), footprint_gb: 1.0, started_at: 1.0, yieldable: true,
+                                             ..Default::default() }];
+        let r = ctl.evaluate(&i, &procs, &no_cpu());
+        assert!(r.paused.iter().chain(r.lowered.iter()).all(|a| !is_fleet_id(*a)) && r.evictions.iter().all(|e| !is_fleet_id(e.attempt_id)),
+                "a workload among the attempts at {t}");
+        for w in wl.iter_mut() {
+            let a = &r.workloads[&w.key];
+            if a.hold.is_some() {
+                assert!(!a.paused && !a.lowered && a.threads.is_none() && a.cpu_cap.is_none() && !a.admit, "{} at {t}: {a:?}", w.key);
+                if w.running { holds += 1; }
+                w.running = false;                                    // the agent stops it
+                paused_since.remove(&w.key);
+                continue;
+            }
+            assert!(!a.paused || (w.pausable && w.pause_tolerance_s > 0.0), "{} paused but cannot be", w.key);
+            if a.paused {
+                let s = *paused_since.entry(w.key.clone()).or_insert(t);
+                assert!(t - s <= w.pause_tolerance_s + 2.0, "{} paused {} s past its tolerance at {t}", w.key, t - s);
+                if s == t { pauses += 1; }
+            } else {
+                paused_since.remove(&w.key);
+            }
+            if !w.running && a.admit {
+                w.running = true;                                     // the agent starts it again
+            }
+        }
+        if quiet && t >= end + 300.0 {
+            assert!(wl.iter().all(|w| w.running), "not all running again at {t}: {:?}", r.workloads);
+        }
+        t += 2.0;
+    }
+    assert!(holds > 10 && pauses > 10, "the soak exercised too little: {holds} holds, {pauses} pauses");
+}

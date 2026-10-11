@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Category = Literal["job_pending", "node_admission", "protection", "attempt_end", "verdict", "invariant"]
+Category = Literal["job_pending", "node_admission", "protection", "attempt_end", "verdict", "invariant", "workload"]
 Severity = Literal["P1", "P2", "P3", "P4", "P5"]
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
@@ -146,6 +146,43 @@ CODES: list[ReasonCode] = [
       "P2", node=False, job=False),
     C("PROTECTION_SERVICE_STOP", "protection", "Service {service} stopped by host protection ({reason}); its jobs requeued",
       node=False, job=False),
+    # ---------------------------------------------------------------- workloads (docs/design/workloads.md)
+    C("MEMORY_HARD_FLOOR_WORKLOAD", "protection", "Workload {workload} stopped by the memory hard floor ({why}) and held "
+      "until the guard is clear", "P2"),
+    C("WORKLOAD_PAUSE", "protection", "Workload {workload} paused (it tolerates {tolerance_s} s)"),
+    C("WORKLOAD_RESUME", "protection", "Workload {workload} resumed"),
+    C("WORKLOAD_LOWER", "protection", "Workload {workload} lowered to background scheduling"),
+    C("WORKLOAD_RESTORE", "protection", "Workload {workload} restored from background scheduling"),
+    C("WORKLOAD_THROTTLE", "protection", "Workload {workload} throttled: {threads} threads, a CPU cap of {cpu_cap} cores"),
+    C("WORKLOAD_HOLD", "protection", "Workload {workload} stopped and held by host protection ({cause})", "P2"),
+    C("WORKLOAD_PAUSE_TOLERANCE", "protection", "Workload {workload} was paused for its tolerance ({tolerance_s} s): stopped "
+      "and held while the pause would last", "P2"),
+    C("WORKLOAD_RELEASE", "protection", "Workload {workload} released from its hold ({cause} cleared after {held_s} s)"),
+    C("WORKLOAD_STOP", "protection", "Workload {workload} stopped by the agent"),
+    C("DELEGATE_PAUSE", "protection", "Delegated processes of rule {rule} paused ({processes})"),
+    C("DELEGATE_RESUME", "protection", "Delegated processes of rule {rule} resumed ({processes})"),
+    C("DELEGATE_LOWER", "protection", "Delegated processes of rule {rule} lowered ({processes})"),
+    C("DELEGATE_RESTORE", "protection", "Delegated processes of rule {rule} restored ({processes})"),
+    C("DELEGATE_PAUSE_LIMIT", "protection", "Delegated processes of rule {rule} were paused for the pause ceiling: resumed "
+      "and lowered instead (a delegation never stops them)", "P2"),
+    C("WORKLOAD_UNASSIGNED", "workload", "{workload} is not assigned to this node", remedies=["workloads.assign"]),
+    C("WORKLOAD_SEAT_ELSEWHERE", "workload", "{workload}'s seat (its identity) is held by another node until that node "
+      "gives it up or its lease ends", remedies=["workloads.unassign"]),
+    C("WORKLOAD_SEAT_LEASE_EXPIRED", "workload", "{workload}'s seat lease ran out on this node (no word from the "
+      "coordinator in time): stopped", "P2"),
+    C("WORKLOAD_HELD", "workload", "{workload} is held down by host protection ({reason})"),
+    C("WORKLOAD_WITHDRAWN", "workload", "{workload} failed {failures} times in a row and was withdrawn: {error}", "P2",
+      remedies=["workloads.restart"]),
+    C("WORKLOAD_RESTART", "workload", "{workload} restarted by the owner"),
+    C("WORKLOAD_SECRETS_NOT_SET", "workload", "{workload} receives secrets that have no value for this node",
+      remedies=["secrets.set"]),
+    C("WORKLOAD_IDENTITY_SHARED", "workload", "{workload} has a per-node identity, and a secret it receives is set for a "
+      "group or the whole module: set it for each node", remedies=["secrets.set"]),
+    C("WORKLOAD_NO_CONTAINMENT", "workload", "This node cannot contain a workload ({detail})"),
+    C("WORKLOAD_POLICY_OFF", "workload", "This node's workloads setting is off", remedies=["settings.apply"]),
+    C("WORKLOAD_NOT_OFFERED", "workload", "{workload} cannot run on this node ({detail})"),
+    C("WORKLOAD_NODE_NOT_ACTIVE", "workload", "The node is not active (paused or draining): its workloads are stopped",
+      remedies=["nodes.resume"]),
     C("RUNG_0", "protection", "Dynamic rung 0: no constraint ({why})"),
     C("RUNG_1", "protection", "Dynamic rung 1: admitting no new work ({why})"),
     C("RUNG_2", "protection", "Dynamic rung 2: the fleet CPU budget is under the allocatable cores ({why})"),

@@ -216,7 +216,11 @@ the Windows service's stop wait hint). A package upgrade renders an installed de
 settings (`oarbank-launcher service refresh`, run by the pkg's and the deb/rpm's postinstall; it keeps the job's program,
 account and environment), so a node set up by 2.8 gets the 60 s too; a Windows major upgrade runs setup, which creates
 the service anew. A job a cancel or revoke already ends keeps that ending. Module services are not
-stopped: a lasting one is adopted by the next agent (service-endpoints.md).
+stopped: a lasting one is adopted by the next agent (service-endpoints.md). Workloads are not stopped either: the
+agent thaws any it froze and leaves them running, and the next agent adopts each from its record while its seat lease
+runs on the boot clock ([workloads.md](workloads.md)); the watchdog of an agent that died ends them when their leases
+run out unless a newer agent adopted them, and removing the node (`oarbank-agent stop-workloads`, run by the
+launcher's remove step) ends them. On Linux a stop of the agent's systemd unit ends them with the unit's cgroup.
 
 An agent that ends without stopping its runners (killed, crashed) leaves none either. On Windows a runner's Job Object is
 kill-on-close and only the agent holds it, so the runner ends with the agent. On POSIX a runner leads a process group of

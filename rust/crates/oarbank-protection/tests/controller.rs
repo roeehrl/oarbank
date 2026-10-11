@@ -1085,3 +1085,126 @@ fn an_active_pause_rule_admits_none_of_the_work_it_pauses() {
         assert_eq!(c.to_json()["paused_by"], json!("rule:app"));
     }
 }
+
+fn workload(key: &str, tolerance: f64, footprint_gb: f64) -> FleetWorkloadView {
+    FleetWorkloadView { pausable: tolerance > 0.0, pause_tolerance_s: tolerance, footprint_gb, started_at: 1.0,
+                        cpu_cores: 2.0, ..FleetWorkloadView::new(key) }
+}
+
+fn with_workloads(now: f64, memory: MemorySignals, w: Vec<FleetWorkloadView>) -> TickInputs {
+    TickInputs { workloads: w, allocatable_cores: 8.0, ..TickInputs::new(now, memory) }
+}
+
+fn journal_reasons(ctl: &ProtectionController, j: &Arc<DecisionJournal>) -> Vec<String> {
+    let _ = ctl;
+    j.pending(500).iter().map(|r| r.reason().to_string()).collect()
+}
+
+/// A rule's pause reaches a pausable workload (never one that cannot be paused, which is lowered instead), the pause
+/// turns into a hold at the workload's tolerance, the hold lasts while the rule does and keeps it from starting, and
+/// every step is journaled with the workload's key.
+#[test]
+fn a_rule_pauses_a_workload_up_to_its_tolerance_then_holds_it_until_the_rule_ends() {
+    let journal = Arc::new(DecisionJournal::new(Box::new(SystemClock), None));
+    let mut ctl = ProtectionController::new(Some(journal.clone()), Host::unavailable());
+    ctl.apply(Some(&json!({"schema": 1, "node": {"mode": "fleet_first", "defaults": {"cooldown": {"base_s": 1, "max_s": 1}}},
+                           "rule": [{"id": "trainer", "match": {"name": "trainer"}, "active_when": {"for_s": 0},
+                                     "pause_fleet": {}, "exit_after_s": 0}]})), &LocalProtection::Absent);
+    let owner = vec![proc_fp(10, "/opt/trainer", 2.0)];
+    let owner = vec![ProcessRecord { comm: "trainer".into(), ..owner[0].clone() }];
+    let ws = vec![workload("m/peer", 20.0, 1.0), workload("m/stiff", 0.0, 1.0)];
+    let mem = MemorySignals::new(64.0, 20.0, 0);
+    let r = ctl.evaluate(&with_workloads(0.0, mem.clone(), ws.clone()), &owner, &no_cpu());
+    assert!(r.reports[0].active, "{:?}", r.reports);
+    assert!(r.workloads["m/peer"].paused && !r.workloads["m/peer"].lowered);
+    assert!(!r.workloads["m/stiff"].paused && r.workloads["m/stiff"].lowered, "a workload that cannot pause is lowered");
+    assert!(r.paused.is_empty() && r.lowered.is_empty(), "workloads never appear as attempts: {:?} {:?}", r.paused, r.lowered);
+    let r = ctl.evaluate(&with_workloads(19.0, mem.clone(), ws.clone()), &owner, &no_cpu());
+    assert!(r.workloads["m/peer"].paused);
+    let r = ctl.evaluate(&with_workloads(20.5, mem.clone(), ws.clone()), &owner, &no_cpu());
+    let h = r.workloads["m/peer"].hold.clone().expect("held at its tolerance");
+    assert_eq!((h.cause, h.reason.as_str()), (HoldCause::PauseTolerance, "preempt_protection"));
+    // the agent stopped it: still held while the rule lasts, and not admitted
+    let stopped = vec![FleetWorkloadView { running: false, ..ws[0].clone() }, ws[1].clone()];
+    let r = ctl.evaluate(&with_workloads(30.0, mem.clone(), stopped.clone()), &owner, &no_cpu());
+    assert!(r.workloads["m/peer"].hold.is_some() && !r.workloads["m/peer"].admit);
+    // the owner's process ends: released and admitted again
+    let _ = ctl.evaluate(&with_workloads(40.0, mem.clone(), stopped.clone()), &[], &no_cpu());
+    let r = ctl.evaluate(&with_workloads(45.0, mem.clone(), stopped), &[], &no_cpu());
+    assert!(r.workloads["m/peer"].hold.is_none() && r.workloads["m/peer"].admit, "{:?}", r.workloads["m/peer"]);
+    assert!(!r.workloads["m/stiff"].lowered);
+    let reasons = journal_reasons(&ctl, &journal);
+    for want in ["WORKLOAD_PAUSE", "WORKLOAD_LOWER", "WORKLOAD_PAUSE_TOLERANCE", "WORKLOAD_RELEASE", "WORKLOAD_RESTORE"] {
+        assert!(reasons.iter().any(|r| r == want), "{want} not journaled: {reasons:?}");
+    }
+    let held = journal.pending(500).into_iter().find(|r| r.reason() == "WORKLOAD_PAUSE_TOLERANCE").unwrap();
+    assert_eq!(held.get("workload").or_else(|| held.get("detail").and_then(|d| d.get("workload"))), Some(&json!("m/peer")));
+}
+
+/// The memory guard may choose a workload as its victim (by footprint, like jobs and services): it is held until the
+/// guard is clear; a rule's evict holds every workload while it lasts.
+#[test]
+fn the_memory_guard_and_a_rules_evict_hold_workloads() {
+    let mut ctl = controller(json!({"schema": 1, "node": {"mode": "fleet_first"}}));
+    let ws = vec![workload("m/big", 20.0, 30.0), workload("m/small", 20.0, 0.5)];
+    let r = ctl.evaluate(&with_workloads(0.0, MemorySignals::new(64.0, 62.0, 3), ws.clone()), &[], &no_cpu());
+    assert_eq!(r.guard_level, GuardLevel::Hard);
+    assert_eq!(r.workloads["m/big"].hold.as_ref().map(|h| (h.cause, h.reason.as_str())),
+               Some((HoldCause::Memory, "preempt_memory")));
+    assert!(r.workloads["m/small"].hold.is_none() && !r.workloads["m/small"].admit);
+    let stopped = vec![FleetWorkloadView { running: false, ..ws[0].clone() }, ws[1].clone()];
+    let r = ctl.evaluate(&with_workloads(2.0, MemorySignals::new(64.0, 20.0, 0), stopped.clone()), &[], &no_cpu());
+    assert!(r.workloads["m/big"].hold.is_none(), "the guard is clear: released");
+    let mut ctl = controller(json!({"schema": 1, "node": {"mode": "fleet_first"},
+                                    "rule": [{"id": "ev", "match": {"name": "x"}, "active_when": {"for_s": 0}, "evict": {}}]}));
+    let x = vec![ProcessRecord { comm: "x".into(), ..proc_fp(5, "/bin/x", 0.1) }];
+    let r = ctl.evaluate(&with_workloads(0.0, MemorySignals::new(64.0, 20.0, 0), ws.clone()), &x, &no_cpu());
+    assert!(r.workloads.values().all(|a| a.hold.as_ref().is_some_and(|h| h.cause == HoldCause::Evict)), "{:?}", r.workloads);
+}
+
+/// The pause probe pauses CPU jobs to measure harm, never a workload (its peers would time out).
+#[test]
+fn the_pause_probe_never_pauses_a_workload() {
+    let mut ctl = controller(json!({"schema": 1, "node": {"mode": "moderate"}}));
+    ctl.probe_requested = true;
+    let mut i = with_workloads(0.0, MemorySignals::new(64.0, 20.0, 0), vec![workload("m/w", 20.0, 1.0)]);
+    i.jobs = vec![FleetJobView { pausable: true, ..FleetJobView::new(1, Some(500), 1.0, 1.0, 1.0) }];
+    let r = ctl.evaluate(&i, &[], &no_cpu());
+    if r.probing {
+        assert!(r.paused.contains(&1));
+    }
+    assert!(!r.workloads["m/w"].paused, "{:?}", r.workloads);
+}
+
+/// With the node setting on, an owner's delegation by exact path names the owner's processes as fleet work that a
+/// pause rule pauses (one by one, by pid and start time); with it off, or for a path a module could have written, it
+/// names nothing. A delegated tree is never part of a protected group.
+#[test]
+fn a_delegation_pauses_the_owners_named_processes_only_with_the_setting_on_and_a_trusted_path() {
+    let central = json!({"schema": 1, "node": {"mode": "fleet_first"},
+                         "rule": [{"id": "trainer", "match": {"name": "trainer"}, "active_when": {"for_s": 0},
+                                   "pause_fleet": {}, "exit_after_s": 0},
+                                  {"id": "worker-app", "match": {"path_prefix": "/opt/worker/bin/worker"},
+                                   "tree": "descendants", "delegate": {"actions": ["pause", "lower"]}}]});
+    let procs = vec![ProcessRecord { comm: "trainer".into(), ..proc_fp(10, "/opt/trainer", 2.0) },
+                     ProcessRecord { comm: "worker".into(), ..ProcessRecord::new(20, 1, 2000, "/opt/worker/bin/worker") },
+                     ProcessRecord { comm: "helper".into(), ..ProcessRecord::new(21, 20, 2100, "/opt/worker/bin/helper") },
+                     ProcessRecord { comm: "worker".into(), ..ProcessRecord::new(30, 1, 3000, "/tmp/worker/bin/worker") }];
+    let mem = MemorySignals::new(64.0, 20.0, 0);
+    let mut ctl = controller(central.clone());
+    ctl.path_trusted = |p| p == "/opt/worker/bin/worker";
+    let r = ctl.evaluate(&with_workloads(0.0, mem.clone(), vec![]), &procs, &no_cpu());
+    assert!(r.delegated.is_empty(), "the setting is off by default");
+    ctl.set_delegation_allowed(true);
+    let r = ctl.evaluate(&with_workloads(2.0, mem.clone(), vec![]), &procs, &no_cpu());
+    assert_eq!(r.delegated.len(), 1);
+    let d = &r.delegated[0];
+    assert_eq!((d.rule.as_str(), d.paused), ("worker-app", true));
+    assert_eq!(d.procs, vec![(20, 2000), (21, 2100)], "the matched process and its descendants, never the copy in /tmp");
+    // an untrusted path delegates nothing
+    let mut ctl = controller(central);
+    ctl.path_trusted = |_| false;
+    ctl.set_delegation_allowed(true);
+    let r = ctl.evaluate(&with_workloads(0.0, mem, vec![]), &procs, &no_cpu());
+    assert!(r.delegated.is_empty());
+}

@@ -489,8 +489,11 @@ departs from it:
   that names a pinhole's client, so a pinhole id a rebooted router gave to another device could in principle be
   deleted; leases are at most an hour.
 - **No in-fleet relay** for unreachable nodes, and UDP listeners, as decided.
-- **Workloads** (D45) are a separate change: a listener is served by an endpoint service; `Manifest.listener_targets()`
-  in the SDK and the agent's `ServiceManager::listener_target` are the places a workload target joins.
+- **Workloads** (D45) serve listeners too (workloads.md): a listener no endpoint service lists is the workload's that
+  lists it (`Manifest.listener_targets()` in the SDK; the agent's hub asks `ServiceManager::listener_target`, then
+  `WorkloadManager::listener_target`). A workload's listener has handover `connections` only, and its connections are
+  closed at once while the workload is not running here; `tests/rust/test_agent_workload_listener.py` serves a public
+  listener from a workload through the relay.
 
 ### What remains to verify on real routers
 

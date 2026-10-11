@@ -197,6 +197,16 @@
 <td><span class="chip {{ 'ok' if sv.state == 'ready' else ('acc' if sv.state == 'starting' else '') }}">{{ sv.state }}</span></td>
 <td>{{ sv.stopped_reason or '' }}{% if sv.gpu_api_missing %}: {{ sv.gpu_api_missing }}{% endif %}</td><td>{{ sv.users or 0 }}</td><td class="mono">{{ sv.error or '' }}</td></tr>{% endfor %}</table>
 {% endif %}
+{% if workloads %}
+<h2>Workloads</h2>
+<table class="small"><tr><th scope="col">workload</th><th scope="col">state</th><th scope="col">why</th><th scope="col">seat</th><th scope="col">lease left</th><th scope="col">protection</th><th scope="col">error</th></tr>
+{% for r in workloads %}{% set rep = r.report or {} %}<tr><td><a href="/modules/{{ r.module }}/workloads">{{ r.key }}</a></td>
+<td><span class="chip {{ 'ok' if r.state == 'running' else ('warn' if r.state in ('held', 'starting', 'stopping') else ('bad' if r.state == 'withdrawn' else '')) }}">{{ r.state }}</span></td>
+<td>{{ r.reason or '' }}</td><td class="mono">{{ r.seat_id or '-' }}{% if r.seat_id %} · fence {{ r.fence }}{% endif %}</td>
+<td>{% if rep.lease_left_s is not none %}{{ rep.lease_left_s | num(0) }} s{% endif %}</td>
+<td>{% if rep.held %}held ({{ rep.held }}){% elif rep.paused %}paused{% elif rep.lowered %}lowered{% elif rep.threads %}{{ rep.threads }} threads{% endif %}</td>
+<td class="mono">{{ rep.error or '' }}</td></tr>{% endfor %}</table>
+{% endif %}
 {% if n.doctor and n.doctor.modules %}
 <h2>Doctor</h2>
 {% for m, rep in n.doctor.modules.items() %}

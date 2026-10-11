@@ -322,6 +322,9 @@ REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#nod
                 "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
                 "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings"),
+                "workloads.assign": ("/modules/{module}/workloads", "/modules"),
+                "workloads.unassign": ("/modules/{module}/workloads", "/modules"),
+                "workloads.restart": ("/modules/{module}/workloads", "/modules"),
                 "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
                 "protection.ab.abort": ("/protection/ab/{run_id}", "/")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}

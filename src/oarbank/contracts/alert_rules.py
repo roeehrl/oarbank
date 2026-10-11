@@ -39,6 +39,8 @@ POLICY: dict[str, dict] = {
                               "runbook": "Fleet work measurably slowed a protected process: consider strict_yield on that node or a tighter rule."},
     "release_awaiting_owner": {"severity": "P3", "pending_s": 300,
                                "runbook": "A release waits for the owner's signature, so its nodes get nothing new (an enrolled node gets no first release and runs no module). On the machine that holds the owner key run the command the alert names: `oarbank release sign <release> --promote` for a platform's release, `oarbank release sign <release>` for a canary or pinned node's own. `oarbank release list` shows every waiting release. The alert clears once the release is signed and current, or a newer build replaces it."},
+    "workload_withdrawn": {"severity": "P3", "pending_s": 0,
+                           "runbook": "A workload failed again and again on the node and was withdrawn: read its last error and log tail (the module's Workloads tab, `oarbank workload logs`), fix the cause (a secret, a setting, the module), then `oarbank workload restart` it. The alert clears once it runs again."},
     "listener_unreachable": {"severity": "P3", "pending_s": 600,
                              "runbook": "A module's inbound listener cannot be reached from the internet for 10 minutes (router port taken, two routers, carrier-grade NAT, no mapping protocol, a firewall). Read the listener's result and fix on the node page's Network card (oarbank listener show <node> <key>); Check now probes it again. It resolves when a probe reaches it."},
     "listener_saturated": {"severity": "P4", "pending_s": 0, "flap": (3, 3600),

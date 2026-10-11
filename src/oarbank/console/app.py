@@ -520,6 +520,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         d["panels"] = await panels("node.detail.panel", request, actor,
                                    {"node": {"id": nid, "node_id": nid, "online": d["n"]["online"]}})
+        r = await coordinator_json("GET", f"/api/v1/workloads?node={nid}", actor)
+        d["workloads"] = (r.json() if r.status_code == 200 else {}).get("workloads") or []
         d["listener_focus"] = await listener_focus(nid, request.query_params.get("listener"), actor)
         return render(request, "node.html", {**d, "actor": actor})
 
@@ -1082,6 +1084,21 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         return render(request, "module_secrets.html", {"name": name, "man": man, "tab": "secrets", "nodes": nodes, "groups": groups,
                                                         "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
                                                         "actor": actor})
+
+    @app.get("/modules/{name}/workloads", response_class=HTMLResponse)
+    async def module_workloads(name: str, request: Request):
+        """The module's workloads (docs/design/workloads.md): each one's assignments per node with seat, fence, lease,
+        state, last error and log tail, the protection actions on it, and Assign / Unassign / Restart."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        if man is None:
+            return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
+        r = await coordinator_json("GET", f"/api/v1/workloads?module={name}", actor)
+        rows = (r.json() if r.status_code == 200 else {}).get("workloads") or []
+        nodes = await drill(lambda rd: rd.q("SELECT node_id, hostname FROM nodes WHERE lifecycle='ready' ORDER BY hostname")) or []
+        return render(request, "module_workloads.html", {"name": name, "man": man, "tab": "workloads", "rows": rows,
+                                                          "nodes": nodes, "actor": actor})
 
     @app.get("/modules/{name}/nodes", response_class=HTMLResponse)
     async def module_nodes(name: str, request: Request):

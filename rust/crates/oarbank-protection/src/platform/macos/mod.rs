@@ -126,4 +126,15 @@ impl Actuator for NativeActuator {
         }
         rc
     }
+
+    fn signal_pid(&self, pid: i32, sig: Signal) -> i32 {
+        // SAFETY: plain syscall; the registry verified the process's start time just before.
+        unsafe { libc::kill(pid, sig.raw()) }
+    }
+
+    fn set_background_pid(&self, pid: i32, on: bool) -> i32 {
+        let prio = if on { libc::PRIO_DARWIN_BG } else { 0 };
+        // SAFETY: plain syscall on a process the registry verified.
+        unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid as libc::id_t, prio) }
+    }
 }

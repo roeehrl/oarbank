@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ name }} workloads · Oarbank{% endblock %}
+{% block body %}
+<div class="row"><h1>{{ name }}</h1><span class="chip">{{ man.module.id }} {{ man.module.version }}</span></div>
+<nav class="row small mod-tabs-nav" aria-label="module sections">
+  {% for d in man.ui.pages %}<a href="{{ '/modules/' ~ name if d.slot == 'module.overview' else '/m/' ~ name ~ '/' ~ d.id }}">{{ d.title }}</a>{% endfor %}
+  <span class="mut">·</span><a href="/modules/{{ name }}/health">Health</a>{% if man.sandbox.tools %}<a href="/modules/{{ name }}/nodes">Nodes</a>{% endif %}{% if man.secrets %}<a href="/modules/{{ name }}/secrets">Secrets</a>{% endif %}<a href="/modules/{{ name }}/workloads" aria-current="page">Workloads</a><a href="/modules/{{ name }}/settings">Settings</a>
+</nav>
+<p class="small mut">A workload is a long-running process of this module that is the work itself. It runs only on the nodes you
+assign it to, sandboxed like the module's jobs, and yields to your protected processes: throttled, lowered, paused for at most
+the time it tolerates, then stopped and held while the cause lasts. A workload with a per-node identity runs under a seat lease,
+so one identity never runs on two nodes at once.</p>
+{% for w in man.workloads %}
+{% set key = name ~ '/' ~ w.name %}
+<div class="card">
+  <div class="row"><b class="mono">{{ w.name }}</b>
+    <span class="chip">seat {{ w.seat }}</span>{% if w.identity == 'per_node' %}<span class="chip acc">per-node identity</span>{% endif %}
+    {% if w.secrets %}<span class="small mut">receives {{ w.secrets | join(', ') }}</span>{% endif %}
+    <span class="small mut">pause tolerance {{ w.effective_pause_tolerance_s() | num(0) }} s · {{ w.resources.cpu_cores }} cores, {{ w.resources.mem_gb }} GB</span></div>
+  <table class="small"><tr><th scope="col">node</th><th scope="col">state</th><th scope="col">why</th><th scope="col">seat</th><th scope="col">lease left</th><th scope="col">restarts</th><th scope="col">last error</th><th scope="col"></th></tr>
+  {% for r in rows if r.workload == w.name %}{% set rep = r.report or {} %}
+  <tr><td><a href="/nodes/{{ r.node_id }}">{{ r.hostname or r.node_id }}</a>{% if r.placed_by == 'coordinator' %} <span class="chip">placed</span>{% endif %}</td>
+    <td><span class="chip {{ 'ok' if r.state == 'running' else ('warn' if r.state in ('held', 'starting', 'stopping') else ('bad' if r.state == 'withdrawn' else '')) }}">{{ r.state }}</span>{% if rep.paused %} <span class="chip warn">paused</span>{% endif %}{% if rep.lowered %} <span class="chip">lowered</span>{% endif %}</td>
+    <td>{{ r.reason or '' }}{% if rep.blocked_detail %}: {{ rep.blocked_detail }}{% endif %}</td>
+    <td class="mono">{{ r.seat_id or '-' }}{% if r.seat_id %} · fence {{ r.fence }}{% endif %}</td>
+    <td>{% if rep.lease_left_s is not none %}{{ rep.lease_left_s | num(0) }} s{% endif %}</td>
+    <td>{{ rep.restarts or 0 }}</td><td class="mono">{{ rep.error or '' }}</td>
+    <td>{% call m.op_form("workloads.restart", key, "Restart", confirm="Restart " ~ key ~ " on " ~ (r.hostname or r.node_id) ~ "?") %}<input type="hidden" name="p.node" value="{{ r.node_id }}">{% endcall %}
+      {% call m.op_form("workloads.unassign", key, "Unassign", confirm="Stop running " ~ key ~ " on " ~ (r.hostname or r.node_id) ~ "?") %}<input type="hidden" name="p.node" value="{{ r.node_id }}">{% endcall %}</td></tr>
+  {% if rep.log_tail %}<tr><td colspan="8"><details><summary class="small">log tail</summary><pre class="mono small">{{ rep.log_tail }}</pre></details></td></tr>{% endif %}
+  {% else %}<tr><td colspan="8" class="mut">not assigned to any node</td></tr>{% endfor %}</table>
+  <div class="row" style="margin-top:6px">
+  {% if w.seat == 'fleet' %}
+  {% call m.op_form("workloads.assign", key, "Place seats", inline=False) %}<input type="number" name="p.count" min="1" value="1" aria-label="seats to place">{% endcall %}
+  {% else %}
+  {% call m.op_form("workloads.assign", key, "Assign", inline=False) %}<select name="p.node" aria-label="node to assign it to" required>{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}
+  {% endif %}
+  </div>
+</div>
+{% else %}<p class="mut">This module declares no workloads.</p>{% endfor %}
+{% endblock %}

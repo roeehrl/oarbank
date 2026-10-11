@@ -334,6 +334,78 @@
     ]
    },
    "refused": []
+  },
+  {
+   "name": "a macOS delegation names a code-signing identity",
+   "os": "darwin",
+   "rule": {
+    "id": "worker-app",
+    "match": {
+     "team_id": "ABCDE12345",
+     "identifier": "com.example.worker"
+    },
+    "tree": "descendants",
+    "delegate": {
+     "actions": [
+      "pause",
+      "lower"
+     ]
+    }
+   },
+   "refused": []
+  },
+  {
+   "name": "a path cannot delegate on macOS",
+   "os": "darwin",
+   "rule": {
+    "id": "worker-bin",
+    "match": {
+     "path_prefix": "/opt/worker/bin/worker"
+    },
+    "delegate": {
+     "actions": [
+      "pause"
+     ]
+    }
+   },
+   "refused": [
+    "on macOS a delegation names a code-signing identity"
+   ]
+  },
+  {
+   "name": "a Linux delegation names one exact path",
+   "os": "linux",
+   "rule": {
+    "id": "worker-bin",
+    "match": {
+     "path_prefix": "/opt/worker/bin/worker"
+    },
+    "delegate": {
+     "actions": [
+      "lower"
+     ]
+    }
+   },
+   "refused": []
+  },
+  {
+   "name": "a signing identity cannot delegate on Linux",
+   "os": "linux",
+   "rule": {
+    "id": "worker-app",
+    "match": {
+     "team_id": "ABCDE12345",
+     "identifier": "com.example.worker"
+    },
+    "delegate": {
+     "actions": [
+      "pause"
+     ]
+    }
+   },
+   "refused": [
+    "on linux a delegation names one executable's exact path"
+   ]
   }
  ]
 }

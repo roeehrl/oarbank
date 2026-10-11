@@ -656,6 +656,36 @@ A module's services, such as a VM, follow service protocol 1 (the SDK's spec/ser
 - **Kill switch.** The services of a module in `modules_disabled` are disabled: stopped once no attempt uses them.
 - **Probes** provide capabilities, such as `java17`, on a period.
 
+## Workloads
+
+A module's workloads (docs/design/workloads.md; the SDK's spec/workload-protocol.md) are long-running processes the
+owner assigns to nodes (`workloads.assign`, T2).
+
+- **Directive** (every hello and heartbeat reply): `workloads: [{key, module, workload, desired, seat_id, fence,
+  lease_s, restart_seq, reason}]`, one entry per assignment of the node. `desired` is `running` only for a workload the
+  node may run now: for a per-node identity, with the seat's lease (`seat_id`, `fence`, and `lease_s`, the lease's end
+  minus the coordinator's now when it wrote the reply); otherwise `stopped` with a reason code (`WORKLOAD_SEAT_ELSEWHERE`,
+  `WORKLOAD_SECRETS_NOT_SET`, `WORKLOAD_IDENTITY_SHARED`, `WORKLOAD_NOT_OFFERED`, `WORKLOAD_NODE_NOT_ACTIVE`). The agent
+  runs exactly what is listed `running` and stops what is not; a workload missing from the list is unassigned. The
+  agent's lease ends at the time it **sent** the request plus `lease_s`, on its boot clock (it counts sleep), and the
+  workload stops then unless a later reply renewed it. A raised `restart_seq` restarts the workload (and lifts a
+  withdrawal).
+- **Report** (hello and heartbeat): `workloads: [{key, state, running, seat_id, fence, release, pid, run, adopted,
+  members, restarts, failures, withdrawn, error, blocked, held, held_code, paused, lowered, threads, cpu_cap, health,
+  lease_left_s, progress, log_tail, ...}]`. `running` is true while anything of the workload may run (starting, running,
+  stopping). `release: true` with `running: false` gives the seat up; the coordinator frees a seat only on such a report
+  from its holder carrying the current fence (an older fence is ignored), else when the lease and a grace of 60 s have
+  passed. `log_tail` is the last 2 KiB of the workload's log, with its secrets' values redacted.
+- **Report events** (heartbeat): `workload_reports: [{key, seat_id, fence, events: [{seq, t, data}]}]`, a workload's
+  `report` events (at most 4 KiB each, 60 a minute); the reply's `workload_reports_ack: {key: seq}` names the highest
+  sequence stored, which the agent then drops. The coordinator delivers them to the module's `workload.report` verb and
+  applies the effects it answers (`coordinator.workload_effects`), with an audit row.
+- **Secrets**: `POST /v1/agent/workloads/secrets {key, seat_id, fence}` answers `{secrets: {name: value}}` only while the
+  node holds the seat with that fence and its lease runs (409 `seat_not_held`, `secrets_not_set`, `identity_shared`,
+  `not_assigned`). The agent asks at each start and keeps the values only in the run's owner-only secrets file.
+- **Adoption**: workloads outlive their agent; the next agent adopts a recorded run (`<home>/state/workloads/`) while its
+  lease runs and its leader is the recorded process, and reports it at hello, which renews the lease.
+
 ## Inbound listeners
 
 docs/design/inbound-listeners.md is the full contract; in short:
@@ -663,7 +693,7 @@ docs/design/inbound-listeners.md is the full contract; in short:
 - **Facts** (hello): `"listeners": {"version": 1, "probe": true}`: the agent runs listeners and can dial back for
   others.
 - **What the agent runs.** For each statement entry `<module>/<listener>`, a listener when the module version in its
-  release requests that `inbound` listener, an enabled endpoint service of the module lists it, `listeners_disabled`
+  release requests that `inbound` listener, an enabled endpoint service or a workload of the module lists it, `listeners_disabled`
   is off, the policy's `inbound_listeners` is not false and the protection mode is not `strict_yield`; else a refusal
   (`LISTENER_NOT_GRANTED`, `LISTENER_NO_TARGET`, `MODULE_DISABLED`, `LISTENERS_DISABLED`, `LISTENERS_FORBIDDEN`,
   `LISTENER_STRICT_YIELD`, `LISTENER_HANDOVER_UNSUPPORTED`, `LISTENER_BIND_FAILED`).

@@ -26,7 +26,8 @@ Safety (must hold after every committed transaction):
   S15 a module fault is never charged: an attempt whose completion waited on its module
       (phase awaiting_module) is never killed, and never ends failed unless the module, once back,
       judged its result (a recorded verdict); the wait itself never counts as an exec failure
-  S16 every journaled actuation targets one of the node's own attempts or services
+  S16 every journaled actuation targets one of the node's own attempts, services or workloads (a workload's members
+      included), or a process an owner rule delegated
   S17 no node admits work while its memory guard is active
   S18 an active protection rule is enforced within enter_for_s + 2 samples (from the decision journal)
   S20 every live, leased or done job of a bound unit of work ran on, or got its canonical result from, a node of the
@@ -43,6 +44,7 @@ Safety (must hold after every committed transaction):
   S25 for a rule marked immediate, a phase the agent's event path saw begin is followed by its pause request within
       100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
       the source event)
+  S26 at most one node runs a seat of a per-node workload identity at a time (workloads.py; TLA+ OarbankSeat)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -197,14 +199,35 @@ def s15_module_faults_not_charged(db: DB):
               "S15 attempt {attempt_id} (job {job_id}) waited on its module but ended {state} ({end_reason})")
 
 
+def _delegated_rule(db: DB, node_id: str, rule: str) -> bool:
+    """Whether the node's protection ever had an owner rule `rule` that delegates (protection_versions)."""
+    for v in db.q("SELECT config_json FROM protection_versions WHERE node_id=?", (node_id,)):
+        cfg = jl(v["config_json"], {}) or {}
+        if any(r.get("id") == rule.removesuffix("@local") and r.get("delegate") for r in cfg.get("rule") or []):
+            return True
+    return False
+
+
 def s16_actuation_only_on_spawned(db: DB):
-    """Every signal or policy change an agent journaled targets one of its own attempts (or services): the
-    agent-side spawn registry refuses anything else, and a refusal is journaled as actuation_refused."""
+    """Every signal or policy change an agent journaled targets one of its own attempts, services or workloads (a
+    workload's members outside its process group included: the record names the workload), or a process an owner rule
+    delegated: the agent-side spawn registry refuses anything else, and a refusal is journaled as actuation_refused."""
     out = []
     for r in db.q("SELECT d.node_id, d.seq, d.record_json FROM protection_decisions d WHERE d.kind='actuation'"):
         rec = json.loads(r["record_json"] or "{}")
         aid, svc = rec.get("attempt"), rec.get("service")
         if svc:
+            continue
+        if rec.get("workload"):
+            m, _, w = str(rec["workload"]).partition("/")
+            if not db.one("SELECT 1 FROM workload_assignments WHERE module=? AND workload=? AND node_id=?", (m, w, r["node_id"])):
+                out.append(f"S16 node {r['node_id']} journal #{r['seq']}: actuation on pid {rec.get('pid')} for workload "
+                           f"{rec['workload']}, which was never assigned to it")
+            continue
+        if rec.get("delegated"):
+            if not _delegated_rule(db, r["node_id"], str(rec["delegated"])):
+                out.append(f"S16 node {r['node_id']} journal #{r['seq']}: actuation on pid {rec.get('pid')} under "
+                           f"delegation {rec['delegated']}, which no owner rule of the node declares")
             continue
         if aid is None or not db.one("SELECT 1 FROM attempts WHERE attempt_id=? AND node_id=?", (aid, r["node_id"])):
             out.append(f"S16 node {r['node_id']} journal #{r['seq']}: actuation on pid {rec.get('pid')} "
@@ -432,6 +455,12 @@ def s24_listeners_granted_and_assigned(db: DB):
     return listeners.s24_violations(db)
 
 
+def s26_single_seat(db: DB):
+    """S26: at most one node runs a seat of a per-node workload identity at a time (workloads.py)."""
+    from .workloads import s26_single_seat as check
+    return check(db)
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
@@ -439,7 +468,7 @@ SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_gener
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
           s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s24_listeners_granted_and_assigned,
-          s25_immediate_phases_pause_at_once]
+          s25_immediate_phases_pause_at_once, s26_single_seat]
 
 
 def check_all(db: DB) -> list[str]:

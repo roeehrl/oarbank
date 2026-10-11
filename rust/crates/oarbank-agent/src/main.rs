@@ -56,6 +56,7 @@ mod sys;
 mod tls;
 mod tools;
 mod tuf;
+mod workloads;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod wslc;
 
@@ -234,6 +235,10 @@ enum Cmd {
         #[arg(long)]
         agent_start: u64,
     },
+    /// End every workload this home's records name (an uninstall, a node leaving its fleet): only processes that
+    /// still have their recorded start times are signalled.
+    #[command(name = "stop-workloads", hide = true)]
+    StopWorkloads,
     /// Apply a sandbox profile to this process, then exec argv (internal: how module processes start).
     #[command(name = "sandbox-exec", hide = true)]
     SandboxExec {
@@ -398,6 +403,12 @@ fn main() -> anyhow::Result<()> {
         #[cfg(unix)]
         Cmd::ReapRunners { agent_pid, agent_start } => {
             runners::watchdog_main(&layout, (agent_pid, agent_start));
+            Ok(())
+        }
+        Cmd::StopWorkloads => {
+            for k in workloads::stop_all_recorded(&layout) {
+                println!("ended workload {k}");
+            }
             Ok(())
         }
         Cmd::Containers { action } => containers(&layout, action),

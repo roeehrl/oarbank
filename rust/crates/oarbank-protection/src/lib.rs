@@ -42,6 +42,7 @@ pub mod support;
 pub mod table;
 pub mod telemetry;
 pub mod watch;
+pub mod workloads;
 pub mod x11;
 
 pub use capacity::{
@@ -49,7 +50,7 @@ pub use capacity::{
     Limits, Policy, ReleaseDecision, Schedule,
 };
 pub use config::{
-    ActiveWhen, CapFleet, ConfigError, DuringSpec, MemoryFloors, ProcessMatch, ProtectSpec,
+    ActiveWhen, CapFleet, ConfigError, Delegation, DuringSpec, MemoryFloors, ProcessMatch, ProtectSpec,
     ProtectionConfig, ProtectionMode, ProtectionRule, ProtectionScope, ReserveExpr, ReserveMetric,
     TreeScope, DEFAULT_GPU_MIN_BUSY,
 };
@@ -85,3 +86,7 @@ pub use table::{
     SourceError, UnsupportedProcessSource,
 };
 pub use telemetry::ProtectionTelemetry;
+pub use workloads::{
+    fleet_id, is_fleet_id, DelegatedAction, DelegatedGroup, DelegationLadder, FleetWorkloadView, Hold, HoldCause,
+    LadderEvent, LadderInputs, WorkloadAction, WorkloadLadder,
+};

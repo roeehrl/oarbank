@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla) under every config and compare
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla) under every config and compare
 # each outcome with the expected one. A config's spec is its name up to the first underscore: OarbankLease_liveness.cfg
 # checks OarbankLease.tla, OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
 #
@@ -103,6 +103,26 @@ CONFIGS=(
   "OarbankPortmap_f_keyed_delete                     inv:AtMostOneExternalPortPerListener"
   "OarbankPortmap_g_epoch_forgets_entry              inv:AtMostOneExternalPortPerListener"
 )
+# OarbankSeat (docs/design/workloads.md, D46)
+CONFIGS+=(
+  "OarbankSeat                                       ok"
+  "OarbankSeat_fence_per_run                         ok"
+  "OarbankSeat_liveness                              ok"
+  "OarbankSeat_witness_SeatMovedAfterExpiry          inv:W_SeatMovedAfterExpiry"
+  "OarbankSeat_witness_SeatMovedOnRelease            inv:W_SeatMovedOnRelease"
+  "OarbankSeat_witness_AdoptedAcrossRestart          inv:W_AdoptedAcrossRestart"
+  "OarbankSeat_a_nofence_release                     inv:AtMostOneRunning"
+  "OarbankSeat_b_renew_after_expiry                  inv:AtMostOneRunning"
+  "OarbankSeat_c_no_grace                            inv:AtMostOneRunning"
+  "OarbankSeat_d_deadline_from_receive               inv:AtMostOneRunning"
+  "OarbankSeat_e_adopt_without_lease                 inv:AtMostOneRunning"
+  "OarbankSeat_f_clock_stops_in_sleep                inv:AtMostOneRunning"
+  "OarbankSeat_finding_release_if_unassigned         inv:AtMostOneRunning"
+  "OarbankSeat_agent_down_past_lease                 inv:AtMostOneRunning"
+  "OarbankSeat_faults2                               ok"
+  "OarbankSeat_unbounded                             ok"
+)
+SLOW+=" OarbankSeat OarbankSeat_fence_per_run OarbankSeat_faults2 OarbankSeat_unbounded "
 
 if [ ! -f "$JAR" ]; then
   echo "missing $JAR: download https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar" >&2
@@ -120,11 +140,12 @@ for row in "${CONFIGS[@]}"; do
   if [ -n "$FILTER" ] && [[ "$cfg" != *"$FILTER"* ]]; then continue; fi
   if [ -n "${QUICK:-}" ] && [[ "$SLOW" == *" $cfg "* ]]; then continue; fi
   log="out/$cfg.log"
+  spec="${cfg%%_*}.tla"
   meta="$(mktemp -d "${TMPDIR:-/tmp}/tlc-meta.XXXXXX")"
   start=$(date +%s)
   "$JAVA" -XX:+UseParallelGC -Xmx"$HEAP" -cp "$JAR" tlc2.TLC \
       -workers "$WORKERS" -deadlock -cleanup -metadir "$meta" \
-      -config "$cfg.cfg" "${cfg%%_*}.tla" >"$log" 2>&1
+      -config "$cfg.cfg" "$spec" >"$log" 2>&1
   secs=$(( $(date +%s) - start ))
   rm -rf "$meta"
 

@@ -71,6 +71,14 @@ This value can only make the coordinator's setting stricter on this computer, ne
       <string id="run_on_battery_Help">Disabled: a laptop on battery power takes no new jobs. Enabled has no effect: the coordinator's setting applies.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="workloads">Run workloads</string>
+      <string id="workloads_Help">Disabled: this computer runs no module workloads (supervised long-running daemons) and stops the ones it runs. Enabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="delegated_processes">Let protection pause and lower delegated processes</string>
+      <string id="delegated_processes_Help">Disabled: owner rules that delegate this computer's own processes to protection match nothing here. Enabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="inbound_listeners">Inbound listeners</string>
       <string id="inbound_listeners_Help">Disabled: no module listener accepts connections from the internet on this computer, and every router port mapping Oarbank made is removed. Enabled has no effect: the coordinator's setting applies.
 

@@ -237,6 +237,16 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     async def heartbeat(request: Request, node=Depends(node_dep)):
         return await run_in_threadpool(core.heartbeat, db, node, await request.json(), peer(request))
 
+    @app.post("/v1/agent/workloads/secrets")
+    async def workload_secrets(request: Request, node=Depends(node_dep)):
+        """A workload's secrets for this node, only while it holds the seat with that fence (docs/design/workloads.md)."""
+        from . import workloads
+        body = await request.json()
+        try:
+            return await run_in_threadpool(workloads.secrets, db, node, body)
+        except workloads.WorkloadError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+
     @app.post("/v1/agent/claim")
     async def claim(request: Request, node=Depends(node_dep)):
         return await run_in_threadpool(core.claim, db, node, await request.json())
@@ -916,6 +926,27 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         d = fleet_data()
         return {k: d[k] for k in ("nodes", "enrollments", "campaigns", "alerts", "discovered")}
 
+    @app.get("/api/v1/workloads")
+    def api_workloads(node: str = "", module: str = "", actor=Depends(who)):
+        """Every workload assignment with its seat and the node's latest report (`oarbank workload list`)."""
+        from . import workloads
+        nid = None
+        if node:
+            n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (node, node))
+            if not n:
+                raise core.ApiError(404, "not_found", f"node {node}")
+            nid = n["node_id"]
+        return {"workloads": workloads.listing(db, nid, module or None)}
+
+    @app.get("/api/v1/workloads/{module}/{name}/logs")
+    def api_workload_logs(module: str, name: str, node: str, actor=Depends(who)):
+        """The log tail a node last reported for one workload (`oarbank workload logs`)."""
+        from . import workloads
+        n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (node, node))
+        if not n:
+            raise core.ApiError(404, "not_found", f"node {node}")
+        return workloads.logs(db, f"{module}/{name}", n["node_id"])
+
     @app.get("/api/v1/campaigns")
     def api_campaigns(module: str = "", state: str = "", actor=Depends(who)):
         rows = db.q("SELECT campaign_id FROM campaigns WHERE (?='' OR module=?) AND (?='' OR state=?) ORDER BY created_at DESC LIMIT 500",
@@ -1210,6 +1241,8 @@ def campaign_loop(db: DB, stop: threading.Event):
                 if db.get_state("move_postflight_pending"):
                     modlife.postflight(db)               # once, on a coordinator that just took over
                 campaigns.tick_all(db)
+                from . import workloads
+                workloads.process_reports(db)            # workloads' report events to their module (module IPC)
                 if clock.now() - last_integrity > 3600:
                     last_integrity = clock.now()
                     modlife.routine(db)                  # each module at most once a day

@@ -182,6 +182,30 @@
       "title": "Cooldown",
       "type": "object"
     },
+    "Delegate": {
+      "additionalProperties": false,
+      "description": "An owner's delegation of a process tree to host protection (docs/design/workloads.md): pause and lower only.",
+      "properties": {
+        "actions": {
+          "description": "What protection may do (stop is not offered).",
+          "items": {
+            "enum": [
+              "pause",
+              "lower"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "actions"
+      ],
+      "title": "Delegate",
+      "type": "object"
+    },
     "During": {
       "additionalProperties": false,
       "description": "Phase-scoped extra actions while an owner-supplied source says a phase is on.",
@@ -732,6 +756,18 @@
             }
           ],
           "default": null
+        },
+        "delegate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Delegate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The matched tree is the owner's own work that protection may pause or lower as fleet work (with the node setting delegated_processes on); no other action goes with it."
         },
         "during": {
           "items": {
