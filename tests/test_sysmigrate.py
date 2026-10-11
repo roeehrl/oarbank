@@ -7,6 +7,7 @@ directory holding the keys under their real item names (macOS), and a recorder i
 login Keychain, no launchd or systemd job, no account is touched.
 """
 import base64
+import contextlib
 import json
 import os
 import plistlib
@@ -133,6 +134,9 @@ def per_user_home(tmp_path, os_name=sys.platform, keys_in_files=True, secret=Tru
             unit = units / f"dev.codonic.oarbank.{name}.service"
             unit.write_text(f'[Service]\nExecStart={q}\nEnvironment="OARBANKD_HOME={old}" "OARBANK_RELEASE_SIGNING=0"\n')
             (units / "default.target.wants" / unit.name).symlink_to(unit)
+    # closed now: an sqlite3 connection holds a reference cycle (its statement cache), so one left open closes at some
+    # later garbage collection, which removes the -wal and -shm files in the middle of whatever the test is checking
+    db.conn.close()
     return person, old, fleet, keys
 
 
@@ -327,27 +331,55 @@ def test_refusals(tmp_path):
         sysmigrate.Migration(lay, Recorder(lay, tmp_path / "b"), inst).run()
 
 
+def _tree(root):
+    """Every path under `root` with its size and modification time: a dry run must leave all of it as it was."""
+    return {str(p.relative_to(root)): (p.lstat().st_size, p.lstat().st_mtime_ns) for p in root.rglob("*")}
+
+
+@contextlib.contextmanager
+def _read_only(monkeypatch):
+    """Inside: any write to the file system or any SQLite connection fails the test (what a dry run may not do)."""
+    def refuse(what):
+        return lambda *a, **k: pytest.fail(f"a dry run tried to {what}: {a[:2]}")
+    real_open = open
+
+    def guarded_open(file, mode="r", *a, **k):
+        if any(c in mode for c in "wax+"):
+            pytest.fail(f"a dry run opened {file} for writing ({mode})")
+        return real_open(file, mode, *a, **k)
+    with monkeypatch.context() as m:
+        m.setattr(sqlite3, "connect", refuse("open a database"))
+        for name in ("mkdir", "makedirs", "rename", "replace", "remove", "unlink", "rmdir", "chmod", "chown", "symlink"):
+            m.setattr(os, name, refuse(name))
+        m.setattr("builtins.open", guarded_open)
+        m.setattr(shutil, "rmtree", refuse("rmtree"))
+        m.setattr(shutil, "copy2", refuse("copy2"))
+        yield
+
+
 def test_a_dry_run_changes_nothing_and_says_what_blocks(tmp_path, monkeypatch):
     """`oarbank coordinator migrate --dry-run` (as the person) and `--run --dry-run` print the plan only: no key leaves
-    the Keychain into the old home, no administrator prompt, no file written."""
+    the Keychain into the old home, no administrator prompt, no file written, no database opened."""
     person, old, _, _ = per_user_home(tmp_path, "darwin", keys_in_files=False)
     lay = layout(tmp_path, "darwin")
-    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    before = _tree(tmp_path)
     monkeypatch.setattr(sysmigrate, "export_keys", lambda *a, **k: pytest.fail("a dry run exported keys"))
     monkeypatch.setattr(sysmigrate, "elevate", lambda *a, **k: pytest.fail("a dry run asked for an administrator"))
     printed = []
-    assert sysmigrate.run_as_person(dry_run=True, out=printed.append, layout=lay, people=people(person)) == 0
+    with _read_only(monkeypatch):
+        assert sysmigrate.run_as_person(dry_run=True, out=printed.append, layout=lay, people=people(person)) == 0
     doc = json.loads(printed[-1])
     assert doc["would_migrate"]["old_home"] == str(old) and doc["to"] == str(lay.new_home)
     assert doc["keys_in_file_store"] == [] and doc["blockers"] == [] and "login Keychain" in doc["keys_to_export"]
+    assert _tree(tmp_path) == before
     (old / "setup.pending.json").write_text("{}")
     monkeypatch.setattr(sysmigrate, "find_installs", lambda layout, people=None: [sysmigrate._from_plist(
         layout, USER, os.getuid(), os.getgid(), person)])
     printed.clear()
-    assert sysmigrate.run_as_root(dry_run=True, layout=lay, out=printed.append) == 0
+    with _read_only(monkeypatch):
+        assert sysmigrate.run_as_root(dry_run=True, layout=lay, out=printed.append) == 0
     assert any("setup is unfinished" in b for b in json.loads(printed[-1])["blockers"])
     (old / "setup.pending.json").unlink()
-    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
     assert sysmigrate.read_record(lay) is None
 
 
