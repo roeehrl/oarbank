@@ -558,7 +558,7 @@ stated without "once settled" (`EventuallyRuns`, `SeatReGranted`).
 | config | change | TLC finds |
 |--------|--------|-----------|
 | `OarbankSeat` | the protocol as designed, at most 1 fault | no violation |
-| `OarbankSeat_faults2`, `_unbounded` | the same, 2 faults / no fault budget (slow) | no violation |
+| `OarbankSeat_faults2`, `_unbounded` | the same, 2 faults / no fault budget | not run to completion (over 50 million distinct states; hours) |
 | `OarbankSeat_liveness` | liveness and safety, 1 fault, patient heartbeats, timely network | no violation |
 | `_witness_SeatMovedAfterExpiry` | reachability: the seat moves after the old lease and grace ran out, and the new node runs it | witness found |
 | `_witness_SeatMovedOnRelease` | reachability: the seat moves before the old lease ends, on a fenced release, and the new node runs it | witness found |
@@ -586,6 +586,27 @@ its next heartbeat stops and restarts it. The explicit release has no such needl
 lease (a crash loop, a long update) nothing stops it at the lease's end and the seat moves while
 it still runs. The agent's watchdog (the runner watchdog, which outlives the agent) now ends
 recorded workloads at their leases' end (`guard_leases`), which restores the assumption.
+
+Results of the last run (TLC 2.19, 4 workers, M4 Max shared with other work, 2026-10-11):
+
+| config | result | generated | distinct | depth | time |
+|--------|--------|-----------|----------|-------|------|
+| `OarbankSeat` | no violation | 349,289,681 | 36,418,976 | 52 | 694 s |
+| `_fence_per_run` | no violation | 440,845,689 | 46,328,972 | 50 | 684 s |
+| `_liveness` | no violation | 19,640,425 | 3,435,672 | 50 | 580 s |
+| `_witness_SeatMovedAfterExpiry` | witness | 2,549,905 | 336,558 | 13 | 5 s |
+| `_witness_SeatMovedOnRelease` | witness | 2,542,571 | 332,858 | 13 | 4 s |
+| `_witness_AdoptedAcrossRestart` | witness | 15,003 | 3,226 | 7 | 1 s |
+| `_a_nofence_release` | `AtMostOneRunning` | 2,691,073 | 372,944 | 13 | 5 s |
+| `_b_renew_after_expiry` | `AtMostOneRunning` | 114,415,699 | 14,631,954 | 16 | 249 s |
+| `_c_no_grace` | `AtMostOneRunning` | 99,041 | 17,137 | 9 | 1 s |
+| `_d_deadline_from_receive` | `AtMostOneRunning` | 5,060,301 | 642,040 | 14 | 8 s |
+| `_e_adopt_without_lease` | `AtMostOneRunning` | 14,469,592 | 1,566,452 | 16 | 20 s |
+| `_f_clock_stops_in_sleep` | `AtMostOneRunning` | 16,738,542 | 1,867,313 | 16 | 49 s |
+| `_finding_release_if_unassigned` | `AtMostOneRunning` | 14,846,053 | 1,616,272 | 16 | 80 s |
+| `_agent_down_past_lease` | `AtMostOneRunning` | 8,930,057 | 1,029,621 | 15 | 18 s |
+
+(For a violation, the counts are those explored when TLC stopped at the counterexample.)
 
 Run them with `./run_tlc.sh OarbankSeat` (`QUICK=1` skips the reference, `_fence_per_run`,
 `_faults2` and `_unbounded`, which take from about ten minutes to hours).
