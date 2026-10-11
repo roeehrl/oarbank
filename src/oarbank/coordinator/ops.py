@@ -1340,6 +1340,195 @@ def _agent_sign(db, req):
     return _agent_op(fn)(db, req)
 
 
+# ------------------------------------------------------------------ fleet updates (docs/design/fleet-updates.md)
+
+def _updates(fn):
+    """A fleet-update handler: the module's refusals become 409 `update`."""
+    def run(db, req):
+        from . import fleetupdates, rollouts
+        try:
+            return fn(db, req, fleetupdates, rollouts)
+        except (fleetupdates.UpdateError, rollouts.RolloutError) as e:
+            raise core.ApiError(409, "update", str(e))
+    return run
+
+
+def _release_ref(db, req) -> str:
+    """The release an operation names (its target or params.version), else the newest ready one."""
+    from . import fleetupdates
+    v = req.target or req.params.get("version")
+    if not v:
+        rels = [r for r in fleetupdates.releases(db) if r["state"] == "ready"]
+        if not rels:
+            raise core.ApiError(404, "not_found", "no fleet release is ready (oarbank update import or fetch)")
+        v = rels[0]["version"]
+    if not db.one("SELECT 1 FROM fleet_releases WHERE version=?", (v,)):
+        raise core.ApiError(404, "not_found", f"no fleet release {v} is imported")
+    req.target = v
+    return v
+
+
+def _rollout_ref(db, req) -> dict:
+    from . import rollouts
+    try:
+        r = rollouts.resolve_target(db, req.target or req.params.get("rollout"))
+    except rollouts.RolloutError as e:
+        raise core.ApiError(404, "not_found", str(e))
+    req.target = r["rollout_id"]
+    return r
+
+
+def _updates_snap(db, req):
+    from . import rollouts
+    a = rollouts.active(db)
+    return {"rollout": {k: a[k] for k in ("rollout_id", "version", "state", "ring")} if a else None}
+
+
+@handler("updates.import", target_type="fleet_release", atomic=False)
+def _updates_import(db, req):
+    def fn(db, req, F, RO):
+        if req.params.get("manifest"):
+            out = F.import_staged(db, req.params["manifest"], req.actor)
+        elif req.params.get("dir"):
+            out = F.import_dir(db, req.params["dir"], req.actor)
+        else:
+            raise F.UpdateError("params: dir (a directory on the coordinator) or manifest (a staged manifest's sha256)")
+        req.target = out["version"]
+        return out
+    return _updates(fn)(db, req)
+
+
+@handler("updates.fetch", target_type="fleet_release", atomic=False)
+def _updates_fetch(db, req):
+    def fn(db, req, F, RO):
+        out = F.fetch(db, req.target or req.params.get("version") or "latest", req.actor)
+        req.target = out["version"]
+        return out
+    return _updates(fn)(db, req)
+
+
+@handler("updates.sign", target_type="fleet_release")
+def _updates_sign(db, req):
+    def fn(db, req, F, RO):
+        v = _release_ref(db, req)
+        return F.attach_signature(db, v, req.params.get("statement") or "", req.params.get("signature") or "", req.actor)
+    return _updates(fn)(db, req)
+
+
+def _updates_start_impact(db, r):
+    from . import rollouts
+    try:
+        return rollouts.plan_impact(rollouts.plan(db, _release_ref(db, r), r.params))
+    except rollouts.RolloutError as e:
+        return {"refused": str(e)}
+
+
+@handler("updates.start", target_type="rollout", impact=_updates_start_impact, snapshot=_updates_snap,
+         name=lambda db, r: r.target or "")
+def _updates_start(db, req):
+    def fn(db, req, F, RO):
+        v = _release_ref(db, req)
+        out = RO.start(db, v, req.actor, req.params)
+        return {"rollout_id": out["rollout_id"], "version": v, "state": out["state"], "ring": out["ring"]}
+    return _updates(fn)(db, req)
+
+
+def _rollout_op(action):
+    def apply(db, req):
+        def fn(db, req, F, RO):
+            r = _rollout_ref(db, req)
+            if action == "halt":
+                out = RO.halt(db, r, req.reason or f"halted by {req.actor}", req.actor)
+            else:
+                out = getattr(RO, action)(db, r, req.actor)
+            return {"rollout_id": out["rollout_id"], "state": out["state"]}
+        return _updates(fn)(db, req)
+    return apply
+
+
+for _a in ("pause", "resume", "halt"):
+    handler(f"updates.{_a}", target_type="rollout", snapshot=_updates_snap)(_rollout_op(_a))
+
+
+def _rollback_impact(db, r):
+    from . import rollouts
+    try:
+        ro = rollouts.resolve_target(db, r.target or r.params.get("rollout"))
+    except rollouts.RolloutError as e:
+        return {"refused": str(e)}
+    moved = rollouts.rollback_plan(db, ro)
+    return {"rollout": ro["rollout_id"], "release": ro["version"], "state": ro["state"],
+            "nodes": [{"hostname": m["hostname"], "back_to": m["from_version"], "state": m["state"]} for m in moved],
+            "then": "each node reinstalls the release it ran (the package its runner kept, or that release's package)"}
+
+
+@handler("updates.rollback", target_type="rollout", impact=_rollback_impact, snapshot=_updates_snap,
+         name=lambda db, r: r.target or "")
+def _updates_rollback(db, req):
+    def fn(db, req, F, RO):
+        r = _rollout_ref(db, req)
+        out = RO.rollback(db, r, req.actor, req.reason or f"rolled back by {req.actor}")
+        return {"rollout_id": out["rollout_id"], "state": out["state"]}
+    return _updates(fn)(db, req)
+
+
+@handler("updates.skip", target_type="node")
+def _updates_skip(db, req):
+    def fn(db, req, F, RO):
+        nid = _nid(db, req)
+        req.target = nid
+        return RO.skip(db, nid, req.actor)
+    return _updates(fn)(db, req)
+
+
+def _update_value(db, req, key: str, value):
+    """Write a node's update_hold or update_pin (their own operations own those settings: R.Setting.writer)."""
+    from .settings import registry as R, store
+    nid = _nid(db, req)
+    req.target = nid
+    try:
+        v = R.check(key, value) if value is not None else None
+    except R.SettingError as e:
+        raise core.ApiError(400, "bad_params", e.detail)
+    rev = store.next_rev(db)
+    if v is None:
+        gone = store.delete(db, "node", nid, "", key)
+        db.event(f"{key}_lifted", actor=req.actor, node_id=nid, reason=req.reason)
+        return {"node_id": nid, key: None, "was_set": gone, "rev": rev}
+    store.put(db, "node", nid, "", key, v, req.actor, rev, req.reason)
+    db.event(f"{key}_set", actor=req.actor, node_id=nid, reason=json.dumps(v)[:300])
+    return {"node_id": nid, key: v, "rev": rev}
+
+
+def _hold_snap(key):
+    return lambda db, req: {key: (db.one("SELECT value_json FROM setting_values WHERE scope='node' AND key=? AND scope_id IN "
+                                         "(SELECT node_id FROM nodes WHERE node_id=? OR hostname=?)", (key, req.target, req.target))
+                                  or {}).get("value_json")}
+
+
+@handler("updates.hold", target_type="node", snapshot=_hold_snap("update_hold"))
+def _updates_hold(db, req):
+    return _update_value(db, req, "update_hold", {"reason": req.params.get("reason") or req.reason or "",
+                                                  "until": req.params.get("until")})
+
+
+@handler("updates.unhold", target_type="node", snapshot=_hold_snap("update_hold"))
+def _updates_unhold(db, req):
+    return _update_value(db, req, "update_hold", None)
+
+
+@handler("updates.pin", target_type="node", snapshot=_hold_snap("update_pin"))
+def _updates_pin(db, req):
+    return _update_value(db, req, "update_pin", {"version": req.params.get("version") or "",
+                                                 "reason": req.params.get("reason") or req.reason or "",
+                                                 "until": req.params.get("until")})
+
+
+@handler("updates.unpin", target_type="node", snapshot=_hold_snap("update_pin"))
+def _updates_unpin(db, req):
+    return _update_value(db, req, "update_pin", None)
+
+
 # ------------------------------------------------------------------ coordinator builds
 
 def _cb_impact(db, r):

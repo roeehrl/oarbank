@@ -89,6 +89,24 @@ def verify_coordinator(stmt: str, signature: str, pubkey_b64: str) -> dict:
     return _verify_fields(stmt, signature, pubkey_b64, "coordinator build", {"coordinator_sha256", "version", "platform", "seq"})
 
 
+FLEET_RELEASE_TYPE = "oarbank.fleet-release/v1"
+
+
+def fleet_release_statement(version: str, seq: int, manifest_sha256: str) -> str:
+    """The owner's statement over a fleet release (docs/design/fleet-updates.md, "Signatures"; D56): the sha256 of the
+    manifest's exact text, with its version and seq. Nodes and the update runners install only what one names."""
+    return json.dumps({"type": FLEET_RELEASE_TYPE, "version": version, "seq": int(seq), "manifest_sha256": manifest_sha256,
+                       "signed_at": int(time.time())}, sort_keys=True, separators=(",", ":"))
+
+
+def verify_fleet_release(stmt: str, signature: str, pubkey_b64: str) -> dict:
+    """The parsed statement of a fleet release signature, or ValueError (a bad signature, another type, missing fields)."""
+    s = _verify_fields(stmt, signature, pubkey_b64, "fleet release", {"type", "version", "seq", "manifest_sha256"})
+    if s["type"] != FLEET_RELEASE_TYPE:
+        raise ValueError(f"not a fleet release statement ({s['type']!r})")
+    return s
+
+
 def owner_anchors_statement(fleet_id: str, version: int, keys: list[str], rescue: list[str] | None = None) -> str:
     """The owner key set (coordinator-move.md): every key in it, and a key of the current set, sign it."""
     return json.dumps({"type": "oarbank.owner-anchors/v1", "fleet_id": fleet_id, "version": int(version), "threshold": 1,

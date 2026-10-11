@@ -343,20 +343,25 @@ class DB:
             self.conn.execute("PRAGMA foreign_keys=OFF")
             from .access import SCHEMA as ACCESS_SCHEMA
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
+            from .fleetupdates import NODE_COLUMNS as UPDATE_COLUMNS
+            from .fleetupdates import SCHEMA as FLEET_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
             from .listeners import NODE_COLUMNS as LISTENER_COLUMNS
             from .listeners import SCHEMA as LISTENER_SCHEMA
+            from .rollouts import SCHEMA as ROLLOUT_SCHEMA
             from .settings import modkeys as settings_modkeys
             from .settings import store as settings_store
             from .workloads import SCHEMA as WORKLOADS_SCHEMA
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
             self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + settings_modkeys.SCHEMA + ACCESS_SCHEMA
-                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + LISTENER_SCHEMA + WORKLOADS_SCHEMA + "COMMIT;")
+                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + LISTENER_SCHEMA + WORKLOADS_SCHEMA + FLEET_SCHEMA
+                                    + ROLLOUT_SCHEMA + "COMMIT;")
             for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
                 _ensure_columns(self.conn, table, cols)
             _ensure_columns(self.conn, "nodes", LISTENER_COLUMNS)     # inbound listeners (listeners.py)
+            _ensure_columns(self.conn, "nodes", UPDATE_COLUMNS)       # fleet updates: the agent's report (fleetupdates.py)
             settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
         from .settings import migrate as settings_migrate
