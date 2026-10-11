@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The node's update runner (PLAN D57; docs/design/fleet-updates.md, "The update runner"): launchd runs
+  `oarbank-launcher update-run` (once: one request at most, then it exits) as root when the agent writes its update
+  request into its spool, and at load (boot, and the pkg's postinstall) so a runner interrupted mid-update resumes from
+  its journal. A job of its own: the
+  pkg it installs restarts the agent's service and the helper, never this job, and the postinstall leaves it alone
+  while it runs. The runner trusts nothing in the request (it verifies its own copy of the package against root's
+  trust in /Library/Application Support/Oarbank/update/trust.json).
+
+  Logs: the runner's state directory, root's alone (0700, created by the postinstall before launchd would create the
+  files; Umask 077 for the files themselves). No KeepAlive: it handles at most one request and exits.
+
+  AssociatedBundleIdentifiers: System Settings, Login Items, "Allow in the Background" lists this job under Oarbank
+  Node (the app's name and icon) with the node's other jobs, not under the signing team's name.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.codonic.oarbank.agent.update</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Oarbank/bin/oarbank-launcher</string>
+        <string>update-run</string>
+        <string>--once</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Application Support/Oarbank/agent/updates/request.json</string>
+    </array>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>/Library/Application Support/Oarbank/update/logs/runner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Application Support/Oarbank/update/logs/runner.log</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>dev.codonic.oarbank.node</string>
+    </array>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

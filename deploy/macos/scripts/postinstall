@@ -10,10 +10,16 @@
 #   - The root helper (dev.codonic.oarbank.agent.helper) through which Oarbank Node.app asks for an administrator to
 #     join or leave (docs/design/node-enrollment.md, "macOS elevation"): its authorization rights, with the prompts the
 #     system shows, are registered, and its job is (re)loaded; it runs on demand, when the app asks.
-#   - An upgrade (a node set up in either scope) renders the service's job again with the new launcher's keys
-#     (`oarbank-launcher service refresh`: a 2.8 job has no ExitTimeOut, so launchd would kill the agent 20 s into
-#     stopping its jobs) and restarts it on the new launcher, and restarts a system install's session helpers on the
-#     new agent binary; the agent's own version is the coordinator's to change (self-update).
+#   - The update runner's job (dev.codonic.oarbank.agent.update, PLAN D57; docs/design/fleet-updates.md): (re)loaded,
+#     unless it is running, which is when the runner itself is installing this pkg: booting it out would end the
+#     install it is in the middle of. Its state directory (logs included) is root's alone. Then
+#     `oarbank-launcher update-trust --from-agent` pins the owner anchors the agent pinned as root's update trust,
+#     while an administrator installs (it does nothing when trust is pinned already, or the node has no anchors yet).
+#   - An upgrade (a node set up in either scope) makes the package's agent the current one (`oarbank-launcher install`:
+#     the package is the unit, D57: the launcher, helpers, app, runtime and agent move together), renders the service's
+#     job again with the new launcher's keys (`oarbank-launcher service refresh`: a 2.8 job has no ExitTimeOut, so
+#     launchd would kill the agent 20 s into stopping its jobs) and restarts it on the new launcher, and restarts a
+#     system install's session helpers on the new agent binary.
 #   - Otherwise a double-click install (Installer.app: COMMAND_LINE_INSTALL unset; `installer` and MDM set it to 1)
 #     with someone at the console and no managed code or address opens Oarbank Node at its join window, as that
 #     person. Anything else says how to join from a terminal.
@@ -24,6 +30,8 @@ BIN=/Library/Oarbank/bin
 LABEL=dev.codonic.oarbank.agent
 POLICY=dev.codonic.oarbank.agent.policy
 HELPER=dev.codonic.oarbank.agent.helper
+UPDATE=dev.codonic.oarbank.agent.update
+SUPPORT="/Library/Application Support/Oarbank"
 APP="/Applications/Oarbank Node.app"
 MANAGED="/Library/Managed Preferences/$LABEL.plist"
 user=$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || echo root)
@@ -52,6 +60,23 @@ log=/var/log/oarbank-policy.log
     || { /bin/sleep 1; /bin/launchctl bootstrap system "/Library/LaunchDaemons/$HELPER.plist" 2>/dev/null; } \
     || echo "Oarbank: Oarbank Node's helper starts at the next restart"
 
+# the update runner: root's update trust first (the runner it loads reads it), then its job. Its log goes in its state
+# directory, made root's alone before launchd would create the file
+/bin/mkdir -p "$SUPPORT/update/logs"
+/usr/sbin/chown root:wheel "$SUPPORT/update" "$SUPPORT/update/logs" 2>/dev/null
+/bin/chmod 700 "$SUPPORT/update" "$SUPPORT/update/logs" 2>/dev/null
+"$BIN/oarbank-launcher" update-trust --from-agent >/dev/null 2>&1
+# A running runner is the one installing this pkg (installer is its child): it keeps the job it was started from, and
+# the next load (a restart) reads the new plist. "state = not running" is a loaded job at rest.
+if /bin/launchctl print "system/$UPDATE" 2>/dev/null | /usr/bin/grep -q '^[[:space:]]*state = running'; then
+    echo "Oarbank: the update runner is running; its job reloads at the next restart"
+else
+    /bin/launchctl bootout "system/$UPDATE" 2>/dev/null
+    /bin/launchctl bootstrap system "/Library/LaunchDaemons/$UPDATE.plist" 2>/dev/null \
+        || { /bin/sleep 1; /bin/launchctl bootstrap system "/Library/LaunchDaemons/$UPDATE.plist" 2>/dev/null; } \
+        || echo "Oarbank: the update runner starts at the next restart"
+fi
+
 # inbound listeners (docs/design/inbound-listeners.md): with the Application Firewall on, an agent it does not list gets a
 # prompt at its first incoming connection, which holds every connection while nobody answers it (measured on macOS 26):
 # list the agent as allowed now. A Developer ID-signed agent is matched by its signature, so updates keep the rule.
@@ -62,6 +87,17 @@ fi
 
 upgraded=
 if [ -f "/Library/LaunchDaemons/$LABEL.plist" ]; then
+    # the package's agent becomes current before the service restarts on it, owned by the node's account like the rest
+    # of its home
+    home="$SUPPORT/agent"
+    if [ -e "$home/current" ] || [ -L "$home/current" ]; then
+        if "$BIN/oarbank-launcher" --home "$home" install "$BIN/oarbank-agent" >/dev/null 2>&1; then
+            /usr/sbin/chown -R _oarbank:_oarbank "$home/versions" 2>/dev/null
+            /usr/sbin/chown -h _oarbank:_oarbank "$home/current" 2>/dev/null
+        else
+            echo "Oarbank: the package's agent could not be made current; the service keeps the agent it had"
+        fi
+    fi
     "$BIN/oarbank-launcher" service refresh --system >/dev/null 2>&1 \
         || /bin/launchctl kickstart -k "system/$LABEL" 2>/dev/null
     for u in $(/usr/bin/who | /usr/bin/awk '$2 == "console" {print $1}' | /usr/bin/sort -u); do
@@ -72,7 +108,11 @@ fi
 if [ -n "$console" ]; then
     uhome=$(/usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
     if [ -n "$uhome" ] && [ -f "$uhome/Library/LaunchAgents/$LABEL.plist" ]; then
-        # the person's own LaunchAgent: rendered again as that person, in their session (their HOME names the file)
+        # the person's own node: the package's agent made current and the LaunchAgent rendered again, as that person,
+        # in their session (their HOME names the file)
+        /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/env HOME="$uhome" "$BIN/oarbank-launcher" \
+            --home "$uhome/Library/Application Support/Oarbank/agent" install "$BIN/oarbank-agent" >/dev/null 2>&1 \
+            || echo "Oarbank: the package's agent could not be made current; the service keeps the agent it had"
         /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/env HOME="$uhome" "$BIN/oarbank-launcher" \
             service refresh >/dev/null 2>&1 \
             || /bin/launchctl kickstart -k "gui/$uid/$LABEL" 2>/dev/null

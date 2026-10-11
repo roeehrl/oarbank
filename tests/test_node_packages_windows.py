@@ -212,6 +212,24 @@ def test_container_support_is_a_task_registered_by_the_msi_cancelled_by_rollback
     assert order["CancelContainers"] < order["RemoveNode"] < order["RemoveFiles"]
 
 
+def test_update_trust_is_pinned_after_setup_on_every_install_and_never_fails_it():
+    # docs/design/fleet-updates.md, "Trust": the owner anchors the agent pinned become root's update trust while an
+    # administrator installs; nothing else in the MSI serves the update runner (the elevated helper starts it)
+    pkg = _pkg()
+    assert _set(pkg, "PinUpdateTrust").get("Value") == f"{LAUNCHER} update-trust --from-agent"
+    assert _set(pkg, "PinUpdateTrust").get("Before") == "PinUpdateTrust"
+    ca = _ca(pkg, "PinUpdateTrust")
+    assert (ca.get("BinaryRef"), ca.get("DllEntry"), ca.get("Execute"), ca.get("Impersonate"), ca.get("Return")) == \
+        ("Wix4UtilCA_$(sys.BUILDARCHSHORT)", "WixQuietExec", "deferred", "no", "ignore")
+    steps = _steps(pkg)
+    cond = steps["PinUpdateTrust"].get("Condition")
+    assert _holds(cond, {}) and _holds(cond, {"WIX_UPGRADE_DETECTED": True}) and _holds(cond, {"Installed": True})
+    assert not _holds(cond, {"Installed": True, "REMOVE": "ALL"})
+    order = _order(steps)
+    for setup in ("SetupWithFile", "SetupWithCode", "SetupWithUrl", "SetupWaiting"):
+        assert order[setup] < order["PinUpdateTrust"], setup
+
+
 def test_the_launcher_owns_the_task_and_the_agent_never_installs_inside_another_installation():
     rs = SUPPORT_RS.read_text(encoding="utf-8")
     # the task's events name this package's product
@@ -427,13 +445,13 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
     managed = {m["key"]: m for m in (re.search(r'key: "(?P<key>\w+)".*kind: Kind::(?P<kind>\w+).*min: (?P<min>None|Some\([\d.]+\))'
                                                r'.*choices: &\[(?P<choices>[^\]]*)\]', line).groupdict()
                                      for line in table.splitlines() if "managed: true" in line)}
-    assert len(managed) == 20
+    assert len(managed) == 22
     settings = {p.get("name"): p for p in every if p.get("key") == SETTINGS_KEY}
     assert set(settings) == set(managed)
     _, strings, _ = _strings()
     for key, m in managed.items():
         p = settings[key]
-        assert p.find("p:supportedOn", GP).get("ref") == ("SUPPORTED_Oarbank_2_10" if key in ("inbound_listeners", "workloads", "delegated_processes") else "SUPPORTED_Oarbank_2_9")
+        assert p.find("p:supportedOn", GP).get("ref") == ("SUPPORTED_Oarbank_2_10" if key in ("inbound_listeners", "workloads", "delegated_processes", "update_auto", "update_hold") else "SUPPORTED_Oarbank_2_9")
         assert "stricter" in strings[f"{key}_Help"] and "has no effect" in strings[f"{key}_Help"], key
         elements = p.findall("p:elements/*", GP)
         if m["kind"] == "Bool":
@@ -445,12 +463,13 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
         if m["kind"] == "Integer":
             assert tag == "decimal" and float(elements[0].get("minValue")) == float(m["min"][5:-1]), key
             assert int(elements[0].get("maxValue")) > int(elements[0].get("minValue"))
-        elif m["kind"] == "Number":
+        elif m["kind"] in ("Number", "Object"):      # "1.5"; a hold's reason (or its JSON object)
             assert tag == "text", key
         else:
             assert m["kind"] == "Choice" and tag == "enum", key
             values = [i.find("p:value/p:string", GP).text for i in elements[0].findall("p:item", GP)]
-            assert values == re.findall(r'"(\w+)"', m["choices"]) == ["soft", "hard"]
+            assert values == re.findall(r'"(\w+)"', m["choices"]) == {"enforce": ["soft", "hard"],
+                                                                        "update_auto": ["off", "notify", "on"]}[key]
 
 
 # MARK: the tray app

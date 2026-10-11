@@ -15,8 +15,10 @@
 # package's architecture), the managed-policy job /Library/LaunchDaemons/dev.codonic.oarbank.agent.policy.plist, and the
 # root helper through which the app asks for an administrator to join or leave (docs/design/node-enrollment.md, "macOS
 # elevation"): /Library/Oarbank/bin/oarbank-node-helper (deploy/macos/node/NodeHelper.swift and Elevation.swift) and its
-# job /Library/LaunchDaemons/dev.codonic.oarbank.agent.helper.plist. The postinstall links /usr/local/bin/oarbank-node
-# to the launcher, loads both jobs and registers the helper's authorization rights.
+# job /Library/LaunchDaemons/dev.codonic.oarbank.agent.helper.plist, and the update runner's job
+# /Library/LaunchDaemons/dev.codonic.oarbank.agent.update.plist (PLAN D57: `oarbank-launcher update-run` as root on the
+# agent's update request). The postinstall links /usr/local/bin/oarbank-node to the launcher, loads the jobs, registers
+# the helper's authorization rights and pins root's update trust.
 #
 # Signing is the owner's: nothing here holds keys.
 #   OARBANK_CODESIGN_IDENTITY   "Developer ID Application: …" for the binaries and the app (default: ad-hoc, for local
@@ -69,10 +71,10 @@ for f in join-window.py join-window.html; do
     [[ -f "$REPO/deploy/node/$f" ]] || { echo "deploy/node/$f is missing: the package has no join window" >&2; exit 1; }
     install -m 644 "$REPO/deploy/node/$f" "$JOIN/$f"
 done
-# the managed-policy job and the helper's; Installer's recommended ownership makes them root:wheel, which launchd
-# requires of a daemon
+# the managed-policy job, the helper's and the update runner's (docs/design/fleet-updates.md); Installer's recommended
+# ownership makes them root:wheel, which launchd requires of a daemon
 mkdir -p "$WORK/root/Library/LaunchDaemons"
-for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper; do
+for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper dev.codonic.oarbank.agent.update; do
     plutil -lint -s "$REPO/deploy/macos/$job.plist"
     # Login Items, Allow in the Background lists the job under Oarbank Node (the app below), not the signing team
     [[ "$(plutil -extract AssociatedBundleIdentifiers.0 raw -o - "$REPO/deploy/macos/$job.plist")" == dev.codonic.oarbank.node ]] \

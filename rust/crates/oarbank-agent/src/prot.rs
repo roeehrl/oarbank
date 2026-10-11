@@ -947,8 +947,12 @@ mod e2e {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(p.frozen.lock().unwrap().contains(&1), "the event path froze the job without a tick");
-        let rec = p.journal.recent_records();
-        let paused = rec.iter().find(|r| r.kind() == "attempt_paused").expect("journaled");
+        // the fast path journals right after it froze the job (outside the table's lock): wait for the record too
+        let journaled = || p.journal.recent_records().into_iter().find(|r| r.kind() == "attempt_paused");
+        while journaled().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let paused = journaled().expect("journaled");
         assert!(paused.get("event_t").is_some() && paused.get("latency_ms").is_some());
         let frozen = cpu_over(pa, 0.5);
         assert!(frozen < 0.05, "a frozen job used {frozen} s of CPU");

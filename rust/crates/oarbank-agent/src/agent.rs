@@ -68,6 +68,8 @@ pub struct Agent {
     pub session_hub: bool,
     facts: Value,
     pub update: crate::selfupdate::SelfUpdate,
+    /// Whole-package updates through the root update runner (nodeupdate.rs; fleet-updates.md, D57).
+    pub node_update: crate::nodeupdate::NodeUpdate,
     /// What happened to the pending coordinator move, for the heartbeat (`coordinator_move_state`).
     pub move_state: Value,
     /// When to read the owner's rescue locations (rescue.rs).
@@ -156,7 +158,8 @@ impl Agent {
         let mut a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
                    last_release_error: None, need_hello: false, table: Table::default(), offered: vec![],
-                   draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
+                   draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout),
+                   node_update: crate::nodeupdate::NodeUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
                    containers: None, images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
@@ -358,6 +361,7 @@ impl Agent {
         body["facts"]["listeners"] = crate::listeners::Hub::facts();   // inbound listeners, and a dial-back prober
         merge(&mut body, self.hooks.hello_extra());
         merge(&mut body, self.update.report());
+        merge(&mut body, self.node_update.report());
         merge(&mut body, self.trust_report());
         merge(&mut body, self.workload_report());
         self.sent_boot = crate::workloads::boot::now_s();
@@ -393,6 +397,7 @@ impl Agent {
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
         merge(&mut body, self.update.report());
+        merge(&mut body, self.node_update.report());
         merge(&mut body, self.trust_report());
         merge(&mut body, self.workload_report());
         self.sent_boot = crate::workloads::boot::now_s();
@@ -436,11 +441,14 @@ impl Agent {
     /// The settings in force: the coordinator's (`settings_base`) with this machine's managed settings laid over, each
     /// only tightening. (policy, limits, the managed keys, the managed keys refused.)
     fn with_managed(&self) -> (Value, Value, Vec<oarbank_protection::settings::Managed>, Vec<oarbank_protection::settings::Rejected>) {
-        use oarbank_protection::settings::{apply_managed, unknown_managed, Section};
+        use oarbank_protection::settings::{apply_managed, report_managed, unknown_managed, Section};
         let (policy, mut set, mut refused) = apply_managed(Section::Policy, &self.settings_base["policy"], &self.managed);
         let (limits, more_set, more_refused) = apply_managed(Section::Limits, &self.settings_base["limits"], &self.managed);
         set.extend(more_set);
         refused.extend(more_refused);
+        let (coord_set, coord_refused) = report_managed(&self.managed);       // the coordinator's keys: reported only
+        set.extend(coord_set);
+        refused.extend(coord_refused);
         refused.extend(unknown_managed(&self.managed));
         (policy, limits, set, refused)
     }
@@ -539,7 +547,12 @@ impl Agent {
             let policy = self.with_grants(&d["policy"]);
             self.run_doctors(&policy).await;
         }
-        if d["agent_update"].is_object() {
+        // a whole-package update (D57) and the agent-only self-update never run at once: a staged agent build goes
+        // first, and no agent update starts while a package update is under way
+        if let Some(api) = self.api.clone() {
+            self.node_update.handle(&api, &d["node_update"], &self.cfg.coordinator_trust, self.update.staged.is_some());
+        }
+        if d["agent_update"].is_object() && !self.node_update.busy() {
             if let Some(api) = self.api.clone() {
                 let l = Layout::new(self.layout.home.clone());
                 if self.update.handle(&api, &l, &d["agent_update"], &self.signing).await {
@@ -1407,6 +1420,7 @@ impl Agent {
                     } else {
                         self.heartbeat().await?;
                         self.update.confirm(&self.layout);          // a hello and a heartbeat succeeded on this build
+                        self.node_update.confirm();
                     }
                     self.rescue_check(false).await;
                     match self.follow_move().await {
@@ -1430,6 +1444,12 @@ impl Agent {
                         info!("drained: restarting on the new version");
                         return Ok(crate::selfupdate::SWAP_EXIT);
                     }
+                    if let Some(code) = self.node_update.tick(self.table.lock().unwrap().is_empty()) {
+                        info!("restarting on the agent the update runner made current");
+                        return Ok(code);
+                    }
+                    self.draining = self.update.staged.is_some() || self.node_update.draining();
+                    self.status.put("update", self.node_update.status());
                     self.drain_services().await;
                     if self.detection_due() {
                         self.detect_tools().await;

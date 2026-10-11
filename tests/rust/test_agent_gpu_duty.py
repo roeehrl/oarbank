@@ -6,20 +6,29 @@ writes the duty into the job's control document and nudges it, and the runner's 
 real protected program, no GPU)."""
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
 import textwrap
+import tomllib
 import uuid
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
-from procguard import SpawnTree  # noqa: E402
+from procguard import KILL, SpawnTree  # noqa: E402
 from test_agent_cotenancy import op  # noqa: E402
 from test_agent_jobs import node_modules  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
 LLMSERVE = REPO / "vendor" / "oarbank-sdk" / "examples" / "llmserve"
+HOST = ({"darwin": "darwin", "win32": "windows"}.get(sys.platform, "linux") + "-"
+        + {"x86_64": "amd64", "amd64": "amd64"}.get(platform.machine().lower(), "arm64"))
+# a node installs a module only on the platforms it lists (llmserve has no Windows ARM build)
+pytestmark = pytest.mark.skipif(HOST not in tomllib.loads((LLMSERVE / "oarbank-module.toml").read_text())["requires"]["platforms"],
+                                reason=f"llmserve lists no {HOST} build")
 
 TRAINER = textwrap.dedent("""
     import json, sys, time
@@ -91,7 +100,7 @@ def test_a_cooperative_runner_holds_the_duty_the_agent_writes(agent_bin, coordin
         try:
             out += p.communicate(timeout=30)[0]
         except subprocess.TimeoutExpired:
-            tree.signal(p.pid, signal.SIGKILL)
+            tree.signal(p.pid, KILL)
             out += p.communicate(timeout=10)[0]
         trainer.wait(10)
         print(out[-4000:])

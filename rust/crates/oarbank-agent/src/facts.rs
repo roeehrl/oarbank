@@ -283,6 +283,8 @@ pub fn collect(home: &std::path::Path) -> Value {
         "disk_free_gb": disk_free_gb(home),
         // a system battery (a laptop): groups select on it, and it derives the `laptop` label (settings groups)
         "power": {"battery": crate::host::has_battery()},
+        // the local zone's offset now: the coordinator places update windows in the node's own time (fleet-updates.md)
+        "utc_offset_s": crate::sys::utc_offset_s(crate::doctor::now() as i64),
     })
 }
 

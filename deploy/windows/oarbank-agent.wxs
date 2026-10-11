@@ -23,9 +23,13 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Oarbank agent" Manufacturer="Codonic" Version="$(var.Version)" UpgradeCode="{5D57D0BD-3099-53F1-B96A-619388A7265D}" Scope="perMachine"
            Compressed="yes">
-    <!-- every build of a version carries the same MSI version (numeric only: 1.0.0-alpha.1 is 1.0.0), so a newer
-         build of it must replace the installed one rather than install beside it -->
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Oarbank agent is already installed." />
+    <!-- Any version replaces any other (docs/design/fleet-updates.md, D57): the update runner rolls a node back by
+         installing the previous MSI over the new one. AllowDowngrades makes the Upgrade row match every version from 0
+         up, the installed one included, so every build of a version (one MSI version: 1.0.0-alpha.1 is 1.0.0) also
+         replaces the installed one rather than installing beside it; WiX refuses AllowSameVersionUpgrades and
+         DowngradeErrorMessage beside it. Schedule="afterInstallInitialize" removes the old product inside this
+         installation's transaction, so a failed upgrade (or downgrade) restores it. -->
+    <MajorUpgrade AllowDowngrades="yes" Schedule="afterInstallInitialize" />
     <!-- the tray app runs from Program Files: it is asked to quit before its files are replaced or removed -->
     <util:CloseApplication Id="CloseNodeTray" Target="Oarbank Node.exe" CloseMessage="yes" ElevatedCloseMessage="yes" RebootPrompt="no" Timeout="5" />
     <MediaTemplate EmbedCab="yes" />
@@ -153,6 +157,8 @@
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; remove --scope system" />
     <SetProperty Id="ClearHelper" Before="ClearHelper" Sequence="execute"
                  Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; helper-clear" />
+    <SetProperty Id="PinUpdateTrust" Before="PinUpdateTrust" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]oarbank-launcher.exe&quot; update-trust --from-agent" />
     <!-- the launcher checks a code offline (its format and check digits) before it changes anything: a malformed code
          fails the install with nothing set up, where a silent deployment sees it -->
     <CustomAction Id="SetupWithFile" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" HideTarget="no" />
@@ -168,6 +174,11 @@
     <!-- the helper's filters and loopback exemptions outlive its service (helper_windows.rs): an uninstall removes them,
          once the service has stopped and the node's jobs have ended; an upgrade keeps them for the new helper -->
     <CustomAction Id="ClearHelper" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
+    <!-- root's update trust (docs/design/fleet-updates.md, "Trust"): after setup, as LocalSystem while an administrator
+         installs, the owner anchors the agent pinned become the update runner's trust in %ProgramData%\Oarbank\update
+         (nothing when trust is pinned already, or the node has no anchors yet: it never fails the install). The
+         elevated helper starts the runner when the agent asks for an update; the MSI installs nothing else for it -->
+    <CustomAction Id="PinUpdateTrust" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" HideTarget="no" />
 
     <InstallExecuteSequence>
       <Custom Action="ConfigureHelper" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
@@ -179,6 +190,7 @@
       <Custom Action="SetupWithUrl" After="SetupWithCode" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND COORDINATOR AND NOT JOINCODE AND NOT JOINCODEFILE" />
       <Custom Action="SetupWaiting" After="SetupWithUrl" Condition="NOT Installed AND (WIX_UPGRADE_DETECTED OR (NOT JOINCODEFILE AND NOT JOINCODE AND NOT COORDINATOR))" />
       <Custom Action="ScheduleContainers" After="SetupWaiting" Condition="CONTAINERS=&quot;1&quot; AND NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="PinUpdateTrust" After="ScheduleContainers" Condition="NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="CancelContainers" Before="RemoveNode" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RemoveNode" Before="ClearHelper" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="ClearHelper" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

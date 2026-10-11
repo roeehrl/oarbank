@@ -375,23 +375,38 @@ impl PhaseRule {
 // ------------------------------------------------------------------ the tail
 
 /// A file's identity: device and inode where the OS has them (a rename keeps it, a new file changes it); on
-/// Windows its creation time.
+/// Windows the volume serial number and the NTFS file index. (Not the creation time: NTFS "tunnels" it, so a file
+/// created under a name that was renamed away seconds before inherits the old file's creation time, which is what a
+/// log rotation does.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileId(u64, u64);
 
-fn file_id(m: &std::fs::Metadata) -> FileId {
+#[cfg_attr(windows, allow(unused_variables))]
+fn file_id(path: &Path, m: &std::fs::Metadata) -> FileId {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         FileId(m.dev(), m.ino())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let created = m
-            .created()
-            .ok()
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos() as u64);
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        // std opens with read, write and delete sharing: looking never stands in the way of a rotation
+        if let Ok(f) = File::open(path) {
+            // SAFETY: a zeroed BY_HANDLE_FILE_INFORMATION is a valid out-parameter, and the handle is ours and open.
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } != 0 {
+                return FileId(info.dwVolumeSerialNumber as u64,
+                              ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64);
+            }
+        }
+        let created = m.created().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+        FileId(created, 0)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let created = m.created().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
         FileId(created, 0)
     }
 }
@@ -435,7 +450,7 @@ impl Tail {
     pub fn read(&mut self, start: Start) -> Result<Vec<String>, String> {
         let path = newest_path(&self.pattern).ok_or_else(|| format!("{}: no such file", self.pattern.display()))?;
         let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let id = file_id(&meta);
+        let id = file_id(&path, &meta);
         let mut lines = vec![];
         let first = self.current.is_none();
         if self.current.as_ref().is_none_or(|(cid, _)| *cid != id) {

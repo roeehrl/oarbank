@@ -30,6 +30,7 @@ network you choose (a LAN, Tailscale, ZeroTier, a VPN); the coordinator never re
 | `oarbank-agent-<v>-windows-x64.msi` (also arm64), `oarbank-agent-<v>-windows-admx.zip` | `scripts\package-windows.ps1` | the node for Windows: `C:\Program Files\Oarbank`, `oarbank-node.exe` on PATH, the **Oarbank Node** tray app; the Group Policy template |
 | `oarbank-install.sh`, `oarbank-install.ps1` | `scripts/package-install-scripts.sh` | one-line installers: download this release's node package for the computer, verify and install it, and join with a code they are given |
 | `oarbank-agent-<v>-darwin-arm64`, `oarbank-agent-<v>-darwin-amd64` | `scripts/package-macos.sh` | the same agent binary, for the coordinator's update channel (`oarbank agent upload`) |
+| `oarbank-fleet-<v>.json` | `scripts/fleet-manifest.py <v> dist` (CI) | the fleet release manifest: every artifact above with its sha256, size, platform and role, signed by the owner for fleet updates ([Updating](#updating)) |
 
 Signing the packages is the owner's: `OARBANK_CODESIGN_IDENTITY` (Developer ID Application) for the binaries,
 `OARBANK_INSTALLER_IDENTITY` (Developer ID Installer) for the pkg, `OARBANK_NOTARY_PROFILE` (a `notarytool` keychain
@@ -222,6 +223,8 @@ owner still lowers caps from the console. The keys and which way each tightens:
 | `cpu_cores`, `mem_gb`, `vm_mem_gb`, `disk_gb`, `staging_mbps` | number | lower |
 | `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` | number | higher |
 | `enforce` | `soft` or `hard` | hard |
+| `update_auto` | `off`, `notify` or `on` | off (the coordinator applies it: [fleet updates](design/fleet-updates.md)) |
+| `update_hold` | the hold's reason as text, or `{"reason", "until"}` | any hold |
 
 A looser value has no effect, a key not in the table is refused, and both show on the node's Settings tab ("Managed on
 this machine: off (applies)") and on **Settings → Applied drift**; `oarbank-agent policy` prints what the machine's
@@ -359,20 +362,69 @@ A managed policy can forbid listeners on a machine (`inbound_listeners = false`)
 
 ## Updating
 
-- **Nodes** update themselves: `oarbank agent upload <binary>`, `oarbank agent sign <build>`, then
-  `canary --node <node>` and `promote`. The launcher keeps the previous version and rolls back a build that does not
-  confirm itself within 10 minutes. Installing a newer package (pkg, deb or rpm) replaces the launcher, renders the
-  agent's service definition again with the new launcher's settings (`oarbank-launcher service refresh`: from 2.9 the
-  launchd job's `ExitTimeOut` and the systemd unit's `TimeoutStopSec` give the agent 60 s to stop its jobs), and
-  restarts the service. A newer MSI runs `oarbank-launcher setup --scope system` again, which creates the service anew.
-- **The coordinator**: run the installer again with the new build; `current` moves and the services restart (agents
-  reconnect by themselves), and modules' Python environments made by the previous build are rebuilt on the new
-  build's interpreter when it starts. Earlier builds stay beside it for going back.
-- **Moving the coordinator** to another node: `oarbank coordinator prepare --to <node>`, then `move` (and `sign` with
-  the owner key). The node's agent fetches and verifies the signed coordinator build; since a node's agent is
-  unprivileged and system services are root's, it then reports the one command to run on that machine
-  (`sudo bash …/install-oarbankd.sh --build … --pair <code> --from … --from-ca …`), as on Windows. Agents verify the
-  move and follow it after its time lock (docs/design/coordinator-move.md).
+From 2.10 the whole fleet updates from the coordinator, one release at a time, whole packages included
+([design/fleet-updates.md](design/fleet-updates.md)): the launcher, the helpers, the node app, the runtime and the
+agent move together, and the coordinator updates itself first.
+
+1. **Get the release.** `oarbank update fetch <version>` downloads it from the project's releases (or
+   `oarbank update import <dir>` takes a directory with the release's files and its `oarbank-fleet-<version>.json`);
+   the **Updates** page in the console does both. With `update_check_h` set, the coordinator looks for new releases
+   itself and says when one is ready (`update_auto = notify`, the default).
+2. **Sign it** (signing mode, the default): `oarbank update sign <version>` with the owner key set
+   ([release-signing.md](release-signing.md#fleet-releases)). Nodes and the coordinator's runner install only a
+   release the owner signed.
+3. **Start it:** **Update fleet** on the Updates page, or `oarbank update start <version>`. You see the plan first:
+   the coordinator, then the rings (`canary`, `early`, `broad`, from each node's `update_ring`), each node's window,
+   holds and pins, and which nodes are skipped and why. The rollout then runs by itself: the coordinator updates
+   first (with a database snapshot it restores if the new version fails its health checks), then each ring, a few
+   nodes at a time, each node draining its running jobs first. A ring bakes before the next one starts; failures
+   halt the rollout and roll the updated nodes back. **Pause**, **Resume**, **Halt**, **Roll back** and **Skip** are
+   on the same page (`oarbank update pause | resume | halt | rollback | skip <node>`), and
+   `oarbank update hold <node> --reason …` keeps a machine out until you unhold it or the hold expires.
+
+On each node the agent downloads and verifies the package, then hands it to the **update runner**, a root job the
+package installs (`oarbank-launcher update-run`: a launchd job on macOS, a systemd path unit on Linux, started by the
+elevated helper on Windows). The runner checks the package again against its own trust, installs it with the
+system's installer (`installer`, `dpkg`, `rpm`, `msiexec`), and waits for the new agent to confirm; if it does not
+within 10 minutes, the runner reinstalls the previous package. The menu bar and the tray show "Updating to <v>…"
+while it runs.
+
+**Update trust.** The runner trusts only owner keys an administrator pinned on that machine. Installing a 2.10 (or
+later) package by hand on a node that has joined pins them: the postinstall (or the MSI) runs
+`oarbank-launcher update-trust --from-agent`, which copies the owner keys the agent pinned when it joined. A node
+that joined after its package was installed gets them with `sudo oarbank-launcher update-trust --from-agent` (an
+elevated prompt on Windows), or at its next package install. The Updates page lists nodes whose runner has no trust, with
+this remedy; they keep agent-only updates until then.
+
+**Installing a package by hand** still works on any node, and does what a fleet update does: from 2.10 an upgrade
+also makes the package's agent the current one (before 2.10 it kept the agent version the coordinator had set), then
+renders the service definition again with the new launcher's settings and restarts it. A newer MSI runs
+`oarbank-launcher setup --scope system` again, which creates the service anew; an MSI also installs over a newer one
+(the runner's rollback).
+
+**Logs of an update on a node:**
+- **macOS:** `sudo cat "/Library/Application Support/Oarbank/update/logs/runner.log"`; the package's own output is in
+  `/var/log/install.log`.
+- **Linux:** `journalctl -u dev.codonic.oarbank.agent.update.service`, and `/var/lib/oarbank/update/logs/`.
+- **Windows:** `%ProgramData%\Oarbank\update\logs\` (the runner's logs, `msiexec`'s among them).
+- Everywhere: the runner's state is `<system data>/update/journal.json`, and the agent reports its update state on
+  the Updates page and in `oarbank-node status`.
+
+**Agent-only updates** remain for development fleets and personal installs (nodes without an update runner): the
+**Agent** page, or `oarbank agent upload <binary>`, `oarbank agent sign <build>`, then `canary --node <node>` and
+`promote`. The launcher keeps the previous version and rolls back a build that does not confirm itself within 10
+minutes.
+
+**The coordinator by hand:** run its installer again with the new build; `current` moves and the services restart
+(agents reconnect by themselves), and modules' Python environments made by the previous build are rebuilt on the new
+build's interpreter when it starts. Earlier builds stay beside it for going back.
+
+**Moving the coordinator** to another node: `oarbank coordinator prepare --to <node>`, then `move` (and `sign` with
+the owner key). The node's agent fetches and verifies the signed coordinator build; since a node's agent is
+unprivileged and system services are root's, it then reports the one command to run on that machine
+(`sudo bash …/install-oarbankd.sh --build … --pair <code> --from … --from-ca …`), as on Windows. Agents verify the
+move and follow it after its time lock (docs/design/coordinator-move.md). A coordinator that is moving does not update
+itself, and a move does not start during an update.
 
 ### Upgrading a coordinator from 2.8 or earlier
 

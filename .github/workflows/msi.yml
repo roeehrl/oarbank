@@ -2,7 +2,9 @@
 # both services with their accounts and start types, the waiting (unjoined) node and its status document, oarbank-node
 # on PATH, the oarbank:// handler and the tray app's self-test, container support (CONTAINERS=1) installed by a task after
 # the MSI rather than inside it, the elevated helper's loopback openings across a major upgrade, and an uninstall that
-# leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
+# leaves nothing behind. Then fleet updates through the update runner (scripts/ci-fleet-update-windows.ps1,
+# docs/design/fleet-updates.md): the first MSI by hand, an update to the second that probation rolls back (a downgrade
+# of the MSI), and the update again, confirmed. Runs when the package or what it installs changes, and on every tag.
 name: msi
 on:
   workflow_dispatch:
@@ -23,6 +25,7 @@ on:
       - scripts/bundle-python*
       - scripts/check-*
       - scripts/fetch-uv.py
+      - scripts/fleet-manifest.py
       - rust/crates/oarbank-launcher/**
       - rust/crates/oarbank-agent/**
       - rust/crates/oarbank-core/**
@@ -39,7 +42,7 @@ jobs:
   msi:
     if: '!inputs.coordinator_fixture_only'
     runs-on: windows-2025
-    timeout-minutes: 75
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,6 +67,9 @@ jobs:
         shell: pwsh
       - name: install, upgrade, uninstall
         run: scripts/ci-windows-msi.ps1 -First dist/oarbank-agent-2.5.900-windows-x64.msi -Second dist/oarbank-agent-2.5.901-windows-x64.msi -Logs dist/msi-logs
+        shell: pwsh
+      - name: fleet updates through the update runner (an update rolled back by probation, then confirmed)
+        run: scripts/ci-fleet-update-windows.ps1 -First dist/oarbank-agent-2.5.900-windows-x64.msi -Second dist/oarbank-agent-2.5.901-windows-x64.msi -Logs dist/msi-logs/fleet
         shell: pwsh
       - uses: actions/upload-artifact@v4
         if: failure()

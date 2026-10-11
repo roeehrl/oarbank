@@ -153,6 +153,42 @@ no program on it runs before. The release notes and the move preflight say so.
     `tailscaled.service`. With those apps the coordinator still starts from boot, and binds its address once the
     tailnet is up. (The development Mac runs Homebrew's `tailscaled` as a LaunchDaemon.)
 
+## Self-update (2.10)
+
+[fleet-updates.md](fleet-updates.md) (D58) lets the coordinator update itself. Decision 3 still holds: the service
+never rewrites what it runs. oarbankd only asks, and a runner of root's does the swap:
+
+- **The runner.** `oarbank-coordupdate run --once`, from the running build (`PROGRAMS/current/bin`), is a job of its
+  own:
+  - macOS: the root LaunchDaemon `dev.codonic.oarbank.oarbankd.update`, with `WatchPaths` on
+    `<home>/updates/coordinator-request.json` and `RunAtLoad`, so a boot finishes an interrupted update;
+  - Linux: `dev.codonic.oarbank.oarbankd.update.path` (`PathExists`) and its oneshot `.service`, enabled for boot as
+    well;
+  - Windows: the SYSTEM task `\Oarbank\CoordinatorUpdate`, every minute and at startup.
+
+  `install-oarbankd` installs it beside the two services and `--uninstall` removes it. Stopping and starting the
+  services never stops the runner. The runner's own `--refresh` leaves its job loaded (`OARBANK_COORDUPDATE_RUNNING`),
+  and the systemd unit is enabled but never started by the installer.
+- **One layout.** `install-oarbankd` keeps `PROGRAMS/current` pointing at the running build however it was installed.
+  For `--installed` (a native package) that is the package's directory. The runner unpacks a new build into
+  `PROGRAMS/<v>-<sha12>` root-owned and not group- or other-writable, the same as `--build`. It flips `current` and
+  runs the new build's `install-oarbankd.sh --refresh --installed <build>`, which writes the services and the record
+  for it. A package upgrade's postinstall refreshes with `--installed <its payload>`, so a package installed after a
+  self-update runs the package's build, not the self-updated one.
+- **Its own state, root's.** `<system data>/coordinator-update/` (0700):
+  - `trust.json`: the owner keys. `coordupdate trust --from-home` copies them from the home's owner anchors (or its
+    pinned release key) only when none are pinned; `install-oarbankd` runs it at every install and refresh, so a package
+    upgrade pins them once the owner has keys. `--unsigned` is an administrator's explicit choice for a test fleet.
+  - `journal.json`.
+  - `db-<id>.sqlite3`, the restore point, which the coordinator's account cannot alter.
+  - `logs/`.
+- **Moves.** A coordinator that is handed off, or has a move plan or a move under way, refuses to update itself, and a
+  move refuses to start while an update runs. A move's standby and a self-updated coordinator have the same shape.
+
+Not yet verified on real machines: the launchd `WatchPaths` job on a Mac, the scheduled task and junction flip on
+Windows (both written to the documented behaviour), and a self-update of the owner's coordinator
+(fleet-updates.md, "Owner-verified").
+
 ## Migration from the per-user form
 
 The 2.9.0 package migrates a per-user coordinator when it upgrades one, and the app finishes the job when the

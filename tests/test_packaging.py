@@ -13,12 +13,15 @@ WXS = Path(__file__).resolve().parents[1] / "deploy" / "windows" / "oarbank-agen
 NS = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
 
 
-def test_msi_replaces_an_installed_build_of_the_same_version():
-    # package-windows.ps1 gives every build of 1.0.0-alpha.1 the MSI version 1.0.0; without same-version upgrades a
-    # rebuilt MSI installs beside the old product (two entries, the old one's uninstall removing the shared service)
+def test_msi_replaces_any_installed_version_inside_its_transaction():
+    # package-windows.ps1 gives every build of 1.0.0-alpha.1 the MSI version 1.0.0; a rebuilt MSI must replace the old
+    # product rather than install beside it (two entries, the old one's uninstall removing the shared service), and the
+    # update runner rolls back by installing the previous MSI over a newer one (docs/design/fleet-updates.md, D57).
+    # AllowDowngrades matches every version, the same one included (WiX refuses AllowSameVersionUpgrades and
+    # DowngradeErrorMessage beside it); the old product goes inside the transaction, so a failed upgrade restores it
     pkg = ET.parse(WXS).getroot().find("w:Package", NS)
     upgrade = pkg.find("w:MajorUpgrade", NS)
-    assert upgrade is not None and upgrade.get("AllowSameVersionUpgrades") == "yes"
+    assert upgrade is not None and dict(upgrade.attrib) == {"AllowDowngrades": "yes", "Schedule": "afterInstallInitialize"}
 
 
 def test_msi_upgrade_keeps_the_node():

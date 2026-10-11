@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, sites, statements, tools, workloads
+from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, fleetupdates, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, sites, statements, tools, workloads
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -283,6 +283,8 @@ def _node_directives(db: DB, node: dict) -> dict:
         if C.RELEASE_SIGNING:
             release.update(statement=rel["statement"], signature=rel["signature"])
     from .settings import apply as settings_apply
+    from . import fleetupdates
+    node_update = fleetupdates.directive(db, node)
     return {"now": now(), "desired_state": node["desired_state"], "lifecycle": node["lifecycle"],
             # the complete effective policy and caps, with the revision the agent reports back once it applied them
             **settings_apply.directive(db, node),
@@ -290,7 +292,9 @@ def _node_directives(db: DB, node: dict) -> dict:
             "release_pubkey": db.get_state("release_pubkey") if C.RELEASE_SIGNING else None,
             "prefetch": prefetch_for(db, node), "run_doctor": bool(node["want_doctor"]),
             "run_probe": bool(node.get("want_probe")), "send_processes": bool(node.get("want_processes")),
-            "agent_update": agentbuilds.directive(db, node),
+            # the whole package through the node's update runner (fleet updates); the agent-only self-update stands aside
+            # while a node has one (docs/design/fleet-updates.md)
+            "node_update": node_update, "agent_update": None if node_update else agentbuilds.directive(db, node),
             "coordinator": {"fleet_id": identity.fleet_id(db), "cik": identity.key(Path(db.path).parent).public_b64,
                             "epoch": identity.epoch(db)},
             "install_coordinator": jl(node.get("install_coordinator_json")),
@@ -369,6 +373,7 @@ def hello(db: DB, node: dict, body: dict) -> dict:
                 _end_attempt(db, a["attempt_id"], "released", "agent_restart", count_failure=False)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         agentbuilds.observe(db, node, body)
+        fleetupdates.observe(db, node, body, heartbeat=False)
         _observe_identity(db, node, body)
         _observe_tools(db, node, body)
         wl_ack = workloads.observe(db, node, body)       # an adopted workload's report renews its lease below
@@ -445,6 +450,7 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
                   t + C.LEASE_TTL if progressed else row["expires_at"],
                   t if progressed else row["last_progress_at"], row["attempt_id"]))
         agentbuilds.observe(db, node, body)
+        fleetupdates.observe(db, node, body, heartbeat=True)
         _observe_identity(db, node, body)
         if isinstance(body.get("processes"), list):
             db.x("UPDATE nodes SET processes_json=?, processes_at=?, want_processes=0 WHERE node_id=?",
@@ -924,6 +930,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         return rules_cache[cid]
     tel, cap = jl(node.get("telemetry_json"), {}) or {}, jl(node.get("capacity_json"), {}) or {}
     return predicates.NodeView(
+        agent_min=fleetupdates.agent_min(db),
         secrets_unset=unset, settings_unset=settings_unset, campaign_rules=campaign_rules,
         on_battery=bool(tel.get("on_battery")), user_present=bool(cap.get("user_present")),
         node=node, states=node_modules(node), offered=runs, excluded=excluded, site=sites.claim_view(db, node),
@@ -1017,6 +1024,9 @@ def claim(db: DB, node: dict, body: dict) -> dict:
     t = now()
     nid = node["node_id"]
     if not coordmove.accepting_leases(db):          # a coordinator move is draining or frozen: no new leases
+        return {"grants": []}
+    from . import coordself
+    if not coordself.admitting(db):                 # a coordinator self-update runs (D58): probation may restore the db
         return {"grants": []}
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)

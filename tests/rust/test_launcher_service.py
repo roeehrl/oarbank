@@ -105,7 +105,7 @@ def test_systemd_units(launcher, tmp_path, monkeypatch):
     out = run(launcher, "--home", str(tmp_path / "a b"), "service", "install", "--label", "dev.example.test", "--dry-run",
               "--", "--coordinator", "https://c.example:7443")
     assert out.startswith(f"# {tmp_path}/cfg/systemd/user/dev.example.test.service")
-    assert f'ExecStart="{LAUNCHER}" "--home" "{tmp_path / "a b"}" "run" "--coordinator" "https://c.example:7443"' in out
+    assert f'ExecStart="{launcher}" "--home" "{tmp_path / "a b"}" "run" "--coordinator" "https://c.example:7443"' in out
     assert "Restart=always" in out and "Delegate=yes" in out and "WantedBy=default.target" in out and "User=" not in out
     assert "systemctl --user enable --now dev.example.test.service" in out
     out = run(launcher, "--home", str(tmp_path), "service", "install", "--system", "--user", "oarbank", "--dry-run")

@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 111 operations, 2 explain kinds, 189 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 124 operations, 2 explain kinds, 189 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -66,6 +66,19 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `agent.promote` | T2 | yes | `oarbank agent promote [--platform <os-arch>]` | yes |
 | `agent.rollback` | T1 | yes | `oarbank agent rollback [--platform <os-arch>]` | yes |
 | `agent.sign` | T1 | yes | `oarbank agent sign <build>` | yes |
+| `updates.import` | T1 | yes | `oarbank update import <dir>` | yes |
+| `updates.fetch` | T1 | yes | `oarbank update fetch <version>` | yes |
+| `updates.sign` | T1 | yes | `oarbank update sign <version>` | yes |
+| `updates.start` | T2 | yes | `oarbank update start <version> [--fast]`<br>`oarbank update plan <version>`<br>`oarbank update coordinator <version>` | yes |
+| `updates.pause` | T1 | yes | `oarbank update pause` | yes |
+| `updates.resume` | T1 | yes | `oarbank update resume` | yes |
+| `updates.halt` | T1 | yes | `oarbank update halt` | yes |
+| `updates.rollback` | T2 | yes | `oarbank update rollback` | yes |
+| `updates.skip` | T1 | yes | `oarbank update skip <node>` | yes |
+| `updates.hold` | T1 | yes | `oarbank update hold <node> --reason <why> [--until <time>]` | yes |
+| `updates.unhold` | T1 | yes | `oarbank update unhold <node>` | yes |
+| `updates.pin` | T1 | yes | `oarbank update pin <node> <version> --reason <why> [--until <time>]` | yes |
+| `updates.unpin` | T1 | yes | `oarbank update unpin <node>` | yes |
 | `coordinator.builds.upload` | T2 | yes | `oarbank coordinator-build upload <archive>` | yes |
 | `coordinator.builds.sign` | T1 | yes | `oarbank coordinator-build sign <build>` | yes |
 | `releases.promote` | T2 | yes | `oarbank release promote <rid>` | yes |
@@ -152,7 +165,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `TOOL_VERSION_UNMET` | `tools.detect` |
 | `TOOL_REFUSED` | `tools.detect` |
 | `FOLDER_UNAVAILABLE` | `settings.folders.update` |
-| `AGENT_TOO_OLD` | `agent.promote` |
+| `AGENT_TOO_OLD` | `updates.start`, `agent.promote` |
 | `RETRIES_EXHAUSTED` | `jobs.cancel` |
 | `SITE_UPLINK_BUDGET` | `sites.update` |
 | `NODE_PAUSED_BY_ADMIN` | `nodes.resume` |

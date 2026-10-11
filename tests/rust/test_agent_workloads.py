@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
-from procguard import SpawnTree  # noqa: E402
+from procguard import KILL, SpawnTree  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
 TOY = REPO / "vendor" / "oarbank-sdk" / "examples" / "toy"
@@ -109,7 +109,7 @@ def stopped(tree: SpawnTree, p):
         try:
             p.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            tree.signal(p.pid, signal.SIGKILL)
+            tree.signal(p.pid, KILL)
             p.wait()
     return ""
 

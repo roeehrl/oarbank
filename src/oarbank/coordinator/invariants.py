@@ -51,6 +51,12 @@ Safety (must hold after every committed transaction):
   S28 the GPU duty budget a node journals never exceeds the certified ceiling it journals with it, and every fleet unit
       (a job or a workload) the duty governor holds or stops for exceeding (or for not being able to check) its gpu_duty
       is paused (a workload: paused or held by its ladder) within the S18 window, or has ended (from the decision journal; docs/design/gpu-cotenancy.md, "The duty governor")
+  S29 no ring of a rollout has more nodes between draining and confirming (or staged with `go`) than its max_unavailable
+      (rollouts.py; docs/design/fleet-updates.md)
+  S30 no node is assigned, or was moved to, a fleet release newer than the coordinator's own version, and no node of a
+      later ring was told `go` before every earlier ring of its rollout finished and baked
+  S31 every `go` was granted while the node was eligible: online, inside its window, not held, not pinned to another
+      version (from the rollout journal: each grant with the eligibility recorded beside it)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -537,6 +543,24 @@ def s27_site_uplink_budget(db: DB):
     return out
 
 
+def s29_rollout_cap(db: DB):
+    """S29 (docs/design/fleet-updates.md): a rollout ring's busy nodes never exceed its max_unavailable."""
+    from .rollouts import s29_violations
+    return s29_violations(db)
+
+
+def s30_no_node_ahead_of_coordinator(db: DB):
+    """S30: nothing newer than the coordinator is assigned or installed, and rings run in order."""
+    from .rollouts import s30_violations
+    return s30_violations(db)
+
+
+def s31_go_only_when_eligible(db: DB):
+    """S31: every update grant was made while the node was eligible (the rollout journal)."""
+    from .rollouts import s31_violations
+    return s31_violations(db)
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
@@ -545,7 +569,8 @@ SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_gener
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
           s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s24_listeners_granted_and_assigned,
           s25_immediate_phases_pause_at_once, s26_single_seat,
-          s28_gpu_duty_within_ceiling_and_enforced, s27_site_uplink_budget]
+          s28_gpu_duty_within_ceiling_and_enforced, s27_site_uplink_budget, s29_rollout_cap,
+          s30_no_node_ahead_of_coordinator, s31_go_only_when_eligible]
 
 
 def check_all(db: DB) -> list[str]:

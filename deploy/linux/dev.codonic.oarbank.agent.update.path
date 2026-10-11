@@ -1,0 +1,13 @@
+# The node's update runner, started when the agent's update request appears (PLAN D57; docs/design/fleet-updates.md,
+# "The update runner"). The agent writes <agent home>/updates/request.json last, through a rename; the runner removes
+# it once it has taken the request (journaled first), so the path triggers once per request. The package's postinstall
+# enables and starts this unit; its preremove stops it on a real removal only.
+[Unit]
+Description=Oarbank update request watch
+
+[Path]
+PathExists=/var/lib/oarbank/agent/updates/request.json
+Unit=dev.codonic.oarbank.agent.update.service
+
+[Install]
+WantedBy=paths.target

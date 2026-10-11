@@ -321,8 +321,11 @@ fn poll_loop(rx: Receiver<Vec<(String, PathBuf)>>, mut on_change: OnChange) {
     loop {
         match rx.try_recv() {
             Ok(t) => {
+                // no baseline: the list can arrive up to a scan after it was set, and a change in between would become
+                // the baseline and never be reported; the first scan reports every target (the caller compares
+                // readings, so a report without a change costs one read)
                 targets = t;
-                seen = targets.iter().map(|(k, p)| (k.clone(), stamp(p))).collect();
+                seen.clear();
             }
             Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {}
@@ -340,5 +343,33 @@ fn poll_loop(rx: Receiver<Vec<(String, PathBuf)>>, mut on_change: OnChange) {
         if !keys.is_empty() {
             on_change(keys, t);
         }
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// The portable backend (Windows) reports a change made right after its targets were set, before it took them up.
+    #[test]
+    fn a_change_between_set_and_the_first_scan_is_reported() {
+        let dir = tempfile::Builder::new().prefix("oarbank-watch-poll-").tempdir().unwrap();
+        let f = dir.path().join("events-1.jsonl");
+        std::fs::write(&f, "{\"event\":\"a\"}\n").unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let s2 = seen.clone();
+        let (tx, rx) = channel();
+        let t = std::thread::spawn(move || poll_loop(rx, Box::new(move |keys, _| s2.lock().unwrap().extend(keys))));
+        tx.send(vec![("k".to_string(), dir.path().join("events-*.jsonl"))]).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&f).unwrap().write_all(b"{\"event\":\"b\"}\n").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(seen.lock().unwrap().first().map(String::as_str), Some("k"));
+        drop(tx);
+        t.join().unwrap();
     }
 }

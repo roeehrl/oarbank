@@ -7,7 +7,9 @@
 #     same name is someone else's and stays. Only the link is created: /usr/local/bin keeps its owner and mode when it
 #     exists (a payload entry would reset them).
 #   - An upgrade of the system service (its record exists): the services are written again from the record and restart
-#     on the new build (install-oarbankd.sh --refresh). No wizard needed.
+#     on the new build (install-oarbankd.sh --refresh --installed: this build, also after a coordinator self-update ran
+#     another one). The refresh also pins the update runner's trust from the home's owner keys when none is pinned yet
+#     (oarbank-coordupdate trust --from-home; fleet-updates.md, D58). No wizard needed.
 #   - An upgrade of an earlier release's per-user coordinator (a LaunchAgent in someone's ~/Library/LaunchAgents): it
 #     moves to the system service (oarbank coordinator migrate). When its keys can only be exported by its owner (nobody
 #     logged in, a locked Keychain), it keeps running per-user, on its Keychain keys, and Oarbank Coordinator offers the
@@ -32,7 +34,7 @@ for name in oarbank oarbank-setup; do
 done
 
 if [ -f "$RECORD" ]; then
-    /bin/bash "$ROOT/install-oarbankd.sh" --refresh || echo "Oarbank: the coordinator's services could not be refreshed; run: sudo oarbank-setup"
+    /bin/bash "$ROOT/install-oarbankd.sh" --refresh --installed "$ROOT" || echo "Oarbank: the coordinator's services could not be refreshed; run: sudo oarbank-setup"
     exit 0
 fi
 per_user=

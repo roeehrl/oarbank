@@ -47,6 +47,7 @@ sealed class NodeTray : Form {
     readonly ToolStripMenuItem status = new ToolStripMenuItem("Checking…");
     readonly ToolStripMenuItem managed = new ToolStripMenuItem("");
     readonly ToolStripMenuItem containers = new ToolStripMenuItem("");
+    readonly ToolStripMenuItem update = new ToolStripMenuItem("");
     readonly ToolStripMenuItem join = new ToolStripMenuItem("Join this PC…");
     readonly ToolStripMenuItem details = new ToolStripMenuItem("Status…");
     readonly ToolStripMenuItem hide = new ToolStripMenuItem("Hide from notification area");
@@ -58,8 +59,9 @@ sealed class NodeTray : Form {
     NodeTray(EventWaitHandle signal, bool selfTest) {
         reopen = signal; Text = "Oarbank Node"; ShowInTaskbar = false;
         var unused = Handle; // Marshal all callbacks through this UI thread.
-        var title = new ToolStripMenuItem("Oarbank Node"); title.Enabled = false; status.Enabled = false; managed.Enabled = false; containers.Enabled = false;
-        menu.Items.Add(title); menu.Items.Add(status); menu.Items.Add(managed); menu.Items.Add(containers); menu.Items.Add(new ToolStripSeparator());
+        var title = new ToolStripMenuItem("Oarbank Node"); title.Enabled = false; status.Enabled = false; managed.Enabled = false; containers.Enabled = false; update.Enabled = false;
+        menu.Items.Add(title); menu.Items.Add(status); menu.Items.Add(managed); menu.Items.Add(containers); menu.Items.Add(update);
+        menu.Items.Add(new ToolStripSeparator());
         join.Click += (s,e) => Request(null);
         details.Click += (s,e) => Request(null);
         menu.Items.Add(join); menu.Items.Add(details); menu.Items.Add(new ToolStripSeparator());
@@ -199,6 +201,24 @@ sealed class NodeTray : Form {
         } catch { return ""; }
     }
 
+    // A whole-package update (the status document's `update`, docs/design/fleet-updates.md D62): "Updating to <v>…" while
+    // the node drains, installs and confirms, "Update failed: back on <v>" for a day after. Empty: nothing to say.
+    internal static string UpdateLine(Dictionary<string,object> st, double now) {
+        var u = st != null && st.ContainsKey("update") ? st["update"] as Dictionary<string,object> : null;
+        var version = S(u, "version");
+        if(version.Length == 0) return "";
+        switch(S(u, "state")) {
+            case "draining": case "installing": case "confirming": return "Updating to " + version + "…";
+            case "rolled_back": case "failed":
+                double at;
+                return Double.TryParse(S(u, "at"), NumberStyles.Float, CultureInfo.InvariantCulture, out at) && now - at < 86400
+                    ? "Update failed: back on " + version : "";
+            default: return "";
+        }
+    }
+
+    static double UnixNow() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds; }
+
     static string ManagedBy(Dictionary<string,object> st) {
         var name = S(st, "managed_by");
         return name.Length > 0 ? name : (Convert.ToString(PolicyValue("ManagedByOrganizationName"), CultureInfo.InvariantCulture) ?? "").Trim();
@@ -213,6 +233,8 @@ sealed class NodeTray : Form {
         managed.Text = "Managed by " + org; managed.Available = org.Length > 0;
         var support = ContainerSupport();
         containers.Text = support; containers.Available = support.Length > 0;
+        var updating = UpdateLine(st, UnixNow());
+        update.Text = updating; update.Available = updating.Length > 0;
         join.Available = !joined && UserJoinAllowed();
         details.Available = joined || (S(st, "state") != "unjoined" && S(st, "state").Length > 0);
         hide.Enabled = ShowPolicy() != true;          // a managed "shown" leaves nothing to hide
@@ -319,14 +341,19 @@ sealed class NodeTray : Form {
 
     void SelfTest() {
         if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true") throw new InvalidOperationException("Self-test is only for disposable CI runners.");
-        Expect(menu.Items.Count == 10 && menu.Items[0].Text == "Oarbank Node" && menu.Items[3] == containers && menu.Items[5].Text == "Join this PC…" &&
-               menu.Items[6].Text == "Status…" && menu.Items[8] == hide && menu.Items[8].Text == "Hide from notification area" &&
-               menu.Items[9].Text == "This PC's node keeps running" && !menu.Items[9].Enabled, "Tray menu items missing.");
+        Expect(menu.Items.Count == 11 && menu.Items[0].Text == "Oarbank Node" && menu.Items[3] == containers && menu.Items[4] == update &&
+               menu.Items[6].Text == "Join this PC…" && menu.Items[7].Text == "Status…" && menu.Items[9] == hide &&
+               menu.Items[9].Text == "Hide from notification area" &&
+               menu.Items[10].Text == "This PC's node keeps running" && !menu.Items[10].Enabled, "Tray menu items missing.");
         Expect(PolicyBool(0) == false && PolicyBool(1) == true && PolicyBool(" False ") == false && PolicyBool("yes") == true &&
                PolicyBool("maybe") == null && PolicyBool(null) == null, "policy booleans");
         Expect(ContainerLine("restart", "") == "Restart Windows to finish container support" &&
                ContainerLine("failed", "no virtualization") == "Container support failed: no virtualization" &&
                ContainerLine("done", "") == "" && ContainerLine(null, null) == "", "container support lines");
+        Expect(UpdateLine(Doc("{\"update\":{\"state\":\"installing\",\"version\":\"2.10.0\",\"at\":100}}"), 200) == "Updating to 2.10.0…" &&
+               UpdateLine(Doc("{\"update\":{\"state\":\"rolled_back\",\"version\":\"2.9.0\",\"at\":100}}"), 200) == "Update failed: back on 2.9.0" &&
+               UpdateLine(Doc("{\"update\":{\"state\":\"rolled_back\",\"version\":\"2.9.0\",\"at\":100}}"), 100000) == "" &&
+               UpdateLine(Doc("{\"state\":\"connected\"}"), 0) == "" && UpdateLine(null, 0) == "", "update lines");
         Expect(Describe(Doc("{\"state\":\"unjoined\"}"), 1) == "Not joined", "unjoined");
         Expect(Describe(Doc("{\"state\":\"pending\",\"user_code\":\"WDJB-MJHT\"}"), 1) == "Waiting for approval (code WDJB-MJHT)", "pending");
         Expect(Describe(Doc("{\"state\":\"connected\",\"coordinator\":\"https://build.example:7443\"}"), 1) == "Connected to build.example", "connected");

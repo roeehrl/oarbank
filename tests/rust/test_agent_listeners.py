@@ -76,8 +76,10 @@ def ask(addr: str, line: str) -> str:
 def start_agent(agent_bin, coordinator, home, gw: Gateway):
     env = {**agent_env(), "OARBANK_PORTMAP_GATEWAY": gw.addr["pmp"], "OARBANK_PORTMAP_SSDP": gw.addr["ssdp"],
            "OARBANK_PORTMAP_TIMING": "fast", "OARBANK_LISTENER_PROBE_ALLOW_LOCAL": "1"}
+    # its own process group on Windows, so a Ctrl-Break stops it gracefully, as SIGTERM does on POSIX
     p = subprocess.Popen([str(agent_bin), "--home", str(home), "run", "--coordinator", coordinator.url], env=env,
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     seen = {e["enrollment_id"] for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"]}
     pending = wait(lambda: [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"]
                             if e["status"] == "pending" and e["enrollment_id"] not in seen] or None)
@@ -126,7 +128,7 @@ def test_a_public_listener_is_mapped_probed_served_recovered_and_released(agent_
         # nobody else's mapping was ever deleted
         assert not [d for d in gw.state()["deletes"] if d["foreign"]]
         # stopping the agent releases its mapping
-        a.send_signal(signal.SIGTERM) if os.name != "nt" else a.terminate()
+        a.send_signal(signal.SIGTERM if os.name != "nt" else signal.CTRL_BREAK_EVENT)   # a graceful stop
         a.wait(60)
         assert not gw.ours(), gw.state()
         # a crash leaves the journal; the uninstall step's release-all cleans it

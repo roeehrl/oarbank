@@ -1,0 +1,74 @@
+# Fleet updates of the node packages through the update runner (PLAN D57; docs/design/fleet-updates.md, "Packages in
+# CI"), on free GitHub-hosted runners. Linux: two versions' deb and rpm, each updated, rolled back by probation and
+# updated again in a Debian and a Fedora container (scripts/ci-fleet-update-linux.sh). macOS: an unsigned pkg updated
+# through launchd's runner job, on tags and by hand only (macOS runners queue long; scripts/ci-fleet-update-macos.sh).
+# Windows: the MSI's update and rollback run in msi.yml, after its install and upgrade test.
+name: fleet-update
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - deploy/linux/**
+      - deploy/macos/**
+      - deploy/node/**
+      - scripts/package-linux.sh
+      - scripts/package-macos.sh
+      - scripts/build-node-runtime*
+      - scripts/check-package.py
+      - scripts/fleet-manifest.py
+      - scripts/ci-fleet-update-*
+      - rust/crates/oarbank-launcher/**
+      - rust/crates/oarbank-agent/**
+      - rust/crates/oarbank-core/**
+      - rust/.cargo/config.toml
+      - .github/workflows/fleet-update.yml
+
+concurrency:
+  group: fleet-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-package-update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update -q && sudo apt-get install -y -q nfpm
+      - name: two versions' deb and rpm, each installed, updated, rolled back and updated again through the runner
+        run: scripts/ci-fleet-update-linux.sh --build 2.10.901 2.10.902
+
+  macos-pkg-update:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: uv sync --extra dev --frozen
+      - name: two unsigned pkgs (no Developer ID Installer team pinned)
+        run: for v in 2.10.901 2.10.902; do scripts/package-macos.sh "$v" arm64; done
+      - name: the first installed by hand, the second through launchd's update runner
+        run: scripts/ci-fleet-update-macos.sh dist/oarbank-agent-2.10.901-macos-arm64.pkg dist/oarbank-agent-2.10.902-macos-arm64.pkg

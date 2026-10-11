@@ -555,7 +555,7 @@ def test_the_console_names_the_product_oarbank_with_a_capital(env):
     import re
     c, n, sid = env["c"], env["node"], env["sid"]
     for path in ("/", f"/nodes/{n['node_id']}", "/campaigns", f"/campaigns/{sid}", "/jobs", "/events", "/audit", "/settings",
-                 "/verify", "/modules", "/modules/relay", "/agent", "/coordinator", "/access", "/account", "/campaigns/nope"):
+                 "/verify", "/modules", "/modules/relay", "/agent", "/updates", "/coordinator", "/access", "/account", "/campaigns/nope"):
         html = c.get(path).text
         title = re.search(r"<title>(.*?)</title>", html, re.S).group(1)
         assert title.endswith("Oarbank") and "<b>Oarbank</b>" in html, (path, title)

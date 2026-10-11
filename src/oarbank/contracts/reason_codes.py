@@ -82,7 +82,9 @@ CODES: list[ReasonCode] = [
       "access, refused by the node, or awaiting the owner's signature)", remedies=["settings.folders.update"]),
     C("SANDBOX_BACKEND_MISSING", "job_pending", "The agent on this node cannot sandbox module processes"),
     C("CAPABILITY_NOT_ENFORCED", "job_pending", "The node's sandbox cannot enforce {capability}, which module {module} needs"),
-    C("AGENT_TOO_OLD", "job_pending", "Module {module} needs agent {need}; the node runs {have}", remedies=["agent.promote"]),
+    # also a node's admission: an agent older than the coordinator's agent_min gets no work until it updates (D61)
+    C("AGENT_TOO_OLD", "job_pending", "Module {module} needs agent {need}; the node runs {have}",
+      remedies=["updates.start", "agent.promote"]),
     C("PINNED_ELSEWHERE", "job_pending", "Pinned to node {node}"),
     C("POOL_JOBS_ONLY", "job_pending", "The node is yielding and takes only short pool jobs"),
     C("GPU_BLOCKED", "job_pending", "A GPU job: the node admits no more GPU jobs now (owner setting or a protected process is using the GPU)"),

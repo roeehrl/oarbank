@@ -310,3 +310,21 @@ def test_the_path_forwarder_forwards_arguments_and_exit_codes(tmp_path):
     build("current", 7)
     r = run()                                              # after setup: the build Coordinator\current names
     assert (r.returncode, r.stdout.strip()) == (7, 'current: join-code --label "a b"'), r
+
+
+def test_the_installer_registers_the_coordinator_update_runner_and_removes_it_first():
+    """Root's coordinator update runner on Windows (fleet-updates.md, D58): the SYSTEM task \\Oarbank\\CoordinatorUpdate,
+    every minute and at boot, one instance at a time, running the build `current` names; the build ships its launcher."""
+    text = INSTALLER.read_text()
+    assert '$UpdateTask = @{TaskPath = "\\Oarbank\\"; TaskName = "CoordinatorUpdate"}' in text
+    assert '$runner = "$App\\current\\bin\\oarbank-coordupdate.py"' in text
+    assert 'New-ScheduledTaskAction -Execute $py -Argument "-I `"$runner`" run --once"' in text
+    assert "-RepetitionInterval (New-TimeSpan -Minutes 1)" in text and "New-ScheduledTaskTrigger -AtStartup" in text
+    assert 'New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest' in text
+    assert "-MultipleInstances IgnoreNew" in text
+    assert "Register-ScheduledTask @UpdateTask" in text and "trust --from-home" in text
+    uninstall = text[text.index("if ($Uninstall) {"):]
+    assert uninstall.index("Remove-UpdateTask") < uninstall.index("Remove-Services")    # no runner starts mid-removal
+    assert text.index("Register-ScheduledTask @UpdateTask") > text.index('Run "sc.exe" @("start", $Services[$k])')
+    build = (REPO / "scripts/build-coordinator.ps1").read_text()
+    assert '@("oarbank-coordupdate", "oarbank.coordupdate")' in build

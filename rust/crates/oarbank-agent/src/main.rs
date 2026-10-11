@@ -29,6 +29,7 @@ mod join;
 mod keys;
 mod listeners;
 mod moves;
+mod nodeupdate;
 mod outbox;
 mod paths;
 mod policy;
