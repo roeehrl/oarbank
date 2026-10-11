@@ -586,6 +586,22 @@ async fn serve(layout: paths::Layout, o: Serve) -> anyhow::Result<i32> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = tx.send(true);
     });
+    // a service manager stops the agent with SIGTERM, which ends it at once: first delete the router mappings of its
+    // inbound listeners (a few seconds at most), then end as SIGTERM would have
+    #[cfg(unix)]
+    if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        tokio::spawn(async move {
+            term.recv().await;
+            let n = listeners::release_on_terminate(std::time::Duration::from_secs(8)).await;
+            if n > 0 {
+                tracing::info!(mappings = n, "router mappings released");
+            }
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                libc::raise(libc::SIGTERM);
+            }
+        });
+    }
     let mut st = status::Status::new(o.status_file.clone());
     let mut join_arg = o.join.clone();
     let mut failed_policy_code: Option<String> = None;
