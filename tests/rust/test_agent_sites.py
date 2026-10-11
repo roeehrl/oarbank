@@ -85,7 +85,7 @@ def test_a_protected_upload_on_one_node_pauses_staging_on_the_other_within_the_b
     data = tmp_path / "uploader"
     data.mkdir()
     phase = data / "phase-1.jsonl"
-    phase.write_text(json.dumps({"event": "heartbeat_response", "response": {"phase": "training"}}) + "\n")
+    phase.write_text(json.dumps({"event": "status", "phase": "working"}) + "\n")
     script = tmp_path / "uploader.py"
     script.write_text(PROTECTED)
     protected = subprocess.Popen([sys.executable, str(script), tag])
@@ -103,8 +103,8 @@ def test_a_protected_upload_on_one_node_pauses_staging_on_the_other_within_the_b
         planned(coordinator, "sites.create", "home", {"nodes": [a, b], "max_transfers": 1})
         config = {"schema": 1, "node": {"mode": "fleet_first"}, "rule": [{
             "id": "uploader", "match": {"argv_regex": tag}, "active_when": "present", "enter_for_s": 0, "immediate": True,
-            "during": [{"source": {"jsonl": str(data / "phase-*.jsonl"), "event": "heartbeat_response",
-                                   "field": "response.phase", "on": ["weights_uploading"]},
+            "during": [{"source": {"jsonl": str(data / "phase-*.jsonl"), "event": "status",
+                                   "field": "phase", "on": ["uploading"]},
                         "cap_fleet": {"staging_mbps": 0}, "tags": ["uplink"]}]}]}
         planned(coordinator, "protection.rules.update", a, {"config": config})
 
@@ -125,7 +125,7 @@ def test_a_protected_upload_on_one_node_pauses_staging_on_the_other_within_the_b
         before = served["bytes"]
         t0 = time.time()
         with open(phase, "a") as f:
-            f.write(json.dumps({"event": "heartbeat_response", "response": {"phase": "weights_uploading"}}) + "\n")
+            f.write(json.dumps({"event": "status", "phase": "uploading"}) + "\n")
         paused = wait(lambda: records(coordinator, b, "transfer_paused"), timeout=60, step=0.5)
         latency = paused[0]["paused_at"] - t0
         print(f"phase source write to the other node's staging pause: {latency:.2f} s (bound {sites.SITE_HOLD_BOUND_S} s)")
@@ -140,7 +140,7 @@ def test_a_protected_upload_on_one_node_pauses_staging_on_the_other_within_the_b
         assert served["bytes"] - held_at < (4 << 20), (before, held_at, served["bytes"])
         # the phase ends: the staging resumes and the dataset is staged with its digest
         with open(phase, "a") as f:
-            f.write(json.dumps({"event": "heartbeat_response", "response": {"phase": "training"}}) + "\n")
+            f.write(json.dumps({"event": "status", "phase": "working"}) + "\n")
         wait(lambda: records(coordinator, b, "transfer_resumed"), timeout=90, step=0.5)
         wait(lambda: "asset:big-1" in json.loads(db_rows(coordinator, "SELECT ready_datasets_json FROM nodes WHERE node_id=?",
                                                        (b,))[0]["ready_datasets_json"] or "[]"), timeout=240, step=1)
