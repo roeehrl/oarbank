@@ -120,6 +120,10 @@ pub struct WorkloadAction {
     pub threads: Option<i64>,
     /// A hard CPU cap for its container (cores), where the OS has one.
     pub cpu_cap: Option<f64>,
+    /// The GPU duty it should hold (`gpu_duty` in its control document; only for a workload with GPU use that
+    /// declares `cooperative_throttle`): the share of a co-tenancy certificate's duty under `gpu_jobs = certified`
+    /// (D50). None: no duty asked.
+    pub gpu_duty: Option<f64>,
     /// Stop it, and keep it stopped.
     pub hold: Option<Hold>,
 }
@@ -248,6 +252,7 @@ impl WorkloadLadder {
                 paused,
                 threads: i.threads.filter(|_| throttled && w.cooperative_throttle).map(|t| t.max(1)),
                 cpu_cap: i.cpu_share.filter(|_| throttled && w.hard_cap).map(|c| cap(c).max(0.1)),
+                gpu_duty: None,             // the controller fills it from the dynamic inputs (the certified share)
                 hold,
             };
             let last = self.last.get(&w.key).cloned().unwrap_or_else(|| WorkloadAction { admit: true, ..Default::default() });

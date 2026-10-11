@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-97 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+105 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -33,7 +33,12 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `nodes.confirm_identity` — Confirm that a node pinned this coordinator's identity key (compare the fingerprints once) | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=nodes.confirm_identity)<br>`POST /do/{op}` (op=nodes.confirm_identity) | oarbank node confirm-identity <node> |
 | `nodes.label` — Add or remove a node's labels (or several nodes'): a label can move nodes into or out of groups | T1 | prompted | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.label)<br>`POST /do/{op}` (op=nodes.label) | oarbank node label <node> <labels> [--remove] |
 | `tools.detect` — Ask a node's agent to detect its host tools again (Re-detect) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=tools.detect)<br>`POST /do/{op}` (op=tools.detect) | oarbank tools detect <node> |
-| `nodes.sign_statement` — Attach the owner's signature to a node's statement: its folders and added tool paths (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.sign_statement)<br>`POST /do/{op}` (op=nodes.sign_statement) | oarbank node sign <node> |
+| `nodes.sign_statement` — Attach the owner's signature to a node's statement: its folders, added tool paths and listeners (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.sign_statement)<br>`POST /do/{op}` (op=nodes.sign_statement) | oarbank node sign <node> |
+| `listeners.configure` — Assign a module's inbound listener to a node, or change its entry: external port, fallback, mapping, IPv6, bind, internal port, lowered limits, allowed addresses (the node statement; signing mode: oarbank node sign) | T2 | required | yes | admin | declarative | listeners.remove | `POST /api/v1/ops/{op}` (op=listeners.configure)<br>`POST /do/{op}` (op=listeners.configure) | oarbank listener set <node> <key> |
+| `listeners.remove` — Remove a listener's entry from a node: the agent closes it and removes its router mapping once it applies the new statement | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=listeners.remove)<br>`POST /do/{op}` (op=listeners.remove) | oarbank listener remove <node> <key> |
+| `listeners.disable` — The listener kill switch for a node or the fleet: every listener closes and every router mapping is removed at the next heartbeat | T0 | optional | – | operator | declarative | listeners.resume | `POST /api/v1/ops/{op}` (op=listeners.disable)<br>`POST /do/{op}` (op=listeners.disable) | oarbank listener disable --node <node><br>oarbank listener disable --all |
+| `listeners.resume` — Lift the listener kill switch for a node or the fleet | T1 | prompted | – | operator | declarative | listeners.disable | `POST /api/v1/ops/{op}` (op=listeners.resume)<br>`POST /do/{op}` (op=listeners.resume) | oarbank listener resume --node <node><br>oarbank listener resume --all |
+| `listeners.probe` — Check a listener from outside now: a fleet node on another network dials its external address (at most once a minute) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=listeners.probe)<br>`POST /do/{op}` (op=listeners.probe) | oarbank listener probe <node> <key> |
 
 ## jobs
 
@@ -123,6 +128,9 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 |---|---|---|---|---|---|---|---|---|
 | `protection.rules.update` — Set a scope's own protection section (a node, the fleet or a group): its rules, node section and mode; every scope's rules apply together on a node | T2 | required | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=protection.rules.update)<br>`POST /do/{op}` (op=protection.rules.update) | oarbank protection set <node> <file><br>oarbank protection set fleet <file><br>oarbank protection set group:<group> <file><br>oarbank protection preview <node> <file> |
 | `protection.probe_now` — Run a pause probe now | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.probe_now)<br>`POST /do/{op}` (op=protection.probe_now) | oarbank protection probe <nid> |
+| `protection.ab.start` — Start a paired on/off harness run on a node: fleet work under test runs beside a protected process in ON windows and is held in OFF windows until the margin is decided (D52) | T2 | required | yes | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.ab.start)<br>`POST /do/{op}` (op=protection.ab.start) | oarbank protection ab start <node> --rule <id> [--work <w>] [--duty <d>] [--blocks <n>] [--window <s>] [--washout <s>] [--margin <m>] [--off paused|evicted] [--max-hours <h>] |
+| `protection.ab.abort` — Abort a harness run (its work under test runs as protection allows again) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.ab.abort)<br>`POST /do/{op}` (op=protection.ab.abort) | oarbank protection ab abort <run> |
+| `protection.ab.sweep` — Search a node's certified GPU duty for a rule: harness runs at rising gpu_duty levels, stopping at the first that is not "no slowdown shown" | T2 | required | yes | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.ab.sweep)<br>`POST /do/{op}` (op=protection.ab.sweep) | oarbank protection ab sweep <node> --rule <id> [--work <w>] [--levels <list>] |
 
 ## alerts
 

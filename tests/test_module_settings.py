@@ -326,7 +326,7 @@ def test_a_29_home_with_module_objects_converts_them_key_by_key(tmp_path):
 
 
 def test_the_live_fleets_shape_converts_to_no_module_values(tmp_path):
-    """The owner's fleet on 2.8: every node's policy a copy with module_settings {} and disabled_services [], no module
+    """A 2.8 fleet: every node's policy a copy with module_settings {} and disabled_services [], no module
     settings in the settings table, one installed module never enabled: nothing to keep but the module's registration."""
     path = tmp_path / "old" / "oarbank.sqlite3"
     db = make_db(path, modules=())

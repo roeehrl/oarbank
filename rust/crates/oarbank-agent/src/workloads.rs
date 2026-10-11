@@ -262,6 +262,8 @@ struct Applied {
     lowered: bool,
     threads: Option<i64>,
     cpu_cap: Option<f64>,
+    /// `gpu_duty` in the control document (cooperative throttle of a workload that uses the GPU).
+    gpu_duty: Option<f64>,
 }
 
 /// One live run of a workload.
@@ -1108,6 +1110,7 @@ impl WorkloadManager {
                     lowered: plan.lowered,
                     threads: plan.threads.filter(|_| w.decl.coop_throttle),
                     cpu_cap: plan.cpu_cap,
+                    gpu_duty: plan.gpu_duty.filter(|_| w.decl.coop_throttle),
                 };
                 apply_to_run(reg.as_deref(), k, run, &want);
             }
@@ -1159,6 +1162,7 @@ impl WorkloadManager {
                 "held": w.hold.as_ref().map(|h| h.0.clone()), "held_code": w.hold.as_ref().map(|h| h.1),
                 "paused": run.is_some_and(|r| r.applied.frozen || r.applied.coop_paused),
                 "lowered": run.is_some_and(|r| r.applied.lowered), "threads": run.and_then(|r| r.applied.threads),
+                "gpu_duty": run.and_then(|r| r.applied.gpu_duty),
                 "cpu_cap": run.and_then(|r| r.applied.cpu_cap), "admit": w.admit,
                 "health": w.health.healthy.map(|h| if h { "healthy" } else { "unhealthy" }).unwrap_or("unknown"),
                 "health_detail": w.health.detail, "lease_left_s": lease_left, "want": w.want.running,
@@ -1714,10 +1718,11 @@ fn apply_to_run(reg: Option<&SpawnRegistry>, key: &str, run: &mut Run, want: &Ap
     if want.cpu_cap != have.cpu_cap {
         crate::sys::cpu_cap(run.leader, want.cpu_cap);
     }
-    if (want.coop_paused, want.threads) != (have.coop_paused, have.threads) {
+    if (want.coop_paused, want.threads, want.gpu_duty) != (have.coop_paused, have.threads, have.gpu_duty) {
         let mut doc = run.doc.clone();
         doc["pause"] = json!(want.coop_paused);
         doc["threads"] = want.threads.map_or(Value::Null, Value::from);
+        doc["gpu_duty"] = want.gpu_duty.map_or(Value::Null, Value::from);
         if let Some(c) = run.control.as_mut() {
             match c.write(doc.clone()) {
                 Ok(()) => run.doc = doc,

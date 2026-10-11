@@ -189,6 +189,21 @@ their process groups, deletes their workspaces, and does not report them.
   queries) show it.
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
   `journal_ack`, the highest seq it stored.
+- **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
+  block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
+  "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:
+  `{"rule", "readable", "reader", "rate"}`), `event_latency` (source event to pause request: `n`, `p50_ms`, `p99_ms`,
+  `max_ms`, `edges_ms`, `buckets`), `gpu_budget` (under `gpu_jobs = certified`: `{"duty", "rules", "jobs", "per_job"}`,
+  or `{"duty": 0, "not_certified": [...]}`) and `identities` (per rule, the protected program's identity a certificate
+  is bound to); `telemetry.cert_context` is what the node's certificates must match (`hardware`, `os_major`,
+  `agent_version`). The coordinator aggregates `phases` across nodes by tag (`protection.node_phases`,
+  `protection.any_phase_on`).
+- **`ab_runs`** is the current or last paired on/off harness run (at most one): `{"run_id", "rule", "work", "duty",
+  "state": "pilot|running|done|aborted", "started_at", "target_blocks", "blocks": [{"on_first", "on_rate",
+  "off_rate", "start", "end"}], "excluded": [{"start", "end", "reason"}], "current": {"arm": "on|off",
+  "window_elapsed_s", "on_first", "excluded_reason"}, "outcome": {"decision":
+  "no_slowdown|slowdown|inconclusive|refused|aborted", "reason", "analysis", "min_detectable", "ended_at"}, "identity",
+  "margin", "window_s", "washout_s", "off"}`. A run that ends `no_slowdown` earns a certificate.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
   at most 80, the agent's own jobs excluded. The agent sends it every 5 minutes, or on the next heartbeat
   after `send_processes`. `comm` is the kernel's short name (the Windows image name); a null `path` or `argv` could
@@ -220,11 +235,17 @@ their process groups, deletes their workspaces, and does not report them.
 | `revoke` | Another attempt won, or the module was disabled: kill silently, no report. |
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
+| `ab_run` | A harness run to start (`{"run_id", "rule", "work", "duty", "blocks", "window_s", "washout_s", "margin", "off", "pilot_blocks", "max_hours", "seed"}`, from `protection.ab.start` or `.sweep`); `null` when none. The agent starts each run id once, refuses one while another runs or for a rule without a `progress_rate` source (journaled `AB_REFUSED`). |
+| `ab_abort` | Run ids to abort (`protection.ab.abort`). |
+| `ab_ack` | The last run oarbankd stored as ended: the agent stops reporting it. |
+| `certificates` | The node's co-tenancy certificates in force: `[{"id", "rule", "work", "duty", "r", "r_lo", "r_hi", "margin", "run_id", "issued_at", "valid_until", "identity", "context"}]`. The agent checks each (expiry, `context` against its own, `identity` against the rule's live group) before `gpu_jobs = certified` uses it. |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
 | `modules_disabled` | Modules that must not run on this node: their effective `[module] enabled` is off here (for the fleet: the kill switch, `modules.disable`; or for a group the node is in, or the node itself). Every service of theirs is disabled on the node (stopped, never offered) until they are enabled again; the coordinator grants none of their work there. |
 | `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
 | `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
 | `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
+| `listeners_disabled` | The inbound-listener kill switch for this node or the fleet: close every listener and remove every router mapping (see Inbound listeners). |
+| `listener_probes`, `dial_probes`, `listener_reachability`, `observed_addr`, `send_listener_talkers` | Dial-back probes to expect and to make, their outcomes, the node's public source address, and a request for the listeners' top client addresses (see Inbound listeners). |
 
 ## Work
 
@@ -419,10 +440,11 @@ nondeterminism takes the results resumed from its checkpoints with it.
 
 Every node-scope value that grants access on one node travels in that node's **statement**: canonical JSON
 `{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}}, "tools":
-[{"id", "module", "path"}], "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
+[{"id", "module", "path"}], "listeners": {"<module>/<listener>": {…}}, "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
 release signing the agent applies a statement only with a valid signature by the pinned release key (`oarbank node sign
 <node>`, operation `nodes.sign_statement`) and a seq above the last one it applied; in developer mode statements are
-unsigned. The agent keeps the applied statement in `state/folders.json`.
+unsigned. The agent keeps the applied statement in `state/folders.json`. `listeners` are the owner's inbound listeners on the node (see
+Inbound listeners); a statement without the key has none.
 
 ## Folders
 
@@ -664,6 +686,33 @@ owner assigns to nodes (`workloads.assign`, T2).
 - **Adoption**: workloads outlive their agent; the next agent adopts a recorded run (`<home>/state/workloads/`) while its
   lease runs and its leader is the recorded process, and reports it at hello, which renews the lease.
 
+## Inbound listeners
+
+docs/design/inbound-listeners.md is the full contract; in short:
+
+- **Facts** (hello): `"listeners": {"version": 1, "probe": true}`: the agent runs listeners and can dial back for
+  others.
+- **What the agent runs.** For each statement entry `<module>/<listener>`, a listener when the module version in its
+  release requests that `inbound` listener, an enabled endpoint service of the module lists it, `listeners_disabled`
+  is off, the policy's `inbound_listeners` is not false and the protection mode is not `strict_yield`; else a refusal
+  (`LISTENER_NOT_GRANTED`, `LISTENER_NO_TARGET`, `MODULE_DISABLED`, `LISTENERS_DISABLED`, `LISTENERS_FORBIDDEN`,
+  `LISTENER_STRICT_YIELD`, `LISTENER_HANDOVER_UNSUPPORTED`, `LISTENER_BIND_FAILED`).
+- **Heartbeat** (when the node has or had listeners): `listeners` (per key: state, bind and external addresses, the
+  announcement, the reachability result with the owner's text and fix, connection counters and refusals by reason,
+  `probe_wanted`, `statement_seq`), `portmaps` (every router mapping it holds: protocol, gateway, external and internal
+  address, lease, expiry, last verification, state, error), `network` (gateway, local addresses, the gateway's
+  external address, the observed address, which mapping protocols answer, the router's other mappings for this node,
+  the firewall), `probe_results` (dial-backs this node made), and `listener_talkers` once after
+  `send_listener_talkers`.
+- **Probes.** The coordinator schedules a dial-back when a report asks (`probe_wanted`) or on `listeners.probe`, at most
+  once a minute per listener: the target gets `listener_probes: [{probe_id, key, nonce, expires_at}]`, the prober
+  `dial_probes: [{probe_id, host, port, nonce}]`; the prober writes `OARBANK-PROBE/1 <probe_id>` and expects
+  `OARBANK-PROBE/1 OK <nonce>` (`SAME`: from the target's own network) and reports `probe_results: [{probe_id, ok,
+  detail, rtt_ms}]`; the target then gets `listener_reachability: {key: {state, at, via, detail}}`.
+- **Mappings** are journaled in `state/portmaps.json` before each request; `oarbank-agent portmap status|release-all`
+  read and empty it; the agent releases its mappings when it stops (its graceful stop), when the coordinator answers
+  `node_retired`, and the launcher's uninstall runs `portmap release-all`.
+
 ## Doctor
 
 For each module the agent runs the runner's exec with `doctor --json`, sandboxed, with the job environment. The runner
@@ -806,6 +855,12 @@ lowest wins:
   the node (the fleet's, a group's or the node's value, else the key's default; a key with neither is absent). A module
   appears only when it has such a value, and never sees another module's keys. The agent rewrites a module's file only
   when its content changes, through a temporary file and a rename; a bootstrap job gets `{}`.
+- **Session helpers** (a system install; docs/design/protection.md, "Whose processes") report one JSON line every two
+  seconds to the agent's local endpoint. The agent sends lines back: `{"v": 2, "watch": [{"key", "kind":
+  "progress|phase", "account", "rel", "spec"}]}`, the owner sources under the person's home the helper should read
+  (when the list changes and on each connection; `spec` is the source without its path). The helper's report then
+  carries `"sources": [{"key", "events", "epoch", "on", "readable", "event_t"}]` (counts and phase states, never file
+  contents), and it reports at once when a phase changes (docs/design/gpu-cotenancy.md).
 - **`protection`** is owner-set host protection (schema 1): the node's effective section, which the coordinator
   assembles from the settings chain (`protection.mode`, `protection.rules` from every scope together, `protection.node`;
   a rule the node's OS cannot run is left out). See docs/design/protection.md and docs/design/settings.md,

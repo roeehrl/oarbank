@@ -94,11 +94,12 @@
 
 {# coordinator/tools.py node_view: what the node found, each module's resolution per tool request, and the paths set here #}
 {% set T = d.tools %}
-<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported yet){% endif %}</span></h2>
+<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported){% endif %}</span></h2>
 <div class="card wide">
   <div class="row"><span class="small mut">The node finds its tools itself, verifies each (a JDK by its <span class="mono">release</span> file) and
     reports it; a module gets the one installation that satisfies what it asks for.</span><span class="sp"></span>
     {{ m.op_form("tools.detect", n.node_id, "Re-detect") }}</div>
+  {% if not T.reported %}<p class="small" role="status"><span class="chip warn">not reported</span> {{ T.unreported_why }}</p>{% endif %}
   {% if T.redetect %}<p class="small" role="status"><span class="chip {{ 'ok' if T.redetect.state == 'done' else 'warn' }}">{{ T.redetect.text }}</span> <span class="mut">asked {{ T.redetect.requested_at | ago }}</span></p>{% endif %}
   <table class="small"><caption class="sr-only">Installations this node found</caption>
   <tr><th>tool</th><th>path</th><th>version</th><th>arch</th><th>vendor</th><th>found by</th><th>status</th></tr>
@@ -106,7 +107,7 @@
     <td class="nowrap">{{ i.version or '?' }}</td><td class="nowrap">{{ i.arch or '?' }}</td><td>{{ i.vendor or '' }}</td>
     <td class="nowrap">{{ {'detected': 'built-in search', 'search': 'fleet search path', 'override': 'path set here', 'local-hint': 'on this machine'}.get(i.source, i.source) }}</td>
     <td><span class="chip {{ 'ok' if i.status == 'ok' else 'bad' }}">{{ i.status }}</span></td></tr>{% endfor %}
-  {% else %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported yet: the agent reports its tools after it connects' }}</td></tr>{% endfor %}
+  {% endfor %}{% if not T.found_any %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported' }}</td></tr>{% endif %}
   </table>
   <h3 class="small">What each module gets here</h3>
   <table class="small"><caption class="sr-only">Each module's host tool requests on this node</caption>
@@ -132,7 +133,7 @@
   {% call m.op_form("settings.apply", n.node_id, "Set path", inline=False, tier="T1", return_to="/nodes/" ~ n.node_id ~ "#tools") %}
     <input type="hidden" name="scope" value="node"><input type="hidden" name="scope_id" value="{{ n.node_id }}">
     <label>tool <select name="tool">{% for tid in T.definitions %}<option>{{ tid }}</option>{% endfor %}</select></label>
-    <label>only for module (empty: every module) <input name="module" class="mono" placeholder="minos-gatk"></label>
+    <label>only for module (empty: every module) <input name="module" class="mono" placeholder="genomics"></label>
     <label>path <input name="path" class="mono" style="width:100%" required list="tool-paths-{{ n.node_id }}"
       placeholder="{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}{% if loop.first %}{{ i.path }}{% endif %}{% endfor %}{% endfor %}"></label>
     <datalist id="tool-paths-{{ n.node_id }}">{% for tid, insts in T.tools.items() %}{% for i in insts if i.status == 'ok' %}<option value="{{ i.path }}">{{ tid }} {{ i.version }}</option>{% endfor %}{% endfor %}</datalist>
@@ -141,6 +142,8 @@
       the folder rules (no roots, homes, data or system directories) and the tool's detector.</span>
   {% endcall %}</details>
 </div>
+
+{% include "_node_network.html" %}
 
 <h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
 {% set P = n.protection or {} %}{% set T = n.tel.protection or {} %}

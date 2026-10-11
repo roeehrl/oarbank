@@ -116,6 +116,8 @@ pub struct Agent {
     workloads_seen: (String, Value, Value),
     /// The boot clock when the request the next directives answer was sent (a seat lease runs from then).
     sent_boot: f64,
+    /// Inbound listeners and their router mappings (listeners.rs).
+    pub listeners: crate::listeners::Hub,
 }
 
 /// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
@@ -149,6 +151,7 @@ impl Agent {
         };
         cfg.save(&layout.config())?;
         let release = release::current(&layout);
+        let layout_home = layout.home.clone();
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
         let mut a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
@@ -162,7 +165,8 @@ impl Agent {
             services_halted: false, coord_install: Default::default(), status: Default::default(), layout,
             tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null,
             settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None,
-            workloads: None, workloads_seen: Default::default(), sent_boot: 0.0 };
+            workloads: None, workloads_seen: Default::default(), sent_boot: 0.0,
+            listeners: crate::listeners::Hub::new(Layout::new(layout_home.clone()), crate::listeners::Env::from_env()) };
         a.refresh_managed();                    // the defaults the agent starts from are tightened, too
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
@@ -349,6 +353,7 @@ impl Agent {
                               "ready_datasets": staging::ready(&self.layout), "tools": self.tools,
                               "live_attempts": self.table.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
+        body["facts"]["listeners"] = crate::listeners::Hub::facts();   // inbound listeners, and a dial-back prober
         merge(&mut body, self.hooks.hello_extra());
         merge(&mut body, self.update.report());
         merge(&mut body, self.trust_report());
@@ -362,12 +367,14 @@ impl Agent {
 
     pub async fn heartbeat(&mut self) -> Result<Value, ApiError> {
         self.seq += 1;
-        let (capacity, telemetry, journal, processes) = match self.prot.as_mut() {
-            Some(p) => (p.capacity.as_ref().map(|c| c.to_json()), p.telemetry.clone(), p.journal_out(), p.processes(&self.table)),
-            None => (None, json!({}), json!([]), None),
+        let (capacity, telemetry, journal, processes, ab_runs) = match self.prot.as_mut() {
+            Some(p) => (p.capacity.as_ref().map(|c| c.to_json()), p.telemetry.clone(), p.journal_out(), p.processes(&self.table),
+                        p.ab_report()),
+            None => (None, json!({}), json!([]), None, json!([])),
         };
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
+                              "ab_runs": ab_runs,
                               "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(), "tools": self.tools,
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         if let Some(svc) = &self.services {
@@ -376,6 +383,7 @@ impl Agent {
         if !self.settings_report.is_null() {
             body["settings"] = self.settings_report.clone();
         }
+        merge(&mut body, self.listeners.report());                      // `listeners`, `portmaps`, `network`, `probe_results`
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
         merge(&mut body, self.update.report());
@@ -549,6 +557,8 @@ impl Agent {
         self.hooks.on_directives(d);
         self.directives = d.clone();
         self.sync_services();
+        // after the services: a listen_fd listener's socket must exist before its service's first start
+        self.listeners.configure(self.release.as_ref(), &self.folders, d, self.services.clone(), self.node_id.as_deref());
         if let Some(w) = self.workloads.clone() {
             let mut w = w.lock().unwrap();
             w.set_wanted(&d["workloads"], self.sent_boot);
@@ -1024,6 +1034,7 @@ impl Agent {
 
     /// One protection tick: sample, decide, actuate, recompute capacity.
     pub fn protect(&mut self) {
+        self.listeners.tick();
         if self.facts.is_null() {
             self.facts = facts::collect(&self.layout.home);
         }
@@ -1203,7 +1214,7 @@ impl Agent {
                 mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0), gpu, pgid: None, stop: None, pause: false,
                 usage: Default::default(), log_bytes: 0, started_at: doctor::now(),
                 caps: runner["capabilities"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
-                bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None,
+                bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None, gpu_duty: None,
                 needs, wake: Default::default(), stop_by: None });
             info!(attempt = aid, kind = g["kind"].as_str().unwrap_or(""), module = g["module"].as_str().unwrap_or(""), "granted");
             tokio::spawn(jobs::run(ctx.clone(), g.clone(), crate::clock::local_deadline(g, received)));
@@ -1237,6 +1248,12 @@ impl Agent {
         }
         if let Some(p) = self.prot.as_mut() {
             p.release_delegated();
+        }
+        // the agent stops (the graceful stop of SIGTERM, SIGHUP, SIGINT or the launcher's stop event) or the node was
+        // retired: close the listeners and delete their router mappings
+        let n = self.listeners.shutdown().await;
+        if n > 0 {
+            info!(mappings = n, "router mappings released");
         }
         self.settle_services().await;
         r

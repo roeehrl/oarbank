@@ -631,7 +631,7 @@ def test_node_show_lists_gpu_in_containers_only_with_a_container_runtime_and_doc
     none = {"containers": {"runtime": None, "state": "absent", "gpu": "undetected", "detail": "no container runtime installed"}}
     assert detail.gpu(none, rep) == {"reported": True, "host": ["metal"], "containers": [], "evidence": {}, "mechanism": None}
     why = "dlopen(/x/libchtslib.so): tried: " + "'/x' (no such file), " * 40 + "(mach-o file, but is an incompatible architecture)"
-    doctor = detail.doctor({"at": 1.0, "release_id": "r_1", "capabilities": [], "modules": {"minos-gatk": {
+    doctor = detail.doctor({"at": 1.0, "release_id": "r_1", "capabilities": [], "modules": {"genomics": {
         "health": "undetected", "ran": True, "checks": [{"name": "pysam_import", "ok": False, "detail": why}]}}})
     for facts, line in ((colima, "containers: colima installed; the agent's Colima VMs start when a job needs one"),
                         (none, "containers: none (no container runtime installed)")):
@@ -827,3 +827,49 @@ def test_caps_are_node_values_that_can_only_lower_capacity(env):
     assert "the lowest wins" in caps
     set_fleet(db, "jobs", 2)                                    # a fleet cap below the node's: min wins
     assert node_settings(db, n)["jobs"] == 2
+
+
+def test_co_tenancy_card_and_a_harness_run_page(env):
+    """The protection page's Co-tenancy card (phases with who reads them, certificates, the run form) and a run's page
+    (blocks, the decision in words, R against the margin), with a run requested from the console's form (T2)."""
+    import json as _json
+    import math
+    from oarbank.contracts import abstats
+    from oarbank.coordinator import core, cotenancy
+    c, db, n = env["c"], env["db"], env["node"]
+    with db.tx():
+        from oarbank.coordinator import protection
+        protection.write(db, n["node_id"], {"schema": 1, "rule": [{
+            "id": "trainer", "match": {"name": "trainer"}, "immediate": True,
+            "protect": {"metric": "progress_rate", "max_slowdown": 0.05, "source": {"jsonl": "~/e-*.jsonl", "event": "s"}},
+            "during": [{"source": {"jsonl": "~/e-*.jsonl", "enter": "up", "exit": "done"}, "pause_fleet": {"scope": "gpu"},
+                        "tags": ["uplink"]}]}]}, "t", None)
+    core.heartbeat(db, fresh(db, n), {"telemetry": {"protection": {
+        "phases": [{"key": "trainer#0", "rule": "trainer", "block": 0, "on": False, "readable": False, "reader": "helper",
+                    "tags": ["uplink"], "immediate": True}],
+        "event_latency": {"n": 3, "p50_ms": 0.6, "p99_ms": 1.9, "max_ms": 1.9}}}})
+    r = c.get(f"/nodes/{n['node_id']}/protection")
+    assert r.status_code == 200 and "Co-tenancy" in r.text and "unreadable: held as on" in r.text
+    assert "the person&#39;s session helper" in r.text and "p99 1.9 ms" in r.text and "PROTECTION_SOURCE_NEEDS_HELPER" in r.text
+    r = form(c, "protection.ab.start", target=n["node_id"], **{"p.rule": "trainer", "p.work": "gpu", "p.duty": "0.3",
+                                                               "p.blocks": "6", "p.window_s": "60", "p.washout_s": "10"})
+    assert r.status_code == 200 and "Review" in r.text                                   # T2: the plan page
+    plan_id = r.text.split('name="plan_id" value="')[1].split('"')[0]
+    r = c.post("/apply/protection.ab.start", data={"plan_id": plan_id, "reason": "measure", "return_to": "/", "idem": "k2"},
+               follow_redirects=False)
+    assert r.status_code == 303
+    run = db.one("SELECT * FROM ab_runs WHERE node_id=?", (n["node_id"],))
+    assert (run["duty"], _json.loads(run["spec_json"])["window_s"]) == (0.3, 60.0)
+    xs = [math.log(1.0) + (0.002 if i % 2 else -0.002) for i in range(6)]
+    a = abstats.analyse(xs, 0.02, 3)
+    rep = {"run_id": run["run_id"], "state": "done", "identity": "id1", "target_blocks": 6,
+           "blocks": [{"on_first": i % 2 == 0, "on_rate": 10 * math.exp(x), "off_rate": 10.0, "start": 0, "end": 1}
+                      for i, x in enumerate(xs)],
+           "excluded": [{"start": 1, "end": 2, "reason": "the protected process restarted"}],
+           "outcome": {"decision": "no_slowdown", "reason": a["reason"], "analysis": a, "ended_at": 3}}
+    core.heartbeat(db, fresh(db, n), {"ab_runs": [rep], "telemetry": {"cert_context": {"hardware": "h"}}})
+    r = c.get(f"/protection/ab/{run['run_id']}")
+    assert r.status_code == 200 and "No slowdown shown" in r.text and "the protected process restarted" in r.text
+    assert "paired dot plot" in r.text and "1 − margin" in r.text
+    r = c.get(f"/nodes/{n['node_id']}/protection")
+    assert "valid" in r.text and cotenancy.list_certificates(db, n["node_id"])[0]["status"] == "valid"

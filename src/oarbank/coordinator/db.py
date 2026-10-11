@@ -221,6 +221,23 @@ CREATE TABLE IF NOT EXISTS coordinator_moves (
   created_at REAL, not_before REAL, ended_at REAL, actor TEXT, reason TEXT, final_snapshot_json TEXT, report_json TEXT,
   cancel_payload TEXT, cancel_sig TEXT,
   modules_json TEXT, force INT DEFAULT 0);          -- what modules said about the move; the operator's override of blockers
+-- Paired on/off harness runs (D52, cotenancy.py): one per run, the agent's latest report, and how it ended
+CREATE TABLE IF NOT EXISTS ab_runs (
+  run_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, duty REAL,
+  spec_json TEXT NOT NULL, state TEXT NOT NULL,     -- requested|running|done|aborted
+  sweep_id TEXT, actor TEXT, reason TEXT, created_at REAL, started_at REAL, ended_at REAL,
+  report_json TEXT, decision TEXT, cert_id TEXT, abort_requested INT DEFAULT 0, identity TEXT, context_json TEXT);
+CREATE INDEX IF NOT EXISTS ab_runs_node ON ab_runs(node_id, created_at);
+-- A frontier search: harness runs at rising GPU duty levels, stopping at the first that does not pass
+CREATE TABLE IF NOT EXISTS ab_sweeps (
+  sweep_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, levels_json TEXT,
+  spec_json TEXT, state TEXT, certified_duty REAL, actor TEXT, created_at REAL, ended_at REAL);
+-- Co-tenancy certificates (D52): a passing run for one node, rule and fleet configuration; gate gpu_jobs = certified
+CREATE TABLE IF NOT EXISTS certificates (
+  cert_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, duty REAL,
+  r REAL, r_lo REAL, r_hi REAL, margin REAL, run_id TEXT, issued_at REAL, valid_until REAL, identity TEXT,
+  context_json TEXT, revoked_at REAL, revoked_why TEXT);
+CREATE INDEX IF NOT EXISTS certificates_node ON certificates(node_id, issued_at);
 -- The history of each node's effective protection section (protection.record_if_changed), one row per change
 CREATE TABLE IF NOT EXISTS protection_versions (
   node_id TEXT NOT NULL, version INT NOT NULL, config_json TEXT NOT NULL, config_hash TEXT, actor TEXT, reason TEXT,
@@ -307,15 +324,18 @@ class DB:
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
+            from .listeners import NODE_COLUMNS as LISTENER_COLUMNS
+            from .listeners import SCHEMA as LISTENER_SCHEMA
             from .settings import modkeys as settings_modkeys
             from .settings import store as settings_store
             from .workloads import SCHEMA as WORKLOADS_SCHEMA
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
             self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + settings_modkeys.SCHEMA + ACCESS_SCHEMA
-                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + WORKLOADS_SCHEMA + "COMMIT;")
+                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + LISTENER_SCHEMA + WORKLOADS_SCHEMA + "COMMIT;")
             for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
                 _ensure_columns(self.conn, table, cols)
+            _ensure_columns(self.conn, "nodes", LISTENER_COLUMNS)     # inbound listeners (listeners.py)
             settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
         from .settings import migrate as settings_migrate

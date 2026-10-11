@@ -109,6 +109,21 @@ CODES: list[ReasonCode] = [
     C("NOT_ADMITTING", "node_admission", "The agent admits no new work: {why}"),
     C("CLOCK_SKEW", "node_admission", "The node's clock is {offset_s} s off the coordinator's: jobs and moves use the "
       "coordinator's time, but certificates and update metadata need a correct clock; set the node's time", "P3"),
+    # inbound listeners (docs/design/inbound-listeners.md): a listener the agent refused, and the doctor's results the
+    # owner must act on; {text} is the agent's own owner text, rendered as it is
+    C("LISTENER_UNAVAILABLE", "node_admission", "Listener {listener} is not open on this node: {why}",
+      remedies=["listeners.configure"]),
+    C("PORT_TAKEN", "node_admission", "Listener {listener}: the router forwards its external port to another device: {text}",
+      "P3", remedies=["listeners.configure"]),
+    C("DOUBLE_NAT", "node_admission", "Listener {listener}: this machine is behind two routers: {text}", "P3"),
+    C("CGNAT", "node_admission", "Listener {listener}: the provider shares one public address among many customers: {text}",
+      "P3"),
+    C("NO_MAPPING_PROTOCOL", "node_admission", "Listener {listener}: the router accepts no automatic port mapping: {text}",
+      "P3", remedies=["listeners.configure"]),
+    C("MAPPED_UNREACHABLE", "node_admission", "Listener {listener}: mapped, but connections from outside do not arrive: {text}",
+      "P3", remedies=["listeners.probe"]),
+    C("FIREWALL_BLOCKED", "node_admission", "Listener {listener}: this machine's firewall blocks incoming connections: {text}",
+      "P3"),
 
     # ---------------------------------------------------------------- protection (the agent's decision journal and capacity)
     C("PROTECTION_CONFIG", "protection", "Protection config applied (mode {mode}, rules {rules})"),
@@ -194,6 +209,20 @@ CODES: list[ReasonCode] = [
       "instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow",
       "P4"),
     C("PROTECTION_SOURCE_ERROR", "protection", "The process table cannot be read: {error}", "P3"),
+    C("PROTECTION_SOURCE_UNREADABLE", "protection", "Rule {rule}: source {source} cannot be read by the agent; protection "
+      "holds fleet work back until it reads", "P3"),
+    C("PROTECTION_SOURCE_NEEDS_HELPER", "protection", "Rule {rule}: source {source} is in a person's home and no session "
+      "helper reports it (nobody logged in?); protection holds fleet work back", "P3"),
+    C("PROTECTION_PHASE_ON", "protection", "A phase of rule {rule} began ({via})"),
+    C("PROTECTION_PHASE_OFF", "protection", "A phase of rule {rule} ended ({via})"),
+    C("GPU_NOT_CERTIFIED", "protection", "gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet "
+      "GPU work waits", "P4", remedies=["protection.ab.sweep"]),
+    C("AB_STARTED", "protection", "Harness run {run_id} started on rule {rule} ({work})", remedies=["protection.ab.abort"]),
+    C("AB_ON", "protection", "Harness run {run_id}: the work under test runs (an ON window)"),
+    C("AB_OFF", "protection", "Harness run {run_id}: the work under test is held (an OFF window)", node=False, job=False),
+    C("AB_IDLE", "protection", "Harness run {run_id} ended: its work runs as protection allows"),
+    C("AB_FINISHED", "protection", "Harness run {run_id} ended: {decision} ({why})"),
+    C("AB_REFUSED", "protection", "Harness run {run_id} refused by the node: {why}", "P4"),
 
     # ---------------------------------------------------------------- how an attempt ended
     C("OK", "attempt_end", "Completed", wire=["ok"], node=False, job=False),

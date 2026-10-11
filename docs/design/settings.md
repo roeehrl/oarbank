@@ -46,6 +46,11 @@ The keys, by section:
 - **Jobs**: `threads_per_job`, `max_slots`; advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
   advanced `vm_mem_gb`, `vm_cpus`, `disk_gb`, `staging_mbps`.
+- **Network** ([inbound-listeners.md](inbound-listeners.md)): `inbound_listeners` (off: no listener opens and every
+  router mapping is removed; managed, off is stricter), advanced `listener_port_range` (the internal ports listeners
+  bind, default `41000-41999`); fleet only, both null by default so no third party is contacted:
+  `listener_probe_endpoint` (an `https://` URL of the owner's `oarbank-agent probe-endpoint`) and `listener_stun_server`
+  (`host:port`). All four travel to agents in the policy.
 - **Notifications** (fleet only): `ntfy.url`, `ntfy.click_base`. The ntfy token is not a setting: it is a core secret
   in the encrypted secrets store (write-only, shown as a fingerprint; `settings.secrets.set` / `clear`).
 - **Access** (fleet only): `console_hosts`, a typed list of host names (an optional `:port`).
@@ -188,8 +193,8 @@ module's settings (oarbank-sdk `spec/manifest.md`, "Settings"):
 {"type": "object", "properties": {
   "vm_mem_gb": {"type": "number", "minimum": 2, "maximum": 64, "default": 8, "title": "VM memory",
                 "description": "Memory the module's VM gets on a node.", "x-oarbank": {"scope": "node", "unit": "GB"}},
-  "pool_tao": {"type": "number", "minimum": 0, "title": "Miner pool per round",
-               "x-oarbank": {"scope": "fleet", "unit": "TAO", "required": true}}}}
+  "credits_per_round": {"type": "number", "minimum": 0, "title": "Credit pool per round",
+                        "x-oarbank": {"scope": "fleet", "unit": "credits", "required": true}}}}
 ```
 
 - **Registration** (modkeys.py). When a version is installed, enabled, promoted, rolled back or uninstalled, the
@@ -350,7 +355,7 @@ machine" layer, in the safe direction only.
   `/etc/oarbank/policy.json`), keyed by the settings' raw keys ([install.md](../install.md), "MDM").
 - **Which keys.** The registry's `managed` keys: `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` (higher is
   stricter), `mem_in_use_bound`, `screen_sharing_present`, `hard_limits` (on is stricter), `user_present_slots`,
-  `max_slots`, `run_on_battery`, `workloads` and `delegated_processes` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
+  `max_slots`, `run_on_battery`, `inbound_listeners`, `workloads` and `delegated_processes` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
   `staging_mbps`: lower) and `enforce` (hard is stricter). Anything else (`job_mem_gb`, a schedule, protection) is
   refused and reported: protection already has its own tighten-only local file.
 - **Enforcement.** The agent applies each managed value only where it is stricter than what the coordinator sends (and
@@ -554,9 +559,9 @@ the command that resets each.
 - Values the registry refuses (an undeclared module key, a value its schema refuses, a fleet-only module key set on a
   node) are dropped and named, with the counts and each module's registration, in the `settings_migrated` event.
 
-On the owner's fleet (six nodes whose policies differed only in the RAM-computed `os_reserve_gb`, `module_settings`
-`{}` and `disabled_services` `[]` everywhere, no caps, no owner keys, minos-gatk 4.0.0 installed and current) this
-yields no rows at all, only minos-gatk's registration: the old model stored copies, not choices.
+On a six-node 2.8 fleet (nodes whose policies differed only in the RAM-computed `os_reserve_gb`, `module_settings`
+`{}` and `disabled_services` `[]` everywhere, no caps, no owner keys, genomics 4.0.0 installed and current) this
+yields no rows at all, only genomics's registration: the old model stored copies, not choices.
 
 ## Deferred
 

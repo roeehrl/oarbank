@@ -9,7 +9,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::session::{Principal, Report, SessionHub, INTERVAL, MAX_LINE};
+use crate::relay::Relay;
+use crate::session::{Principal, Report, SessionHub, Watch, INTERVAL, MAX_LINE, PROTOCOL};
 
 /// Where the system service listens: `OARBANK_SESSION_SOCKET`, else the platform's place.
 pub(super) fn socket_path(default: &str) -> PathBuf {
@@ -73,14 +74,36 @@ pub(super) fn serve(
     Ok(())
 }
 
-fn take_reports(hub: &SessionHub, s: UnixStream, owns: fn(u32, i32, u64) -> bool) {
+fn take_reports(hub: &Arc<SessionHub>, s: UnixStream, owns: fn(u32, i32, u64) -> bool) {
     let Some(uid) = peer_uid(&s) else { return };
     let who = Principal::Uid(uid);
-    // requests to act on a delegated process of this person go back on the same connection
+    hub.set_account(who, crate::sources::account_of(uid));
+    // one writer for what the service sends this person's helper: the owner sources to read (`Watch` lines) and
+    // requests to act on a delegated process of this person (`act` lines)
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     if let Ok(w) = s.try_clone() {
-        let w = std::sync::Mutex::new(w);
+        let w = Arc::new(std::sync::Mutex::new(w));
+        let relay_w = w.clone();
         hub.register_relay(who, move |line: &str| {
-            w.lock().map(|mut w| w.write_all(line.as_bytes()).is_ok()).unwrap_or(false)
+            relay_w.lock().map(|mut w| w.write_all(line.as_bytes()).is_ok()).unwrap_or(false)
+        });
+        // the owner sources this person's helper should read: sent now and whenever the list changes
+        let hub = hub.clone();
+        let alive = alive.clone();
+        let _ = std::thread::Builder::new().name("session-watch".into()).spawn(move || {
+            let mut seen = u64::MAX;
+            while alive.load(std::sync::atomic::Ordering::Relaxed) {
+                let gen = hub.wanted_after(seen, INTERVAL * 5);
+                if gen != seen {
+                    seen = gen;
+                    let mut line = serde_json::to_string(&Watch { v: PROTOCOL, watch: hub.asked(who) })
+                        .unwrap_or_default();
+                    line.push('\n');
+                    if w.lock().map(|mut w| w.write_all(line.as_bytes()).is_err()).unwrap_or(true) {
+                        return;
+                    }
+                }
+            }
         });
     }
     let mut r = BufReader::new(s);
@@ -95,49 +118,64 @@ fn take_reports(hub: &SessionHub, s: UnixStream, owns: fn(u32, i32, u64) -> bool
             hub.accept(who, report, |pid, start| owns(uid, pid, start));
         }
     }
+    alive.store(false, std::sync::atomic::Ordering::Relaxed);
     hub.gone(who);
 }
 
 /// The helper: send `report(first)` to the service at `path` every interval (`first`: the connection is new, so
 /// the service knows none of the account's processes yet), connecting again every interval while it is not there.
+/// It also reads the owner sources the service names (`Watch` lines on the same connection) and reports at once
+/// when one of their phases changes.
 pub(super) fn run_helper(path: &Path, mut report: impl FnMut(bool) -> Report) -> ! {
+    let relay = Relay::own();
     loop {
         if let Ok(mut s) = UnixStream::connect(path) {
-            // the service's requests to act on this person's delegated processes
+            // what the service sends on the same connection: the owner sources to read (`Watch`) and requests to
+            // act on this person's delegated processes (`act`)
             if let Ok(r) = s.try_clone() {
-                let _ = std::thread::Builder::new().name("session-acts".into()).spawn(move || take_acts(r));
+                let relay = relay.clone();
+                let _ = std::thread::Builder::new().name("session-watch".into()).spawn(move || {
+                    let mut r = BufReader::new(r);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match (&mut r).take(MAX_LINE as u64).read_line(&mut line) {
+                            Ok(n) if n > 0 && line.ends_with('\n') => {}
+                            _ => return,
+                        }
+                        if let Some(a) = act_request(&line) {
+                            let _ = act_on(&a);
+                        } else if let Ok(w) = serde_json::from_str::<Watch>(&line) {
+                            if w.v == PROTOCOL {
+                                relay.set(w);
+                            }
+                        }
+                    }
+                });
             }
             let mut first = true;
             loop {
-                let mut line = serde_json::to_string(&report(first)).unwrap_or_default();
+                let mut rep = report(first);
+                rep.sources = relay.readings();
+                let mut line = serde_json::to_string(&rep).unwrap_or_default();
                 line.push('\n');
                 if s.write_all(line.as_bytes()).is_err() {
                     break;
                 }
                 first = false;
-                std::thread::sleep(INTERVAL);
+                relay.wait(INTERVAL);
             }
         }
         std::thread::sleep(INTERVAL);
     }
 }
 
-/// The helper's side of `SessionHub::act`: each line names one of this person's processes (pid and start time) and a
-/// verb; the helper acts only if the process still has that start time, and only with the four verbs (the kernel lets
-/// it act only on its own person's processes).
-fn take_acts(s: UnixStream) {
-    let mut r = BufReader::new(s);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match (&mut r).take(64 * 1024).read_line(&mut line) {
-            Ok(n) if n > 0 => {}
-            _ => return,
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-        let Ok(a) = serde_json::from_value::<crate::session::Act>(v["act"].clone()) else { continue };
-        let _ = act_on(&a);
-    }
+/// The helper's side of `SessionHub::act`: a line `{"act": {pid, start_us, op}}` names one of this person's processes
+/// (pid and start time) and a verb; the helper acts only if the process still has that start time, and only with the
+/// four verbs (the kernel lets it act only on its own person's processes).
+fn act_request(line: &str) -> Option<crate::session::Act> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    serde_json::from_value::<crate::session::Act>(v.get("act")?.clone()).ok()
 }
 
 /// Carry out one request on a process of this helper's own person.

@@ -57,10 +57,12 @@ function Install-OarbankNode {
             Add-Type -Namespace OarbankInstall -Name Machine -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+[DllImport("kernel32.dll")]
+public static extern IntPtr GetCurrentProcess();
 '@
         }
         $process, $native = [uint16]0, [uint16]0
-        if ([OarbankInstall.Machine]::IsWow64Process2([System.Diagnostics.Process]::GetCurrentProcess().Handle, [ref]$process, [ref]$native)) {
+        if ([OarbankInstall.Machine]::IsWow64Process2([OarbankInstall.Machine]::GetCurrentProcess(), [ref]$process, [ref]$native)) {
             $Arch = @{ 0xAA64 = "arm64"; 0x8664 = "x64" }[[int]$native]
         }
     } catch { }

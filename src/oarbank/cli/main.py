@@ -763,6 +763,8 @@ def node_show(target: str, as_json: bool = False):
     print(f"{n['hostname']} {n['node_id']} {n['platform'] or '-'} {n['lifecycle']} {n['desired_state']} "
           f"{'online' if n['online'] else 'OFFLINE'} agent {n['agent_version'] or '-'}"
           + (f" QUARANTINED: {n['quarantine_reason']}" if n["quarantine_reason"] else ""))
+    if n.get("agent_behind"):
+        print(f"  update: {n['agent_behind']['text']}")
     if d.get("why"):
         print(f"  why: {d['why']['line']}")
     for m, st in d["modules"].items():
@@ -802,7 +804,7 @@ def node_show(target: str, as_json: bool = False):
               + (f" (statement {f['statement_seq']}, {'signed' if f['signed'] else 'unsigned'})" if f["statement_seq"] else ""))
     t = d.get("tools") or {}
     if not t.get("reported"):
-        print("  host tools: not reported yet")
+        print(f"  host tools: not reported: {t.get('unreported_why') or 'not yet'}")
     for tid, insts in sorted((t.get("tools") or {}).items()):
         for i in insts:
             print(f"  tool {tid}: {i.get('version') or '?'} {i.get('arch') or ''} at {i.get('path')}, {i.get('status')} [{i.get('source')}]")
@@ -1255,6 +1257,22 @@ def cmd_protection(a):
     them on a group first, then `oarbank settings promote protection.rules --group <group>` (the mode: oarbank node
     mode, or oarbank settings set protection.mode)."""
     ask = dict(reason=a.reason, yes=a.yes)
+    if a.action == "ab":
+        return cmd_protection_ab(a, ask)
+    if a.action == "certificates":
+        q = f"?node={a.node}" if a.node else ""
+        d = api("GET", f"/api/v1/protection/certificates{q}")
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        if not d["certificates"]:
+            print("no co-tenancy certificates (oarbank protection ab start|sweep <node> --rule <id> earns one)")
+        for c in d["certificates"]:
+            duty = f"duty {c['duty']}" if c.get("duty") is not None else "no duty"
+            print(f"{c['cert_id']}  {c['hostname'] or c['node_id']:<22} rule {c['rule']:<16} {c['work']:<10} {duty:<10} "
+                  f"R {c['r']:.3f} [{c['r_lo']:.3f}, {c['r_hi']:.3f}] margin {c['margin'] * 100:.0f} %  until "
+                  f"{_when(c['valid_until'])}  {c['status']}" + (f" ({c['why']})" if c.get("why") else ""))
+        return
     need = {"show": "<node>", "probe": "<node>", "set": "<node|fleet|group:G> <file>", "preview": "<node|fleet|group:G> <file>"}
     if a.action in need and (not a.node or need[a.action].count("<") == 2 and not a.value):
         sys.exit(f"oarbank protection {a.action} {need[a.action]}")
@@ -1270,6 +1288,70 @@ def cmd_protection(a):
     else:
         res = run_op("protection.probe_now", a.node, None, **ask)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
+
+
+def print_ab_run(d: dict) -> None:
+    """One harness run as `oarbank protection ab show` prints it: the decision in words, then the blocks."""
+    print(f"run {d['run_id']} on {d['hostname'] or d['node_id']}: rule {d['rule']}, work {d['work']}"
+          + (f", gpu_duty {d['duty']}" if d.get("duty") is not None else "") + f"; {d['state']}"
+          + (f", {d['decision']}" if d.get("decision") else ""))
+    print(f"  {d['summary']}")
+    rep = d.get("report") or {}
+    o = (d.get("outcome") or {})
+    if o.get("reason"):
+        print(f"  why: {o['reason']}")
+    if o.get("min_detectable") is not None:
+        print(f"  the pilot's spread lets the planned run detect a {o['min_detectable'] * 100:.1f} % slowdown (80 % power)")
+    for i, b in enumerate(rep.get("blocks") or [], 1):
+        ratio = b["on_rate"] / b["off_rate"] if b.get("off_rate") else float("nan")
+        print(f"  block {i:<3} {'ON first ' if b.get('on_first') else 'OFF first'}  on {b['on_rate']:.3f}/s  "
+              f"off {b['off_rate']:.3f}/s  ratio {ratio:.4f}")
+    for x in rep.get("excluded") or []:
+        print(f"  excluded {_when(x['start'])}: {x['reason']}")
+    if d.get("cert_id"):
+        print(f"  certificate {d['cert_id']}")
+
+
+def cmd_protection_ab(a, ask) -> None:
+    """oarbank protection ab start|status|show|abort|sweep: the paired on/off harness (docs/design/gpu-cotenancy.md)."""
+    sub, target = a.node, a.value
+    if sub not in ("start", "status", "show", "abort", "sweep"):
+        sys.exit("oarbank protection ab start|status|show|abort|sweep ...")
+    if sub in ("start", "sweep"):
+        if not target or not a.rule:
+            sys.exit(f"oarbank protection ab {sub} <node> --rule <id>")
+        params = {"rule": a.rule, "work": a.work, "duty": a.duty, "blocks": a.blocks, "window_s": a.window,
+                  "washout_s": a.washout, "margin": a.margin, "off": a.off, "max_hours": a.max_hours}
+        if sub == "sweep" and a.levels:
+            params["levels"] = [float(x) for x in a.levels.split(",")]
+        params = {k: v for k, v in params.items() if v is not None}
+        res = run_op(f"protection.ab.{sub}", target, params, **ask)
+        print(json.dumps((res or {}).get("result"), indent=1, default=str))
+        return
+    if sub == "abort":
+        if not target:
+            sys.exit("oarbank protection ab abort <run>")
+        res = run_op("protection.ab.abort", target, None, **ask)
+        print(json.dumps((res or {}).get("result"), indent=1, default=str))
+        return
+    if sub == "show":
+        if not target:
+            sys.exit("oarbank protection ab show <run>")
+        d = api("GET", f"/api/v1/protection/ab/runs/{target}")
+        print(json.dumps(d, indent=1, default=str)) if a.json else print_ab_run(d)
+        return
+    q = f"?node={target}" if target else ""
+    d = api("GET", f"/api/v1/protection/ab/runs{q}")
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    if not d["runs"]:
+        print("no harness runs")
+    for r in d["runs"]:
+        prog = f"{r['blocks_done']}/{r['target_blocks'] or '?'} blocks"
+        print(f"{r['run_id']}  {r['hostname'] or r['node_id']:<22} {r['rule']:<16} {r['work']:<10} "
+              f"{'duty ' + str(r['duty']) if r.get('duty') is not None else '':<10} {r['state']:<9} {prog:<12} "
+              f"{r['decision'] or ''}")
 
 
 def cmd_verify(a):
@@ -1432,6 +1514,122 @@ def cmd_folders(a):
     print(json.dumps(res, indent=1, default=str))
 
 
+# ------------------------------------------------------------------ inbound listeners (docs/design/inbound-listeners.md)
+
+def _listener_lines(row: dict) -> list[str]:
+    """One listener as the owner reads it: where it is reachable, the agent's result with its text and fix as they are,
+    its connections and the latest probe."""
+    ext = row.get("external") or "no external address yet"
+    out = [f"  {row['key']:<28} {row.get('state') or 'not reported':<10} {ext}"
+           + (f"  (IPv6 {row['external_v6']})" if row.get("external_v6") else "")
+           + (f"  refused: {row['refused']}" if row.get("refused") else "")]
+    if row.get("result"):
+        out.append(f"    {row['result']}" + (f" [{', '.join(row['flags'])}]" if row.get("flags") else ""))
+    if row.get("text"):
+        out.append(f"    {row['text']}")
+    if row.get("fix"):
+        out.append(f"    fix: {row['fix']}")
+    c = row.get("conns") or {}
+    if c.get("accepted") is not None:
+        ref = ", ".join(f"{k} {v}" for k, v in (c.get("refused") or {}).items() if v)
+        out.append(f"    connections: {c.get('open') or 0} open, {c.get('accepted') or 0} accepted"
+                   + (f", refused {ref}" if ref else ""))
+    p = row.get("probe") or {}
+    if p.get("state"):
+        out.append(f"    last check from outside: {p['state']}" + (f" via {p['via']}" if p.get("via") else "")
+                   + (f" ({p['detail']})" if p.get("detail") else ""))
+    if p.get("pending"):
+        out.append(f"    a check from outside is running (via {p['pending'].get('via')})")
+    if row.get("configured") is not None and row.get("statement") is None:
+        out.append("    configured, but not in the node's statement (its module version does not request it, or its grants "
+                   "are not approved)")
+    return out
+
+
+def _mapping_line(m: dict) -> str:
+    exp = f", expires {time.strftime('%H:%M', time.localtime(m['expires_at']))}" if m.get("expires_at") else ""
+    return (f"  {m.get('key') or '?':<28} {m.get('protocol') or '?':<7} {m.get('family') or '':<5} {m.get('external') or '?'}"
+            f" -> {m.get('internal') or '?'}  via {m.get('gateway') or '?'}  {m.get('state') or ''}{exp}"
+            + ("  permanent" if m.get("permanent") else "") + (f"  error: {m['error']}" if m.get("error") else ""))
+
+
+def cmd_listener(a):
+    """oarbank listener list|show|mappings|set|remove|probe|disable|resume: inbound listeners (a module accepting
+    connections from the internet on nodes the owner assigns). The agent's results are printed as it words them."""
+    from urllib.parse import quote
+    if a.action in ("list", "mappings"):
+        node = a.node or a.target
+        v = api("GET", "/api/v1/listeners" + (f"?node={quote(node)}" if node else ""))
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        if v.get("fleet_disabled"):
+            print("listeners are disabled for the whole fleet (oarbank listener resume --all)")
+        for d in v["nodes"]:
+            off = " (listeners disabled on this node)" if d["disabled"]["node"] else ""
+            print(f"{d['hostname']} ({d['node_id']}){'' if d['online'] else ' offline'}{off}")
+            if a.action == "list":
+                for row in d["listeners"]:
+                    print("\n".join(_listener_lines(row)))
+                if not d["listeners"]:
+                    print("  no listeners")
+                continue
+            for m in d["portmaps"]:
+                print(_mapping_line(m))
+            others = [m for m in d["router_mappings"] if not m.get("ours")]
+            if others:
+                print("  other mappings the router reports for this machine (Oarbank never touches them):")
+                for m in others:
+                    print(f"    {m.get('protocol') or '?'} {m.get('external_port')} -> {m.get('internal')}"
+                          + (f"  {m['description']}" if m.get("description") else ""))
+            if not d["portmaps"] and not others:
+                print("  no router mappings")
+        return
+    if a.action in ("disable", "resume"):
+        if bool(a.all) == bool(a.node):
+            sys.exit(f"oarbank listener {a.action} --node <node> | --all")
+        res = run_op(f"listeners.{a.action}", "fleet" if a.all else a.node, {}, a.reason, a.yes)
+        print(json.dumps(res.get("result"), indent=1, default=str))
+        return
+    if not a.target or not a.key:
+        sys.exit(f"oarbank listener {a.action} <node> <module>/<listener>")
+    if a.action == "show":
+        v = api("GET", f"/api/v1/nodes/{quote(a.target)}/listeners/{quote(a.key, safe='/')}")
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        row = v["listener"]
+        print(f"{v['hostname']} ({v['node_id']}): {row['key']}")
+        print("\n".join(_listener_lines(row)))
+        if row.get("statement"):
+            print(f"  entry: {json.dumps(row['statement'], sort_keys=True)}")
+        for m in row.get("portmaps") or []:
+            print(_mapping_line(m))
+        if row.get("talkers"):
+            print("  top client addresses (24 h):")
+            for t in row["talkers"]:
+                print(f"    {t.get('addr'):<40} {t.get('conns') or 0} connections, {t.get('refused') or 0} refused")
+        else:
+            print("  top client addresses: asked for; the node sends them with its next heartbeat (run this again)")
+        return
+    if a.action == "set":
+        params = {"key": a.key}
+        for k, v in (("external_port", a.external_port), ("fallback", a.fallback), ("mapping", a.mapping),
+                     ("ipv6", a.ipv6), ("bind", a.bind), ("internal_port", a.internal_port)):
+            if v is not None:
+                params[k] = v
+        if a.limit:
+            params["limits"] = _kv(a.limit)
+        if a.allow:
+            params["allow"] = [c for x in a.allow for c in x.replace(",", " ").split()]
+        res = run_op("listeners.configure", a.target, params, a.reason, a.yes)
+        print(json.dumps(res.get("result"), indent=1, default=str))
+    elif a.action == "remove":
+        print(json.dumps(run_op("listeners.remove", a.target, {"key": a.key}, a.reason, a.yes).get("result"), indent=1))
+    elif a.action == "probe":
+        print(json.dumps(run_op("listeners.probe", a.target, {"key": a.key}, a.reason, True).get("result"), indent=1))
+
+
 def _inst(i: dict) -> str:
     return f"{i.get('version') or '?'} {i.get('arch') or ''} {i.get('path')}".replace("  ", " ")
 
@@ -1543,8 +1741,8 @@ def cmd_cli(a):
     py = module_python(bundle)
     argv = mf.resolve_exec(info["exec"], bundle, py) + list(a.args)
     tmp = Path(tempfile.mkdtemp(prefix=f"oarbank-cli-{a.module}-"))
-    env = cli_env(tmp, port, tok, a.module)
     try:
+        env = cli_env(tmp, port, tok, a.module)
         if modsandbox.backend() is None:
             sys.exit("no module sandbox backend on this OS: a module CLI does not run unconfined")
         from ..coordinator import sandboxexec
@@ -1646,10 +1844,23 @@ def parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("protection", help="protected-process rules on the settings chain: show (a node's effective "
                                            "rules and where each comes from), set / preview (a node's, the fleet's or "
                                            "a group's own section), probe (the mode: oarbank node mode)")
-    pr.add_argument("action", choices=["show", "set", "preview", "probe"])
-    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>")
-    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml)")
-    pr.add_argument("--json", action="store_true", help="show: as JSON")
+    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates"])
+    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>; "
+                                            "ab: start|status|show|abort|sweep; certificates: a node (all without)")
+    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml); "
+                                             "ab start|sweep|status: a node; ab show|abort: a run")
+    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates: as JSON")
+    pr.add_argument("--rule", help="ab start|sweep: the protected rule (its progress_rate source is what is measured)")
+    pr.add_argument("--work", help="ab start|sweep: the fleet work under test: gpu (default), cpu, all, <module>, "
+                                   "<module>/<workload>")
+    pr.add_argument("--duty", type=float, help="ab start: the gpu_duty the GPU work under test holds in ON windows")
+    pr.add_argument("--blocks", type=int, help="ab start|sweep: planned blocks (default 12)")
+    pr.add_argument("--window", type=float, help="ab start|sweep: window length in seconds (default 300)")
+    pr.add_argument("--washout", type=float, help="ab start|sweep: seconds discarded after each switch (default 60)")
+    pr.add_argument("--margin", type=float, help="ab start|sweep: the slowdown margin (default 0.02)")
+    pr.add_argument("--off", choices=["paused", "evicted"], help="ab start|sweep: how OFF holds the work (default paused)")
+    pr.add_argument("--max-hours", type=float, help="ab start|sweep: the run's cap (default 8)")
+    pr.add_argument("--levels", help="ab sweep: rising gpu_duty levels, comma-separated (default 0.1,0.2,0.35,0.5,...)")
     pr.add_argument("--reason")
     pr.add_argument("--yes", "-y", action="store_true")
     pr.set_defaults(fn=cmd_protection)
@@ -1682,6 +1893,28 @@ def parser() -> argparse.ArgumentParser:
     fo.add_argument("--reason")
     fo.add_argument("--yes", "-y", action="store_true")
     fo.set_defaults(fn=cmd_folders)
+    li = sub.add_parser("listener", help="inbound listeners: list, show <node> <key>, mappings (router mappings), set <node> "
+                                         "<key> (the node's entry; signing mode: oarbank node sign), remove, probe (check "
+                                         "from outside now), disable|resume --node N | --all (the kill switch)")
+    li.add_argument("action", choices=["list", "show", "mappings", "set", "remove", "probe", "disable", "resume"])
+    li.add_argument("target", nargs="?", help="a node (list and mappings: optional)")
+    li.add_argument("key", nargs="?", help="the listener: <module>/<listener>")
+    li.add_argument("--node", help="list, mappings: one node; disable, resume: this node")
+    li.add_argument("--all", action="store_true", help="disable, resume: the whole fleet")
+    li.add_argument("--external-port", type=int, help="set: the port to ask the router for")
+    li.add_argument("--fallback", help="set: refuse | next_free:<a>-<b> | router_choice")
+    li.add_argument("--mapping", choices=["auto", "pcp", "natpmp", "upnp", "manual", "none"])
+    li.add_argument("--ipv6", choices=["auto", "off"])
+    li.add_argument("--bind", help="set: default_route or an address of the node")
+    li.add_argument("--internal-port", type=int, help="set: the local port (fixed, for a forward made by hand)")
+    li.add_argument("--limit", action="append", metavar="KEY=VALUE",
+                    help="set: lower one of the module's limits (max_conns, max_conns_per_ip, new_conns_per_ip_per_s, "
+                         "idle_timeout_s, max_bytes_per_s); repeatable")
+    li.add_argument("--allow", action="append", metavar="CIDR", help="set: only these client addresses (repeatable)")
+    li.add_argument("--json", action="store_true")
+    li.add_argument("--reason")
+    li.add_argument("--yes", "-y", action="store_true")
+    li.set_defaults(fn=cmd_listener)
     tl = sub.add_parser("tools", help="host tools: list (definitions, what each node found, each module's resolution), "
                                       "detect <node>, define <id>, delete <id> (a tool's path on a node: oarbank settings set "
                                       "tool.<id>.path <path> --node <node>)")

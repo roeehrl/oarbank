@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 97 operations, 2 explain kinds, 156 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 105 operations, 2 explain kinds, 174 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -72,6 +72,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `releases.pin_key` | T3 | yes | `oarbank release keygen` | yes |
 | `protection.rules.update` | T2 | yes | `oarbank protection set <node> <file>`<br>`oarbank protection set fleet <file>`<br>`oarbank protection set group:<group> <file>`<br>`oarbank protection preview <node> <file>` | yes |
 | `protection.probe_now` | T0 | yes | `oarbank protection probe <nid>` | yes |
+| `protection.ab.start` | T2 | yes | `oarbank protection ab start <node> --rule <id> [--work <w>] [--duty <d>] [--blocks <n>] [--window <s>] [--washout <s>] [--margin <m>] [--off paused|evicted] [--max-hours <h>]` | yes |
+| `protection.ab.abort` | T0 | yes | `oarbank protection ab abort <run>` | yes |
+| `protection.ab.sweep` | T2 | yes | `oarbank protection ab sweep <node> --rule <id> [--work <w>] [--levels <list>]` | yes |
 | `alerts.ack` | T0 | yes | `oarbank alerts ack <id> [--useful|--noise]` | yes |
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
@@ -90,6 +93,11 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `tools.detect` | T0 | yes | `oarbank tools detect <node>` | yes |
 | `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
 | `nodes.sign_statement` | T1 | yes | `oarbank node sign <node>` | yes |
+| `listeners.configure` | T2 | yes | `oarbank listener set <node> <key>` | yes |
+| `listeners.remove` | T1 | yes | `oarbank listener remove <node> <key>` | yes |
+| `listeners.disable` | T0 | yes | `oarbank listener disable --node <node>`<br>`oarbank listener disable --all` | yes |
+| `listeners.resume` | T1 | yes | `oarbank listener resume --node <node>`<br>`oarbank listener resume --all` | yes |
+| `listeners.probe` | T0 | yes | `oarbank listener probe <node> <key>` | yes |
 | `access.accounts.create` | T2 | yes | `oarbank account create <name>` | yes |
 | `access.accounts.update` | T2 | yes | `oarbank op access.accounts.update` | yes |
 | `access.accounts.reset_totp` | T2 | yes | `oarbank op access.accounts.reset_totp` | yes |
@@ -145,6 +153,10 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |
 | `NO_RELEASE` | `modules.install`, `modules.enable` |
 | `RELEASE_UNSIGNED` | `releases.attach_signature` |
+| `LISTENER_UNAVAILABLE` | `listeners.configure` |
+| `PORT_TAKEN` | `listeners.configure` |
+| `NO_MAPPING_PROTOCOL` | `listeners.configure` |
+| `MAPPED_UNREACHABLE` | `listeners.probe` |
 | `WORKLOAD_UNASSIGNED` | `workloads.assign` |
 | `WORKLOAD_SEAT_ELSEWHERE` | `workloads.unassign` |
 | `WORKLOAD_WITHDRAWN` | `workloads.restart` |
@@ -152,4 +164,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `WORKLOAD_IDENTITY_SHARED` | `secrets.set` |
 | `WORKLOAD_POLICY_OFF` | `settings.apply` |
 | `WORKLOAD_NODE_NOT_ACTIVE` | `nodes.resume` |
+| `GPU_NOT_CERTIFIED` | `protection.ab.sweep` |
+| `AB_STARTED` | `protection.ab.abort` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

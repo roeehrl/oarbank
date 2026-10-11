@@ -49,6 +49,9 @@ pub struct JobState {
     pub bandwidth: Option<String>,
     /// Cooperative throttle: the thread ceiling protection set (written into control.json).
     pub threads: Option<i64>,
+    /// Cooperative throttle: the GPU duty protection set (`gpu_duty` in control.json: a harness run's level, or a
+    /// co-tenancy certificate's under `gpu_jobs = certified`).
+    pub gpu_duty: Option<f64>,
     /// Pools the job reserves or needs (services start on demand for them; the job uses the services providing them).
     pub needs: Vec<String>,
     /// Wakes the job's monitor when `stop`, `pause` or `threads` change, so control.json follows at once.
@@ -553,6 +556,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let mut stopping: Option<(Stop, Instant, f64)> = None;
     let mut paused = false;
     let mut threads: Option<i64> = None;
+    let mut gpu_duty: Option<f64> = None;
     let mut log_sent = 0u64;
     let holdback = secrets.iter().map(|(_, v)| v.as_str().unwrap_or("").len() as u64).max().unwrap_or(0);
     let mut escaped: Option<String> = None;
@@ -573,7 +577,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         if let Some(r) = record.as_mut() {
             r.track();
         }
-        let (stop, want_pause, want_threads, stop_by) = {
+        let (stop, want_pause, want_threads, want_duty, stop_by) = {
             let mut t = ctx.table.lock().unwrap();
             let j = t.get_mut(&aid);
             match j {
@@ -586,9 +590,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                             j.phase = p;
                         }
                     }
-                    (j.stop.clone(), j.pause, j.threads, j.stop_by)
+                    (j.stop.clone(), j.pause, j.threads, j.gpu_duty, j.stop_by)
                 }
-                None => (Some(Stop::Revoke), false, None, None),
+                None => (Some(Stop::Revoke), false, None, None, None),
             }
         };
         // a value split across two chunks would escape redaction: hold back as many bytes as the longest secret
@@ -602,11 +606,15 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                 }
             }
         }
-        if want_pause != paused || want_threads != threads {
+        if want_pause != paused || want_threads != threads || want_duty != gpu_duty {
             let mut doc = json!({"pause": want_pause, "reason": "protection"});
             if let Some(t) = want_threads {
                 doc["threads"] = json!(t);
             }
+            if let Some(d) = want_duty {
+                doc["gpu_duty"] = json!(d);
+            }
+            gpu_duty = want_duty;
             control.write(doc)?;
             if want_pause != paused {
                 set_phase(&ctx.table, aid, if want_pause { "paused" } else { "running" });

@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import apple_tool
+
 REPO = Path(__file__).resolve().parents[1]
 MACOS = REPO / "deploy" / "macos"
 POSTINSTALL = MACOS / "scripts" / "postinstall"
@@ -86,6 +88,11 @@ class Mac:
         helper = self.root / "Library/Oarbank/bin/oarbank-node-helper"
         helper.write_text('#!/bin/sh\necho "oarbank-node-helper $*" >> "$CALLS"\n', encoding="utf-8")
         helper.chmod(0o755)
+        # the new launcher: records its arguments and HOME, and exits with $LAUNCHER_RC (0)
+        launcher = self.root / "Library/Oarbank/bin/oarbank-launcher"
+        launcher.write_text('#!/bin/sh\necho "oarbank-launcher $* HOME=$HOME" >> "$CALLS"\nexit "${LAUNCHER_RC:-0}"\n',
+                            encoding="utf-8")
+        launcher.chmod(0o755)
         text = POSTINSTALL.read_text(encoding="utf-8")
         r, s = str(self.root), str(self.root / "stub")
         for real, fake in [("/bin/launchctl", f"{s}/launchctl"), ("/usr/bin/open", f"{s}/open"), ("/usr/bin/sudo", f"{s}/sudo"),
@@ -173,22 +180,30 @@ def test_a_managed_mac_joins_by_policy_and_its_code_is_never_printed(tmp_path):
 
 
 @unix
-def test_an_upgrade_restarts_the_service_in_either_scope(tmp_path):
+def test_an_upgrade_renders_the_service_again_and_restarts_it_in_either_scope(tmp_path):
+    # a 2.8 job has no ExitTimeOut (launchd kills the agent 20 s into stopping its jobs): the new launcher renders it
+    # again and restarts it (service refresh); only if it cannot is the old job kickstarted on the new launcher
     mac = Mac(tmp_path / "system")
     (mac.root / "Library/LaunchDaemons/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
     out, calls = mac.run()
     assert out.returncode == 0 and "open " not in calls
-    assert "launchctl kickstart -k system/dev.codonic.oarbank.agent" in calls
+    assert "oarbank-launcher service refresh --system HOME=" in calls
+    assert "kickstart -k system/dev.codonic.oarbank.agent\n" not in calls
     assert "launchctl kickstart -k gui/501/dev.codonic.oarbank.agent.session" in calls
     assert out.stdout.splitlines() == ["Oarbank: upgraded; the service restarted on the new launcher"]
     # an upgrade reloads the helper on its new binary and plist, and registers the rights again (new prompts)
     assert "oarbank-node-helper register-rights" in calls and "bootout system/dev.codonic.oarbank.agent.helper" in calls
+    out, calls = Mac(tmp_path / "system").run(LAUNCHER_RC="1")
+    assert "oarbank-launcher service refresh --system" in calls
+    assert "launchctl kickstart -k system/dev.codonic.oarbank.agent\n" in calls
     mac = Mac(tmp_path / "personal")
     (mac.home / "Library/LaunchAgents/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
     out, calls = mac.run()
     assert out.returncode == 0 and "open " not in calls
-    assert "launchctl kickstart -k gui/501/dev.codonic.oarbank.agent" in calls
-    assert "system/dev.codonic.oarbank.agent " not in calls + " "
+    # as the person, with their HOME (which names their LaunchAgents), in their session (launchctl asuser runs it)
+    assert (f"launchctl asuser 501 {mac.root}/stub/sudo -u pat /usr/bin/env HOME={mac.home} "
+            f"{mac.root}/Library/Oarbank/bin/oarbank-launcher service refresh\n") in calls
+    assert "kickstart" not in calls and "system/dev.codonic.oarbank.agent " not in calls + " "
 
 
 @unix
@@ -387,7 +402,7 @@ def test_the_rendered_glyphs_match_their_svgs(tmp_path):
     shutil.copy(REPO / "scripts/render-menu-bar-icons.swift", work / "scripts")
     for svg in (REPO / "deploy/icons").glob("*-symbolic.svg"):
         shutil.copy(svg, work / "deploy/icons")
-    r = subprocess.run(["xcrun", "swift", str(work / "scripts/render-menu-bar-icons.swift")], capture_output=True, text=True, timeout=300)
+    r = apple_tool(["xcrun", "swift", str(work / "scripts/render-menu-bar-icons.swift")], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     for png in (work / "deploy/icons").glob("*.png"):
         assert png.read_bytes() == (REPO / "deploy/icons" / png.name).read_bytes(), png.name
@@ -417,7 +432,7 @@ def swiftc(out: Path, *sources: Path, frameworks=("Security",)):
     cmd = ["xcrun", "swiftc", "-O", "-parse-as-library", "-target", f"{platform.machine()}-apple-macos15.0"]
     for f in frameworks:
         cmd += ["-framework", f]
-    result = subprocess.run([*cmd, *map(str, sources), "-o", str(out)], capture_output=True, text=True)
+    result = apple_tool([*cmd, *map(str, sources), "-o", str(out)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "warning:" not in result.stderr, result.stderr
     build = subprocess.run(["xcrun", "vtool", "-show-build", str(out)], capture_output=True, text=True, check=True)
@@ -634,7 +649,7 @@ def test_elevate_refuses_before_it_asks_for_anything(tmp_path, node_app):
 def _info_plist() -> dict:
     text = PACKAGE.read_text(encoding="utf-8")
     body = re.search(r'cat > "\$APP/Contents/Info.plist" <<PLIST\n(.*?)\nPLIST\n', text, re.S).group(1)
-    return plistlib.loads(body.replace("$VERSION", "2.8.0").encode())
+    return plistlib.loads(body.replace("$VERSION", "2.9.0").encode())
 
 
 def test_the_app_bundle_registers_oarbank_links_and_hides_from_the_dock():

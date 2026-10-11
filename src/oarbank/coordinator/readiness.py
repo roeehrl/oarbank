@@ -186,21 +186,35 @@ def _settings_step(db: DB, name: str, man, nodes: list[dict], needs: list) -> di
                  [_act("Settings", href=href)], items)
 
 
-def module(db: DB, name: str, now: float | None = None) -> dict | None:
-    """The checklist of one installed module: {name, version, state, summary, needs, steps}."""
+def module(db: DB, name: str, now: float | None = None, version: str | None = None) -> dict | None:
+    """The checklist of one installed module: {name, version, state, summary, needs, steps}: of its current version, or
+    of `version` (an installed one that is not in use yet, such as the fix for what blocks the current one)."""
     from oarbank_sdk import manifest as mf
     now = now or time.time()
     rows = modstore.installed(db, name)
     if not rows:
         return None
     ch = modstore.channel(db, name)
-    ver = ch["current"] or rows[-1]["version"]
+    if version is not None and not any(r["version"] == version for r in rows):
+        return None
+    ver = version or ch["current"] or rows[-1]["version"]
     rec = next((r for r in rows if r["version"] == ver), rows[-1])
     man = mf.load(Path(rec["path"]) / "oarbank-module.toml")
     steps, needs = [], []
+    in_use = ch["current"] is None or ver == ch["current"]
+    # an installed version newer than the one in use: what to do next is usually to move to it
+    newer = None if not in_use or not ch["current"] else max(
+        (r["version"] for r in rows if modstore._ver(r["version"]) > modstore._ver(ch["current"])),
+        key=modstore._ver, default=None)
 
     # 1. installed
     steps.append(_step("installed", "Installed", "done", f"{name} {ver} installed by {rec['installed_by']}"))
+    if newer:
+        steps.append(_step("newer", "Newer version installed", "next",
+                           f"{name} {newer} is installed and not in use: its own checklist says what stands between it and "
+                           "running work (approving its grants, enabling it, its tools on the nodes)",
+                           [_act(f"Checklist of {newer}", href=f"/modules/{name}?version={newer}#readiness",
+                                 command=f"oarbank module ready {name}@{newer}")]))
 
     # 2. sandbox grants
     st = modsandbox.status(db, name, ver)
@@ -217,9 +231,19 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
     granted = not st["requests"] or st["approved"]
 
     # 3. enabled
-    enabled = bool(ch["current"]) and not ch["disabled"]
+    enabled = in_use and bool(ch["current"]) and not ch["disabled"]
     nodes = [n for n in db.q("SELECT * FROM nodes WHERE lifecycle NOT IN ('retired') ORDER BY hostname")]
-    if enabled:
+    if not in_use:
+        needs.append(f"enable {ver}")
+        steps.append(_step("enabled", "Enabled", "blocked" if granted else "waiting",
+                           f"{ver} is installed but not in use (current: {ch['current']}"
+                           + (", switched off by the kill switch" if ch["disabled"] else "") + "): enable it to make it the "
+                           "current version on every node, or canary it on a few nodes first"
+                           + ("" if granted else "; approve its grants first"),
+                           [_act(f"Enable {ver}", op="modules.enable", target=f"{name}@{ver}",
+                                 command=f"oarbank module enable {name}@{ver}"),
+                            _act("Canary", command=f"oarbank module canary {name}@{ver} --node <node>")]))
+    elif enabled:
         steps.append(_step("enabled", "Enabled", "done", f"{ver} is the current version on every node"))
     elif ch["current"] and ch["disabled"]:
         needs.append("re-enable it")
@@ -321,7 +345,7 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
     from . import tools as T
     tool_ids = {t.id for t in man.sandbox.tools}
     mine = [n for n in nodes if platforms.node_platform(n) in supported]
-    titems, short, unknown = [], [], []
+    titems, short, unknown, old_agents = [], [], [], set()
     for row in T.resolution(db, name, man, mine):
         need = row["need"]
         if row["unknown"]:
@@ -337,15 +361,25 @@ def module(db: DB, name: str, now: float | None = None) -> dict | None:
                        "counts": {c: sum(1 for _, _, x in row["failed"] if x == c) for c in sorted({x for _, _, x in row["failed"]})}})
         if not ok_n:
             short.append(row["request"]["id"])
+            if row["old_agents"] and len(row["old_agents"]) == len(row["failed"]):
+                old_agents.update(row["old_agents"])
     if not man.sandbox.tools:
         steps.append(_step("tools", "Host tools on the nodes", "done", "it asks for no host tools"))
     elif unknown:
-        needs.append(f"a new version (unknown tool {', '.join(unknown)})")
+        needs.append(f"{newer} (installed), which replaces this version" if newer else
+                     f"a new version (unknown tool {', '.join(unknown)})")
         steps.append(_step("tools", "Host tools on the nodes", "blocked",
                            f"it asks for {', '.join(repr(u) for u in unknown)}, which this fleet does not define: tool ids name "
                            "the fleet's tool definitions (jdk, python, or one an admin defines), not paths; publish a new "
                            "module version that asks for a defined tool with a version constraint",
                            [_act(f"Define {u} in Settings → Tools", href=f"/settings?tool={u}#tools") for u in unknown], titems))
+    elif short and mine and old_agents:
+        needs.append(f"agent updates ({_plural(len(old_agents), 'node')})")
+        steps.append(_step("tools", "Host tools on the nodes", "blocked",
+                           f"no node reports {', '.join(short)}: {', '.join(sorted(old_agents))} "
+                           f"run{'s' if len(old_agents) == 1 else ''} an agent that predates host tools; update "
+                           f"{'it' if len(old_agents) == 1 else 'them'} and each reports the tools it finds when it connects",
+                           [_act("Agent updates", href="/agent")], titems))
     elif short and mine:
         needs.append(f"{', '.join(short)} on a node")
         steps.append(_step("tools", "Host tools on the nodes", "blocked",

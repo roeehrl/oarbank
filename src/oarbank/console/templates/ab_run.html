@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Harness run {{ d.run_id }} · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/nodes/{{ d.node_id }}/protection#cotenancy">← protection on {{ d.hostname or d.node_id }}</a></p>
+<div class="row"><h1>Harness run <span class="mono">{{ d.run_id }}</span></h1>
+  <span class="chip {{ 'ok' if d.decision == 'no_slowdown' else ('bad' if d.decision == 'slowdown' else 'acc') }}">{{ d.decision or d.state }}</span>
+  <span class="sp"></span>{% if d.state in ('requested', 'running') %}{{ m.op_form("protection.ab.abort", d.run_id, "Abort the run") }}{% endif %}
+</div>
+<p><b>{{ d.summary }}</b></p>
+<div class="kv small">
+  <span class="mut">rule</span><span class="mono">{{ d.rule }}</span>
+  <span class="mut">work under test</span><span class="mono">{{ d.work }}{% if d.duty is not none %} at gpu_duty {{ d.duty }}{% endif %}</span>
+  <span class="mut">blocks</span><span>{{ d.blocks_done }} of {{ d.target_blocks or spec.blocks }} ({{ d.excluded }} excluded and repeated)</span>
+  <span class="mut">windows</span><span>{{ spec.window_s | int }} s, the first {{ spec.washout_s | int }} s of each discarded; OFF: {{ spec.off }}</span>
+  <span class="mut">margin</span><span>{{ '%.0f' | format((spec.margin or 0.02) * 100) }} %</span>
+  <span class="mut">requested</span><span>by {{ d.actor }} {{ d.created_at | ago }}{% if d.reason %}: {{ d.reason }}{% endif %}</span>
+  {% if d.cert_id %}<span class="mut">certificate</span><span class="mono">{{ d.cert_id }}</span>{% endif %}
+  {% if current %}<span class="mut">now</span><span>{{ current.arm | upper }} window, {{ current.window_elapsed_s | int }} s in{% if current.excluded_reason %} (this block will be excluded: {{ current.excluded_reason }}){% endif %}</span>{% endif %}
+</div>
+
+<h2>Blocks <span class="small mut">(the protected process's progress per window: OFF ○, ON ●, joined per block)</span></h2>
+<div class="card">
+{% if plot %}
+<svg viewBox="0 0 {{ plot_w }} {{ plot_h }}" width="100%" role="img" aria-label="paired dot plot of progress rate per block, OFF and ON">
+  {% for p in plot %}<line x1="{{ p.x }}" x2="{{ p.x }}" y1="{{ p.off }}" y2="{{ p.on }}" stroke="currentColor" stroke-opacity="0.4"/>
+  <circle cx="{{ p.x }}" cy="{{ p.off }}" r="4" fill="none" stroke="#2e6bd8"><title>block {{ loop.index }} OFF: {{ p.off_rate }}/s</title></circle>
+  <circle cx="{{ p.x }}" cy="{{ p.on }}" r="4" fill="#d92d20"><title>block {{ loop.index }} ON: {{ p.on_rate }}/s (ratio {{ p.ratio }}){{ ', ON first' if p.on_first else ', OFF first' }}</title></circle>{% endfor %}
+</svg>
+{% else %}<p class="mut small">no completed block yet</p>{% endif %}
+</div>
+
+{% if band %}
+<h2>R and its interval <span class="small mut">(ON ÷ OFF; the dashed line is 1 − margin)</span></h2>
+<div class="card">
+<svg viewBox="0 0 {{ plot_w }} 60" width="100%" role="img" aria-label="R with its 90 percent interval against the margin">
+  <line x1="{{ band.margin }}" x2="{{ band.margin }}" y1="5" y2="45" stroke="#d68a00" stroke-dasharray="4 3"><title>1 − margin</title></line>
+  <line x1="{{ band.one }}" x2="{{ band.one }}" y1="5" y2="45" stroke="currentColor" stroke-opacity="0.5"><title>no effect</title></line>
+  <rect x="{{ band.lo }}" y="18" width="{{ [band.hi - band.lo, 1] | max }}" height="14" fill="#2e6bd8" fill-opacity="0.35"><title>90 % interval</title></rect>
+  <circle cx="{{ band.r }}" cy="25" r="4" fill="#2e6bd8"><title>R</title></circle>
+  <text x="30" y="58" font-size="10" fill="currentColor">{{ band.left }}</text><text x="{{ plot_w - 70 }}" y="58" font-size="10" fill="currentColor">{{ band.right }}</text>
+</svg>
+{% set a = d.outcome.analysis %}
+<p class="small">R = {{ '%.4f' | format(a.r) }}; bootstrap 90 % interval {{ '%.4f' | format(a.r_lo) }}–{{ '%.4f' | format(a.r_hi) }}; t interval {{ '%.4f' | format(a.t_lo) }}–{{ '%.4f' | format(a.t_hi) }} over {{ a.n }} blocks. {{ a.reason }}{% if a.further_blocks %}; about {{ a.further_blocks }} more blocks would decide it{% endif %}.</p>
+</div>
+{% endif %}
+
+<h2>Excluded blocks</h2>
+<table class="small"><tr><th>when</th><th>why</th></tr>
+{% for x in excluded %}<tr><td class="mut">{{ x.start | ago }}</td><td>{{ x.reason }}</td></tr>
+{% else %}<tr><td colspan="2" class="mut">none</td></tr>{% endfor %}</table>
+{% endblock %}

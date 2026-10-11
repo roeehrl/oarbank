@@ -84,6 +84,7 @@ The agent reaches the OS only through these interfaces, one backend per OS:
 | Session helpers (the system service) | a LaunchAgent in every GUI login, reporting over `/Library/Application Support/Oarbank/run/session.sock` | a global systemd user unit per person, reporting over `/run/oarbank/session.sock` | started by the elevated helper in each person's session, reporting over `\\.\pipe\oarbank-session` |
 | Discovery (browse) | dns-sd | Avahi | `DnsServiceBrowse` |
 | Module sandbox | Seatbelt | Landlock and seccomp | AppContainer in a Job Object, plus an elevated helper for the egress allowlist |
+| Inbound listeners: network and firewall | the default route and interfaces (netdev: the routing table, SystemConfiguration), checked every 5 s and after a wake; the Application Firewall (`socketfilterfw`) | the default route (netlink); nftables, ufw or firewalld when active | the default route (`GetAdaptersAddresses`); Defender Firewall rules added by the elevated helper |
 | Containers | agent-owned Colima profiles in the agent's home, brought up when a release wants containers: one on Virtualization.framework with Rosetta, and one on krunkit for GPU jobs where krunkit is installed ([macos-containers.md](macos-containers.md)) | rootless Podman, else Docker Engine | an agent-owned WSL containers session (a VM of its own) |
 
 Host protection runs on every OS ([protection.md](protection.md), "On each OS" and "Whose processes"): the rules,
@@ -211,7 +212,10 @@ runner to stop as a release does (a checkpointing runner checkpoints first; a fr
 what has not stopped after at most 15 s, releases each attempt as `agent_stop` (`AGENT_STOPPED`: requeued, no charge to
 the job or the node), waits up to 10 s more for the releases and a last checkpoint's upload, lets dropped services finish
 stopping, and exits. The launcher's service definitions give it 60 s (launchd `ExitTimeOut`, systemd `TimeoutStopSec`,
-the Windows service's stop wait hint). A job a cancel or revoke already ends keeps that ending. Module services are not
+the Windows service's stop wait hint). A package upgrade renders an installed definition again with the new launcher's
+settings (`oarbank-launcher service refresh`, run by the pkg's and the deb/rpm's postinstall; it keeps the job's program,
+account and environment), so a node set up by 2.8 gets the 60 s too; a Windows major upgrade runs setup, which creates
+the service anew. A job a cancel or revoke already ends keeps that ending. Module services are not
 stopped: a lasting one is adopted by the next agent (service-endpoints.md). Workloads are not stopped either: the
 agent thaws any it froze and leaves them running, and the next agent adopts each from its record while its seat lease
 runs on the boot clock ([workloads.md](workloads.md)); the watchdog of an agent that died ends them when their leases
@@ -296,7 +300,13 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
   (`AllowedEthernetLocalNetworkAddresses`, `AllowedWiFiLocalNetworkAddresses` in `com.apple.network.local-network`,
   then a restart); MDM cannot set Local Network privacy, and a join code or tailnet address avoids it.
 - **Ports**: the agent listener 7443 (TLS), the admin API 7401 and the console 7400 on loopback, module frames 7402.
-  Agents are outbound-only.
+  Agents are outbound-only, except for **inbound listeners** ([inbound-listeners.md](inbound-listeners.md), D47-D49):
+  a TCP port the agent opens on a node only for a module whose `[sandbox].net.inbound` grant is approved and whose
+  listener the owner put in the node's signed statement. The agent binds the node's address on the default route,
+  relays each connection to the module's endpoint service (module code still never listens), maps the port on the
+  router with PCP, NAT-PMP or UPnP IGD (journaled, verified, renewed, released), and proves reachability with a
+  dial-back from another fleet node. Internal ports come from `listener_port_range` (default 41000-41999); a machine's
+  managed policy can forbid listeners (`inbound_listeners = false`).
 - **Coordinator moves** ([coordinator-move.md](coordinator-move.md)) work across operating systems: the data is
   portable (`/` paths, modes recorded rather than read back), the standby is installed through the service manager (on
   Windows by the owner's installer with the pairing code: an agent's account cannot create services), file modes are

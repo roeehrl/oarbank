@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools, workloads
+from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools, workloads
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -300,9 +300,18 @@ def _node_directives(db: DB, node: dict) -> dict:
             "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
             "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
+            # harness runs and co-tenancy certificates (docs/design/gpu-cotenancy.md)
+            **cotenancy.directives(db, node),
             **coordmove.directives(db), **owner.directives(db),
+            # inbound listeners: the kill switch, dial-back probes, reachability, the observed address (listeners.py)
+            **_listener_directives(db, node),
             # what this node runs of the modules' workloads, with each seat's fence and lease (docs/design/workloads.md)
             "workloads": workloads.directives(db, node)}
+
+
+def _listener_directives(db: DB, node: dict) -> dict:
+    from . import listeners
+    return listeners.directives(db, node)
 
 
 def _renew_within() -> float:
@@ -326,6 +335,8 @@ def hello(db: DB, node: dict, body: dict) -> dict:
     if facts.get("platform"):
         releases.ensure(db, platforms.facts_platform(facts)["platform"])     # a platform the fleet has no release for yet
     with db.tx():
+        if body.get("boot_id") and body.get("boot_id") != node.get("boot_id"):
+            cotenancy.agent_restarted(db, node["node_id"])           # a harness run it held is gone with it
         db.x("UPDATE nodes SET agent_version=?, boot_id=?, facts_json=?, release_id=?, last_hello_at=?,"
              " last_heartbeat_at=?, ready_datasets_json=?, clock_offset_s=? WHERE node_id=?",
              (body.get("agent_version"), body.get("boot_id"), json.dumps(facts or jl(node["facts_json"], {})),
@@ -402,7 +413,7 @@ def _observe_tools(db: DB, node: dict, body: dict):
         db.x("UPDATE nodes SET tools_json=? WHERE node_id=?", (text, node["node_id"]))
 
 
-def heartbeat(db: DB, node: dict, body: dict) -> dict:
+def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
     t = now()
     nid = node["node_id"]
     tel, cap = body.get("telemetry") or {}, body.get("capacity") or {}
@@ -450,10 +461,12 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
                    "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
             db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps(rep), t, nid))
         wl_ack = workloads.observe(db, node, body)       # workloads' state, seats given up, report events
+        _observe_listeners(db, node, body, peer_ip)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         ack = _ingest_journal(db, nid, body.get("journal") or [])
+        cotenancy.ingest(db, node, body.get("ab_runs"), tel)       # harness runs (docs/design/gpu-cotenancy.md)
         cancel, revoke = jl(node["pending_cancel_json"], []), jl(node["pending_revoke_json"], [])
         db.x("UPDATE nodes SET pending_cancel_json='[]', pending_revoke_json='[]' WHERE node_id=?", (nid,))
         recert = bool(node["want_recertify"])
@@ -473,6 +486,13 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
     if wl_ack is not None:
         d["workload_reports_ack"] = wl_ack
     return d
+
+
+def _observe_listeners(db: DB, node: dict, body: dict, peer_ip: str):
+    """Inbound listeners (docs/design/inbound-listeners.md, "Protocol"): the agent's listeners, router mappings, network
+    view, probe results and top talkers, and the node's public source address (listeners.ingest)."""
+    from . import listeners
+    listeners.ingest(db, node, body, peer_ip)
 
 
 def _ingest_journal(db: DB, node_id: str, records: list) -> int | None:
@@ -1864,7 +1884,8 @@ def reap(db: DB):
             _alert(db, "node_offline", n["node_id"], f"{n['hostname']} offline for {int((t - hb) / 60)} min")
         elif hb and t - hb < C.OFFLINE_AFTER:
             _resolve_alert(db, "node_offline", n["node_id"])
-    from . import alerting, protection
+    from . import alerting, listeners, protection
+    listeners.tick(db, t)               # probes expire, statements follow module and grant changes, talkers age out
     protection.check_alerts(db, t)
     releases.note_awaiting(db)          # releases waiting for the owner's signature (a key pinned, a node gone, ...)
     alerting.promote_pending(db, t)

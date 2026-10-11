@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d636079a5cdc7247c82704c0d634f53d12f7118bec3c83b0ef893965da0a241e # shrinks to pcp = true, natpmp = false, upnp = false, permanent_only = false, acts = [Step(1), Step(1), Rebind(20), LoseNext, Rebind(21), Foreign(9000), Step(1), Reboot, Rebind(20)]
+cc 9519590a711b4e137ba035155614034b6d394355fcf37d137652c8bd6b91d247 # shrinks to pcp = false, natpmp = true, upnp = true, permanent_only = false, acts = [Step(1), Step(1), Step(1), Step(603), Step(898)]
+cc 1460c70a40fd560ee5e50744ff10b5b7a6b57ae079cc32ff5ee05ec3687004f1 # shrinks to pcp = false, natpmp = true, upnp = false, permanent_only = false, acts = [Step(1), Step(300), Reboot, Toggle(2), Step(1), Reboot, Step(1), Step(1), Step(653), Step(846)]
+cc 03465a73d9212f7d35111d2cb67fbc03c98890116289fb17760927c0d650cfe5 # shrinks to pcp = false, natpmp = false, upnp = true, permanent_only = false, acts = [Step(1), Reboot, Foreign(9001), Toggle(2), Step(300), Step(300), Step(237), Step(545), Step(719)]
+cc bc8334d0ae94ed291b110b0cb63fa77093798e4975a0321e751f790d3692bcfd # shrinks to pcp = false, natpmp = false, upnp = true, permanent_only = false, acts = [Toggle(2), Toggle(2), Toggle(2), Toggle(2), Step(1), LoseNext, Toggle(2), Foreign(9002), Step(1), DropForeign, Step(5)]

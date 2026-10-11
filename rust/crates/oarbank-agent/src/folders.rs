@@ -28,6 +28,9 @@ pub struct Folders {
     pub folders: Map<String, Value>,
     /// The host tool paths the statement adds: [{id, module, path}] (tools.rs detects and verifies them).
     pub tools: Vec<Value>,
+    /// The owner's inbound listeners on this node: {"<module>/<listener>": entry} (listeners.rs;
+    /// docs/design/inbound-listeners.md). A statement without the key has none.
+    pub listeners: Map<String, Value>,
 }
 
 /// Directories no folder may be, contain or lie in (besides roots, homes and the Oarbank data root): what the sandbox
@@ -45,12 +48,14 @@ impl Folders {
     pub fn load(p: &Path) -> Folders {
         std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .map(|v| Folders { seq: v["seq"].as_i64().unwrap_or(0), folders: v["folders"].as_object().cloned().unwrap_or_default(),
-                               tools: v["tools"].as_array().cloned().unwrap_or_default() })
+                               tools: v["tools"].as_array().cloned().unwrap_or_default(),
+                               listeners: v["listeners"].as_object().cloned().unwrap_or_default() })
             .unwrap_or_default()
     }
 
     pub fn save(&self, p: &Path) -> std::io::Result<()> {
-        crate::fsutil::write_private(p, &serde_json::to_vec(&json!({"seq": self.seq, "folders": self.folders, "tools": self.tools}))?)
+        crate::fsutil::write_private(p, &serde_json::to_vec(&json!({"seq": self.seq, "folders": self.folders, "tools": self.tools,
+                                                                         "listeners": self.listeners}))?)
     }
 
     /// The heartbeat's `folders`: {id: {access, status}}.
@@ -96,7 +101,8 @@ pub fn apply(cur: &Folders, d: &Value, node_id: &str, fleet_id: Option<&str>, pi
     }
     let tools = s["tools"].as_array().cloned().unwrap_or_default().into_iter()
         .filter(|t| t["id"].is_string() && t["path"].is_string()).collect();
-    let mut out = Folders { seq, folders: Map::new(), tools };
+    let listeners = s["listeners"].as_object().cloned().unwrap_or_default();
+    let mut out = Folders { seq, folders: Map::new(), tools, listeners };
     let wanted = s["folders"].as_object().cloned().unwrap_or_default();
     let mut canon: Vec<(String, Option<PathBuf>)> = vec![];
     for (id, f) in &wanted {

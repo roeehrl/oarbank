@@ -14,12 +14,16 @@
 
 mod json;
 
+pub mod abstats;
 pub mod capacity;
+pub mod certificates;
 pub mod config;
 pub mod controller;
 pub mod dynamic;
 pub mod evaluator;
+pub mod events;
 pub mod gpu;
+pub mod harness;
 pub mod journal;
 pub mod matcher;
 pub mod memory_guard;
@@ -27,6 +31,7 @@ pub mod model;
 pub mod platform;
 pub mod presence;
 pub mod procinfo;
+pub mod relay;
 pub mod session;
 pub mod settings;
 pub mod settings_table;
@@ -36,6 +41,7 @@ pub mod spawn_registry;
 pub mod support;
 pub mod table;
 pub mod telemetry;
+pub mod watch;
 pub mod workloads;
 pub mod x11;
 
@@ -67,7 +73,10 @@ pub use model::{GroupSample, ProcessKey, ProcessRecord};
 pub use signals::{
     Front, FrontReading, GroupMetrics, Meter, NullMeter, Presence, PresenceReading, ProcCounters,
 };
-pub use sources::{FileOwnerSources, NoOwnerSources, OwnerSources};
+pub use certificates::{CertContext, Certificate};
+pub use events::{EventSources, FastPath, PhaseHit};
+pub use harness::{AbSpec, Arm, Harness, OffMode, WorkSelector};
+pub use sources::{FileOwnerSources, NoOwnerSources, OwnerSources, PhaseReport, Progress};
 pub use spawn_registry::{
     Actuator, FileRegistryStore, Member, Refusal, RegistryStore, Signal, SpawnRegistry,
     UnsupportedActuator,

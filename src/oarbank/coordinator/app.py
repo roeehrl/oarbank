@@ -235,7 +235,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
 
     @app.post("/v1/agent/heartbeat")
     async def heartbeat(request: Request, node=Depends(node_dep)):
-        return await run_in_threadpool(core.heartbeat, db, node, await request.json())
+        return await run_in_threadpool(core.heartbeat, db, node, await request.json(), peer(request))
 
     @app.post("/v1/agent/workloads/secrets")
     async def workload_secrets(request: Request, node=Depends(node_dep)):
@@ -873,11 +873,14 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return readiness.all_modules(db)
 
     @app.get("/api/v1/modules/{name}/readiness")
-    def api_module_readiness(name: str, actor=Depends(who)):
+    def api_module_readiness(name: str, version: str | None = None, actor=Depends(who)):
+        """One module's checklist: of its current version, or of an installed `version` (`?version=` or name@version)."""
         from . import readiness
-        r = readiness.module(db, name)
+        name, _, at = name.partition("@")
+        version = version or at or None
+        r = readiness.module(db, name, version=version)
         if r is None:
-            raise core.ApiError(404, "not_found", f"no module {name} is installed")
+            raise core.ApiError(404, "not_found", f"no module {name}{'@' + version if version else ''} is installed")
         return r
 
     @app.get("/api/v1/modules/{name}/secrets")
@@ -980,6 +983,53 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         if d is None:
             raise core.ApiError(404, "not_found", f"node {nid}")
         return d
+
+    # ---------------- inbound listeners (docs/design/inbound-listeners.md): what `oarbank listener list|show|mappings` print
+    @app.get("/api/v1/listeners")
+    def api_listeners(node: str | None = None, actor=Depends(who)):
+        """Every node's listeners, router mappings, network view and reachability (or one node's)."""
+        from . import listeners
+        return listeners.fleet_doc(db, node)
+
+    @app.get("/api/v1/nodes/{nid}/listeners/{key:path}")
+    def api_node_listener(nid: str, key: str, actor=Depends(who)):
+        """One listener of a node. Looking at it asks the node for its top client addresses for the next 10 minutes
+        (`send_listener_talkers`); they show once the node sends them."""
+        from . import listeners
+        n = db.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+        if n is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+        listeners.want_talkers(db, n["node_id"])
+        doc = listeners.node_doc(db, db.one("SELECT * FROM nodes WHERE node_id=?", (n["node_id"],)))
+        row = next((x for x in doc["listeners"] if x["key"] == key), None)
+        if row is None:
+            raise core.ApiError(404, "not_found", f"{n['hostname']} has no listener {key}")
+        return {**{k: v for k, v in doc.items() if k != "listeners"}, "listener": row}
+
+    # ---------------- co-tenancy: harness runs and certificates (docs/design/gpu-cotenancy.md; `oarbank protection ab`)
+    @app.get("/api/v1/protection/ab/runs")
+    def api_ab_runs(node: str | None = None, limit: int = 50, actor=Depends(who)):
+        from . import cotenancy
+        try:
+            return {"runs": cotenancy.list_runs(db, node, max(1, min(limit, 500)))}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
+    @app.get("/api/v1/protection/ab/runs/{run_id}")
+    def api_ab_run(run_id: str, actor=Depends(who)):
+        from . import cotenancy
+        d = cotenancy.run_detail(db, run_id)
+        if d is None:
+            raise core.ApiError(404, "not_found", f"run {run_id}")
+        return d
+
+    @app.get("/api/v1/protection/certificates")
+    def api_certificates(node: str | None = None, actor=Depends(who)):
+        from . import cotenancy
+        try:
+            return {"certificates": cotenancy.list_certificates(db, node)}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
 
     @app.get("/api/v1/jobs/{jid}")
     def api_job(jid: int, actor=Depends(who)):

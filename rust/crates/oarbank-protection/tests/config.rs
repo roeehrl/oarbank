@@ -3,6 +3,7 @@
 mod common;
 
 use oarbank_protection::*;
+use oarbank_protection::config::TreeScope;
 use serde_json::json;
 
 #[test]
@@ -134,9 +135,44 @@ fn rule_fields_parse() {
     // lower_fleet: null is absent; a during block alone is an action
     let r2 = common::rule(
         json!({"id": "d", "match": {"name": "a"}, "lower_fleet": null,
-                                 "during": [{"source": {"jsonl": "/p"}}]}),
+                                 "during": [{"source": {"jsonl": "/p", "enter": "a", "exit": "b"}}]}),
     );
     assert!(!r2.lower_fleet && r2.during.len() == 1);
+    assert!(!r2.immediate && r2.during[0].tags.is_empty() && r2.during[0].on_exec.is_none());
+}
+
+#[test]
+fn phase_sources_immediate_rules_tags_and_process_triggers() {
+    let r = common::rule(json!({
+        "id": "t", "match": {"name": "trainer"}, "immediate": true,
+        "during": [
+            {"source": {"jsonl": "~/logs/events-*.jsonl", "event": "heartbeat_response", "field": "response.phase",
+                        "on": ["uploading", "merging"], "soon": "upload_soon"},
+             "pause_fleet": {"scope": "gpu"}, "tags": ["uplink"]},
+            {"source": {"on_exec": {"match": {"name": "uploader"}, "tree": "descendants"}}, "cap_fleet": {"staging_mbps": 0}},
+            {"source": {"jsonl": "/e.jsonl", "enter": "a", "enter_soon": "a_soon", "exit": "b"}, "lower_fleet": {}},
+        ],
+    }));
+    assert!(r.immediate);
+    assert_eq!(r.during[0].tags, ["uplink"]);
+    assert_eq!(r.during[0].pause_fleet, Some(ProtectionScope::Gpu));
+    let (m, tree) = r.during[1].on_exec.clone().unwrap();
+    assert_eq!((m.name.as_deref(), tree), (Some("uploader"), TreeScope::Descendants));
+    // a source that names no phase rule is refused, not left inert
+    let bad = |src: serde_json::Value| {
+        ProtectionRule::from_json(&json!({"id": "x", "match": {"name": "a"}, "during": [{"source": src}]})).unwrap_err().0
+    };
+    assert!(bad(json!({"jsonl": "/p"})).contains("during source needs"));
+    assert!(bad(json!({"jsonl": "/p", "field": "x"})).contains("during source needs"));
+    assert!(bad(json!({"on_exec": {}})).contains("on_exec needs a match"));
+    assert!(bad(json!({"on_exec": {"match": {"name": "u"}, "tree": "up"}})).contains("unknown tree"));
+    // gpu_jobs: certified is a value, and ranks between always and when_no_gpu_protected in the union
+    let c = |g: &str| ProtectionConfig::from_json(&json!({"node": {"gpu_jobs": g}}), "x");
+    assert!(c("certified").is_ok());
+    assert!(c("sometimes").unwrap_err().0.contains("certified"));
+    let (a, cert, w) = (c("always").unwrap(), c("certified").unwrap(), c("when_no_gpu_protected").unwrap());
+    assert_eq!(a.union(&cert).gpu_jobs, "certified");
+    assert_eq!(cert.union(&w).gpu_jobs, "when_no_gpu_protected");
 }
 
 #[test]
