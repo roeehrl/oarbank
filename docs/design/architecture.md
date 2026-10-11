@@ -212,7 +212,11 @@ what has not stopped after at most 15 s, releases each attempt as `agent_stop` (
 the job or the node), waits up to 10 s more for the releases and a last checkpoint's upload, lets dropped services finish
 stopping, and exits. The launcher's service definitions give it 60 s (launchd `ExitTimeOut`, systemd `TimeoutStopSec`,
 the Windows service's stop wait hint). A job a cancel or revoke already ends keeps that ending. Module services are not
-stopped: a lasting one is adopted by the next agent (service-endpoints.md).
+stopped: a lasting one is adopted by the next agent (service-endpoints.md). Workloads are not stopped either: the
+agent thaws any it froze and leaves them running, and the next agent adopts each from its record while its seat lease
+runs on the boot clock ([workloads.md](workloads.md)); the watchdog of an agent that died ends them when their leases
+run out unless a newer agent adopted them, and removing the node (`oarbank-agent stop-workloads`, run by the
+launcher's remove step) ends them. On Linux a stop of the agent's systemd unit ends them with the unit's cgroup.
 
 An agent that ends without stopping its runners (killed, crashed) leaves none either. On Windows a runner's Job Object is
 kill-on-close and only the agent holds it, so the runner ends with the agent. On POSIX a runner leads a process group of
