@@ -149,12 +149,12 @@ CONFIGS+=(
   "OarbankRollout_witness_OfflineNodeCaughtUp        inv:W_OfflineNodeCaughtUp"
   "OarbankRollout_witness_CommittedAfterRunnerCrash  inv:W_CommittedAfterRunnerCrash"
   "OarbankRollout_witness_CoordinatorRolledBack      inv:W_CoordinatorRolledBack"
-  "OarbankRollout_witness_BroadWithoutCanary         inv:W_BroadWithoutCanary"
   "OarbankRollout_a_nocap                            inv:CapRespected"
   "OarbankRollout_b_noorder                          inv:RingOrder"
   "OarbankRollout_c_coordlast                        inv:NoNodeAheadOfCoordinator"
   "OarbankRollout_d_nohalt                           inv:BudgetHalts"
   "OarbankRollout_e_norunnerjournal                  inv:RunnerSafe"
+  "OarbankRollout_f_noevidence                       inv:WidenOnlyOnEvidence"
 )
 
 if [ ! -f "$JAR" ]; then

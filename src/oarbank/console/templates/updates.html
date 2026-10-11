@@ -46,7 +46,7 @@ coordinator.</p>
         {% if g.nodes %} {{ g.done }}/{{ g.nodes }} done{% endif %}</td>
       <td>{% if g.max_unavailable %}{{ g.busy }} of {{ g.max_unavailable }}{% else %}–{% endif %}</td>
       <td>{{ g.failures }} / {{ g.budget if g.budget is not none else '–' }}</td>
-      <td>{% if g.bake_left_s is not none %}{{ g.bake_left_s | secs }} left{% endif %}{% if g.heartbeats_min is not none %} · heartbeats {{ g.heartbeats_min }}/10{% endif %}</td>
+      <td>{% if g.bake_left_s is not none %}{{ g.bake_left_s | secs }} left{% endif %}{% if g.heartbeats_min is not none %} · heartbeats {{ g.heartbeats_min }}/10{% endif %}{% if g.waiting_for %} · {{ g.waiting_for }}{% endif %}</td>
     </tr>{% endfor %}
   </table>
   <table class="small" style="margin-top:8px">

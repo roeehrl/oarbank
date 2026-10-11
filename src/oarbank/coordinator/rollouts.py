@@ -536,7 +536,21 @@ def _tick_one(db: DB, rid: str, t: float):
     ring = r["ring"]
     ms = members(db, rid, ring)
     info = r["rings"].setdefault(ring, {})
-    if all(m["state"] in SETTLED or (m["state"] == "waiting" and m["error"] == "offline") for m in ms):
+    settled = all(m["state"] in SETTLED or (m["state"] == "waiting" and m["error"] == "offline") for m in ms)
+    # a ring widens the rollout only on evidence: before a later ring with nodes starts, one of this ring's nodes must
+    # have updated, or the owner skipped them all; a ring whose nodes are all offline waits (inconclusive is a pause)
+    later = any(members(db, rid, x) for x in RINGS[RINGS.index(ring) + 1:])
+    evidence = any(m["state"] == "done" for m in ms) or all(m["state"] == "skipped" for m in ms)
+    if settled and later and not evidence:
+        away = [m["hostname"] or m["node_id"] for m in ms if m["state"] == "waiting"]
+        why = f"no node of the {ring} ring has updated yet" + (f" ({', '.join(away)} offline: wait, or skip them)" if away else "")
+        if info.get("waiting_for") != why:
+            info["waiting_for"] = why
+            db.event("rollout_ring_waiting", reason=f"{rid}: {why}")
+        _save_rings(db, r)
+        return
+    info.pop("waiting_for", None)
+    if settled:
         info.setdefault("finished_at", t)
         db.x("UPDATE rollouts SET ring_finished_at=? WHERE rollout_id=?", (info["finished_at"], rid))
         moved = [m for m in ms if m["state"] == "done" and m["from_version"] != r["version"]]

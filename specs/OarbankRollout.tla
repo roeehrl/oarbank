@@ -48,7 +48,8 @@ CONSTANTS
     NoBake,                     \* (b) the next ring starts when a ring finishes, without its bake
     CoordLast,                  \* (c) the nodes update before the coordinator, which updates whenever
     NoHalt,                     \* (d) failures above the budget do not halt
-    NoJournal                   \* (e) the runner keeps its step only in memory: a crash forgets it
+    NoJournal,                  \* (e) the runner keeps its step only in memory: a crash forgets it
+    NoEvidence                  \* (f) a ring bakes and widens the rollout with none of its nodes updated
 
 Nodes == Canary \cup Broad
 ASSUME Canary \cap Broad = {} /\ Canary # {} /\ Broad # {}
@@ -269,6 +270,9 @@ Bake ==
     /\ rs = "running" /\ kind = "update" /\ fin
     /\ RingSettled(ring)
     /\ ring = 2 => coordUpd = "done"
+    \* widen only on evidence (D59): the canary ring hands over to broad once one of its nodes updated; a canary ring
+    \* whose nodes were all offline waits for one to return (inconclusive is a pause)
+    /\ (ring = 1 /\ ~NoEvidence) => \E c \in Canary : ns[c] = "done"
     /\ baked' = baked \cup {ring}
     /\ fin' = FALSE
     /\ IF ring = 2 THEN rs' = "done" /\ ring' = ring ELSE ring' = ring + 1 /\ rs' = rs
@@ -455,6 +459,9 @@ RolledBackIsOld == rs = "rolled_back" => \A n \in Nodes : pkg[n] = 1 /\ committe
 RunnerSafe == \A n \in Nodes : rstep[n] = "idle" => pkg[n] = committed[n]
 
 \* Liveness: once started, the rollout ends done, halted or rolled back, and stays there.
+\* The broad ring starts only after a canary node updated in this rollout (the evidence rule; S30's companion)
+WidenOnlyOnEvidence == (kind = "update" /\ ring = 2) => \E c \in Canary : moved[c]
+
 Ends == (rs # "planned") ~> [](rs \in Final)
 
 -----------------------------------------------------------------------------
@@ -477,7 +484,6 @@ W_CommittedAfterRunnerCrash == ~(\E n \in Nodes : resumed[n] /\ committed[n] = 2
 
 \* a broad node updated although no canary node ever did (the canary was offline while its ring ran:
 \* it finished waiting(offline) and baked with no evidence; see the README)
-W_BroadWithoutCanary == ~(\E n \in Broad : committed[n] = 2 /\ \A c \in Canary : ~moved[c])
 
 \* the coordinator's own update rolled back and the rollout halted before any node
 W_CoordinatorRolledBack == ~(coordUpd = "rolled_back" /\ rs = "halted")

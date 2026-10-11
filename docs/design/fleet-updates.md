@@ -71,7 +71,7 @@ Sources are summarized in the references at the end. The design takes these poin
 | | 1. The coordinator updates first (ring 0).
 | | 2. Then the node rings `canary` → `early` → `broad`, a node's ring being the `update_ring` setting.
 | | 3. Within a ring, at most `max_unavailable` nodes are between *draining* and *confirmed* at once.
-| | 4. The next ring starts only after the ring finished and baked: its bake time passed **and** each updated node heartbeated at least 10 times on the new version **and** no node of the ring was unhealthy.
+| | 4. The next ring starts only after the ring finished and baked: its bake time passed **and** each updated node heartbeated at least 10 times on the new version **and** no node of the ring was unhealthy. A ring widens the rollout only on evidence: one of its nodes updated, or the owner skipped them all. A ring whose nodes are all offline waits and says so (inconclusive is a pause).
 | | 5. Install failures are counted against the ring's failure budget: 0 for canary, 1 after that. Exceeding it halts the rollout, and with `auto_rollback` (default on) the updated nodes go back to the previous release through the same machinery.
 | | 6. A node updates only when every one of these holds:
 | |   - it is online (heartbeat within 120 s);
@@ -592,6 +592,7 @@ The model has three nodes in two rings and a coordinator. Versions are 1 (old) a
 - `HaltedStartsNothing`: after a halt, no new `go`.
 - `BudgetHalts`: failures above the budget imply halted or rolling back.
 - `RolledBackIsOld`: a rolled-back rollout leaves every node it moved on the old version.
+- `WidenOnlyOnEvidence`: the broad ring starts only after a canary node updated in this rollout.
 
 **Liveness:** with weak fairness and finitely many failures, every rollout ends `done`, `halted` or `rolled_back`.
 
@@ -600,6 +601,8 @@ The model has three nodes in two rings and a coordinator. Versions are 1 (old) a
 - `_b_noorder` (rings start without baking) → `RingOrder`.
 - `_c_coordlast` (nodes before the coordinator) → `NoNodeAheadOfCoordinator`.
 - `_d_nohalt` (failures do not halt) → `BudgetHalts`.
+- `_e_norunnerjournal` (the runner forgets its step across a crash) → `RunnerSafe`.
+- `_f_noevidence` (a ring widens with none of its nodes updated) → `WidenOnlyOnEvidence`.
 
 The runner's own commit-or-rollback is the second machine in the same spec (`RunnerSafe`: after the runner stops, the
 node runs the new version confirmed or the previous one).

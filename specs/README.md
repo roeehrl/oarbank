@@ -945,17 +945,18 @@ Faults and the other operator actions are unfair and bounded.
 | `_witness_OfflineNodeCaughtUp` | a node offline while its ring ran and baked returned and updated in a later ring | witness found |
 | `_witness_CommittedAfterRunnerCrash` | a runner crashed mid-update, resumed from its journal and committed | witness found |
 | `_witness_CoordinatorRolledBack` | the coordinator's update rolled back and the rollout halted | witness found |
-| `_witness_BroadWithoutCanary` | a broad node updated although no canary node ever did (observation below) | witness found |
 | `_a_nocap` | (a) `Grant` ignores `max_unavailable` | `CapRespected` |
 | `_b_noorder` | (b) the next ring starts when a ring finishes, without its bake | `RingOrder` |
 | `_c_coordlast` | (c) the nodes update before the coordinator | `NoNodeAheadOfCoordinator` |
 | `_d_nohalt` | (d) failures above the budget do not halt | `BudgetHalts` |
 | `_e_norunnerjournal` | (e) the runner keeps its step only in memory: a crash during probation leaves the unconfirmed new version installed and the runner idle | `RunnerSafe` |
+| `_f_noevidence` | (f) a ring bakes and widens the rollout with none of its nodes updated (the canary offline) | `WidenOnlyOnEvidence` |
 
-**Observation (canary offline).** As designed, a ring finishes when its members are done or `waiting(offline)`. If a
-one-node canary is offline while its ring runs, the canary ring finishes and bakes with no node updated. The broad ring
-then starts without any canary evidence (`_witness_BroadWithoutCanary`). No property breaks, but the canary does nothing.
-One fix: a ring counts as baked only with at least one `done` node; otherwise the rollout pauses.
+**Widen only on evidence (`WidenOnlyOnEvidence`).** A first version of the model found that a one-node canary offline
+while its ring ran let the canary ring finish and bake with no node updated, and the broad ring start without any canary
+evidence (no other property broke). The protocol now waits: the canary ring hands over only once one of its nodes
+updated (the coordinator also accepts the owner skipping them all), and `_f_noevidence` shows the property fails
+without that rule. Liveness still holds, since offline nodes eventually return.
 
 **Choices the model makes where the design is silent.**
 * A failed or rolled-back node within its ring's budget does not hold the ring up; it is settled, like `done`.

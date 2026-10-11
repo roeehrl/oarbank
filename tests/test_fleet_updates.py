@@ -766,6 +766,26 @@ def test_offline_nodes_wait_the_ring_finishes_without_them_and_they_catch_up(db,
     ok(db)
 
 
+def test_a_canary_ring_whose_nodes_are_all_offline_holds_the_rollout_until_one_updates_or_is_skipped(db, tmp_path):
+    """Inconclusive is a pause (D59; TLA+ OarbankRollout's former witness BroadWithoutCanary): a ring widens the
+    rollout only once one of its nodes updated, or the owner skipped them all."""
+    n = rings(db)
+    imported(db, tmp_path)
+    start(db)
+    others = [v for k, v in n.items() if k != "c1"]
+    clock.advance(200)
+    tick(db, *others)                                                # c1 silent: waiting(offline)
+    tick(db, *others, dt=3600)
+    r = RO.active(db)
+    assert r["ring"] == "canary" and rn(db, n["c1"])["error"] == "offline"
+    assert "no node of the canary ring has updated yet (c1 offline" in r["rings"]["canary"]["waiting_for"]
+    assert all(directive(db, x) is None for x in others)              # nothing wider moves meanwhile
+    run_op(db, "updates.skip", "c1")                                 # the owner's explicit call
+    tick(db, *others)
+    assert RO.active(db)["ring"] == "early" and "waiting_for" not in RO.active(db)["rings"]["canary"]
+    ok(db)
+
+
 def test_new_nodes_join_and_retired_ones_leave(db, tmp_path):
     a = node(db, "a")
     imported(db, tmp_path)
