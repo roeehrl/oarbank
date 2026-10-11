@@ -32,6 +32,8 @@ or is not confirmed within 10 minutes, is rolled back on that node automatically
     <td class="mono">{{ n.agent_version or '?' }}{% if n.agent_build %} · {{ n.agent_build[:12] }}{% endif %}</td>
     <td>{{ build(n.assigned) }}</td>
     <td>{% if n.up_to_date %}<span class="chip ok">up to date</span>
+        {% elif n.behind and not n.assigned %}<span class="chip warn">older than the coordinator ({{ n.behind.coordinator }})</span>
+        <span class="mut">install the {{ n.behind.coordinator }} node package on it, or upload the {{ n.behind.coordinator }} agent build below and enable it for {{ n.platform or 'its platform' }}</span>
         {% else %}{% set st = n.update.state or 'pending' %}<span class="chip {{ 'bad' if st in ('failed', 'rolled_back', 'blocked') else 'warn' }}">{{ st | replace('_', ' ') }}</span>
         {% if n.update.error %}<span class="mut">{{ n.update.error[:160] }}</span>{% endif %}{% endif %}</td>
   </tr>{% else %}<tr><td colspan="5" class="mut">No nodes enrolled.</td></tr>{% endfor %}

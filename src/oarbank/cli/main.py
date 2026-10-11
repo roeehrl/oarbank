@@ -716,6 +716,8 @@ def node_show(target: str, as_json: bool = False):
     print(f"{n['hostname']} {n['node_id']} {n['platform'] or '-'} {n['lifecycle']} {n['desired_state']} "
           f"{'online' if n['online'] else 'OFFLINE'} agent {n['agent_version'] or '-'}"
           + (f" QUARANTINED: {n['quarantine_reason']}" if n["quarantine_reason"] else ""))
+    if n.get("agent_behind"):
+        print(f"  update: {n['agent_behind']['text']}")
     if d.get("why"):
         print(f"  why: {d['why']['line']}")
     for m, st in d["modules"].items():
@@ -755,7 +757,7 @@ def node_show(target: str, as_json: bool = False):
               + (f" (statement {f['statement_seq']}, {'signed' if f['signed'] else 'unsigned'})" if f["statement_seq"] else ""))
     t = d.get("tools") or {}
     if not t.get("reported"):
-        print("  host tools: not reported yet")
+        print(f"  host tools: not reported: {t.get('unreported_why') or 'not yet'}")
     for tid, insts in sorted((t.get("tools") or {}).items()):
         for i in insts:
             print(f"  tool {tid}: {i.get('version') or '?'} {i.get('arch') or ''} at {i.get('path')}, {i.get('status')} [{i.get('source')}]")

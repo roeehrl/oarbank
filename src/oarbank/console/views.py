@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import time
 
-from ..coordinator import detail, nodepolicy, nodeservices
+from ..coordinator import agentbuilds, detail, nodepolicy, nodeservices
 from ..coordinator.settings import views as settings_views
 from ..coordinator.settings.apply import flat_values, node_values
 
@@ -114,6 +114,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
     v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"), n["node_id"])
     v["gpu"] = detail.gpu(facts, v["doctor"])
     v["services"] = nodeservices.rows(n)
+    v["agent_behind"] = agentbuilds.behind(n)
     return v
 
 
@@ -808,9 +809,10 @@ def agent_builds(r) -> dict:
                  "WHERE lifecycle NOT IN ('retired') ORDER BY hostname"):
         ch = chans.get(n["platform"]) or {"current": None, "canary": None, "canary_nodes": []}
         assigned = ch["canary"] if ch["canary"] and n["node_id"] in ch["canary_nodes"] else ch["current"]
+        behind = agentbuilds.behind(n)
         nodes.append({**n, "update": jl(n["agent_update_json"], {}) or {}, "assigned": assigned,
-                      "assigned_version": ver.get(assigned), "canary": n["node_id"] in ch["canary_nodes"],
-                      "up_to_date": assigned is None or n["agent_build"] == assigned})
+                      "assigned_version": ver.get(assigned), "canary": n["node_id"] in ch["canary_nodes"], "behind": behind,
+                      "up_to_date": (assigned is None or n["agent_build"] == assigned) and not (assigned is None and behind)})
     for plat, ch in chans.items():
         ch["ready"] = bool(ch["canary"]) and all(n["agent_build"] == ch["canary"] for n in nodes if n["canary"] and n["platform"] == plat)
     return {"builds": builds, "channels": chans, "versions": ver, "nodes": nodes}

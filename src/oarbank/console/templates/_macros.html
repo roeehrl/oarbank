@@ -56,7 +56,7 @@
   <a href="/modules/{{ r.name }}#readiness">Getting it running →</a></div>
 {% else %}
 <section id="readiness" class="card readiness" aria-labelledby="readiness-h">
-<div class="row"><h2 id="readiness-h" style="margin:0">Getting this module running</h2><span class="chip {{ state_tone[r.state] }}">{{ r.summary }}</span></div>
+<div class="row"><h2 id="readiness-h" style="margin:0">Getting this module running <span class="small mut">({{ r.version }})</span></h2><span class="chip {{ state_tone[r.state] }}">{{ r.summary }}</span></div>
 <ol class="readiness-steps" style="padding-left:1.4em">
 {% for s in r.steps %}<li style="margin:6px 0"><div class="row"><span class="chip {{ tone[s.status] }}">{{ s.status }}</span><b>{{ s.title }}</b></div>
   <div class="small">{{ s.reason }}</div>
