@@ -5,7 +5,8 @@
 #   scripts/build-coordinator.sh [version]
 #
 # Layout: oarbank-coordinator.json, python/ (a relocatable CPython with the coordinator's dependencies and the SDK;
-# modules run on this interpreter), bin/oarbankd, bin/oarbank, bin/oarbank-console, bin/uv (module environments;
+# modules run on this interpreter), bin/oarbankd, bin/oarbank, bin/oarbank-console, bin/oarbank-coordupdate (root's update
+# runner), bin/uv (module environments;
 # scripts/fetch-uv.py), and off macOS bin/oarbank-sandbox (the agent's module launcher). The core is compiled with Nuitka
 # into one native extension module (D7: its source is not shipped); its templates, static files and schemas sit
 # beside it. OARBANK_CODESIGN_IDENTITY signs every Mach-O file (default: ad-hoc).
@@ -91,6 +92,7 @@ launcher oarbankd oarbank.coordinator.__main__
 launcher oarbank oarbank.cli.main
 launcher oarbank-console oarbank.console.__main__
 launcher oarbank-setup oarbank.setup
+launcher oarbank-coordupdate oarbank.coordupdate        # root's coordinator update runner (fleet-updates.md, D58)
 install -m 755 "$REPO/deploy/oarbankd/install-oarbankd.sh" "$ROOT/install-oarbankd.sh"
 # pip wrote the build path into its console scripts' shebangs (python/bin/oarbank-sdk, uvicorn, ...): point them at the
 # python beside them, and stop if any script still names an interpreter by absolute path

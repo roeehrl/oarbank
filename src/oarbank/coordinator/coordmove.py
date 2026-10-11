@@ -107,6 +107,14 @@ def _sha(p: Path) -> str:
 
 # ------------------------------------------------------------------ plan and pairing
 
+def _no_self_update(db: DB):
+    """A move does not start while this coordinator updates itself (fleet-updates.md, "Moves and D44")."""
+    from . import coordself
+    u = coordself.busy(db)
+    if u:
+        raise MoveError(f"coordinator update {u['update_id']} to {u['version']} is {u['state']}; a move waits for it")
+
+
 def prepare(db: DB, target: str, actor: str) -> dict:
     """A move plan for `target`: an enrolled node (hostname or node id: its agent installs the standby
     coordinator) or a URL `https://host:port` of a standby the owner starts by hand. One plan at a time."""
@@ -115,6 +123,7 @@ def prepare(db: DB, target: str, actor: str) -> dict:
     busy = db.one("SELECT plan_id FROM coordinator_plans WHERE state IN ('prepared','paired','moving')")
     if busy:
         raise MoveError(f"plan {busy['plan_id']} is in progress; cancel it first")
+    _no_self_update(db)
     node = db.one("SELECT * FROM nodes WHERE (node_id=? OR hostname=?) AND lifecycle!='retired'", (target, target))
     if node:
         if not node["ts_ip"]:
@@ -354,6 +363,7 @@ def request_move(db: DB, actor: str, reason: str | None, timelock_s: int | None 
         raise MoveError("no paired move plan (coordinator.prepare, then start the standby target)")
     if db.one("SELECT move_id FROM coordinator_moves WHERE state IN ('pending','cutover','awaiting_owner')"):
         raise MoveError("a move is already pending")
+    _no_self_update(db)
     tl = DEFAULT_TIMELOCK_S if timelock_s is None else int(timelock_s)
     if tl < MIN_TIMELOCK_S:
         raise MoveError(f"the time lock is at least {MIN_TIMELOCK_S} s")

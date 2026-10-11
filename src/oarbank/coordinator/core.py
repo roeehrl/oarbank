@@ -1018,6 +1018,9 @@ def claim(db: DB, node: dict, body: dict) -> dict:
     nid = node["node_id"]
     if not coordmove.accepting_leases(db):          # a coordinator move is draining or frozen: no new leases
         return {"grants": []}
+    from . import coordself
+    if not coordself.admitting(db):                 # a coordinator self-update runs (D58): probation may restore the db
+        return {"grants": []}
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
     offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
