@@ -34,6 +34,7 @@ from oarbank_sdk.rpc import ConnectionClosed, Peer, Request, RpcError
 log = logging.getLogger("oarbank.modulehost")
 
 BACKOFF_INITIAL_S, BACKOFF_MAX_S = 1.0, 60.0
+STDERR_DRAIN_S = 2.0                  # a failed start waits this long at most for the rest of the module's stderr
 FAULT_AFTER = 3                       # consecutive failures (crash, handshake failure, timeouts) -> fault
 TIMEOUTS_BEFORE_RESTART = 3           # consecutive timeouts on one process -> kill and respawn
 # a module's first start on a cold machine: 4.5 s on a fresh windows-2025 runner (the sandboxed interpreter loading files
@@ -166,7 +167,8 @@ class _Proc:
         self.delivered: dict[str, str] = {}        # secret values this process received (host.secrets.get)
         # what it wrote to stderr last, which a failed start reports (a self-test's host keeps no log)
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
-        threading.Thread(target=self._drain_stderr, name=f"mod-{spec.name}-stderr", daemon=True).start()
+        self._stderr_reader = threading.Thread(target=self._drain_stderr, name=f"mod-{spec.name}-stderr", daemon=True)
+        self._stderr_reader.start()
 
     def _on_request(self, req: Request):
         entry = mp.HOST_CALLBACKS.get(req.method)
@@ -205,6 +207,12 @@ class _Proc:
             line = raw.decode(errors="replace")
             self.stderr_tail.append(line.rstrip("\n"))
             self._write_log(line)
+
+    def said(self, wait: float = STDERR_DRAIN_S) -> str:
+        """What the process wrote to stderr, once its reader has taken in the rest (after a kill the pipe ends; a reader
+        thread that has not run yet would leave a failed start reporting only "ConnectionClosed"), waiting at most `wait`."""
+        self._stderr_reader.join(wait)
+        return "; ".join(self.stderr_tail)[-1500:]
 
     def alive(self) -> bool:
         return self.proc.poll() is None and not self.peer.closed
@@ -300,7 +308,7 @@ class ModuleHost:
                 p.peer.notify("initialized")
             except Exception as e:
                 p.kill(0.5)
-                said = "; ".join(p.stderr_tail)[-1500:]
+                said = p.said()
                 raise self._fail(name, "handshake", f"{type(e).__name__}: {e}" + (f" (its stderr: {said})" if said else ""))
             from . import sandboxexec
             if not sandboxexec.is_confined(p.box):       # it answered, so it is past exec: it must be confined
