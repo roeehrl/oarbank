@@ -124,6 +124,11 @@ def assignments(db: DB, node_id: str | None = None, module: str | None = None) -
     return db.q(sql + " ORDER BY module, workload, node_id", tuple(args))
 
 
+def _assigned(db: DB, module: str, name: str, node_id: str) -> bool:
+    return bool(db.one("SELECT 1 FROM workload_assignments WHERE module=? AND workload=? AND node_id=? AND "
+                       "unassigned_at IS NULL", (module, name, node_id)))
+
+
 def assign(db: DB, module: str, name: str, node_id: str, actor: str, placed_by: str = "owner") -> dict:
     db.x("INSERT INTO workload_assignments(module, workload, node_id, desired, assigned_at, assigned_by, placed_by) "
          "VALUES(?,?,?,'running',?,?,?) ON CONFLICT(module, workload, node_id) DO UPDATE SET desired='running', "
@@ -134,19 +139,19 @@ def assign(db: DB, module: str, name: str, node_id: str, actor: str, placed_by: 
 
 
 def unassign(db: DB, module: str, name: str, node_id: str, actor: str) -> dict:
-    n = db.x("UPDATE workload_assignments SET unassigned_at=?, version=version+1 WHERE module=? AND workload=? AND "
-             "node_id=? AND unassigned_at IS NULL", (clock.now(), module, name, node_id)).rowcount
-    if not n:
+    if not _assigned(db, module, name, node_id):
         raise WorkloadError(404, "not_assigned", f"{module}/{name} is not assigned to {node_id}")
+    db.x("UPDATE workload_assignments SET unassigned_at=?, version=version+1 WHERE module=? AND workload=? AND "
+             "node_id=? AND unassigned_at IS NULL", (clock.now(), module, name, node_id))
     db.event("workload_unassigned", actor=actor, node_id=node_id, reason=f"{module}/{name}", module=module)
     return {"module": module, "workload": name, "node_id": node_id}
 
 
 def restart(db: DB, module: str, name: str, node_id: str, actor: str) -> dict:
-    n = db.x("UPDATE workload_assignments SET restart_seq=restart_seq+1, version=version+1 WHERE module=? AND workload=? "
-             "AND node_id=? AND unassigned_at IS NULL", (module, name, node_id)).rowcount
-    if not n:
+    if not _assigned(db, module, name, node_id):
         raise WorkloadError(404, "not_assigned", f"{module}/{name} is not assigned to {node_id}")
+    db.x("UPDATE workload_assignments SET restart_seq=restart_seq+1, version=version+1 WHERE module=? AND workload=? "
+             "AND node_id=? AND unassigned_at IS NULL", (module, name, node_id))
     db.event("workload_restarted", actor=actor, node_id=node_id, reason=f"{module}/{name}", module=module)
     return {"module": module, "workload": name, "node_id": node_id}
 
