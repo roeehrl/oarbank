@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla; a config's spec is its name up to the first _)
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankGpuDuty.tla; a config's spec is its name up to the first _)
 # under every config and compare each outcome with the expected one.
 #
 #   ./run_tlc.sh            run every config
@@ -81,6 +81,12 @@ CONFIGS=(
   "OarbankFastPause                                  ok"
   "OarbankFastPause_a_nofresh                        inv:FastPauseHolds"
   "OarbankFastPause_b_unshared                       liveness"
+  "OarbankGpuDuty                                    ok"
+  "OarbankGpuDuty_liveness                           ok"
+  "OarbankGpuDuty_a_noclamp                          inv:DutyWithinCeiling"
+  "OarbankGpuDuty_b_grow_unclean                     inv:NoGrowthOnUnclean"
+  "OarbankGpuDuty_c_nohold                           inv:ExcessBounded"
+  "OarbankGpuDuty_d_strikes_reset                    liveness"
 )
 
 if [ ! -f "$JAR" ]; then
