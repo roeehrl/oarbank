@@ -4,13 +4,13 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
-## 2.10.0 (unreleased)
+## 2.10.0 (2026-10-12)
 
 Module SDK: **oarbank-sdk 1.7.0**. This release lets fleet work earn beside the people who use the machines: modules
 can accept connections from the internet, run long-lived daemons that are the work itself, and share a GPU with a
 protected program at a measured, certified level. It also updates the whole fleet from the coordinator, with one click:
 every node's full package and the coordinator itself, ring by ring, with automatic rollback. 2.9.0 was not published on
-its own, so if you run 2.8, read the [2.9.0 section](#290-unreleased) as well: its upgrade steps apply.
+its own, so if you run 2.8, read the [2.9.0 section](#290-shipped-in-2100) as well: its upgrade steps apply.
 
 ### What's new
 
@@ -216,7 +216,7 @@ Built and tested against simulations and fakes; the owner verifies these on real
   delegated process, and multi-node (gang) jobs. On Windows delegated processes are matched by trusted path only, and
   only in the agent's own session. Releases, agent updates and container image pulls are not held by a site.
 
-## 2.9.0 (unreleased)
+## 2.9.0 (shipped in 2.10.0)
 
 Module SDK: **oarbank-sdk 1.6.0**. Read [What changes when you upgrade](#what-changes-when-you-upgrade) before you
 install it: the macOS and Linux coordinator moves to a system service, settings move to a new model by themselves, and
