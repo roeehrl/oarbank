@@ -254,6 +254,17 @@
         },
         "source": {
           "$ref": "#/$defs/Source"
+        },
+        "tags": {
+          "description": "Owner labels reported with the phase (uplink: it uses the site's internet line); the coordinator aggregates them, the node acts on nothing but the actions.",
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Tags",
+          "type": "array"
         }
       },
       "required": [
@@ -492,9 +503,11 @@
         },
         "gpu_jobs": {
           "default": "when_no_gpu_protected",
+          "description": "Fleet GPU work beside a protected GPU group: never; only while none is active (default); certified: cooperative work up to a valid co-tenancy certificate's duty, else as when_no_gpu_protected (D50); always.",
           "enum": [
             "never",
             "when_no_gpu_protected",
+            "certified",
             "always"
           ],
           "title": "Gpu Jobs",
@@ -533,6 +546,30 @@
         }
       },
       "title": "NodeSection",
+      "type": "object"
+    },
+    "OnExec": {
+      "additionalProperties": false,
+      "description": "A process trigger: the phase is on while a matching owner process runs.",
+      "properties": {
+        "match": {
+          "$ref": "#/$defs/Match"
+        },
+        "tree": {
+          "default": "self",
+          "enum": [
+            "self",
+            "descendants",
+            "same_team"
+          ],
+          "title": "Tree",
+          "type": "string"
+        }
+      },
+      "required": [
+        "match"
+      ],
+      "title": "OnExec",
       "type": "object"
     },
     "OwnerStall": {
@@ -752,6 +789,12 @@
           "title": "Ignore",
           "type": "boolean"
         },
+        "immediate": {
+          "default": false,
+          "description": "The rule's during phases act at once, between ticks (the event path; S25), with the phase's own exit as hysteresis, and while its group is present before it is active.",
+          "title": "Immediate",
+          "type": "boolean"
+        },
         "lower_fleet": {
           "anyOf": [
             {
@@ -819,6 +862,7 @@
     },
     "Source": {
       "additionalProperties": false,
+      "description": "An owner source (never a module's). A path or glob (`*` in the last component; the newest matching file is\nfollowed, and a new one is picked up); `~` is the person's home (a system install's session helper reads it).",
       "properties": {
         "enter": {
           "anyOf": [
@@ -826,11 +870,36 @@
               "type": "string"
             },
             {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
               "type": "null"
             }
           ],
           "default": null,
           "title": "Enter"
+        },
+        "enter_soon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "An event announcing the phase: on from then (fleet work clears before it starts).",
+          "title": "Enter Soon"
         },
         "event": {
           "anyOf": [
@@ -842,7 +911,21 @@
             }
           ],
           "default": null,
+          "description": "The event type: lines whose event_key field equals it (progress: what is counted; a field phase: the event carrying the field). No event counts every line.",
           "title": "Event"
+        },
+        "event_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The JSON field naming a line's event type (a dotted path; default event).",
+          "title": "Event Key"
         },
         "exec": {
           "anyOf": [
@@ -867,11 +950,30 @@
               "type": "string"
             },
             {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
               "type": "null"
             }
           ],
           "default": null,
           "title": "Exit"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A phase from a field of the event type (a dotted path).",
+          "title": "Field"
         },
         "jsonl": {
           "anyOf": [
@@ -896,6 +998,67 @@
           ],
           "default": null,
           "title": "Log Regex"
+        },
+        "on": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Field values meaning the phase is on.",
+          "title": "On"
+        },
+        "on_exec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnExec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "soon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Field values announcing it (on from then).",
+          "title": "Soon"
         }
       },
       "title": "Source",

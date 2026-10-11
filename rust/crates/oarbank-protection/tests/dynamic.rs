@@ -562,6 +562,7 @@ fn throttle_documents_carry_a_sequence_and_the_pause_flag() {
         ThrottleDoc {
             threads: Some(1),
             pause: true,
+            gpu_duty: None,
             seq: 1
         }
     );
@@ -570,6 +571,7 @@ fn throttle_documents_carry_a_sequence_and_the_pause_flag() {
         ThrottleDoc {
             threads: Some(1),
             pause: false,
+            gpu_duty: None,
             seq: 2
         }
     );
@@ -583,6 +585,7 @@ fn throttle_documents_carry_a_sequence_and_the_pause_flag() {
         ThrottleDoc {
             threads: Some(1),
             pause: false,
+            gpu_duty: None,
             seq: 3
         }
     );

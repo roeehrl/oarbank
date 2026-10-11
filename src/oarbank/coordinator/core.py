@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools
+from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -300,6 +300,8 @@ def _node_directives(db: DB, node: dict) -> dict:
             "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
             "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
+            # harness runs and co-tenancy certificates (docs/design/gpu-cotenancy.md)
+            **cotenancy.directives(db, node),
             **coordmove.directives(db), **owner.directives(db)}
 
 
@@ -324,6 +326,8 @@ def hello(db: DB, node: dict, body: dict) -> dict:
     if facts.get("platform"):
         releases.ensure(db, platforms.facts_platform(facts)["platform"])     # a platform the fleet has no release for yet
     with db.tx():
+        if body.get("boot_id") and body.get("boot_id") != node.get("boot_id"):
+            cotenancy.agent_restarted(db, node["node_id"])           # a harness run it held is gone with it
         db.x("UPDATE nodes SET agent_version=?, boot_id=?, facts_json=?, release_id=?, last_hello_at=?,"
              " last_heartbeat_at=?, ready_datasets_json=?, clock_offset_s=? WHERE node_id=?",
              (body.get("agent_version"), body.get("boot_id"), json.dumps(facts or jl(node["facts_json"], {})),
@@ -448,6 +452,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         ack = _ingest_journal(db, nid, body.get("journal") or [])
+        cotenancy.ingest(db, node, body.get("ab_runs"), tel)       # harness runs (docs/design/gpu-cotenancy.md)
         cancel, revoke = jl(node["pending_cancel_json"], []), jl(node["pending_revoke_json"], [])
         db.x("UPDATE nodes SET pending_cancel_json='[]', pending_revoke_json='[]' WHERE node_id=?", (nid,))
         recert = bool(node["want_recertify"])

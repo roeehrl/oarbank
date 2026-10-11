@@ -221,6 +221,23 @@ CREATE TABLE IF NOT EXISTS coordinator_moves (
   created_at REAL, not_before REAL, ended_at REAL, actor TEXT, reason TEXT, final_snapshot_json TEXT, report_json TEXT,
   cancel_payload TEXT, cancel_sig TEXT,
   modules_json TEXT, force INT DEFAULT 0);          -- what modules said about the move; the operator's override of blockers
+-- Paired on/off harness runs (D52, cotenancy.py): one per run, the agent's latest report, and how it ended
+CREATE TABLE IF NOT EXISTS ab_runs (
+  run_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, duty REAL,
+  spec_json TEXT NOT NULL, state TEXT NOT NULL,     -- requested|running|done|aborted
+  sweep_id TEXT, actor TEXT, reason TEXT, created_at REAL, started_at REAL, ended_at REAL,
+  report_json TEXT, decision TEXT, cert_id TEXT, abort_requested INT DEFAULT 0, identity TEXT, context_json TEXT);
+CREATE INDEX IF NOT EXISTS ab_runs_node ON ab_runs(node_id, created_at);
+-- A frontier search: harness runs at rising GPU duty levels, stopping at the first that does not pass
+CREATE TABLE IF NOT EXISTS ab_sweeps (
+  sweep_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, levels_json TEXT,
+  spec_json TEXT, state TEXT, certified_duty REAL, actor TEXT, created_at REAL, ended_at REAL);
+-- Co-tenancy certificates (D52): a passing run for one node, rule and fleet configuration; gate gpu_jobs = certified
+CREATE TABLE IF NOT EXISTS certificates (
+  cert_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, duty REAL,
+  r REAL, r_lo REAL, r_hi REAL, margin REAL, run_id TEXT, issued_at REAL, valid_until REAL, identity TEXT,
+  context_json TEXT, revoked_at REAL, revoked_why TEXT);
+CREATE INDEX IF NOT EXISTS certificates_node ON certificates(node_id, issued_at);
 -- The history of each node's effective protection section (protection.record_if_changed), one row per change
 CREATE TABLE IF NOT EXISTS protection_versions (
   node_id TEXT NOT NULL, version INT NOT NULL, config_json TEXT NOT NULL, config_hash TEXT, actor TEXT, reason TEXT,
