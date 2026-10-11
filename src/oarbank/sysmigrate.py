@@ -652,7 +652,7 @@ def run_as_root(user: str | None = None, build: Path | None = None, from_install
         out("no per-user coordinator on this machine: nothing to migrate")
         return 0
     if dry_run:
-        out(json.dumps({"would_migrate": inst.summary(), "to": str(layout.new_home)}, indent=1))
+        out(json.dumps(plan(layout, inst), indent=1))
         return 0
     if os.geteuid() != 0:
         raise MigrationError("the migration's second half runs as root (sudo)")
@@ -668,14 +668,40 @@ def run_as_root(user: str | None = None, build: Path | None = None, from_install
     return 0
 
 
-def run_as_person(dry_run: bool = False, out=print) -> int:
+def plan(layout: Layout, inst: Install) -> dict:
+    """What a migration of `inst` would do and what stops it now, read only: no key leaves the Keychain, nothing is
+    written, no service is touched (the dry runs print it)."""
+    keys = [n for n in KEY_NAMES if secrets.read_file_secret(n, inst.old_home) is not None]
+    blockers = []
+    if inst.standby:
+        blockers.append("the per-user coordinator is a move's standby: finish or cancel the move first")
+    if not (inst.old_home / "oarbank.sqlite3").exists():
+        blockers.append(f"{inst.old_home} holds no coordinator")
+    if (inst.old_home / "setup.pending.json").exists():
+        blockers.append("the coordinator's setup is unfinished: finish it in the setup wizard first")
+    if (layout.new_home / "oarbank.sqlite3").exists():
+        blockers.append(f"{layout.new_home} already holds a coordinator")
+    out = {"would_migrate": inst.summary(), "to": str(layout.new_home),
+           "keys_in_file_store": keys, "blockers": blockers}
+    if layout.os == "darwin":
+        out["keys_to_export"] = ("the coordinator keys still in the login Keychain are exported into "
+                                 f"{inst.old_home / 'keys'} first, as {inst.user}, in their session")
+    return out
+
+
+def run_as_person(dry_run: bool = False, out=print, layout: Layout | None = None, people=None) -> int:
     """`oarbank coordinator migrate`: export this person's keys (macOS), then the root half through sudo, or the
-    system's administrator prompt when there is no terminal."""
+    system's administrator prompt when there is no terminal. A dry run only prints the plan (`plan`): it exports no
+    key and asks for no administrator."""
     import getpass
-    layout = Layout()
-    inst = pick(find_installs(layout, [(getpass.getuser(), os.getuid(), os.getgid(), Path.home())]), None)
+    layout = layout or Layout()
+    people = people if people is not None else [(getpass.getuser(), os.getuid(), os.getgid(), Path.home())]
+    inst = pick(find_installs(layout, people), None)
     if not inst:
         out("this account has no per-user coordinator: nothing to migrate")
+        return 0
+    if dry_run:
+        out(json.dumps(plan(layout, inst), indent=1))
         return 0
     if layout.os == "darwin":
         names = export_keys(inst.old_home)
@@ -684,8 +710,6 @@ def run_as_person(dry_run: bool = False, out=print) -> int:
     if not build:
         raise MigrationError("run the coordinator build's own oarbank (this is not a coordinator build)")
     argv = [str(build / "bin" / "oarbank"), "coordinator", "migrate", "--run", "--user", inst.user, "--build", str(build)]
-    if dry_run:
-        argv.append("--dry-run")
     return elevate(argv, "Oarbank Coordinator needs an administrator to move the coordinator to a system service.")
 
 

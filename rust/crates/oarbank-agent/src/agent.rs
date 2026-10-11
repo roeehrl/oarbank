@@ -110,6 +110,14 @@ pub struct Agent {
     pub managed_by: Option<String>,
     /// When the managed policy was last read: at most once a minute, since a read runs plutil or reg.
     managed_read: Option<std::time::Instant>,
+    /// Workloads (docs/design/workloads.md), made before the first hello (it adopts what an earlier agent left).
+    pub workloads: Option<Arc<std::sync::Mutex<crate::workloads::WorkloadManager>>>,
+    /// What the workloads were last configured with: release id, policy, disabled modules.
+    workloads_seen: (String, Value, Value),
+    /// The boot clock when the request the next directives answer was sent (a seat lease runs from then).
+    sent_boot: f64,
+    /// Inbound listeners and their router mappings (listeners.rs).
+    pub listeners: crate::listeners::Hub,
 }
 
 /// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
@@ -143,6 +151,7 @@ impl Agent {
         };
         cfg.save(&layout.config())?;
         let release = release::current(&layout);
+        let layout_home = layout.home.clone();
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
         let mut a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
@@ -155,7 +164,9 @@ impl Agent {
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
             services_halted: false, coord_install: Default::default(), status: Default::default(), layout,
             tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null,
-            settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None };
+            settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None,
+            workloads: None, workloads_seen: Default::default(), sent_boot: 0.0,
+            listeners: crate::listeners::Hub::new(Layout::new(layout_home.clone()), crate::listeners::Env::from_env()) };
         a.refresh_managed();                    // the defaults the agent starts from are tightened, too
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
@@ -344,9 +355,12 @@ impl Agent {
                               "ready_datasets": staging::ready(&self.layout), "tools": self.tools,
                               "live_attempts": self.table.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
+        body["facts"]["listeners"] = crate::listeners::Hub::facts();   // inbound listeners, and a dial-back prober
         merge(&mut body, self.hooks.hello_extra());
         merge(&mut body, self.update.report());
         merge(&mut body, self.trust_report());
+        merge(&mut body, self.workload_report());
+        self.sent_boot = crate::workloads::boot::now_s();
         let d = self.api().map_err(io_err)?.post("/v1/agent/hello", &body).await?;
         self.rescue.contact(doctor::now());
         self.after_directives(&d).await;
@@ -375,10 +389,13 @@ impl Agent {
         if !self.settings_report.is_null() {
             body["settings"] = self.settings_report.clone();
         }
+        merge(&mut body, self.listeners.report());                      // `listeners`, `portmaps`, `network`, `probe_results`
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
         merge(&mut body, self.update.report());
         merge(&mut body, self.trust_report());
+        merge(&mut body, self.workload_report());
+        self.sent_boot = crate::workloads::boot::now_s();
         let d = self.api().map_err(io_err)?.post("/v1/agent/heartbeat", &body).await?;
         self.rescue.contact(doctor::now());
         self.after_directives(&d).await;
@@ -547,6 +564,75 @@ impl Agent {
         self.hooks.on_directives(d);
         self.directives = d.clone();
         self.sync_services();
+        // after the services: a listen_fd listener's socket must exist before its service's first start
+        self.listeners.configure(self.release.as_ref(), &self.folders, d, self.services.clone(), self.node_id.as_deref());
+        if let Some(w) = self.workloads.clone() {
+            let mut w = w.lock().unwrap();
+            w.set_wanted(&d["workloads"], self.sent_boot);
+            w.ack_reports(&d["workload_reports_ack"]);
+        }
+    }
+
+    /// The heartbeat's `workloads` and `workload_reports` (docs/protocol.md, "Workloads").
+    fn workload_report(&self) -> Value {
+        match &self.workloads {
+            Some(w) => {
+                let w = w.lock().unwrap();
+                json!({"workloads": w.report(), "workload_reports": w.reports_out()})
+            }
+            None => json!({}),
+        }
+    }
+
+    /// Make the workload manager (once there is a runtime) and adopt what an earlier agent left running: before the
+    /// first hello, which reports them so the coordinator renews their leases.
+    fn ensure_workloads(&mut self) {
+        if self.workloads.is_some() {
+            return;
+        }
+        let Ok(rt) = self.runtime() else { return };
+        let hub = self.session_hub;
+        let registry = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&self.layout, hub)).registry.clone();
+        let mut m = crate::workloads::WorkloadManager::new(Layout::new(self.layout.home.clone()), rt, Some(registry));
+        m.adopt(self.release.as_ref());
+        let m = Arc::new(std::sync::Mutex::new(m));
+        self.listeners.set_workloads(m.clone());       // a workload may serve inbound listeners
+        self.workloads = Some(m);
+        self.sync_workloads();
+    }
+
+    /// Hand the workloads a new release, policy, caps and disabled modules.
+    fn sync_workloads(&mut self) {
+        let (Some(rel), Some(w)) = (self.release.clone(), self.workloads.clone()) else { return };
+        let policy = self.with_grants(&self.directives["policy"]);
+        let off = self.directives["modules_disabled"].clone();
+        let mut w = w.lock().unwrap();
+        w.set_gpu_apis(crate::gpuapi::host(&self.gpu_apis));
+        w.set_limits(&self.directives["limits"]);
+        w.set_allowed(policy["workloads"].as_bool().unwrap_or(true));
+        if self.workloads_seen.0 != rel.id || self.workloads_seen.1 != policy || self.workloads_seen.2 != off {
+            let disabled: Vec<String> = off.as_array().into_iter().flatten().filter_map(|m| m.as_str().map(str::to_string)).collect();
+            w.configure(&rel, &policy, self.node_id.as_deref(), &disabled);
+            self.workloads_seen = (rel.id.clone(), policy, off);
+        }
+    }
+
+    /// Fetch the secrets of workloads about to start (`POST /v1/agent/workloads/secrets`): each for its seat and fence,
+    /// never kept beyond the run.
+    async fn fetch_workload_secrets(&mut self) {
+        let (Some(w), Some(api)) = (self.workloads.clone(), self.api.clone()) else { return };
+        let wanted = w.lock().unwrap().needs_secrets();
+        for (key, seat, fence) in wanted {
+            let r = api.post("/v1/agent/workloads/secrets", &json!({"key": key, "seat_id": seat, "fence": fence})).await;
+            let got = match r {
+                Ok(v) => v["secrets"].as_object().cloned().ok_or_else(|| "the reply had no secrets".to_string()),
+                Err(e) => Err(format!("{}: {e}", e.code())),
+            };
+            if let Err(e) = &got {
+                warn!(workload = %key, error = %e, "workload secrets not delivered");
+            }
+            w.lock().unwrap().provide_secrets(&key, seat, fence, got);
+        }
     }
 
     /// Create the service manager with the first release; reconfigure it on a new release or policy, and hand it
@@ -585,6 +671,8 @@ impl Agent {
             s.set_limits(limits);
             self.services_seen.2 = limits.clone();
         }
+        drop(s);
+        self.sync_workloads();
     }
 
     fn runtime(&mut self) -> Result<Runtime> {
@@ -955,6 +1043,7 @@ impl Agent {
 
     /// One protection tick: sample, decide, actuate, recompute capacity.
     pub fn protect(&mut self) {
+        self.listeners.tick();
         if self.facts.is_null() {
             self.facts = facts::collect(&self.layout.home);
         }
@@ -989,8 +1078,19 @@ impl Agent {
                 self.rerun_doctors = true;
             }
         }
+        let (mut wl_views, mut wl_pids, mut wl_reserved) = (vec![], vec![], (0.0, 0.0));
+        if let Some(w) = self.workloads.clone() {
+            let mut w = w.lock().unwrap();
+            w.tick();
+            wl_views = w.views();
+            wl_pids = w.fleet_pids();
+            wl_reserved = w.reserved();
+        }
         let hub = self.session_hub;
         let p = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&l, hub));
+        p.workloads = wl_views;
+        p.workload_pids = wl_pids;
+        p.workload_reserved = wl_reserved;
         p.service_pools = pools;
         p.service_reserved_mem_gb = reserved;
         p.services = self.services.as_ref().map(|s| s.lock().unwrap().fleet_view()).unwrap_or_default();
@@ -1015,6 +1115,10 @@ impl Agent {
                 s.tick(&demand.0, &demand.1, soft);                          // stopped now, not on the next tick
             }
             held = s.held();
+        }
+        if let (Some(w), Some(r)) = (self.workloads.clone(), p.last.as_ref()) {
+            let plans = r.workloads.clone();
+            w.lock().unwrap().apply(&plans);
         }
         p.telemetry["services_running"] = json!(running);
         p.telemetry["services_reserved_gb"] = json!((reserved * 10.0).round() / 10.0);
@@ -1156,6 +1260,19 @@ impl Agent {
         let r = self.rounds(stop).await;
         // however the rounds end (a stop, a fatal error, a rollback), no runner outlives the agent
         self.stop_jobs().await;
+        // workloads outlive it (the next agent adopts them), but nothing it paused stays paused
+        if let Some(w) = &self.workloads {
+            w.lock().unwrap().thaw_all();
+        }
+        if let Some(p) = self.prot.as_mut() {
+            p.release_delegated();
+        }
+        // the agent stops (the graceful stop of SIGTERM, SIGHUP, SIGINT or the launcher's stop event) or the node was
+        // retired: close the listeners and delete their router mappings
+        let n = self.listeners.shutdown().await;
+        if n > 0 {
+            info!(mappings = n, "router mappings released");
+        }
         self.settle_services().await;
         r
     }
@@ -1225,6 +1342,7 @@ impl Agent {
         jobs::clear_workdirs(&self.layout);
         self.reap_containers().await;
         self.probe_gpu_apis().await;                // before any service is offered: a GPU service waits for it
+        self.ensure_workloads();                    // adopts what an earlier agent left, before hello reports it
         self.detect_tools().await;                  // hello reports them
         let mut backoff = Duration::from_secs(2);
         let mut stopped = stop.clone();
@@ -1325,6 +1443,7 @@ impl Agent {
                         let policy = self.with_grants(&self.directives["policy"]);
                         self.run_doctors(&policy).await;
                     }
+                    self.fetch_workload_secrets().await;
                     self.claim().await?;
                 }
             };

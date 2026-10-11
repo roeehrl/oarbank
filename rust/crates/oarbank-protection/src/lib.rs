@@ -23,6 +23,7 @@ pub mod dynamic;
 pub mod evaluator;
 pub mod events;
 pub mod gpu;
+pub mod gpu_duty;
 pub mod harness;
 pub mod journal;
 pub mod matcher;
@@ -42,6 +43,7 @@ pub mod support;
 pub mod table;
 pub mod telemetry;
 pub mod watch;
+pub mod workloads;
 pub mod x11;
 
 pub use capacity::{
@@ -49,7 +51,7 @@ pub use capacity::{
     Limits, Policy, ReleaseDecision, Schedule,
 };
 pub use config::{
-    ActiveWhen, CapFleet, ConfigError, DuringSpec, MemoryFloors, ProcessMatch, ProtectSpec,
+    ActiveWhen, CapFleet, ConfigError, Delegation, DuringSpec, MemoryFloors, ProcessMatch, ProtectSpec,
     ProtectionConfig, ProtectionMode, ProtectionRule, ProtectionScope, ReserveExpr, ReserveMetric,
     TreeScope, DEFAULT_GPU_MIN_BUSY,
 };
@@ -64,6 +66,7 @@ pub use evaluator::{
     CombinedConstraint, ConstraintVector, ProtectionEvent, RuleEvaluator, RuleReport, RuleState,
 };
 pub use gpu::{GpuBusy, GpuTimes};
+pub use gpu_duty::{DutyEvent, DutyGovernor, DutyInputs, DutyOutputs, DutySignal, DutyUnit};
 pub use journal::{
     Clock, DecisionJournal, FileJournalSink, JournalRecord, JournalSink, SystemClock,
 };
@@ -85,3 +88,7 @@ pub use table::{
     SourceError, UnsupportedProcessSource,
 };
 pub use telemetry::ProtectionTelemetry;
+pub use workloads::{
+    fleet_id, is_fleet_id, DelegatedAction, DelegatedGroup, DelegationLadder, FleetWorkloadView, Hold, HoldCause,
+    LadderEvent, LadderInputs, WorkloadAction, WorkloadLadder,
+};

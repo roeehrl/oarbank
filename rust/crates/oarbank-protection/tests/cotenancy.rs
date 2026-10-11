@@ -454,3 +454,40 @@ fn an_immediate_phase_pauses_admission_too_and_a_certificate_never_lifts_an_owne
         assert!(r.paused.contains(&1), "{scope}: the phase pauses the certified GPU job too");
     }
 }
+
+/// gpu_jobs = certified with workloads: a running workload that uses the GPU and honours gpu_duty shares the certified
+/// duty with the cooperative jobs (its plan carries `gpu_duty`); one that cannot throttle gets none.
+#[test]
+fn a_cooperative_gpu_workload_shares_the_certified_duty() {
+    let (mut ctl, host, _src, _journal) = trainer_controller("certified");
+    let central = json!({"schema": 1, "node": {"mode": "moderate", "gpu_jobs": "certified",
+                                                "implicit": {"frontmost_app": false, "owner_stall": null}},
+        "rule": [{"id": "trainer", "match": {"path_prefix": "/opt/trainer/"}, "active_when": "present", "enter_for_s": 0,
+                  "protect": {"metric": "gpu_share", "max": 0.99}}]});
+    ctl.apply(Some(&central), &LocalProtection::Absent);
+    let wl = |key: &str, coop: bool| {
+        let mut w = FleetWorkloadView::new(key);
+        w.gpu = true;
+        w.cooperative_throttle = coop;
+        w.footprint_gb = 1.0;
+        w
+    };
+    let tick = |ctl: &mut ProtectionController, now: f64| {
+        let mut i = inputs(now, vec![gpu_job(1, true)]);
+        i.workloads = vec![wl("llm/server", true), wl("llm/plain", false)];
+        ctl.tick(&i)
+    };
+    host.0.lock().unwrap().gpu = Some(GpuTimes::known(HashMap::from([(7, 0.0)])));
+    tick(&mut ctl, 0.0);
+    host.0.lock().unwrap().gpu = Some(GpuTimes::known(HashMap::from([(7, 1.8e9)])));
+    let r = tick(&mut ctl, 2.0);
+    assert_eq!(r.workloads["llm/server"].gpu_duty, None, "no certificate: no duty");
+    let id = ctl.identity("trainer").expect("the trainer's identity").to_string();
+    let ctx = CertContext { hardware: "Mac16,9".into(), os_major: "26".into(), agent_version: "2.10.0".into() };
+    ctl.set_certificates(vec![cert(&id, 0.4, 1e12)], ctx);
+    host.0.lock().unwrap().gpu = Some(GpuTimes::known(HashMap::from([(7, 3.6e9)])));
+    let r = tick(&mut ctl, 4.0);
+    assert_eq!(r.throttle.get(&1).and_then(|d| d.gpu_duty), Some(0.2), "the job's half of the certified duty");
+    assert_eq!(r.workloads["llm/server"].gpu_duty, Some(0.2), "the cooperative workload's half");
+    assert_eq!(r.workloads["llm/plain"].gpu_duty, None, "a workload that cannot throttle gets no duty");
+}

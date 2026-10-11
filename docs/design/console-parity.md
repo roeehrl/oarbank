@@ -39,7 +39,7 @@ plan's impact as raw JSON.
    node, a job operation on the job, a campaign operation on the job's campaign, a fleet operation on the fleet; job
    remedies also carry the module. The console renders a remedy as a button when the operation needs nothing but its
    target (T2/T3 still open their plan review), as a link to the page whose form collects the rest
-   (`views.REMEDY_FORMS`: caps, rebind, secrets, tools, folders, canary, agent promotion), and otherwise as its name with
+   (`views.REMEDY_FORMS`: caps, rebind, secrets, tools, folders, listeners, canary, agent promotion), and otherwise as its name with
    the command; `oarbank explain` prints the command (`operations.command`). A test keeps every remedy in one of the
    three.
 5. **A plan's impact reads as rows**, in the console's review page and in the CLI's preview, from one function

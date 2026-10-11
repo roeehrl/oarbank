@@ -620,6 +620,15 @@ def set_mix(db: DB, campaign_id: str, mix: str) -> dict:
         db.x("UPDATE jobs SET state='pending', generation=generation+1 WHERE job_id=? AND NOT EXISTS "
              "(SELECT 1 FROM attempts WHERE job_id=? AND state='live')", (a["job_id"], a["job_id"]))
         revoked += 1
+    # an expired attempt may still report (a node that slept). A pending job's moved generation fences it; a job leased
+    # again keeps its generation for its live attempt, so an expired one outside its unit's class now is closed: its late
+    # result cannot land beside the live attempt on the class the new mix bound (invariant S20)
+    for a in db.q("SELECT a.attempt_id, j.placement_unit, n.platform FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
+                  "JOIN nodes n ON n.node_id=a.node_id WHERE a.state='expired' AND j.state='leased' AND j.campaign_id=? "
+                  "AND a.generation=j.generation", (campaign_id,)):
+        if not all(u["class"] is None or (a["platform"] and pf.class_key(a["platform"], u["mix"]) == u["class"])
+                   for u in chain(db, a["placement_unit"])):
+            db.x("UPDATE attempts SET state='revoked', end_reason='placement_rebound' WHERE attempt_id=?", (a["attempt_id"],))
     return {"mix": new, "units": len(campaign_units(db, campaign_id)), "revoked": revoked}
 
 

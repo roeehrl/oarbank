@@ -284,6 +284,20 @@ def test_a_step_sequence_replays_the_same_whatever_the_campaign_ids(monkeypatch)
     assert _replay(monkeypatch, COUNTEREXAMPLE, ["s_ffffffff", "s_00000000"]) == rising
 
 
+
+# Found by the machine (S20): an attempt expires on one node, its job is leased again on a node of another platform, the
+# campaign's mix becomes same-platform (bound to the live attempt's platform) and the expired attempt's late result
+# arrived at the job's current generation, a result from outside the bound class.
+LATE_RESULT_AFTER_REBIND = ([("quarantine", {"i": 0}), ("claim", {"free": 1, "i": 2})]
+                            + [("advance_and_reap", {"dt": 1.0})] * 15 + [("advance_and_reap", {"dt": 76.97383880347316})]
+                            + [("advance_and_reap", {"dt": 1.0})] * 7
+                            + [("claim", {"free": 1, "i": 1}), ("set_placement", {"mix": "same-platform"}),
+                               ("complete", {"k": 0, "variant": "good"})])
+
+
+def test_a_late_result_from_outside_the_new_mix_does_not_land(monkeypatch):
+    _replay(monkeypatch, LATE_RESULT_AFTER_REBIND, ["s_00000001", "s_00000002"])     # safety() after every step
+
 import os
 CoordinatorMachine.TestCase.settings = settings(
     max_examples=1000 if os.environ.get("OARBANK_THOROUGH") else 150,

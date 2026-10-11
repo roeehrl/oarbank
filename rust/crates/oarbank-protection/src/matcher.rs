@@ -125,6 +125,18 @@ pub fn matches(p: &ProcessRecord, m: &ProcessMatch) -> bool {
 /// ppid, or every process sharing a matched Team ID).
 pub fn group(procs: &[ProcessRecord], m: &ProcessMatch, tree: TreeScope) -> Vec<ProcessRecord> {
     let direct: Vec<&ProcessRecord> = procs.iter().filter(|p| matches(p, m)).collect();
+    tree_of(procs, direct, tree)
+}
+
+/// The processes an owner's delegation names: like [`group`], but a direct match must hold on facts the agent read
+/// (an unreadable fact never delegates a process) and pass `accept` (the exact-path and ownership checks).
+pub fn strict_group(procs: &[ProcessRecord], m: &ProcessMatch, tree: TreeScope,
+                    accept: impl Fn(&ProcessRecord) -> bool) -> Vec<ProcessRecord> {
+    let direct: Vec<&ProcessRecord> = procs.iter().filter(|p| check(p, m) == Match::Yes && accept(p)).collect();
+    tree_of(procs, direct, tree)
+}
+
+fn tree_of<'a>(procs: &'a [ProcessRecord], direct: Vec<&'a ProcessRecord>, tree: TreeScope) -> Vec<ProcessRecord> {
     if direct.is_empty() {
         return vec![];
     }

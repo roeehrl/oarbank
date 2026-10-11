@@ -45,7 +45,11 @@ rustup target list --installed | grep -x "$TARGET" >/dev/null || { echo "rustup 
 arch "-$ARCH" /usr/bin/true 2>/dev/null || { echo "this Mac cannot run $ARCH code: softwareupdate --install-rosetta" >&2; exit 2; }
 OUT="$REPO/dist"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/oarbank-pkg.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# the tools' own scratch (swiftc's driver leaves a TemporaryDirectory.* behind in the temp directory) goes in a directory
+# removed with $WORK; not inside $WORK, whose paths the package must never name (check-package.py --build-path)
+TOOLTMP="$(mktemp -d "${TMPDIR:-/tmp}/oarbank-pkg-tmp.XXXXXX")"
+trap 'rm -rf "$WORK"; rm -rf "$TOOLTMP"' EXIT
+export TMPDIR="$TOOLTMP"
 mkdir -p "$OUT"
 
 # the crates' source paths the binaries embed name CARGO_HOME as /cargo, not this machine's

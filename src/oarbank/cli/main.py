@@ -175,6 +175,53 @@ def cmd_secret(a):
     print(f"{a.module}/{a.name} set for {res.get('scope') or 'the module'}: fingerprint {res['fingerprint']}")
 
 
+def cmd_workload(a):
+    """Workloads (docs/design/workloads.md): list, assign, unassign, restart, logs [--follow]."""
+    if a.action == "list":
+        q = "&".join(f"{k}={v}" for k, v in (("node", a.node), ("module", a.module)) if v)
+        rows = api("GET", "/api/v1/workloads" + (f"?{q}" if q else ""))["workloads"]
+        if a.json:
+            print(json.dumps(rows, indent=1, default=str))
+            return
+        if not rows:
+            print("no workloads assigned")
+        for r in rows:
+            rep = r["report"] or {}
+            seat = f" seat {r['seat_id']} fence {r['fence']}" if r.get("seat_id") else ""
+            lease = f" lease {rep['lease_left_s']:.0f} s" if rep.get("lease_left_s") is not None else ""
+            extra = [x for x in (rep.get("held") and f"held: {rep['held']}", rep.get("paused") and "paused",
+                                 rep.get("lowered") and "lowered", rep.get("error")) if x]
+            print(f"{r['key']:<28} {r['hostname'] or r['node_id']:<16} {r['state']:<10}"
+                  f"{(' ' + r['reason']) if r.get('reason') else ''}{seat}{lease}"
+                  f"{'  (' + '; '.join(map(str, extra)) + ')' if extra else ''}")
+        return
+    if not a.workload or "/" not in a.workload:
+        sys.exit(f"oarbank workload {a.action} <module>/<workload> --node N")
+    if a.action == "logs":
+        if not a.node:
+            sys.exit("oarbank workload logs <module>/<workload> --node N [--follow]")
+        module, name = a.workload.split("/", 1)
+        seen = None
+        while True:
+            d = api("GET", f"/api/v1/workloads/{module}/{name}/logs?node={a.node}")
+            text = d["log_tail"]
+            if text != seen:
+                new = text
+                if seen:                                 # only what came after the last part already printed
+                    tail = seen[-200:]
+                    at = text.rfind(tail)
+                    new = text[at + len(tail):] if at >= 0 else text
+                print(new, end="" if not new or new.endswith("\n") else "\n")
+                seen = text
+            if not a.follow:
+                return
+            time.sleep(2)
+    params = {"node": a.node} if a.node else ({"count": a.count} if a.count is not None else {})
+    op = {"assign": "workloads.assign", "unassign": "workloads.unassign", "restart": "workloads.restart"}[a.action]
+    res = run_op(op, a.workload, params, a.reason, a.yes, dry_run=a.dry_run)
+    print(json.dumps(res.get("result", res), indent=1, default=str))
+
+
 MARK = {"done": "[done]   ", "blocked": "[BLOCKED]", "waiting": "[waiting]", "next": "[next]   ", "skipped": "[n/a]    "}
 
 
@@ -716,6 +763,8 @@ def node_show(target: str, as_json: bool = False):
     print(f"{n['hostname']} {n['node_id']} {n['platform'] or '-'} {n['lifecycle']} {n['desired_state']} "
           f"{'online' if n['online'] else 'OFFLINE'} agent {n['agent_version'] or '-'}"
           + (f" QUARANTINED: {n['quarantine_reason']}" if n["quarantine_reason"] else ""))
+    if n.get("agent_behind"):
+        print(f"  update: {n['agent_behind']['text']}")
     if d.get("why"):
         print(f"  why: {d['why']['line']}")
     for m, st in d["modules"].items():
@@ -755,7 +804,7 @@ def node_show(target: str, as_json: bool = False):
               + (f" (statement {f['statement_seq']}, {'signed' if f['signed'] else 'unsigned'})" if f["statement_seq"] else ""))
     t = d.get("tools") or {}
     if not t.get("reported"):
-        print("  host tools: not reported yet")
+        print(f"  host tools: not reported: {t.get('unreported_why') or 'not yet'}")
     for tid, insts in sorted((t.get("tools") or {}).items()):
         for i in insts:
             print(f"  tool {tid}: {i.get('version') or '?'} {i.get('arch') or ''} at {i.get('path')}, {i.get('status')} [{i.get('source')}]")
@@ -1298,6 +1347,8 @@ def cmd_protection(a):
     ask = dict(reason=a.reason, yes=a.yes)
     if a.action == "ab":
         return cmd_protection_ab(a, ask)
+    if a.action == "duty":
+        return cmd_protection_duty(a)
     if a.action == "certificates":
         q = f"?node={a.node}" if a.node else ""
         d = api("GET", f"/api/v1/protection/certificates{q}")
@@ -1327,6 +1378,46 @@ def cmd_protection(a):
     else:
         res = run_op("protection.probe_now", a.node, None, **ask)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
+
+
+def cmd_protection_duty(a) -> None:
+    """oarbank protection duty [<node>]: the GPU duty governor (D50) on each node that has one, or on <node>: the budget
+    against the certified ceiling, each GPU unit's requested and measured duty and compliance state, and recent steps."""
+    q = f"?node={a.node}" if a.node else ""
+    d = api("GET", f"/api/v1/protection/duty{q}")
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    if not d["nodes"]:
+        print("no node reports a GPU duty budget (it needs gpu_jobs = certified and a protected group using the GPU)")
+    for n in d["nodes"]:
+        name = n["hostname"] or n["node_id"]
+        if n["not_certified"]:
+            print(f"{name}: not certified for {', '.join(n['not_certified'])}: GPU work waits "
+                  "(oarbank protection ab sweep <node> --rule <id>)")
+            continue
+        if n["state"] is None:
+            print(f"{name}: no GPU duty budget (gpu_jobs is not certified, or no protected group is using the GPU)")
+            continue
+        lock = f", locked {n['lockout_s']:.0f} s" if n.get("lockout_s") else ""
+        print(f"{name}: gpu_duty budget {n['duty']} of ceiling {n['ceiling']} ({n['state']}{lock}) beside "
+              f"{', '.join(n['rules']) or '-'}; {n['jobs'] or 0} unit(s) at {n['per_job']} each")
+        for rule, b in sorted((n.get("baseline") or {}).items()):
+            rate = f"{b['rate']}/s, {b['age_s']:.0f} s old" if b.get("rate") is not None else "not measured yet"
+            press = f", last pressure {b['pressure']}" if b.get("pressure") is not None else ""
+            print(f"  baseline {rule}: {rate}{press}")
+        for u in n["units"]:
+            what = f"{u.get('module') or '?'}/{u.get('stage') or '?'} " + ("workload" if u.get("workload") else
+                                                                          f"attempt {u['attempt_id']}")
+            why = f" ({u['why']}, {u.get('for_s', 0):.0f} s left)" if u.get("why") else ""
+            print(f"  {what:<44} duty {u.get('duty') if u.get('duty') is not None else '-':<6} measured "
+                  f"{u.get('measured') if u.get('measured') is not None else '-':<6} {u['state']}{why}")
+        for x in n["distrusted"]:
+            print(f"  not trusted: {x['unit']} for {x['for_s'] / 60:.0f} min more")
+        for e in n["events"][:10]:
+            detail = e.get("why") or (f"{e.get('unit')} measured {e.get('measured')} against {e.get('duty')}: "
+                                      f"{e.get('action')}" if e.get("unit") else "")
+            print(f"  {_when(e['t'])}  {e['reason']:<20} duty {e.get('duty', '-')}  {detail}")
 
 
 def print_ab_run(d: dict) -> None:
@@ -1553,6 +1644,122 @@ def cmd_folders(a):
     print(json.dumps(res, indent=1, default=str))
 
 
+# ------------------------------------------------------------------ inbound listeners (docs/design/inbound-listeners.md)
+
+def _listener_lines(row: dict) -> list[str]:
+    """One listener as the owner reads it: where it is reachable, the agent's result with its text and fix as they are,
+    its connections and the latest probe."""
+    ext = row.get("external") or "no external address yet"
+    out = [f"  {row['key']:<28} {row.get('state') or 'not reported':<10} {ext}"
+           + (f"  (IPv6 {row['external_v6']})" if row.get("external_v6") else "")
+           + (f"  refused: {row['refused']}" if row.get("refused") else "")]
+    if row.get("result"):
+        out.append(f"    {row['result']}" + (f" [{', '.join(row['flags'])}]" if row.get("flags") else ""))
+    if row.get("text"):
+        out.append(f"    {row['text']}")
+    if row.get("fix"):
+        out.append(f"    fix: {row['fix']}")
+    c = row.get("conns") or {}
+    if c.get("accepted") is not None:
+        ref = ", ".join(f"{k} {v}" for k, v in (c.get("refused") or {}).items() if v)
+        out.append(f"    connections: {c.get('open') or 0} open, {c.get('accepted') or 0} accepted"
+                   + (f", refused {ref}" if ref else ""))
+    p = row.get("probe") or {}
+    if p.get("state"):
+        out.append(f"    last check from outside: {p['state']}" + (f" via {p['via']}" if p.get("via") else "")
+                   + (f" ({p['detail']})" if p.get("detail") else ""))
+    if p.get("pending"):
+        out.append(f"    a check from outside is running (via {p['pending'].get('via')})")
+    if row.get("configured") is not None and row.get("statement") is None:
+        out.append("    configured, but not in the node's statement (its module version does not request it, or its grants "
+                   "are not approved)")
+    return out
+
+
+def _mapping_line(m: dict) -> str:
+    exp = f", expires {time.strftime('%H:%M', time.localtime(m['expires_at']))}" if m.get("expires_at") else ""
+    return (f"  {m.get('key') or '?':<28} {m.get('protocol') or '?':<7} {m.get('family') or '':<5} {m.get('external') or '?'}"
+            f" -> {m.get('internal') or '?'}  via {m.get('gateway') or '?'}  {m.get('state') or ''}{exp}"
+            + ("  permanent" if m.get("permanent") else "") + (f"  error: {m['error']}" if m.get("error") else ""))
+
+
+def cmd_listener(a):
+    """oarbank listener list|show|mappings|set|remove|probe|disable|resume: inbound listeners (a module accepting
+    connections from the internet on nodes the owner assigns). The agent's results are printed as it words them."""
+    from urllib.parse import quote
+    if a.action in ("list", "mappings"):
+        node = a.node or a.target
+        v = api("GET", "/api/v1/listeners" + (f"?node={quote(node)}" if node else ""))
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        if v.get("fleet_disabled"):
+            print("listeners are disabled for the whole fleet (oarbank listener resume --all)")
+        for d in v["nodes"]:
+            off = " (listeners disabled on this node)" if d["disabled"]["node"] else ""
+            print(f"{d['hostname']} ({d['node_id']}){'' if d['online'] else ' offline'}{off}")
+            if a.action == "list":
+                for row in d["listeners"]:
+                    print("\n".join(_listener_lines(row)))
+                if not d["listeners"]:
+                    print("  no listeners")
+                continue
+            for m in d["portmaps"]:
+                print(_mapping_line(m))
+            others = [m for m in d["router_mappings"] if not m.get("ours")]
+            if others:
+                print("  other mappings the router reports for this machine (Oarbank never touches them):")
+                for m in others:
+                    print(f"    {m.get('protocol') or '?'} {m.get('external_port')} -> {m.get('internal')}"
+                          + (f"  {m['description']}" if m.get("description") else ""))
+            if not d["portmaps"] and not others:
+                print("  no router mappings")
+        return
+    if a.action in ("disable", "resume"):
+        if bool(a.all) == bool(a.node):
+            sys.exit(f"oarbank listener {a.action} --node <node> | --all")
+        res = run_op(f"listeners.{a.action}", "fleet" if a.all else a.node, {}, a.reason, a.yes)
+        print(json.dumps(res.get("result"), indent=1, default=str))
+        return
+    if not a.target or not a.key:
+        sys.exit(f"oarbank listener {a.action} <node> <module>/<listener>")
+    if a.action == "show":
+        v = api("GET", f"/api/v1/nodes/{quote(a.target)}/listeners/{quote(a.key, safe='/')}")
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        row = v["listener"]
+        print(f"{v['hostname']} ({v['node_id']}): {row['key']}")
+        print("\n".join(_listener_lines(row)))
+        if row.get("statement"):
+            print(f"  entry: {json.dumps(row['statement'], sort_keys=True)}")
+        for m in row.get("portmaps") or []:
+            print(_mapping_line(m))
+        if row.get("talkers"):
+            print("  top client addresses (24 h):")
+            for t in row["talkers"]:
+                print(f"    {t.get('addr'):<40} {t.get('conns') or 0} connections, {t.get('refused') or 0} refused")
+        else:
+            print("  top client addresses: asked for; the node sends them with its next heartbeat (run this again)")
+        return
+    if a.action == "set":
+        params = {"key": a.key}
+        for k, v in (("external_port", a.external_port), ("fallback", a.fallback), ("mapping", a.mapping),
+                     ("ipv6", a.ipv6), ("bind", a.bind), ("internal_port", a.internal_port)):
+            if v is not None:
+                params[k] = v
+        if a.limit:
+            params["limits"] = _kv(a.limit)
+        if a.allow:
+            params["allow"] = [c for x in a.allow for c in x.replace(",", " ").split()]
+        res = run_op("listeners.configure", a.target, params, a.reason, a.yes)
+        print(json.dumps(res.get("result"), indent=1, default=str))
+    elif a.action == "remove":
+        print(json.dumps(run_op("listeners.remove", a.target, {"key": a.key}, a.reason, a.yes).get("result"), indent=1))
+    elif a.action == "probe":
+        print(json.dumps(run_op("listeners.probe", a.target, {"key": a.key}, a.reason, True).get("result"), indent=1))
+
+
 def _inst(i: dict) -> str:
     return f"{i.get('version') or '?'} {i.get('arch') or ''} {i.get('path')}".replace("  ", " ")
 
@@ -1664,8 +1871,8 @@ def cmd_cli(a):
     py = module_python(bundle)
     argv = mf.resolve_exec(info["exec"], bundle, py) + list(a.args)
     tmp = Path(tempfile.mkdtemp(prefix=f"oarbank-cli-{a.module}-"))
-    env = cli_env(tmp, port, tok, a.module)
     try:
+        env = cli_env(tmp, port, tok, a.module)
         if modsandbox.backend() is None:
             sys.exit("no module sandbox backend on this OS: a module CLI does not run unconfined")
         from ..coordinator import sandboxexec
@@ -1786,12 +1993,12 @@ def parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("protection", help="protected-process rules on the settings chain: show (a node's effective "
                                            "rules and where each comes from), set / preview (a node's, the fleet's or "
                                            "a group's own section), probe (the mode: oarbank node mode)")
-    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates"])
+    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates", "duty"])
     pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>; "
-                                            "ab: start|status|show|abort|sweep; certificates: a node (all without)")
+                                            "ab: start|status|show|abort|sweep; certificates, duty: a node (all without)")
     pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml); "
                                              "ab start|sweep|status: a node; ab show|abort: a run")
-    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates: as JSON")
+    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates, duty: as JSON")
     pr.add_argument("--rule", help="ab start|sweep: the protected rule (its progress_rate source is what is measured)")
     pr.add_argument("--work", help="ab start|sweep: the fleet work under test: gpu (default), cpu, all, <module>, "
                                    "<module>/<workload>")
@@ -1835,6 +2042,28 @@ def parser() -> argparse.ArgumentParser:
     fo.add_argument("--reason")
     fo.add_argument("--yes", "-y", action="store_true")
     fo.set_defaults(fn=cmd_folders)
+    li = sub.add_parser("listener", help="inbound listeners: list, show <node> <key>, mappings (router mappings), set <node> "
+                                         "<key> (the node's entry; signing mode: oarbank node sign), remove, probe (check "
+                                         "from outside now), disable|resume --node N | --all (the kill switch)")
+    li.add_argument("action", choices=["list", "show", "mappings", "set", "remove", "probe", "disable", "resume"])
+    li.add_argument("target", nargs="?", help="a node (list and mappings: optional)")
+    li.add_argument("key", nargs="?", help="the listener: <module>/<listener>")
+    li.add_argument("--node", help="list, mappings: one node; disable, resume: this node")
+    li.add_argument("--all", action="store_true", help="disable, resume: the whole fleet")
+    li.add_argument("--external-port", type=int, help="set: the port to ask the router for")
+    li.add_argument("--fallback", help="set: refuse | next_free:<a>-<b> | router_choice")
+    li.add_argument("--mapping", choices=["auto", "pcp", "natpmp", "upnp", "manual", "none"])
+    li.add_argument("--ipv6", choices=["auto", "off"])
+    li.add_argument("--bind", help="set: default_route or an address of the node")
+    li.add_argument("--internal-port", type=int, help="set: the local port (fixed, for a forward made by hand)")
+    li.add_argument("--limit", action="append", metavar="KEY=VALUE",
+                    help="set: lower one of the module's limits (max_conns, max_conns_per_ip, new_conns_per_ip_per_s, "
+                         "idle_timeout_s, max_bytes_per_s); repeatable")
+    li.add_argument("--allow", action="append", metavar="CIDR", help="set: only these client addresses (repeatable)")
+    li.add_argument("--json", action="store_true")
+    li.add_argument("--reason")
+    li.add_argument("--yes", "-y", action="store_true")
+    li.set_defaults(fn=cmd_listener)
     tl = sub.add_parser("tools", help="host tools: list (definitions, what each node found, each module's resolution), "
                                       "detect <node>, define <id>, delete <id> (a tool's path on a node: oarbank settings set "
                                       "tool.<id>.path <path> --node <node>)")
@@ -1919,6 +2148,19 @@ def parser() -> argparse.ArgumentParser:
     mo.add_argument("--yes", action="store_true")
     mo.add_argument("--dry-run", action="store_true")
     mo.set_defaults(fn=cmd_module)
+    wl = sub.add_parser("workload", help="workloads (long-running daemons the owner assigns to nodes): list, assign, unassign, "
+                        "restart, logs [--follow]")
+    wl.add_argument("action", choices=["list", "assign", "unassign", "restart", "logs"])
+    wl.add_argument("workload", nargs="?", help="<module>/<workload>")
+    wl.add_argument("--node", help="a node (hostname or id)")
+    wl.add_argument("--module", help="list: one module's workloads only")
+    wl.add_argument("--count", type=int, help="assign: place this many seats of a seat = \"fleet\" workload")
+    wl.add_argument("--follow", action="store_true", help="logs: keep printing new lines")
+    wl.add_argument("--json", action="store_true")
+    wl.add_argument("--reason")
+    wl.add_argument("--yes", action="store_true")
+    wl.add_argument("--dry-run", action="store_true")
+    wl.set_defaults(fn=cmd_workload)
     se = sub.add_parser("secret", help="module secrets, write-only: set (value from stdin or a no-echo prompt), clear, list")
     se.add_argument("action", choices=["set", "clear", "list"])
     se.add_argument("module")

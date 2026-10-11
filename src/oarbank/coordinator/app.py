@@ -235,7 +235,17 @@ def agent_app(db: DB, puller=None) -> FastAPI:
 
     @app.post("/v1/agent/heartbeat")
     async def heartbeat(request: Request, node=Depends(node_dep)):
-        return await run_in_threadpool(core.heartbeat, db, node, await request.json())
+        return await run_in_threadpool(core.heartbeat, db, node, await request.json(), peer(request))
+
+    @app.post("/v1/agent/workloads/secrets")
+    async def workload_secrets(request: Request, node=Depends(node_dep)):
+        """A workload's secrets for this node, only while it holds the seat with that fence (docs/design/workloads.md)."""
+        from . import workloads
+        body = await request.json()
+        try:
+            return await run_in_threadpool(workloads.secrets, db, node, body)
+        except workloads.WorkloadError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
 
     # ---------------- sites: transfer leases under the site's uplink budget (docs/design/sites.md)
     @app.post("/v1/agent/uplink/lease")
@@ -886,11 +896,14 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return readiness.all_modules(db)
 
     @app.get("/api/v1/modules/{name}/readiness")
-    def api_module_readiness(name: str, actor=Depends(who)):
+    def api_module_readiness(name: str, version: str | None = None, actor=Depends(who)):
+        """One module's checklist: of its current version, or of an installed `version` (`?version=` or name@version)."""
         from . import readiness
-        r = readiness.module(db, name)
+        name, _, at = name.partition("@")
+        version = version or at or None
+        r = readiness.module(db, name, version=version)
         if r is None:
-            raise core.ApiError(404, "not_found", f"no module {name} is installed")
+            raise core.ApiError(404, "not_found", f"no module {name}{'@' + version if version else ''} is installed")
         return r
 
     @app.get("/api/v1/modules/{name}/secrets")
@@ -936,6 +949,27 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         d = fleet_data()
         return {k: d[k] for k in ("nodes", "enrollments", "campaigns", "alerts", "discovered")}
 
+    @app.get("/api/v1/workloads")
+    def api_workloads(node: str = "", module: str = "", actor=Depends(who)):
+        """Every workload assignment with its seat and the node's latest report (`oarbank workload list`)."""
+        from . import workloads
+        nid = None
+        if node:
+            n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (node, node))
+            if not n:
+                raise core.ApiError(404, "not_found", f"node {node}")
+            nid = n["node_id"]
+        return {"workloads": workloads.listing(db, nid, module or None)}
+
+    @app.get("/api/v1/workloads/{module}/{name}/logs")
+    def api_workload_logs(module: str, name: str, node: str, actor=Depends(who)):
+        """The log tail a node last reported for one workload (`oarbank workload logs`)."""
+        from . import workloads
+        n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (node, node))
+        if not n:
+            raise core.ApiError(404, "not_found", f"node {node}")
+        return workloads.logs(db, f"{module}/{name}", n["node_id"])
+
     @app.get("/api/v1/campaigns")
     def api_campaigns(module: str = "", state: str = "", actor=Depends(who)):
         rows = db.q("SELECT campaign_id FROM campaigns WHERE (?='' OR module=?) AND (?='' OR state=?) ORDER BY created_at DESC LIMIT 500",
@@ -973,6 +1007,27 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(404, "not_found", f"node {nid}")
         return d
 
+    # ---------------- inbound listeners (docs/design/inbound-listeners.md): what `oarbank listener list|show|mappings` print
+    @app.get("/api/v1/listeners")
+    def api_listeners(node: str | None = None, actor=Depends(who)):
+        """Every node's listeners, router mappings, network view and reachability (or one node's)."""
+        from . import listeners
+        return listeners.fleet_doc(db, node)
+
+    @app.get("/api/v1/nodes/{nid}/listeners/{key:path}")
+    def api_node_listener(nid: str, key: str, actor=Depends(who)):
+        """One listener of a node. Looking at it asks the node for its top client addresses for the next 10 minutes
+        (`send_listener_talkers`); they show once the node sends them."""
+        from . import listeners
+        n = db.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+        if n is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+        listeners.want_talkers(db, n["node_id"])
+        doc = listeners.node_doc(db, db.one("SELECT * FROM nodes WHERE node_id=?", (n["node_id"],)))
+        row = next((x for x in doc["listeners"] if x["key"] == key), None)
+        if row is None:
+            raise core.ApiError(404, "not_found", f"{n['hostname']} has no listener {key}")
+        return {**{k: v for k, v in doc.items() if k != "listeners"}, "listener": row}
     # ---------------- sites (docs/design/sites.md; `oarbank sites`)
     @app.get("/api/v1/sites")
     def api_sites(actor=Depends(who)):
@@ -1010,6 +1065,15 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         from . import cotenancy
         try:
             return {"certificates": cotenancy.list_certificates(db, node)}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
+    @app.get("/api/v1/protection/duty")
+    def api_gpu_duty(node: str | None = None, actor=Depends(who)):
+        """The GPU duty governor per node (D50; `oarbank protection duty`)."""
+        from . import cotenancy
+        try:
+            return {"nodes": cotenancy.duty_view(db, node)}
         except cotenancy.CotenancyError as e:
             raise core.ApiError(404, "not_found", str(e))
 
@@ -1223,6 +1287,8 @@ def campaign_loop(db: DB, stop: threading.Event):
                 if db.get_state("move_postflight_pending"):
                     modlife.postflight(db)               # once, on a coordinator that just took over
                 campaigns.tick_all(db)
+                from . import workloads
+                workloads.process_reports(db)            # workloads' report events to their module (module IPC)
                 if clock.now() - last_integrity > 3600:
                     last_integrity = clock.now()
                     modlife.routine(db)                  # each module at most once a day

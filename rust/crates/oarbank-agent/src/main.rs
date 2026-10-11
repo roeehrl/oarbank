@@ -17,6 +17,7 @@ mod discover;
 mod doctor;
 mod endpoints;
 mod facts;
+mod firewall;
 mod folders;
 mod fsutil;
 mod gpuapi;
@@ -26,6 +27,7 @@ mod imageset;
 mod jobs;
 mod join;
 mod keys;
+mod listeners;
 mod moves;
 mod outbox;
 mod paths;
@@ -54,6 +56,7 @@ mod sys;
 mod tls;
 mod tools;
 mod tuf;
+mod workloads;
 mod uplink;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod wslc;
@@ -196,6 +199,23 @@ enum Cmd {
         #[command(subcommand)]
         action: ToolsCmd,
     },
+    /// Router port mappings of inbound listeners (docs/design/inbound-listeners.md).
+    Portmap {
+        #[command(subcommand)]
+        action: PortmapCmd,
+    },
+    /// The host firewall and inbound listeners: whether connections reach the agent, and letting them (administrator).
+    Firewall {
+        #[command(subcommand)]
+        action: FirewallCmd,
+    },
+    /// Serve dial-back probes for a fleet's listeners from a machine on another network (`listener_probe_endpoint`):
+    /// POST {host, port, probe_id}; it dials the listener and returns the line it read. Put it behind HTTPS.
+    #[command(name = "probe-endpoint")]
+    ProbeEndpoint {
+        #[arg(long, default_value = "127.0.0.1:7480")]
+        bind: std::net::SocketAddr,
+    },
     /// The managed policy in force, as JSON (`oarbank-node policy-apply`; node-enrollment.md, "Managed policy keys").
     /// The join code shows as `"(set)"` unless `--with-join-code` (the launcher's policy job, never a person's terminal).
     #[command(hide = true)]
@@ -216,11 +236,36 @@ enum Cmd {
         #[arg(long)]
         agent_start: u64,
     },
+    /// End every workload this home's records name (an uninstall, a node leaving its fleet): only processes that
+    /// still have their recorded start times are signalled.
+    #[command(name = "stop-workloads", hide = true)]
+    StopWorkloads,
     /// Apply a sandbox profile to this process, then exec argv (internal: how module processes start).
     #[command(name = "sandbox-exec", hide = true)]
     SandboxExec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PortmapCmd {
+    /// The journal of every mapping this node requested, as JSON.
+    Status,
+    /// Delete every journaled mapping (its own only; the launcher's uninstall step). Exit 3 when some router could not
+    /// be asked (those stay journaled until their lease runs out).
+    ReleaseAll,
+}
+
+#[derive(Subcommand)]
+enum FirewallCmd {
+    /// Whether the host firewall lets connections reach the agent, as JSON.
+    Status,
+    /// Let connections reach the agent (an administrator): macOS adds the agent to the Application Firewall; Linux and
+    /// Windows open the given ports for it.
+    Allow {
+        #[arg(long = "port")]
+        ports: Vec<u16>,
     },
 }
 
@@ -361,6 +406,12 @@ fn main() -> anyhow::Result<()> {
             runners::watchdog_main(&layout, (agent_pid, agent_start));
             Ok(())
         }
+        Cmd::StopWorkloads => {
+            for k in workloads::stop_all_recorded(&layout) {
+                println!("ended workload {k}");
+            }
+            Ok(())
+        }
         Cmd::Containers { action } => containers(&layout, action),
         Cmd::Tools { action: ToolsCmd::Detect } => {
             let rel = release::current(&layout);
@@ -385,6 +436,8 @@ fn main() -> anyhow::Result<()> {
             // a scratch home: opening the live one would point its agent.json at this placeholder coordinator
             let _ = layout;
             let scratch = std::env::temp_dir().join(format!("oarbank-status-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&scratch);           // a dead process's, under a reused id
+            let _scratch_goes = fsutil::RemovedOnDrop(scratch.clone());
             let mut a = agent::Agent::open(paths::Layout::new(scratch.clone()), Some("https://127.0.0.1:7443"))?;
             if a.directives.is_null() {
                 a.directives = serde_json::json!({"desired_state": "active", "lifecycle": "ready", "policy": {}, "limits": {}});
@@ -403,6 +456,27 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&discover::browse(wait).map_err(anyhow::Error::msg)?)?);
             Ok(())
         }
+        Cmd::Portmap { action: PortmapCmd::Status } => {
+            println!("{}", serde_json::to_string_pretty(&rt.block_on(listeners::portmap_status(&layout)))?);
+            Ok(())
+        }
+        Cmd::Portmap { action: PortmapCmd::ReleaseAll } => {
+            let v = rt.block_on(listeners::portmap_release_all(&layout, &listeners::Env::from_env()));
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            if v["left"].as_u64().unwrap_or(0) > 0 {
+                std::process::exit(3);
+            }
+            Ok(())
+        }
+        Cmd::Firewall { action: FirewallCmd::Status } => {
+            println!("{}", serde_json::to_string_pretty(&firewall::status().to_json())?);
+            Ok(())
+        }
+        Cmd::Firewall { action: FirewallCmd::Allow { ports } } => {
+            println!("{}", firewall::allow(&ports)?);
+            Ok(())
+        }
+        Cmd::ProbeEndpoint { bind } => rt.block_on(listeners::serve_probe_endpoint(bind)),
         Cmd::Facts => {
             println!("{}", serde_json::to_string_pretty(&facts::collect(&layout.home))?);
             Ok(())

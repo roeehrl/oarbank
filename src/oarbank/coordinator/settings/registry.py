@@ -77,6 +77,23 @@ def _os_reserve(facts: dict) -> tuple:
     return (4 if ram <= 32 else (8 if ram >= 96 else 6)), f"{ram:g} GB RAM"
 
 
+def _port_range(v):
+    """listener_port_range: "<a>-<b>" with 1024 <= a <= b <= 65535."""
+    v = _check(REGISTRY["listener_port_range"].schema, v, "listener_port_range")
+    a, b = (int(x) for x in v.split("-"))
+    if not 1024 <= a <= b <= 65535:
+        raise SettingError("bad_value", f"listener_port_range: {v!r} must be <a>-<b> with 1024 <= a <= b <= 65535")
+    return f"{a}-{b}"
+
+
+def _https_or_none(v):
+    """listener_probe_endpoint: an https:// URL, or none."""
+    v = _check(REGISTRY["listener_probe_endpoint"].schema, v, "listener_probe_endpoint")
+    if v is not None and not v.lower().startswith("https://"):
+        raise SettingError("bad_value", f"listener_probe_endpoint: {v!r} is not an https:// URL")
+    return v
+
+
 SERVICE_NAME = r"^[a-z0-9][a-z0-9_.-]{0,63}$"
 HOST = r"^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:[0-9]{1,5})?$"
 NUM_GE0 = {"type": "number", "minimum": 0}
@@ -97,8 +114,9 @@ SECTIONS = {
     "module_own": ("Its settings", "The settings the module declares in its manifest."),
     "protection": ("Protection", "How fleet work yields to the owner's own programs. Protected-process rules from every "
                                  "scope apply together; they are edited on the protection pages."),
+    "network": ("Network", "Inbound listeners and how they are checked from outside (docs/design/inbound-listeners.md)."),
 }
-NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection")
+NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection", "network")
 FLEET_SECTIONS = ("notifications", "access", "verification")
 # the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
 MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
@@ -146,6 +164,14 @@ SETTINGS = (
             "Jobs over their memory or CPU reservation are stopped where the OS enforces it (Linux cgroups, Windows Job "
             "Objects; macOS has none).", {"type": "boolean"}, default=False, wire="policy", section="jobs", advanced=True,
             tighten="higher", managed=True),
+    Setting("workloads", "Run workloads",
+            "Off: the node runs no module workloads (long-running daemons the owner assigned), and running ones stop.",
+            {"type": "boolean"}, default=True, wire="policy", section="jobs", tighten="lower", managed=True),
+    Setting("delegated_processes", "Delegated processes",
+            "On: owner rules with `delegate` let host protection pause and lower the owner's named processes (by code "
+            "signature or a trusted exact path) for a protected process. Never stopped.",
+            {"type": "boolean"}, default=False, wire="policy", section="protection", danger="T2", tighten="lower",
+            managed=True),
     Setting("services.disabled", "Services that do not run",
             "The module's services by name; a change re-checks and re-certifies the module on the nodes it reaches.",
             {"type": "array", "items": {"type": "string", "pattern": SERVICE_NAME}, "maxItems": 64}, default=[],
@@ -188,6 +214,27 @@ SETTINGS = (
             "The memory guard, timing, GPU jobs and longest pause beside the mode (the node section of a protection "
             "config).", {"type": "object", "x-kind": "protection_node"}, default={}, advanced=True,
             effects=("protection",)),
+    # ---------------------------------------------------------------- network (inbound listeners; the agent)
+    Setting("inbound_listeners", "Inbound listeners",
+            "Off: no module listener opens on this computer and every router mapping is removed (a machine's managed policy "
+            "can forbid listeners).", {"type": "boolean"}, default=True, wire="policy", section="network", tighten="lower",
+            managed=True),
+    Setting("listener_port_range", "Internal listener ports",
+            "The local ports listeners bind when their entry names no internal port (each listener gets the same port on "
+            "every start while it is free).", {"type": "string", "pattern": r"^\d{4,5}-\d{4,5}$", "maxLength": 11},
+            default="41000-41999", wire="policy", section="network", advanced=True,
+            validator=lambda v: _port_range(v), examples=("41000-41999",)),
+    Setting("listener_probe_endpoint", "Probe endpoint",
+            "An https:// URL of an `oarbank-agent probe-endpoint` the owner runs on another network: it checks a listener "
+            "from outside when no fleet node on another network can; none: no endpoint.",
+            {"type": ["string", "null"], "format": "uri", "maxLength": 2048}, default=None, scopes=("fleet",),
+            wire="policy", section="network", lockable=False, validator=lambda v: _https_or_none(v),
+            examples=("https://probe.example.net:7480/",)),
+    Setting("listener_stun_server", "STUN server",
+            "host:port of a STUN server the agents ask for their public address every 30 minutes; none: no third party is "
+            "ever contacted.", {"type": ["string", "null"], "pattern": r"^[A-Za-z0-9.-]+:[0-9]{1,5}$", "maxLength": 260},
+            default=None, scopes=("fleet",), wire="policy", section="network", lockable=False,
+            examples=("stun.example.net:3478",)),
     # ---------------------------------------------------------------- fleet-wide (the coordinator)
     Setting("ntfy.url", "Topic URL", "The ntfy topic alerts are pushed to; none: notifications off.",
             {"type": ["string", "null"], "format": "uri", "maxLength": 2048}, scopes=("fleet",), applies="coordinator",

@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Category = Literal["job_pending", "node_admission", "protection", "attempt_end", "verdict", "invariant"]
+Category = Literal["job_pending", "node_admission", "protection", "attempt_end", "verdict", "invariant", "workload"]
 Severity = Literal["P1", "P2", "P3", "P4", "P5"]
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
@@ -112,6 +112,21 @@ CODES: list[ReasonCode] = [
     C("NOT_ADMITTING", "node_admission", "The agent admits no new work: {why}"),
     C("CLOCK_SKEW", "node_admission", "The node's clock is {offset_s} s off the coordinator's: jobs and moves use the "
       "coordinator's time, but certificates and update metadata need a correct clock; set the node's time", "P3"),
+    # inbound listeners (docs/design/inbound-listeners.md): a listener the agent refused, and the doctor's results the
+    # owner must act on; {text} is the agent's own owner text, rendered as it is
+    C("LISTENER_UNAVAILABLE", "node_admission", "Listener {listener} is not open on this node: {why}",
+      remedies=["listeners.configure"]),
+    C("PORT_TAKEN", "node_admission", "Listener {listener}: the router forwards its external port to another device: {text}",
+      "P3", remedies=["listeners.configure"]),
+    C("DOUBLE_NAT", "node_admission", "Listener {listener}: this machine is behind two routers: {text}", "P3"),
+    C("CGNAT", "node_admission", "Listener {listener}: the provider shares one public address among many customers: {text}",
+      "P3"),
+    C("NO_MAPPING_PROTOCOL", "node_admission", "Listener {listener}: the router accepts no automatic port mapping: {text}",
+      "P3", remedies=["listeners.configure"]),
+    C("MAPPED_UNREACHABLE", "node_admission", "Listener {listener}: mapped, but connections from outside do not arrive: {text}",
+      "P3", remedies=["listeners.probe"]),
+    C("FIREWALL_BLOCKED", "node_admission", "Listener {listener}: this machine's firewall blocks incoming connections: {text}",
+      "P3"),
 
     # ---------------------------------------------------------------- protection (the agent's decision journal and capacity)
     C("PROTECTION_CONFIG", "protection", "Protection config applied (mode {mode}, rules {rules})"),
@@ -134,6 +149,43 @@ CODES: list[ReasonCode] = [
       "P2", node=False, job=False),
     C("PROTECTION_SERVICE_STOP", "protection", "Service {service} stopped by host protection ({reason}); its jobs requeued",
       node=False, job=False),
+    # ---------------------------------------------------------------- workloads (docs/design/workloads.md)
+    C("MEMORY_HARD_FLOOR_WORKLOAD", "protection", "Workload {workload} stopped by the memory hard floor ({why}) and held "
+      "until the guard is clear", "P2"),
+    C("WORKLOAD_PAUSE", "protection", "Workload {workload} paused (it tolerates {tolerance_s} s)"),
+    C("WORKLOAD_RESUME", "protection", "Workload {workload} resumed"),
+    C("WORKLOAD_LOWER", "protection", "Workload {workload} lowered to background scheduling"),
+    C("WORKLOAD_RESTORE", "protection", "Workload {workload} restored from background scheduling"),
+    C("WORKLOAD_THROTTLE", "protection", "Workload {workload} throttled: {threads} threads, a CPU cap of {cpu_cap} cores"),
+    C("WORKLOAD_HOLD", "protection", "Workload {workload} stopped and held by host protection ({cause})", "P2"),
+    C("WORKLOAD_PAUSE_TOLERANCE", "protection", "Workload {workload} was paused for its tolerance ({tolerance_s} s): stopped "
+      "and held while the pause would last", "P2"),
+    C("WORKLOAD_RELEASE", "protection", "Workload {workload} released from its hold ({cause} cleared after {held_s} s)"),
+    C("WORKLOAD_STOP", "protection", "Workload {workload} stopped by the agent"),
+    C("DELEGATE_PAUSE", "protection", "Delegated processes of rule {rule} paused ({processes})"),
+    C("DELEGATE_RESUME", "protection", "Delegated processes of rule {rule} resumed ({processes})"),
+    C("DELEGATE_LOWER", "protection", "Delegated processes of rule {rule} lowered ({processes})"),
+    C("DELEGATE_RESTORE", "protection", "Delegated processes of rule {rule} restored ({processes})"),
+    C("DELEGATE_PAUSE_LIMIT", "protection", "Delegated processes of rule {rule} were paused for the pause ceiling: resumed "
+      "and lowered instead (a delegation never stops them)", "P2"),
+    C("WORKLOAD_UNASSIGNED", "workload", "{workload} is not assigned to this node", remedies=["workloads.assign"]),
+    C("WORKLOAD_SEAT_ELSEWHERE", "workload", "{workload}'s seat (its identity) is held by another node until that node "
+      "gives it up or its lease ends", remedies=["workloads.unassign"]),
+    C("WORKLOAD_SEAT_LEASE_EXPIRED", "workload", "{workload}'s seat lease ran out on this node (no word from the "
+      "coordinator in time): stopped", "P2"),
+    C("WORKLOAD_HELD", "workload", "{workload} is held down by host protection ({reason})"),
+    C("WORKLOAD_WITHDRAWN", "workload", "{workload} failed {failures} times in a row and was withdrawn: {error}", "P2",
+      remedies=["workloads.restart"]),
+    C("WORKLOAD_RESTART", "workload", "{workload} restarted by the owner"),
+    C("WORKLOAD_SECRETS_NOT_SET", "workload", "{workload} receives secrets that have no value for this node",
+      remedies=["secrets.set"]),
+    C("WORKLOAD_IDENTITY_SHARED", "workload", "{workload} has a per-node identity, and a secret it receives is set for a "
+      "group or the whole module: set it for each node", remedies=["secrets.set"]),
+    C("WORKLOAD_NO_CONTAINMENT", "workload", "This node cannot contain a workload ({detail})"),
+    C("WORKLOAD_POLICY_OFF", "workload", "This node's workloads setting is off", remedies=["settings.apply"]),
+    C("WORKLOAD_NOT_OFFERED", "workload", "{workload} cannot run on this node ({detail})"),
+    C("WORKLOAD_NODE_NOT_ACTIVE", "workload", "The node is not active (paused or draining): its workloads are stopped",
+      remedies=["nodes.resume"]),
     C("RUNG_0", "protection", "Dynamic rung 0: no constraint ({why})"),
     C("RUNG_1", "protection", "Dynamic rung 1: admitting no new work ({why})"),
     C("RUNG_2", "protection", "Dynamic rung 2: the fleet CPU budget is under the allocatable cores ({why})"),
@@ -174,6 +226,19 @@ CODES: list[ReasonCode] = [
     C("AB_IDLE", "protection", "Harness run {run_id} ended: its work runs as protection allows"),
     C("AB_FINISHED", "protection", "Harness run {run_id} ended: {decision} ({why})"),
     C("AB_REFUSED", "protection", "Harness run {run_id} refused by the node: {why}", "P4"),
+    # the GPU duty governor (D50, docs/design/gpu-cotenancy.md "The duty governor")
+    C("GPU_DUTY_START", "protection", "GPU duty budget {duty} beside the protected GPU work (certified ceiling {ceiling}): "
+      "{why}"),
+    C("GPU_DUTY_BASELINE", "protection", "Fleet GPU work held for a minute to measure the protected program without it "
+      "({why})"),
+    C("GPU_DUTY_GROW", "protection", "GPU duty budget grown to {duty} after a clean minute (certified ceiling {ceiling})"),
+    C("GPU_DUTY_HALVE", "protection", "GPU duty budget halved to {duty}: the protected program slowed to its target"),
+    C("GPU_DUTY_TAKE_BACK", "protection", "GPU duty budget taken back to 0: {why}", "P3"),
+    C("GPU_DUTY_CLAMP", "protection", "GPU duty budget lowered to the certified ceiling {ceiling}"),
+    C("GPU_DUTY_EXCEEDED", "protection", "{unit} kept the GPU {measured} busy against a gpu_duty of {duty} for three "
+      "samples: {action} (the third time within an hour stops it, and it gets no duty for an hour)", "P3"),
+    C("GPU_DUTY_UNVERIFIED", "protection", "The GPU time of {unit} cannot be read, so its gpu_duty cannot be checked: "
+      "{action}", "P4"),
     C("TRANSFER_PAUSED", "protection", "A {transfer} transfer paused: {why}", node=False, job=False),
     C("TRANSFER_RESUMED", "protection", "A {transfer} transfer resumed after {paused_s} s"),
     C("SITE_PAUSE", "protection", "Network-heavy attempts paused: their site is in an uplink phase", node=False, job=False),

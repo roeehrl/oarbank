@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankSiteUplink.tla; a config's spec is its name up to the first _)
-# under every config and compare each outcome with the expected one.
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla, OarbankGpuDuty.tla, OarbankSiteUplink.tla) under every config and compare
+# each outcome with the expected one. A config's spec is its name up to the first underscore: OarbankLease_liveness.cfg
+# checks OarbankLease.tla, OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
 #
-#   ./run_tlc.sh            run every config
-#   ./run_tlc.sh a_nofence  run only the configs whose name contains "a_nofence"
-#   QUICK=1 ./run_tlc.sh    skip the four slowest configs (about 13 of the 21 minutes)
+#   ./run_tlc.sh                 run every config
+#   ./run_tlc.sh a_nofence       run only the configs whose name contains "a_nofence"
+#   ./run_tlc.sh OarbankPortmap  run only one spec's configs
+#   QUICK=1 ./run_tlc.sh         skip the four slowest configs (about 13 of the 21 minutes)
 #
 # A line says PASS when TLC's outcome matches the expectation: "ok" (no violation) for the
 # reference protocol, and the named invariant / temporal-property violation for each weakened
@@ -81,11 +83,60 @@ CONFIGS=(
   "OarbankFastPause                                  ok"
   "OarbankFastPause_a_nofresh                        inv:FastPauseHolds"
   "OarbankFastPause_b_unshared                       liveness"
+
+  # OarbankPortmap.tla: the agent's port-mapping lifecycle (docs/design/inbound-listeners.md)
+  "OarbankPortmap                                    ok"
+  "OarbankPortmap_refuse_permanent                   ok"
+  "OarbankPortmap_liveness                           ok"
+  "OarbankPortmap_permanent_liveness                 ok"
+  "OarbankPortmap_permanent_dead_agent               liveness"
+  "OarbankPortmap_witness_RebootRecovered            inv:W_RebootRecovered"
+  "OarbankPortmap_witness_ConflictNextFree           inv:W_ConflictNextFree"
+  "OarbankPortmap_witness_NetChangeRemapped          inv:W_NetChangeRemapped"
+  "OarbankPortmap_witness_RestartCleanup             inv:W_RestartCleanup"
+  "OarbankPortmap_a_nojournal                        inv:AtMostOneExternalPortPerListener"
+  "OarbankPortmap_a_nojournal_liveness               liveness"
+  "OarbankPortmap_b_delete_by_port                   inv:NoForeignDelete"
+  "OarbankPortmap_c_no_epoch                         inv:AnnouncedImpliesMapped"
+  "OarbankPortmap_d_remap_before_release             inv:AtMostOneExternalPortPerListener"
+  "OarbankPortmap_e_readback_race                    inv:NoForeignDelete"
+  "OarbankPortmap_f_keyed_delete                     inv:AtMostOneExternalPortPerListener"
+  "OarbankPortmap_g_epoch_forgets_entry              inv:AtMostOneExternalPortPerListener"
+
+  # OarbankGpuDuty.tla: the GPU duty governor (docs/design/gpu-cotenancy.md)
+  "OarbankGpuDuty                                    ok"
+  "OarbankGpuDuty_liveness                           ok"
+  "OarbankGpuDuty_a_noclamp                          inv:DutyWithinCeiling"
+  "OarbankGpuDuty_b_grow_unclean                     inv:NoGrowthOnUnclean"
+  "OarbankGpuDuty_c_nohold                           inv:ExcessBounded"
+  "OarbankGpuDuty_d_strikes_reset                    liveness"
+
+  # OarbankSiteUplink.tla: transfer leases at a site (docs/design/sites.md)
   "OarbankSiteUplink                                 ok"
   "OarbankSiteUplink_a_nomargin                      inv:Budget"
   "OarbankSiteUplink_b_norevoke                      inv:HoldBound"
   "OarbankSiteUplink_c_slotfreed                     inv:Budget"
 )
+# OarbankSeat (docs/design/workloads.md, D46)
+CONFIGS+=(
+  "OarbankSeat                                       ok"
+  "OarbankSeat_fence_per_run                         ok"
+  "OarbankSeat_liveness                              ok"
+  "OarbankSeat_witness_SeatMovedAfterExpiry          inv:W_SeatMovedAfterExpiry"
+  "OarbankSeat_witness_SeatMovedOnRelease            inv:W_SeatMovedOnRelease"
+  "OarbankSeat_witness_AdoptedAcrossRestart          inv:W_AdoptedAcrossRestart"
+  "OarbankSeat_a_nofence_release                     inv:AtMostOneRunning"
+  "OarbankSeat_b_renew_after_expiry                  inv:AtMostOneRunning"
+  "OarbankSeat_c_no_grace                            inv:AtMostOneRunning"
+  "OarbankSeat_d_deadline_from_receive               inv:AtMostOneRunning"
+  "OarbankSeat_e_adopt_without_lease                 inv:AtMostOneRunning"
+  "OarbankSeat_f_clock_stops_in_sleep                inv:AtMostOneRunning"
+  "OarbankSeat_finding_release_if_unassigned         inv:AtMostOneRunning"
+  "OarbankSeat_agent_down_past_lease                 inv:AtMostOneRunning"
+  "OarbankSeat_faults2                               ok"
+  "OarbankSeat_unbounded                             ok"
+)
+SLOW+=" OarbankSeat OarbankSeat_fence_per_run OarbankSeat_faults2 OarbankSeat_unbounded "
 
 if [ ! -f "$JAR" ]; then
   echo "missing $JAR: download https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar" >&2
@@ -95,17 +146,20 @@ fi
 
 mkdir -p out
 fail=0
+meta=""
+trap 'rm -rf "$meta"' EXIT        # an interrupted TLC run leaves no metadata directory behind
 printf '%-50s %-34s %-34s %-6s %12s %12s %6s %8s\n' CONFIG EXPECTED GOT RESULT GENERATED DISTINCT DEPTH TIME
 for row in "${CONFIGS[@]}"; do
   read -r cfg expected <<<"$row"
   if [ -n "$FILTER" ] && [[ "$cfg" != *"$FILTER"* ]]; then continue; fi
   if [ -n "${QUICK:-}" ] && [[ "$SLOW" == *" $cfg "* ]]; then continue; fi
   log="out/$cfg.log"
+  spec="${cfg%%_*}.tla"
   meta="$(mktemp -d "${TMPDIR:-/tmp}/tlc-meta.XXXXXX")"
   start=$(date +%s)
   "$JAVA" -XX:+UseParallelGC -Xmx"$HEAP" -cp "$JAR" tlc2.TLC \
       -workers "$WORKERS" -deadlock -cleanup -metadir "$meta" \
-      -config "$cfg.cfg" "${cfg%%_*}.tla" >"$log" 2>&1
+      -config "$cfg.cfg" "$spec" >"$log" 2>&1
   secs=$(( $(date +%s) - start ))
   rm -rf "$meta"
 

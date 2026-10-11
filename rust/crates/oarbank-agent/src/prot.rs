@@ -41,6 +41,14 @@ pub struct Protection {
     pub site_hold: Option<(String, BTreeSet<i64>)>,
     /// Attempts paused for the site, and since when.
     site_paused: HashMap<i64, f64>,
+    /// Workloads (running or held), their processes, and the cores and memory running ones hold, set before each tick.
+    pub workloads: Vec<P::FleetWorkloadView>,
+    pub workload_pids: Vec<i32>,
+    pub workload_reserved: (f64, f64),
+    /// What was last done to each delegated process of the owner's: (rule, paused, lowered) by (pid, start time).
+    delegated: std::collections::HashMap<(i32, u64), (String, bool, bool)>,
+    /// The session helpers (a system install): they act on a person's delegated processes the agent's account may not.
+    hub: Option<Arc<P::session::SessionHub>>,
 }
 
 impl Protection {
@@ -55,6 +63,7 @@ impl Protection {
         #[cfg(not(target_os = "macos"))]
         let registry = Arc::new(P::SpawnRegistry::new(Box::new(ContainerActuator), Some(journal.clone()), store));
         let hub = session_hub.then(P::session::SessionHub::new);
+        let hub_keep = hub.clone();
         if let Some(h) = &hub {
             if let Err(e) = P::platform::serve_sessions(h.clone()) {
                 tracing::warn!(error = %e, "cannot serve session helpers: other accounts' paths, arguments, display and input stay unreadable");
@@ -66,8 +75,9 @@ impl Protection {
         Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(),
                      frozen: Default::default(), fast_paused: Default::default(), certs_seen: Value::Null, fast_attached: false,
                      last: None, capacity: None, telemetry: json!({}),
-                     service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![], site_hold: None,
-                     site_paused: Default::default() }
+                     service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![], workloads: vec![],
+                     workload_pids: vec![], workload_reserved: (0.0, 0.0), delegated: Default::default(), hub: hub_keep,
+                     site_hold: None, site_paused: Default::default() }
     }
 
     /// Give the controller the event path's fast pause over the agent's job table (D51): an immediate rule's phase
@@ -143,11 +153,15 @@ impl Protection {
         if d["send_processes"].as_bool() == Some(true) {
             self.ctrl.processes_requested = true;
         }
+        self.ctrl.set_delegation_allowed(policy["delegated_processes"].as_bool().unwrap_or(false));
         self.attach_fast_path(table);
         self.directives(d, facts, now);
         let tick_started = crate::doctor::now();
         let m = host::memory();
-        let mut mem = P::MemorySignals::new(m.ram_gb, m.used_gb, m.pressure);
+        // end-to-end tests on a shared, loaded host: the OS's own pressure level is not theirs to judge (the floors the
+        // test sets still apply); never set by an installed agent
+        let pressure = if std::env::var_os("OARBANK_TEST_IGNORE_OS_MEMORY_PRESSURE").is_some() { 0 } else { m.pressure };
+        let mut mem = P::MemorySignals::new(m.ram_gb, m.used_gb, pressure);
         mem.swap_used_gb = m.swap_used_gb;
         let mut inputs = P::TickInputs::new(now, mem);
         let mut inputs_services = vec![];
@@ -156,11 +170,16 @@ impl Protection {
             let mut pids = HashSet::new();
             let mut views = vec![];
             for j in t.values() {
+                let mut members = vec![];
                 if let Some(pg) = j.pgid {
-                    pids.extend(procs::group_pids(pg));
-                    pids.insert(pg);
+                    members = procs::group_pids(pg).into_iter().collect::<Vec<i32>>();
+                    if !members.contains(&pg) {
+                        members.push(pg);
+                    }
+                    pids.extend(members.iter().copied());
                 }
                 let mut v = P::FleetJobView::new(j.attempt_id, j.pgid, j.usage.footprint_gb, j.started_at, j.mem_gb);
+                v.pids = members;                       // whose GPU time the duty governor checks (D50)
                 // paused by a freeze, or at its safe points through control.json
                 v.pausable = j.caps.iter().any(|c| c == "freeze_ok" || c == "cooperative_pause");
                 v.cooperative = j.caps.iter().any(|c| c == "cooperative_pause" || c == "cooperative_throttle");
@@ -183,6 +202,7 @@ impl Protection {
                                       yieldable: s.yieldable, users }
             }).collect();
             inputs_services = svc_views;
+            pids.extend(self.workload_pids.iter().copied());
             let rss: f64 = t.values().map(|j| j.usage.footprint_gb).sum();
             // the part of each job's reservation it already holds: in use, yet already charged through used_mem
             let resident: f64 = t.values().map(|j| j.usage.footprint_gb.min(j.mem_gb).max(0.0)).sum();
@@ -201,12 +221,14 @@ impl Protection {
         inputs.run_on_battery = policy["run_on_battery"].as_bool().unwrap_or(T::RUN_ON_BATTERY);
         inputs.jobs = jobs;
         inputs.services = inputs_services;
+        inputs.workloads = self.workloads.clone();
         inputs.user_idle_s = idle;
         inputs.allocatable_cores = perf as f64 + eff as f64 / 2.0;
         inputs.lowering = can_lower();
         let r = self.ctrl.tick(&inputs);
         let max_pause = self.ctrl.config().max_pause_s;
         self.actuate(&r, table, tick_started, now, max_pause);
+        self.actuate_delegated(&r);
         let limits = P::Limits::from_json(d.get("limits"));
         let at = now as i64;
         let in_schedule = limits.schedule.as_ref().is_none_or(|s| s.contains_unix(at, crate::sys::utc_offset_s(at)));
@@ -227,10 +249,10 @@ impl Protection {
         ci.fleet_resident_gb = fleet_resident;
         ci.mem_margin_gb = P::CapacityModel::mem_margin_gb(m.ram_gb, self.ctrl.config().memory.soft_free_pct);
         ci.live_attempts = live;
-        ci.used_cpu = used_cpu;
+        ci.used_cpu = used_cpu + self.workload_reserved.0;
         ci.used_mem_gb = used_mem;
         ci.service_pools = self.service_pools.clone();
-        ci.service_reserved_mem_gb = self.service_reserved_mem_gb;
+        ci.service_reserved_mem_gb = self.service_reserved_mem_gb + self.workload_reserved.1;
         let cap = P::CapacityModel::compute(&ci);
         self.telemetry = json!({
             "mem_used_gb": round1(m.used_gb), "mem_free_pct": if m.ram_gb > 0.0 { round1(100.0 * (1.0 - m.used_gb / m.ram_gb)) } else { 0.0 },
@@ -314,6 +336,64 @@ impl Protection {
         fast.retain(|a, _| t.contains_key(a));
     }
 
+    /// The owner's delegated processes (docs/design/workloads.md): pause and lower each as this tick's plan says, one
+    /// process at a time through the registry (its start time checked first); a process no longer delegated, or no
+    /// longer paused or lowered, is resumed and restored.
+    fn actuate_delegated(&mut self, r: &P::ProtectionTickResult) {
+        let mut want: std::collections::HashMap<(i32, u64), (String, bool, bool)> = Default::default();
+        for a in &r.delegated {
+            for p in &a.procs {
+                want.insert(*p, (a.rule.clone(), a.paused, a.lowered));
+            }
+        }
+        let keys: Vec<(i32, u64)> = want.keys().chain(self.delegated.keys()).copied().collect::<BTreeSet<_>>().into_iter().collect();
+        for k in keys {
+            let have = self.delegated.get(&k).cloned();
+            let (rule, paused, lowered) = want.get(&k).cloned()
+                .unwrap_or_else(|| (have.as_ref().map(|h| h.0.clone()).unwrap_or_default(), false, false));
+            let (hp, hl) = have.as_ref().map(|h| (h.1, h.2)).unwrap_or((false, false));
+            if paused != hp {
+                let sig = if paused { P::Signal::Stop } else { P::Signal::Cont };
+                let reason = if paused { "DELEGATE_PAUSE" } else { "DELEGATE_RESUME" };
+                if let Err(P::Refusal::Failed(_)) = self.registry.signal_delegated(k.0, k.1, &rule, sig, reason) {
+                    self.relay(k, &rule, if paused { "pause" } else { "resume" }, reason);
+                }
+            }
+            if lowered != hl {
+                let reason = if lowered { "DELEGATE_LOWER" } else { "DELEGATE_RESTORE" };
+                if let Err(P::Refusal::Failed(_)) = self.registry.set_background_delegated(k.0, k.1, &rule, lowered, reason) {
+                    self.relay(k, &rule, if lowered { "lower" } else { "restore" }, reason);
+                }
+            }
+            if paused || lowered {
+                self.delegated.insert(k, (rule, paused, lowered));
+            } else {
+                self.delegated.remove(&k);
+            }
+        }
+    }
+
+    /// A delegated process of another account (a system install): its person's session helper acts on it.
+    fn relay(&self, k: (i32, u64), rule: &str, op: &str, reason: &str) {
+        if let Some(sent) = self.hub.as_ref().and_then(|h| h.act(k.0, k.1, op)) {
+            self.registry.journal_delegated(k.0, k.1, rule, op, reason, sent, "session_helper");
+        }
+    }
+
+    /// Resume every delegated process protection paused (the agent is stopping: nothing it paused stays paused).
+    pub fn release_delegated(&mut self) {
+        for ((pid, start), (rule, paused, lowered)) in std::mem::take(&mut self.delegated) {
+            if paused && matches!(self.registry.signal_delegated(pid, start, &rule, P::Signal::Cont, "DELEGATE_RESUME"),
+                                  Err(P::Refusal::Failed(_))) {
+                self.relay((pid, start), &rule, "resume", "DELEGATE_RESUME");
+            }
+            if lowered && matches!(self.registry.set_background_delegated(pid, start, &rule, false, "DELEGATE_RESTORE"),
+                                   Err(P::Refusal::Failed(_))) {
+                self.relay((pid, start), &rule, "restore", "DELEGATE_RESTORE");
+            }
+        }
+    }
+
     /// Resume every job protection froze (the agent is stopping them: a frozen process cannot act on a stop request).
     pub fn thaw_all(&mut self, table: &Table) {
         let t = table.lock().unwrap();
@@ -345,8 +425,9 @@ impl Protection {
     }
 
     pub fn processes(&mut self, table: &Table) -> Option<Value> {
-        let pids: HashSet<i32> = table.lock().unwrap().values().filter_map(|j| j.pgid)
+        let mut pids: HashSet<i32> = table.lock().unwrap().values().filter_map(|j| j.pgid)
             .flat_map(|pg| procs::group_pids(pg).into_iter().chain([pg])).collect();
+        pids.extend(self.workload_pids.iter().copied());
         self.ctrl.process_summary(crate::doctor::now(), &pids).map(|rows| serde_json::to_value(rows).unwrap_or(json!([])))
     }
 }
@@ -447,6 +528,38 @@ impl P::Actuator for ContainerActuator {
     /// The container's background CPU quota (Linux) or idle priority class and EcoQoS (Windows), sys.rs.
     fn set_background(&self, pgid: i32, on: bool) -> i32 {
         if crate::sys::set_background(pgid, on) { 0 } else { -1 }
+    }
+
+    fn signal_pid(&self, pid: i32, sig: P::Signal) -> i32 {
+        let s = match sig {
+            P::Signal::Stop => procs::Sig::Stop,
+            P::Signal::Cont => procs::Sig::Cont,
+            P::Signal::Term => procs::Sig::Term,
+            P::Signal::Kill => procs::Sig::Kill,
+        };
+        if crate::sys::signal_process(pid, s) { 0 } else { -1 }
+    }
+
+    /// One process: nice 19 on Linux (an unprivileged agent may only lower), the idle priority class on Windows.
+    fn set_background_pid(&self, pid: i32, on: bool) -> i32 {
+        #[cfg(unix)]
+        {
+            let r = unsafe { libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, if on { 19 } else { 0 }) };
+            if r == 0 { 0 } else { -1 }
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{OpenProcess, SetPriorityClass, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+                                                        PROCESS_SET_INFORMATION};
+            let h = OpenProcess(PROCESS_SET_INFORMATION, 0, pid as u32);
+            if h.is_null() {
+                return -1;
+            }
+            let ok = SetPriorityClass(h, if on { IDLE_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS }) != 0;
+            CloseHandle(h);
+            if ok { 0 } else { -1 }
+        }
     }
 }
 

@@ -16,6 +16,8 @@ hex.workspace = true
 libc = "0.2.190"
 oarbank-core = { path = "../oarbank-core" }
 oarbank-protection = { path = "../oarbank-protection" }
+# inbound listeners: router port mapping, NAT classification, the dial-back probe
+oarbank-portmap = { path = "../oarbank-portmap" }
 rand = "0.10.3"
 rcgen = "0.14.10"
 # host tools: an executable definition's version regex (tools.rs); the coordinator refuses look-around and back-references
@@ -25,6 +27,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring", "s
 rustls-pemfile = "2.2.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+socket2 = { version = "0.6.5", features = ["all"] }
 sha2.workspace = true
 tar = "0.4.46"
 thiserror.workspace = true
@@ -35,6 +38,8 @@ webpki-roots = "1.0.9"
 x509-parser = "0.18.1"
 
 [dev-dependencies]
+# fake NAT-PMP, PCP and UPnP gateways on loopback for the listener tests
+oarbank-portmap = { path = "../oarbank-portmap", features = ["fake"] }
 # signing test images in imageset.rs's local registry tests
 ring = "0.17.14"
 # tests' scratch directories: a fresh name each, removed when dropped

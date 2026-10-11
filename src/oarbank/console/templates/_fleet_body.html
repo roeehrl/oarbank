@@ -55,6 +55,7 @@
       {% if n.release_wait and (not n.online or n.lifecycle == 'ready') %}<span class="chip warn" title="{{ n.release_wait.title }}">{{ n.release_wait.text }}</span>{% endif %}
       {% if n.cap.binding_limit and n.cap.binding_limit.startswith('cap.') %}<span class="chip acc">capped: {{ n.cap.binding_limit[4:] }}{% if n.limits[n.cap.binding_limit[4:]] is defined %} {{ n.limits[n.cap.binding_limit[4:]] }}{% endif %}</span>{% endif %}
       {% for r in (n.tel.protection or {}).get('active') or [] %}<span class="chip acc" title="protection rule active">protecting: {{ r }}</span>{% endfor %}
+      {% if n.agent_behind %}<a class="chip warn" href="/agent" title="{{ n.agent_behind.text }}">agent {{ n.agent_behind.version }}: update</a>{% endif %}
       {% if n.tel.guard and n.tel.guard != 'clear' %}<span class="chip warn" title="{{ (n.tel.protection or {}).get('guard_reason') or '' }}">memory guard: {{ n.tel.guard }}</span>{% endif %}
       <span class="sp"></span>{% if n.hw.cpu %}<span class="small mut">{{ n.hw.cpu }}</span>{% endif %}
     </div>

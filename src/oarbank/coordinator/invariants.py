@@ -26,7 +26,8 @@ Safety (must hold after every committed transaction):
   S15 a module fault is never charged: an attempt whose completion waited on its module
       (phase awaiting_module) is never killed, and never ends failed unless the module, once back,
       judged its result (a recorded verdict); the wait itself never counts as an exec failure
-  S16 every journaled actuation targets one of the node's own attempts or services
+  S16 every journaled actuation targets one of the node's own attempts, services or workloads (a workload's members
+      included), or a process an owner rule delegated
   S17 no node admits work while its memory guard is active
   S18 an active protection rule is enforced within enter_for_s + 2 samples (from the decision journal)
   S20 every live, leased or done job of a bound unit of work ran on, or got its canonical result from, a node of the
@@ -37,17 +38,25 @@ Safety (must hold after every committed transaction):
       payload, and artifacts that each hold one pin's files (reads the catalogue's manifests)
   S23 an attempt that resumed from a checkpoint resumed from one recorded by an earlier attempt of the same job under the
       same job generation
+  S24 every listener and router mapping a node reports belongs to an approved grant (the module version the node runs
+      requests that inbound listener, its grants approved by digest), an assignment (the node's statement lists it) and
+      the statement the node applied (listeners.py)
   S25 for a rule marked immediate, a phase the agent's event path saw begin is followed by its pause request within
       100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
       the source event)
+  S26 at most one node runs a seat of a per-node workload identity at a time (workloads.py; TLA+ OarbankSeat)
   S27 a site's unexpired transfer leases (revoked ones until given back) never number more than its max_transfers, their
       rates never sum past its uplink_mbps, and none is live, unrevoked, while the site holds (a protected process there is
       in an uplink phase)
+  S28 the GPU duty budget a node journals never exceeds the certified ceiling it journals with it, and every fleet unit
+      (a job or a workload) the duty governor holds or stops for exceeding (or for not being able to check) its gpu_duty
+      is paused (a workload: paused or held by its ladder) within the S18 window, or has ended (from the decision journal; docs/design/gpu-cotenancy.md, "The duty governor")
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
 import bisect
 import json
+import time
 
 from oarbank_sdk import platform as pf
 
@@ -197,14 +206,35 @@ def s15_module_faults_not_charged(db: DB):
               "S15 attempt {attempt_id} (job {job_id}) waited on its module but ended {state} ({end_reason})")
 
 
+def _delegated_rule(db: DB, node_id: str, rule: str) -> bool:
+    """Whether the node's protection ever had an owner rule `rule` that delegates (protection_versions)."""
+    for v in db.q("SELECT config_json FROM protection_versions WHERE node_id=?", (node_id,)):
+        cfg = jl(v["config_json"], {}) or {}
+        if any(r.get("id") == rule.removesuffix("@local") and r.get("delegate") for r in cfg.get("rule") or []):
+            return True
+    return False
+
+
 def s16_actuation_only_on_spawned(db: DB):
-    """Every signal or policy change an agent journaled targets one of its own attempts (or services): the
-    agent-side spawn registry refuses anything else, and a refusal is journaled as actuation_refused."""
+    """Every signal or policy change an agent journaled targets one of its own attempts, services or workloads (a
+    workload's members outside its process group included: the record names the workload), or a process an owner rule
+    delegated: the agent-side spawn registry refuses anything else, and a refusal is journaled as actuation_refused."""
     out = []
     for r in db.q("SELECT d.node_id, d.seq, d.record_json FROM protection_decisions d WHERE d.kind='actuation'"):
         rec = json.loads(r["record_json"] or "{}")
         aid, svc = rec.get("attempt"), rec.get("service")
         if svc:
+            continue
+        if rec.get("workload"):
+            m, _, w = str(rec["workload"]).partition("/")
+            if not db.one("SELECT 1 FROM workload_assignments WHERE module=? AND workload=? AND node_id=?", (m, w, r["node_id"])):
+                out.append(f"S16 node {r['node_id']} journal #{r['seq']}: actuation on pid {rec.get('pid')} for workload "
+                           f"{rec['workload']}, which was never assigned to it")
+            continue
+        if rec.get("delegated"):
+            if not _delegated_rule(db, r["node_id"], str(rec["delegated"])):
+                out.append(f"S16 node {r['node_id']} journal #{r['seq']}: actuation on pid {rec.get('pid')} under "
+                           f"delegation {rec['delegated']}, which no owner rule of the node declares")
             continue
         if aid is None or not db.one("SELECT 1 FROM attempts WHERE attempt_id=? AND node_id=?", (aid, r["node_id"])):
             out.append(f"S16 node {r['node_id']} journal #{r['seq']}: actuation on pid {rec.get('pid')} "
@@ -340,6 +370,55 @@ def s25_immediate_phases_pause_at_once(db: DB, since: float = 0.0):
     return out
 
 
+S28_EVICT_S = 60.0      # a unit the governor stops has ended within a minute (its runner's stop grace and a heartbeat)
+
+
+def s28_gpu_duty_within_ceiling_and_enforced(db: DB, since: float = 0.0, now: float | None = None):
+    """S28: every `gpu_duty` record (the governor's budget steps) has a duty at most its ceiling; every
+    GPU_DUTY_EXCEEDED or GPU_DUTY_UNVERIFIED record whose action is `paused` names an attempt that an `attempt_paused`
+    record of the same node covers within the S18 window (or that ended by then), and one whose action is `evicted` an
+    attempt that is no longer live a minute later."""
+    t_now = time.time() if now is None else now
+    out = []
+    for r in db.q("SELECT node_id, seq, t, record_json FROM protection_decisions WHERE kind='gpu_duty' AND t>=?", (since,)):
+        rec = json.loads(r["record_json"] or "{}")
+        d, c = rec.get("duty"), rec.get("ceiling")
+        if d is not None and c is not None and float(d) > float(c) + 1e-9:
+            out.append(f"S28 node {r['node_id']} journal #{r['seq']}: GPU duty budget {d} above the certified ceiling {c}")
+    for r in db.q("SELECT node_id, seq, t, reason, record_json FROM protection_decisions WHERE kind='gpu_compliance' "
+                  "AND t>=?", (since,)):
+        rec = json.loads(r["record_json"] or "{}")
+        aid, action, t0 = rec.get("attempt"), rec.get("action"), r["t"] or 0
+        if rec.get("workload"):
+            # a workload: its ladder pauses it (workload_paused) or stops and holds it (workload_held), naming its key
+            kinds = ("workload_paused", "workload_held") if action == "paused" else ("workload_held",)
+            acts = db.q(f"SELECT record_json FROM protection_decisions WHERE node_id=? AND kind IN ({','.join('?' * len(kinds))}) "
+                        "AND t>=? AND t<=?", (r["node_id"], *kinds, t0 - 1, t0 + S18_WINDOW_S))
+            if not any(json.loads(x["record_json"] or "{}").get("workload") == rec["workload"] for x in acts) \
+                    and t_now - t0 > S18_WINDOW_S:
+                what = "paused" if action == "paused" else "stopped"
+                out.append(f"S28 node {r['node_id']} journal #{r['seq']}: {r['reason']} {what} workload {rec['workload']}, "
+                           f"but its ladder did not within {S18_WINDOW_S:.0f} s")
+            continue
+        if aid is None:
+            continue
+        att = db.one("SELECT state, ended_at FROM attempts WHERE attempt_id=?", (aid,))
+        ended = att is not None and att["ended_at"] is not None
+        if action == "paused":
+            if ended and (att["ended_at"] or 0) <= t0 + S18_WINDOW_S:
+                continue
+            pauses = db.q("SELECT record_json FROM protection_decisions WHERE node_id=? AND kind='attempt_paused' "
+                          "AND t>=? AND t<=?", (r["node_id"], t0 - 1, t0 + S18_WINDOW_S))
+            if not any(aid in (json.loads(p["record_json"] or "{}").get("attempts") or []) for p in pauses) \
+                    and t_now - t0 > S18_WINDOW_S:
+                out.append(f"S28 node {r['node_id']} journal #{r['seq']}: {r['reason']} held attempt {aid}, but no pause "
+                           f"of it followed within {S18_WINDOW_S:.0f} s")
+        elif action == "evicted" and att is not None and att["state"] == "live" and t_now - t0 > S28_EVICT_S:
+            out.append(f"S28 node {r['node_id']} journal #{r['seq']}: {r['reason']} stopped attempt {aid}, which is still "
+                       f"live {t_now - t0:.0f} s later")
+    return out
+
+
 def s20_units_stay_in_their_class(db: DB):
     bound = {r["unit"]: r for r in db.q("SELECT unit, parent, mix, class FROM placement_bindings")}
 
@@ -425,6 +504,17 @@ def s23_resume_from_own_checkpoint(db: DB):
     return out
 
 
+def s24_listeners_granted_and_assigned(db: DB):
+    """S24 (docs/design/inbound-listeners.md): a listener or router mapping a node reports is granted, assigned by the
+    node's statement and part of the statement it applied."""
+    from . import listeners
+    return listeners.s24_violations(db)
+
+
+def s26_single_seat(db: DB):
+    """S26: at most one node runs a seat of a per-node workload identity at a time (workloads.py)."""
+    from .workloads import s26_single_seat as check
+    return check(db)
 def s27_site_uplink_budget(db: DB):
     """S27 (docs/design/sites.md): the leases a site grants stay within its budget (revoked ones keep their slot until
     given back) and none is live, unrevoked, while it holds. Leases past their expiry are dead (the agent stopped by its
@@ -451,8 +541,9 @@ SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_gener
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
-          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s25_immediate_phases_pause_at_once,
-          s27_site_uplink_budget]
+          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s24_listeners_granted_and_assigned,
+          s25_immediate_phases_pause_at_once, s26_single_seat,
+          s28_gpu_duty_within_ceiling_and_enforced, s27_site_uplink_budget]
 
 
 def check_all(db: DB) -> list[str]:

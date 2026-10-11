@@ -3,6 +3,15 @@
 use std::io::Write;
 use std::path::Path;
 
+/// A directory removed when this is dropped: on every way out of its scope, an error or a panic included.
+pub struct RemovedOnDrop(pub std::path::PathBuf);
+
+impl Drop for RemovedOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub fn private_dir(p: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(p)?;
     #[cfg(unix)]

@@ -1,16 +1,20 @@
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
 
-# never touch the real coordinator's state (~/Library/Application Support/Oarbank/coordinator): releases and the module store go to a scratch home
-os.environ["OARBANKD_HOME"] = tempfile.mkdtemp(prefix="oarbank-test-home-")
-
-from hypothesis import HealthCheck, settings
-
 sys.path.insert(0, str(Path(__file__).parent))
+# first: the run's own temp directory, checked for leftovers when the session ends (tmpguard.py)
+import tmpguard  # noqa: E402
+from tmpguard import pytest_sessionfinish, pytest_terminal_summary  # noqa: E402,F401
+
+# never touch the real coordinator's state (~/Library/Application Support/Oarbank/coordinator): releases and the module store go to a scratch home
+os.environ["OARBANKD_HOME"] = str(tmpguard.suite_dir() / "home")
+os.makedirs(os.environ["OARBANKD_HOME"], exist_ok=True)
+
+from hypothesis import HealthCheck, settings  # noqa: E402
+
 settings.register_profile("thorough", max_examples=1000, stateful_step_count=100, deadline=None,
                           suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much])
 if os.environ.get("OARBANK_THOROUGH"):
