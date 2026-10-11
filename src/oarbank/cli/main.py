@@ -516,6 +516,148 @@ def cmd_agent(a):
     print(json.dumps(res, indent=1, default=str))
 
 
+def _ago(t) -> str:
+    import time as _t
+    if not t:
+        return "never"
+    d = _t.time() - float(t)
+    return f"{d:.0f}s ago" if d < 90 else f"{d / 60:.0f}m ago" if d < 5400 else f"{d / 3600:.1f}h ago"
+
+
+def _print_rollout(r: dict):
+    print(f"rollout {r['rollout_id']} {r['kind']} to {r['version']}: {r['state']}"
+          + (f" (ring {r['ring']})" if r.get("ring") else "") + (f": {r['halted_reason']}" if r.get("halted_reason") else ""))
+    for g in r["rings"]:
+        if g.get("skipped"):
+            print(f"  {g['ring']:<11} skipped ({g['skipped']})")
+            continue
+        if not g["nodes"] and g["ring"] != "coordinator":
+            continue
+        gate = []
+        if g.get("bake_left_s") is not None:
+            gate.append(f"bake {g['bake_left_s'] / 60:.0f} min left")
+        if g.get("heartbeats_min") is not None:
+            gate.append(f"heartbeats >= {g['heartbeats_min']}")
+        state = "baked" if g.get("baked_at") else "finished" if g.get("finished_at") else "running" if g.get("started_at") else "waiting"
+        print(f"  {g['ring']:<11} {state:<9} {g['done']}/{g['nodes']} done, {g['busy']} busy"
+              + (f" of {g['max_unavailable']}" if g.get("max_unavailable") else "")
+              + f", failures {g['failures']}/{g['budget']}" + (f"  ({', '.join(gate)})" if gate else ""))
+    for n in r["nodes"]:
+        print(f"    {n['hostname'] or n['node_id']:<22} {n['ring']:<7} {n['state']:<11} {n['from_version'] or '?'} -> {n['target']}"
+              + (" go" if n["go"] else "") + (f"  {n['error'][:100]}" if n.get("error") else ""))
+
+
+def _update_upload(dir_: Path) -> str:
+    """Stage a release directory's manifest and the artifacts this fleet needs; returns the manifest's sha256."""
+    mans = sorted(dir_.glob("oarbank-fleet-*.json"))
+    if len(mans) != 1:
+        sys.exit(f"{dir_} holds {len(mans)} oarbank-fleet-<version>.json manifests (one is needed)")
+    doc = json.loads(mans[0].read_text(encoding="utf-8"))
+    st = api("GET", "/api/v1/updates")
+    want = {st["coordinator"]["platform"]} | {n["platform"] for n in st["nodes"] if n.get("platform")}
+
+    def put(p: Path) -> str:
+        r = http_request("POST", f"{URL}/api/v1/updates/uploads", content=p.read_bytes(),
+                         headers={"x-oarbank-source": "cli", **auth_headers()}, timeout=3600)
+        if r.status_code >= 400:
+            sys.exit(f"upload {p.name}: {r.status_code} {r.text}")
+        return r.json()["sha256"]
+    for x in doc.get("artifacts") or []:
+        if x.get("platform") in want and (dir_ / x["name"]).is_file():
+            print(f"uploading {x['name']} ({x.get('size', 0) // 2 ** 20} MB)")
+            put(dir_ / x["name"])
+    return put(mans[0])
+
+
+def cmd_update(a):
+    """oarbank update <status|releases|import|fetch|sign|plan|start|pause|resume|halt|rollback|skip|hold|unhold|pin|unpin|
+    coordinator>: fleet updates (docs/design/fleet-updates.md): whole packages on every node, the coordinator first."""
+    ask_ = dict(reason=a.reason, yes=a.yes, dry_run=a.dry_run)
+    act = a.action
+    if act in ("status", "releases") or (act == "coordinator" and a.what in (None, "status")):
+        v = api("GET", "/api/v1/updates")
+        c = v["coordinator"]
+        if act == "coordinator":
+            u = c.get("update") or {}
+            print(f"coordinator {c['version']} on {c['platform']}; last self-update: "
+                  + (f"{u.get('version')} {u.get('state')}" + (f" ({u['error']})" if u.get("error") else "") if u else "none"))
+            return
+        if act == "releases" or not v["releases"]:
+            for r in v["releases"]:
+                print(f"{r['version']:<10} seq {r['seq']:<7} {r['state']:<10} {'signed' if r['signed'] else 'unsigned':<8} "
+                      f"from {r['source']}  imported {_ago(r['imported_at'])} by {r['imported_by']}")
+                for g in r["gaps"]:
+                    print(f"  needs: {g}")
+            if not v["releases"]:
+                print("no fleet release imported (oarbank update import <dir> | fetch <version>)")
+            if act == "releases":
+                return
+        nr = v.get("newest_ready")
+        print(f"coordinator {c['version']} ({c['platform']}); newest ready release: {nr['version'] if nr else 'none'}; "
+              f"update_auto {v['update_auto']}; source {v['source']}")
+        for r in (v.get("active"), v.get("rolling_back")):
+            if r:
+                _print_rollout(r)
+        for n in v["nodes"]:
+            rp = n["report"] or {}
+            extra = [f"ring {n['ring']}"]
+            if n.get("hold"):
+                extra.append(f"held: {n['hold']['reason']}" + (" (expired)" if n["hold_expired"] else ""))
+            if n.get("pin"):
+                extra.append(f"pinned {n['pin']['version']}: {n['pin']['reason']}" + (" (expired)" if n["pin_expired"] else ""))
+            if not n["updater"]:
+                extra.append(f"no updater ({(n['install'] or {}).get('why') or 'agent self-update only'})")
+            print(f"  {n['hostname']:<22} {n['version'] or '?':<9} -> {n['target'] or '-':<9} {rp.get('state') or 'idle':<11} "
+                  + "; ".join(extra) + (f"  error: {rp['error'][:100]}" if rp.get("error") else ""))
+        return
+    if act == "import":
+        if not a.what:
+            sys.exit("oarbank update import <dir with oarbank-fleet-<version>.json and its artifacts> [--local]")
+        d = Path(a.what).expanduser()
+        if a.local:
+            res = run_op("updates.import", None, {"dir": str(d.resolve())}, **ask_)
+        else:
+            res = run_op("updates.import", None, {"manifest": _update_upload(d)}, **ask_)
+    elif act == "fetch":
+        res = run_op("updates.fetch", a.what or "latest", **ask_)
+    elif act == "sign":
+        if not a.what:
+            sys.exit("oarbank update sign <version> [--key PATH]")
+        from .. import signing
+        rel = next((r for r in api("GET", "/api/v1/updates")["releases"] if r["version"] == a.what), None)
+        if rel is None:
+            sys.exit(f"no fleet release {a.what} is imported")
+        stmt = signing.fleet_release_statement(rel["version"], rel["seq"], rel["manifest_sha256"])
+        sig = signing.sign(stmt, Path(a.key) if a.key else signing.DEFAULT_KEY)
+        res = run_op("updates.sign", rel["version"], {"statement": stmt, "signature": sig}, **ask_)
+    elif act in ("plan", "start", "coordinator"):
+        if not a.what:
+            sys.exit(f"oarbank update {act} <version>")
+        params = {"fast": True} if a.fast else {}
+        if act == "coordinator":
+            params["rings"] = ["coordinator"]
+        if a.rings:
+            params["rings"] = a.rings.split(",")
+        if a.max_unavailable:
+            params["max_unavailable"] = a.max_unavailable
+        res = run_op("updates.start", a.what, params, **{**ask_, "dry_run": a.dry_run or act == "plan"})
+    elif act in ("pause", "resume", "halt", "rollback"):
+        res = run_op(f"updates.{act}", a.what, **ask_)
+    elif act in ("skip", "unhold", "unpin"):
+        if not a.what:
+            sys.exit(f"oarbank update {act} <node>")
+        res = run_op(f"updates.{act}", a.what, **ask_)
+    elif act == "hold":
+        if not a.what or not a.reason:
+            sys.exit("oarbank update hold <node> --reason <why> [--until <ISO time>]")
+        res = run_op("updates.hold", a.what, {"reason": a.reason, "until": a.until}, **ask_)
+    else:                                             # pin
+        if not a.what or not a.version or not a.reason:
+            sys.exit("oarbank update pin <node> <version> --reason <why> [--until <ISO time>]")
+        res = run_op("updates.pin", a.what, {"version": a.version, "reason": a.reason, "until": a.until}, **ask_)
+    print(json.dumps((res or {}).get("result") or res, indent=1, default=str))
+
+
 def cmd_account(a):
     """oarbank account <list|create|disable|enable|role|reset-totp|password>: console accounts (access.py)."""
     ask = dict(reason=a.reason, yes=a.yes, dry_run=a.dry_run)
@@ -2255,6 +2397,21 @@ def parser() -> argparse.ArgumentParser:
     ag.add_argument("--yes", action="store_true")
     ag.add_argument("--dry-run", action="store_true")
     ag.set_defaults(fn=cmd_agent)
+    up = sub.add_parser("update", help="fleet updates: import, sign and roll out a release to the coordinator and every node")
+    up.add_argument("action", choices=["status", "releases", "import", "fetch", "sign", "plan", "start", "pause", "resume", "halt",
+                                       "rollback", "skip", "hold", "unhold", "pin", "unpin", "coordinator"])
+    up.add_argument("what", nargs="?", help="a release version, a directory (import), a node, or a rollout id")
+    up.add_argument("version", nargs="?", help="pin: the release to pin the node to")
+    up.add_argument("--fast", action="store_true", help="start: the fast policy (short bakes) for a critical release")
+    up.add_argument("--rings", help="start, plan: only these rings, e.g. coordinator,canary")
+    up.add_argument("--max-unavailable", type=int, help="start, plan: nodes updating at once in every node ring")
+    up.add_argument("--local", action="store_true", help="import: the directory is on the coordinator's machine (no upload)")
+    up.add_argument("--until", help="hold, pin: when it expires (ISO 8601; default never)")
+    up.add_argument("--key", help=f"sign: the owner key (default {key})")
+    up.add_argument("--reason", help="hold, pin: why (also the audit record's reason)")
+    up.add_argument("--yes", action="store_true")
+    up.add_argument("--dry-run", action="store_true")
+    up.set_defaults(fn=cmd_update)
     sub.add_parser("modules").set_defaults(fn=lambda a: [print(f"{m['name']:<12} v{m['version']} requires={m['requires']} "
                                                                f"{'enabled' if m['enabled'] else 'disabled'}") for m in api("GET", "/api/v1/modules")])
     v = sub.add_parser("verify", help="check protocol invariants and fleet health (exit 1 on violations)")

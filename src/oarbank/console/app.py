@@ -17,6 +17,7 @@ import functools
 import hashlib
 import hmac
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -940,6 +941,13 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         d = await drill(views.agent_builds) or {"builds": [], "channel": {}, "versions": {}, "nodes": [], "canary_ready": False}
         return render(request, "agent.html", {**d, "actor": actor})
 
+    @app.get("/updates", response_class=HTMLResponse)
+    async def updates_page(request: Request):
+        """Fleet updates (docs/design/fleet-updates.md, D62): the coordinator, releases, the active rollout, every node."""
+        actor = who(request)
+        r = await coordinator_json("GET", "/api/v1/updates", actor)
+        return render(request, "updates.html", {"u": r.json() if r.status_code == 200 else None, "actor": actor})
+
     @app.get("/modules/{name}", response_class=HTMLResponse)
     async def module_overview(name: str, request: Request):
         actor = who(request)
@@ -1235,6 +1243,19 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             if up.status_code != 200:
                 return back(return_to, f"upload failed: {up.text[:200]}", "bad")
             form = {**{k: form.get(k) for k in form.keys() if k != "archive"}, "p.sha256": up.json()["sha256"]}
+        if op == "updates.import" and hasattr(form, "getlist"):
+            man = None                                # each file staged on oarbankd; the operation names the manifest
+            for f in form.getlist("files"):
+                if not (getattr(f, "read", None) and f.filename):
+                    continue
+                up = await http.post("/api/v1/updates/uploads", content=await f.read(), headers=state.coordinator_headers(actor))
+                if up.status_code != 200:
+                    return back(return_to, f"upload of {Path(f.filename).name} failed: {up.text[:200]}", "bad")
+                if re.fullmatch(r"oarbank-fleet-.+\.json", Path(f.filename).name):
+                    man = up.json()["sha256"]
+            if man is None:
+                return back(return_to, "choose the release's oarbank-fleet-<version>.json with its packages", "bad")
+            form = {**{k: form.get(k) for k in form.keys() if k != "files"}, "p.manifest": man}
         if op == "vendor.metadata.upload" and hasattr(form, "getlist"):
             files = {}
             for f in form.getlist("metadata"):

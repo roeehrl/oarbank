@@ -37,7 +37,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `FOLDER_UNAVAILABLE` | Module {module} needs folders this node does not provide (unmapped, another access, refused by the node, or awaiting the owner's signature) | P1 | – | `settings.folders.update` | – |
 | `SANDBOX_BACKEND_MISSING` | The agent on this node cannot sandbox module processes | P1 | – | – | – |
 | `CAPABILITY_NOT_ENFORCED` | The node's sandbox cannot enforce {capability}, which module {module} needs | P1 | – | – | – |
-| `AGENT_TOO_OLD` | Module {module} needs agent {need}; the node runs {have} | P1 | – | `agent.promote` | – |
+| `AGENT_TOO_OLD` | Module {module} needs agent {need}; the node runs {have} | P1 | – | `updates.start`, `agent.promote` | – |
 | `PINNED_ELSEWHERE` | Pinned to node {node} | P1 | – | – | – |
 | `POOL_JOBS_ONLY` | The node is yielding and takes only short pool jobs | P1 | – | – | – |
 | `GPU_BLOCKED` | A GPU job: the node admits no more GPU jobs now (owner setting or a protected process is using the GPU) | P1 | – | – | – |

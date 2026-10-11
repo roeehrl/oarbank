@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Updates · Oarbank{% endblock %}
+{% block body %}
+<h1>Updates</h1>
+<p class="small mut">A fleet release is one signed manifest naming every package of a version. A rollout updates the coordinator
+first, then the canary, early and broad rings: a few nodes at a time, each inside its update window, baking before the next
+ring, halting (and rolling back) when installs fail. Each node installs the whole package through its root update runner and
+goes back to the previous one by itself if the new version does not confirm. No node ever runs a release newer than the
+coordinator.</p>
+{% if not u %}<div class="flash bad" role="alert">The coordinator did not answer: the update state is not available right now.</div>
+{% else %}
+{% set c = u.coordinator %}{% set nr = u.newest_ready %}{% set act = u.active %}
+<div class="card">
+  <div class="row"><b>Coordinator {{ c.version }}</b><span class="chip">{{ c.platform }}</span>
+    {% if nr %}<span class="chip {{ 'acc' if nr.version != c.version else 'ok' }}">newest ready release {{ nr.version }}</span>
+      {% if nr.notes %}<a class="small" href="{{ nr.notes }}" rel="noopener noreferrer" target="_blank">release notes</a>{% endif %}
+    {% else %}<span class="chip">no ready release</span>{% endif %}
+    <span class="chip">update_auto {{ u.update_auto }}</span>
+    <span class="sp"></span>
+    {% if nr and not act %}{{ m.op_form("updates.start", nr.version, "Update fleet…", cls="pri") }}{% endif %}
+  </div>
+  <div class="small mut">Release source: <span class="mono">{{ u.source }}</span>{% if u.signing %} · signing mode: releases need the owner's signature{% endif %}</div>
+</div>
+
+{% for r in [act, u.rolling_back] if r %}
+<h2>{{ 'Rollback' if r.kind == 'rollback' else 'Active rollout' }}: {{ r.version }} <span class="small mut">({{ r.rollout_id }})</span></h2>
+<div class="card">
+  <div class="row"><span class="chip {{ 'ok' if r.state in ('running', 'done') else 'bad' if r.state in ('halted', 'rolling_back') else 'warn' }}">{{ r.state | replace('_', ' ') }}</span>
+    {% if r.ring %}<span class="chip">ring {{ r.ring }}</span>{% endif %}
+    {% if r.auto %}<span class="chip">started automatically</span>{% endif %}
+    {% if r.halted_reason %}<span class="small">{{ r.halted_reason }}</span>{% endif %}
+    <span class="sp"></span>
+    {% if r.kind == 'update' %}
+    {% if r.state == 'running' %}{{ m.op_form("updates.pause", r.rollout_id, "Pause", confirm="Pause the rollout? Installs under way finish.") }}
+    {{ m.op_form("updates.halt", r.rollout_id, "Halt", cls="danger", confirm="Halt the rollout? Nothing new starts until it is resumed or rolled back.", reason_prompt=True) }}{% endif %}
+    {% if r.state in ('paused', 'halted') %}{{ m.op_form("updates.resume", r.rollout_id, "Resume", confirm="Resume the rollout?") }}{% endif %}
+    {% if r.state in ('running', 'paused', 'halted') %}{{ m.op_form("updates.rollback", r.rollout_id, "Roll back…", cls="danger") }}{% endif %}
+    {% endif %}
+  </div>
+  <table class="small">
+    <tr><th>ring</th><th>progress</th><th>at once</th><th>failures / budget</th><th>bake</th></tr>
+    {% for g in r.rings if g.nodes or g.ring == 'coordinator' and (g.started_at or g.skipped) %}<tr>
+      <td>{{ g.ring }}{% if g.current %} <span class="chip acc">now</span>{% endif %}</td>
+      <td>{% if g.skipped %}<span class="mut">skipped: {{ g.skipped }}</span>{% elif g.baked_at %}<span class="chip ok">baked</span>{% elif g.finished_at %}<span class="chip">finished</span>{% elif g.started_at %}running{% else %}<span class="mut">waiting</span>{% endif %}
+        {% if g.nodes %} {{ g.done }}/{{ g.nodes }} done{% endif %}</td>
+      <td>{% if g.max_unavailable %}{{ g.busy }} of {{ g.max_unavailable }}{% else %}–{% endif %}</td>
+      <td>{{ g.failures }} / {{ g.budget if g.budget is not none else '–' }}</td>
+      <td>{% if g.bake_left_s is not none %}{{ g.bake_left_s | secs }} left{% endif %}{% if g.heartbeats_min is not none %} · heartbeats {{ g.heartbeats_min }}/10{% endif %}</td>
+    </tr>{% endfor %}
+  </table>
+  <table class="small" style="margin-top:8px">
+    <tr><th>node</th><th>ring</th><th>state</th><th>from</th><th>to</th><th>note</th><th><span class="sr-only">actions</span></th></tr>
+    {% for n in r.nodes %}<tr>
+      <td>{{ n.hostname or n.node_id }}</td><td>{{ n.ring }}</td>
+      <td><span class="chip {{ 'ok' if n.state == 'done' else 'bad' if n.state in ('failed', 'rolled_back') else 'warn' if n.state in ('draining', 'installing', 'confirming') or n.go else '' }}">{{ n.state | replace('_', ' ') }}{% if n.go and n.state == 'staged' %} · go{% endif %}</span></td>
+      <td class="mono">{{ n.from_version or '?' }}</td><td class="mono">{{ n.target }}</td>
+      <td class="mut">{{ (n.error or '')[:160] }}</td>
+      <td class="actions">{% if r.kind == 'update' and n.state in ('pending', 'waiting', 'staging', 'staged') and not n.go %}{{ m.op_form("updates.skip", n.node_id, "Skip", confirm="Leave " ~ (n.hostname or n.node_id) ~ " out of this rollout?") }}{% endif %}</td>
+    </tr>{% endfor %}
+  </table>
+</div>
+{% endfor %}
+
+<h2>Nodes</h2>
+<table class="small">
+  <tr><th>node</th><th>version</th><th>target</th><th>update</th><th>ring</th><th>window</th><th>hold or pin</th><th>updater</th><th><span class="sr-only">actions</span></th></tr>
+  {% for n in u.nodes %}{% set rp = n.report or {} %}<tr>
+    <td>{{ n.hostname }}{% if not n.online %} <span class="chip">offline</span>{% endif %}</td>
+    <td class="mono">{{ n.version or '?' }}</td>
+    <td class="mono">{{ n.target or '–' }}{% if n.rollback %} <span class="chip warn">rollback</span>{% endif %}</td>
+    <td>{% if rp.state %}<span class="chip {{ 'bad' if rp.state in ('failed', 'rolled_back', 'refused') else 'ok' if rp.state == 'done' else '' }}">{{ rp.state | replace('_', ' ') }}</span>{% else %}<span class="mut">idle</span>{% endif %}
+      {% if rp.error %}<div class="mut">{{ rp.error[:200] }}{% if rp.state in ('failed', 'rolled_back', 'refused') %} (the runner's log: &lt;system data&gt;/update/logs on the node){% endif %}</div>{% endif %}
+      {% if n.unsupported %}<div class="mut">{{ n.unsupported }}</div>{% endif %}</td>
+    <td>{{ n.ring }}</td>
+    <td>{% if n.window %}{{ n.window.start }}–{{ n.window.end }}{% else %}<span class="mut">any time</span>{% endif %}</td>
+    <td>{% if n.hold %}<span class="chip {{ 'bad' if n.hold_expired else 'warn' }}">held{% if n.hold_expired %} · expired{% endif %}</span> {{ n.hold.reason }}{% if n.hold.until %} <span class="mut">until {{ n.hold.until | ts }}</span>{% endif %}{% endif %}
+      {% if n.pin %}<span class="chip {{ 'bad' if n.pin_expired else 'acc' }}">pinned {{ n.pin.version }}{% if n.pin_expired %} · expired{% endif %}</span> {{ n.pin.reason }}{% if n.pin.until %} <span class="mut">until {{ n.pin.until | ts }}</span>{% endif %}{% endif %}</td>
+    <td>{% if n.updater %}<span class="chip ok">{{ n.install.format }}</span>{% else %}<span class="chip warn">none</span>
+      <div class="mut">{{ n.install.why or 'no update runner (a personal or developer install, or an agent older than 2.10)' }}: it updates its agent alone (the Agent page); install the node package as an administrator to get whole-package updates</div>{% endif %}</td>
+    <td class="actions">
+      {% if n.hold %}{{ m.op_form("updates.unhold", n.node_id, "Unhold", confirm="Lift the update hold on " ~ n.hostname ~ "?") }}
+      {% else %}<details><summary class="small">Hold…</summary>
+        {% call m.op_form("updates.hold", n.node_id, "Hold updates", inline=False) %}
+        <label class="small">why <input name="p.reason" required></label>
+        <label class="small">until (ISO time, optional) <input name="p.until" placeholder="2026-12-01T00:00:00Z"></label>
+        {% endcall %}</details>{% endif %}
+      {% if n.pin %}{{ m.op_form("updates.unpin", n.node_id, "Unpin", confirm="Lift the pin on " ~ n.hostname ~ "?") }}
+      {% else %}<details><summary class="small">Pin…</summary>
+        {% call m.op_form("updates.pin", n.node_id, "Pin to release", inline=False) %}
+        <label class="small">release <input name="p.version" required placeholder="{{ c.version }}"></label>
+        <label class="small">why <input name="p.reason" required></label>
+        <label class="small">until (ISO time, optional) <input name="p.until"></label>
+        {% endcall %}</details>{% endif %}
+    </td>
+  </tr>{% else %}<tr><td colspan="9" class="mut">No nodes enrolled.</td></tr>{% endfor %}
+</table>
+
+<h2>Releases</h2>
+<div class="card">
+  <div class="row">
+    {% call m.op_form("updates.import", "", "Import…", inline=False, multipart=True) %}
+    <label class="small">oarbank-fleet-&lt;version&gt;.json and its packages (only the platforms your nodes run are kept)
+      <input type="file" name="files" multiple required></label>
+    {% endcall %}
+    {% call m.op_form("updates.fetch", "", "Fetch", inline=False) %}
+    <label class="small">version <input name="target_input" placeholder="latest"></label>
+    {% endcall %}
+  </div>
+  <div class="small mut">Or on the coordinator: <span class="mono">oarbank update import &lt;dir&gt;</span>, <span class="mono">oarbank update fetch &lt;version&gt;</span>.</div>
+</div>
+<table class="small" style="margin-top:8px">
+  <tr><th>version</th><th>seq</th><th>state</th><th>signed</th><th>imported</th><th>needs</th><th><span class="sr-only">actions</span></th></tr>
+  {% for r in u.releases %}<tr>
+    <td class="mono">{{ r.version }}{% if r.notes %} <a href="{{ r.notes }}" rel="noopener noreferrer" target="_blank">notes</a>{% endif %}</td>
+    <td>{{ r.seq }}</td>
+    <td><span class="chip {{ 'ok' if r.state == 'ready' else 'warn' }}">{{ r.state }}</span></td>
+    <td>{{ 'yes' if r.signed else 'no' }}</td>
+    <td class="mut">{{ r.imported_at | ago }} by {{ r.imported_by }}</td>
+    <td class="mut">{{ r.gaps | join('; ') }}{% if r.missing %}<div>skipped: {{ r.missing | map(attribute='name') | join(', ') }}</div>{% endif %}</td>
+    <td class="actions">
+      {% if r.state == 'ready' and not act and r.version != (nr.version if nr else '') %}{{ m.op_form("updates.start", r.version, "Update to it…") }}{% endif %}
+      {% if not r.signed %}<details><summary class="small">Sign…</summary>
+        {% call m.op_form("updates.sign", r.version, "Attach signature", inline=False) %}
+        <label class="small">statement <textarea name="p.statement" rows="2" required></textarea></label>
+        <label class="small">signature <input name="p.signature" required></label>
+        <span class="small mut">or on the machine with the owner key: <span class="mono">oarbank update sign {{ r.version }}</span></span>
+        {% endcall %}</details>{% endif %}
+    </td>
+  </tr>{% else %}<tr><td colspan="7" class="mut">No fleet release imported yet.</td></tr>{% endfor %}
+</table>
+
+<h2>Coordinator</h2>
+<div class="card">
+  {% set cu = c.update %}
+  {% if cu %}<div class="row"><span class="chip {{ 'ok' if cu.state == 'done' else 'bad' if cu.state in ('rolled_back', 'refused', 'failed') else 'warn' }}">{{ cu.state | replace('_', ' ') }}</span>
+    <span class="mono">{{ cu.from_version or '' }}{% if cu.from_version %} → {% endif %}{{ cu.version }}</span>
+    {% if cu.requested_at %}<span class="mut small">requested {{ cu.requested_at | ago }}</span>{% endif %}
+    {% if cu.snapshot %}<span class="mut small">snapshot <span class="mono">{{ cu.snapshot }}</span></span>{% endif %}</div>
+    {% if cu.error %}<div class="small">{{ cu.error }}</div>{% endif %}
+  {% else %}<div class="small mut">This coordinator has not updated itself yet. A rollout of a newer release updates it first (or: <span class="mono">oarbank update coordinator &lt;version&gt;</span>); it snapshots its database and restores it automatically if the new version fails its probation.</div>{% endif %}
+  {% if c.agent_min %}<div class="small mut">Serves agents from {{ c.agent_min }} on; older ones get no work until they update.</div>{% endif %}
+</div>
+
+<h2>History</h2>
+<table class="small">
+  <tr><th>rollout</th><th>release</th><th>kind</th><th>state</th><th>started</th><th>by</th><th>note</th></tr>
+  {% for h in u.history %}<tr>
+    <td class="mono">{{ h.rollout_id }}</td><td class="mono">{{ h.version }}</td><td>{{ h.kind }}</td><td>{{ h.state | replace('_', ' ') }}</td>
+    <td class="mut">{{ h.created_at | ts }}</td><td>{{ h.created_by }}{% if h.auto %} (automatic){% endif %}</td><td class="mut">{{ (h.halted_reason or '')[:160] }}</td>
+  </tr>{% else %}<tr><td colspan="7" class="mut">No rollout yet.</td></tr>{% endfor %}
+</table>
+{% endif %}
+{% endblock %}
