@@ -50,6 +50,14 @@ log=/var/log/oarbank-policy.log
     || { /bin/sleep 1; /bin/launchctl bootstrap system "/Library/LaunchDaemons/$HELPER.plist" 2>/dev/null; } \
     || echo "Oarbank: Oarbank Node's helper starts at the next restart"
 
+# inbound listeners (docs/design/inbound-listeners.md): with the Application Firewall on, an agent it does not list gets a
+# prompt at its first incoming connection, which holds every connection while nobody answers it (measured on macOS 26):
+# list the agent as allowed now. A Developer ID-signed agent is matched by its signature, so updates keep the rule.
+if /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | /usr/bin/grep -q "State = [12]" \
+        && [ -x "$BIN/oarbank-agent" ]; then
+    "$BIN/oarbank-agent" firewall allow >/dev/null 2>&1 || echo "Oarbank: the firewall rule for inbound listeners was not added"
+fi
+
 upgraded=
 if [ -f "/Library/LaunchDaemons/$LABEL.plist" ]; then
     /bin/launchctl kickstart -k "system/$LABEL" 2>/dev/null

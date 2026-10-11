@@ -59,8 +59,8 @@ pub fn parse_macos_global(s: &str) -> Option<bool> {
     }
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-/// `socketfilterfw --getappblocked <path>`: "The application ... is permitted" / "... is blocked"; an application the
+#[allow(dead_code)]
+/// `socketfilterfw --getappblocked <path>` (misleading for unlisted programs: see `status`): "The application ... is permitted" / "... is blocked"; an application the
 /// firewall does not list yet is judged by "allow signed software" (`--getallowsigned`).
 pub fn parse_macos_app(s: &str) -> Option<bool> {
     let l = s.to_ascii_lowercase();
@@ -71,6 +71,26 @@ pub fn parse_macos_app(s: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// `socketfilterfw --listapps`: the entry for `exe` and the line after it, "( Allow incoming connections )" or
+/// "( Block incoming connections )"; None when the program is not listed.
+pub fn parse_macos_listapps(s: &str, exe: &str) -> Option<bool> {
+    let mut lines = s.lines();
+    while let Some(l) = lines.next() {
+        if l.trim_end().ends_with(exe) || l.contains(&format!("{exe} ")) {
+            let next = lines.next().unwrap_or("").to_ascii_lowercase();
+            return Some(next.contains("allow"));
+        }
+    }
+    None
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// `socketfilterfw --getallowsigned`: whether downloaded signed software is allowed automatically.
+pub fn parse_macos_allowsigned(s: &str) -> bool {
+    s.lines().any(|l| { let l = l.to_ascii_lowercase(); l.contains("downloaded signed") && l.contains("enabled") })
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -86,9 +106,12 @@ pub fn status() -> State {
     {
         let enabled = run(SOCKETFILTERFW, &["--getglobalstate"]).and_then(|s| parse_macos_global(&s));
         let blockall = run(SOCKETFILTERFW, &["--getblockall"]).is_some_and(|s| s.to_ascii_lowercase().contains("enabled"));
-        let app = run(SOCKETFILTERFW, &["--getappblocked", &exe]).and_then(|s| parse_macos_app(&s));
-        let signed = run(SOCKETFILTERFW, &["--getallowsigned"]).map(|s| s.to_ascii_lowercase().contains("enabled"));
-        let allowed = if blockall { Some(false) } else { app.or(signed) };
+        // `--getappblocked` answers "permitted" for a program the firewall does not list at all, which still gets a
+        // prompt (measured in a macOS 26 VM): read the list instead
+        let app = run(SOCKETFILTERFW, &["--listapps"]).and_then(|s| parse_macos_listapps(&s, &exe));
+        let downloaded_signed = run(SOCKETFILTERFW, &["--getallowsigned"]).map(|s| parse_macos_allowsigned(&s));
+        let devid = run("/usr/bin/codesign", &["-dvv", &exe]).is_some_and(|s| s.contains("Authority=Developer ID Application"));
+        let allowed = if blockall { Some(false) } else { app.or(downloaded_signed.map(|d| d && devid)) };
         State { kind: "macos-alf", enabled, agent_allowed: allowed, detail: blockall.then(|| "the firewall blocks all incoming connections".into()) }
     }
     #[cfg(target_os = "linux")]
@@ -170,6 +193,13 @@ mod tests {
         assert_eq!(parse_macos_global("Firewall is disabled. (State = 0)"), Some(false));
         assert_eq!(parse_macos_app("The application /x/oarbank-agent is permitted"), Some(true));
         assert_eq!(parse_macos_app("The application /x/oarbank-agent is blocked"), Some(false));
+        let list = "ALF: total number of apps = 2 \n\n1 : /usr/libexec/sshd-session \n \t ( Allow incoming connections ) \n\n\
+                    2 : /usr/local/oarbank-test/oarbank-agent \n             (Block incoming connections)\n";
+        assert_eq!(parse_macos_listapps(list, "/usr/local/oarbank-test/oarbank-agent"), Some(false));
+        assert_eq!(parse_macos_listapps(list, "/usr/libexec/sshd-session"), Some(true));
+        assert_eq!(parse_macos_listapps(list, "/opt/other"), None);
+        assert!(!parse_macos_allowsigned("Automatically allow built-in signed software ENABLED.\nAutomatically allow downloaded signed software DISABLED."));
+        assert!(parse_macos_allowsigned("Automatically allow built-in signed software ENABLED.\nAutomatically allow downloaded signed software ENABLED."));
         assert_eq!(parse_windows_state("Domain Profile Settings:\n------\nState                                 ON\n"), Some(true));
         assert_eq!(parse_windows_state("State                                 OFF"), Some(false));
         assert_eq!(State { kind: "x", enabled: Some(true), agent_allowed: Some(false), detail: None }.blocks(), Some(true));
