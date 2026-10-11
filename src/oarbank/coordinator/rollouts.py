@@ -439,6 +439,18 @@ def tick(db: DB, now: float | None = None):
     auto(db, t)
 
 
+_PREPARING: dict = {}                 # rollout id -> the coordinator update's prepare running on its thread
+
+
+def _prepare(cs, path, version: str, actor: str, job: dict):
+    try:
+        cs.request(DB(path), version, actor)
+    except Exception as e:                  # coordself.UpdateError, or a prepare that failed
+        job["err"] = str(e)[:300] or type(e).__name__
+    finally:
+        job["done"].set()
+
+
 def _coordinator_step(db: DB, rid: str, t: float):
     """Ring 0: ask coordself for the coordinator's own update, once per rollout (D58)."""
     from . import fleetupdates as F
@@ -456,10 +468,18 @@ def _coordinator_step(db: DB, rid: str, t: float):
     elif cs is None:
         err = "this coordinator cannot update itself (no coordself)"
     else:
-        try:
-            cs.request(db, r["version"], r["created_by"] or "system")
-        except Exception as e:              # coordself.UpdateError, or a prepare that failed
-            err = str(e)[:300] or type(e).__name__
+        # the prepare (a snapshot, and the new build migrating a copy) can take minutes: it runs on a thread with a
+        # connection of its own, so this loop (leases, the reaper, invariants) never waits for it
+        job = _PREPARING.get(rid)
+        if job is None:
+            job = _PREPARING[rid] = {"err": None, "done": threading.Event()}
+            threading.Thread(target=_prepare, args=(cs, db.path, r["version"], r["created_by"] or "system", job),
+                             name=f"coordinator-update-{rid}", daemon=True).start()
+            return
+        if not job["done"].is_set():
+            return
+        _PREPARING.pop(rid, None)
+        err = job["err"]
     with db.tx():
         r = row(db, rid)
         if err:

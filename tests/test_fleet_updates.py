@@ -46,8 +46,9 @@ def db(tmp_path):
 def coordself(monkeypatch):
     """A stand-in for coordself (the coordinator's own update, another part of 2.10): records requests, reports a state."""
     import oarbank.coordinator as pkg
+    from oarbank.coordinator.coordself import SCHEMA
     fake = types.ModuleType("oarbank.coordinator.coordself")
-    fake.calls, fake.current, fake.refuse = [], None, None
+    fake.calls, fake.current, fake.refuse, fake.SCHEMA = [], None, None, SCHEMA     # a DB opens with its table
 
     class UpdateError(Exception):
         pass
@@ -158,6 +159,10 @@ def tick(db, *nodes, dt=0.0):
     for n in nodes:
         beat(db, n)
     RO.tick(db)
+    if RO._PREPARING:                     # a coordinator update's prepare runs on its thread: let it finish, tick again
+        for job in list(RO._PREPARING.values()):
+            assert job["done"].wait(10)
+        RO.tick(db)
 
 
 def heartbeats(db, *nodes, k=RO.BAKE_HEARTBEATS):
