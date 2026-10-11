@@ -1695,6 +1695,8 @@ def cmd_listener(a):
             return
         if v.get("fleet_disabled"):
             print("listeners are disabled for the whole fleet (oarbank listener resume --all)")
+        if not v["nodes"]:
+            print("no node has a listener or a router mapping (oarbank listener set <node> <module>/<listener> assigns one)")
         for d in v["nodes"]:
             off = " (listeners disabled on this node)" if d["disabled"]["node"] else ""
             print(f"{d['hostname']} ({d['node_id']}){'' if d['online'] else ' offline'}{off}")

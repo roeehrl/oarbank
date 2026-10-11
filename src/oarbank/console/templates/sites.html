@@ -6,8 +6,8 @@
 <p class="small mut">A site is the nodes that share one internet line. Large transfers from two of them at once slow each other
 down, and a protected program on one of them may have to upload on time. While a protected process at a site is in a phase its
 rule tags <span class="mono">uplink</span> (or that phase cannot be read, or its node stops reporting), network-heavy fleet work
-pauses on <b>every</b> node of the site: dataset staging, uploads, checkpoints, releases and jobs whose stage declares
-<span class="mono">network = "heavy"</span>. Outside such phases the site's budget limits how many of them run at once.
+pauses on <b>every</b> node of the site: dataset staging, uploads (results and checkpoints), and jobs and workloads that
+declare <span class="mono">network = "heavy"</span>. Releases and agent updates are not held. Outside such phases the site's budget limits how many of them run at once.
 A node is at one site at most.</p>
 
 <section class="card wide" aria-labelledby="h-sites">

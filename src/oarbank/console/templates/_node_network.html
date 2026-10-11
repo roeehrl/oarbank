@@ -6,7 +6,7 @@
 {% import "_macros.html" as m with context %}
 {% set L = d.listeners %}
 {% set back = "/nodes/" ~ n.node_id ~ "#network" %}
-<h2 id="network">Network <span class="small mut">{% if L.reported_at %}(reported {{ L.reported_at | ago }}){% elif L.supported %}(no listener reported){% else %}(this agent does not support inbound listeners){% endif %}</span></h2>
+<h2 id="network">Network <span class="small mut">{% if L.reported_at %}(reported {{ L.reported_at | ago }}){% elif L.supported %}(no listener reported){% else %}(this agent does not support inbound listeners: update it to 2.10 or later){% endif %}</span></h2>
 <div class="card wide">
   <div class="row">
     <span class="small">{% if L.disabled.fleet %}<span class="chip bad">listeners disabled for the fleet</span>
