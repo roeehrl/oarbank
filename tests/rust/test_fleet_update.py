@@ -4,6 +4,7 @@ tarball install uses). A release is imported from its manifest and artifacts and
 agent downloads and verifies the package, drains and hands it to the runner; the runner installs it, points
 `current` at its agent and commits once the new agent confirmed. A release whose agent cannot start is rolled back by
 the runner to the package it kept, and the rollout halts on the failure."""
+import hashlib
 import json
 import os
 import subprocess
@@ -15,17 +16,21 @@ from conftest import agent_env, build_version, pointer  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 from helpers import stop_tree  # noqa: E402
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 def release_dir(binary, version, seq, dest):
-    """The release's assets as CI publishes them (the Linux tarball) and its manifest (scripts/fleet-manifest.py)."""
+    """A release's tarball for this machine (the format a Linux tarball install uses; the runner's tar install is the
+    same on every OS) and its manifest, canonical JSON as scripts/fleet-manifest.py writes it."""
+    from oarbank_sdk import portable
     dest.mkdir(parents=True)
-    plat = {"x86_64": "amd64", "aarch64": "arm64"}[os.uname().machine]
-    with tarfile.open(dest / f"oarbank-agent-{version}-linux-{plat}.tar.gz", "w:gz") as t:
-        t.add(binary, arcname="oarbank-agent")
-    subprocess.run([sys.executable, os.path.join(REPO, "scripts", "fleet-manifest.py"), version, str(dest), "--seq", str(seq),
-                    "--agent-min", "0.0.1"], check=True, capture_output=True)
+    plat = portable.host_platform()
+    name = f"oarbank-agent-{version}-{plat}.tar.gz"
+    with tarfile.open(dest / name, "w:gz") as t:
+        t.add(binary, arcname=binary.name)                          # oarbank-agent, oarbank-agent.exe on Windows
+    data = (dest / name).read_bytes()
+    manifest = {"type": "oarbank-fleet-release", "format": 1, "version": version, "seq": seq, "agent_min": "0.0.1",
+                "stops": [], "released_at": "2026-10-11T00:00:00Z", "expires": None, "notes": None,
+                "artifacts": [{"name": name, "role": "node", "platform": plat, "format": "tar",
+                               "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "agent_version": version}]}
+    (dest / f"oarbank-fleet-{version}.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
     return dest
 
 
