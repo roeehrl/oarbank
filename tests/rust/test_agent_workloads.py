@@ -203,7 +203,8 @@ def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigne
         wait(lambda: row(c)["report"].get("adopted") and row(c)["report"].get("pid") == leader, timeout=120)
         assert alive(daemon) and row(c)["fence"] == 1, row(c)
         # an evict rule holds it while it lasts
-        planned(c, "protection.rules.update", nid, {"config": {"schema": 1, "node": {"mode": "fleet_first", "memory": floors}, "rule": [
+        planned(c, "protection.rules.update", nid, {"config": {"schema": 1, "node": {
+            "mode": "fleet_first", "memory": floors, "defaults": {"cooldown": {"base_s": 1, "max_s": 1}}}, "rule": [
             {"id": "e2e-evict", "match": {"argv_regex": tag}, "active_when": {"for_s": 0}, "evict": {}, "exit_after_s": 0}]}})
         owner = subprocess.Popen(["/bin/sh", "-c", "sleep 600; :", tag])
         wait(lambda: row(c)["state"] == "held" and not alive(daemon) and not alive(leader), timeout=90)
