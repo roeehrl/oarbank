@@ -64,19 +64,19 @@ def adopt(old: Path, url: str, home: Path | None = None) -> dict:
     db = DB(home / "oarbank.sqlite3")
     if not (C.RELEASE_SIGNING and owner.anchors(db)):
         raise RescueError("a rescue needs signing mode and an owner key set: agents follow no other move from a lost coordinator")
-    old_cik = db.get_setting("coordinator_cik")
+    old_cik = db.get_state("coordinator_cik")
     fid = identity.fleet_id(db)
     tlsca.ensure_ca(home, fid)
     tlsca.trust_adopted_ca(home, (old / "tls" / "ca.pem").read_text(encoding="utf-8"))
     with db.tx():
         identity.set_role(db, "standby")
         for k in ("move_phase", "move_commit_decided", "move_rules_plan", "move_blockers", "move_postflight_pending"):
-            db.set_setting(k, None)
+            db.set_state(k, None)
         db.x("UPDATE coordinator_plans SET state='done' WHERE state NOT IN ('done','cancelled')")
         db.x("UPDATE nodes SET client_cert_not_after=0")      # every node renews under this CA at its first hello
         req = {"fleet_id": fid, "epoch": identity.epoch(db) + 1, "from_cik": old_cik,
                "to": {"url": url.rstrip("/"), "cik": identity.key(home).public_b64, "audit_pubkey": audit.Signer().public_b64}}
-        db.set_setting("rescue_request", req)
+        db.set_state("rescue_request", req)
         db.event("coordinator_rescue_adopted", reason=f"fleet {fid} from {old}, epoch {req['epoch']} pending")
     files.write_private(home / REQUEST, json.dumps(req, indent=1) + "\n")
     return req
@@ -86,7 +86,7 @@ def sign(path: Path, home: Path | None = None) -> dict:
     """Check the owner-signed move against the adopted fleet, add this coordinator's signature and take the fleet over."""
     home = Path(home or C.HOME)
     db = DB(home / "oarbank.sqlite3")
-    req = db.get_setting("rescue_request")
+    req = db.get_state("rescue_request")
     if not req:
         raise RescueError("nothing to sign: adopt a fleet first (python -m oarbank.coordinator.rescue adopt)")
     d = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -103,14 +103,14 @@ def sign(path: Path, home: Path | None = None) -> dict:
     Path(path).write_text(json.dumps(d, indent=1) + "\n", encoding="utf-8", newline="\n")
     last = db.one("SELECT MAX(last_event_id) m FROM audit_digests")["m"]
     with db.tx():
-        db.set_setting("coordinator_epoch", int(stmt["epoch"]))
+        db.set_state("coordinator_epoch", int(stmt["epoch"]))
         identity.set_role(db, "active")
-        db.set_setting("coordinator_url", stmt["to"]["url"])
-        db.set_setting("coordinator_cik", k.public_b64)
-        db.set_setting("move_phase", "idle")
-        db.set_setting("reaper_grace_until", time.time() + C.LEASE_TTL + 120)
-        db.set_setting("audit_rescue", {"after": last, "statement": mv["statement"], "owner_sig": mv["signatures"]["owner"]})
-        db.set_setting("rescue_request", None)
+        db.set_state("coordinator_url", stmt["to"]["url"])
+        db.set_state("coordinator_cik", k.public_b64)
+        db.set_state("move_phase", "idle")
+        db.set_state("reaper_grace_until", time.time() + C.LEASE_TTL + 120)
+        db.set_state("audit_rescue", {"after": last, "statement": mv["statement"], "owner_sig": mv["signatures"]["owner"]})
+        db.set_state("rescue_request", None)
         db.x("INSERT INTO coordinator_moves(move_id,plan_id,epoch,statement,sig_from,sig_to,sig_owner,state,created_at,"
              "not_before,ended_at,actor,reason) VALUES(?,NULL,?,?,NULL,?,?,'committed',?,?,?,'owner','rescue')",
              (stmt["move_id"], stmt["epoch"], mv["statement"], mv["signatures"]["to"], mv["signatures"]["owner"],

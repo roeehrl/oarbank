@@ -242,7 +242,8 @@ def rows_for(r, module: str, man: mf.Manifest, src: U.Source, now: float | None 
     if q == "datasets":
         return _datasets(r, module, man, p)
     if q == "module_settings":
-        return [r.get_setting(f"module_settings:{module}", {}) or {}]
+        from ..coordinator import effects
+        return [effects.module_settings(r, module)]
     if q == "module_events":
         return _events(r, module, p)
     if q == "nodes":

@@ -1,0 +1,51 @@
+# javelin: the core test suite's fixture module for host tools (not shipped). It asks for a JDK 17 or newer; its runner
+# reads the tools file the agent writes and the granted JDK's `release` file, and reports what it was given.
+manifest = 1
+
+[module]
+id = "dev.codonic.oarbank.javelin"
+version = "1.0.0"
+compat = "javelin1"
+publisher = "oarbank"
+license = "Apache-2.0"
+codeowners = ["roeehrl"]
+stability = "experimental"
+description = "Core test fixture: a host JDK resolved by version on each node"
+
+[requires]
+core = ">=2.9,<3"
+module_protocol = [1]
+runner_protocol = [1]
+platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]
+
+[coordinator]
+exec = ["python", "-I", "{bundle}/javelin_module.py"]
+runtime = { kind = "python" }
+capabilities = ["op.apply"]
+
+[runner]
+exec = ["python", "-I", "{bundle}/javelin_runner.py"]
+runtime = { kind = "python" }
+capabilities = ["deterministic_output"]
+
+[[stages]]
+name = "eval"
+timeout_s = 600
+requires = { resources = { cpu = 1, mem_gb = 0.25 } }
+
+[sandbox]
+tools = [{ id = "jdk", version = ">=17", trust = "code-exec" }]
+
+[results]
+schema = "schemas/result.schema.json"
+schema_version = 1
+determinism = "exact"
+digest = { version = 1, over = ["digest"] }
+fields = [{ name = "digest", type = "string" }]
+
+[[operations]]
+verb = "inspect"
+title = "Inspect the granted JDK"
+tier = "T1"
+target = "none"
+effects = ["campaigns.create", "jobs.enqueue"]

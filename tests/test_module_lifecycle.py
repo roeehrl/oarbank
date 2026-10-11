@@ -3,7 +3,6 @@ install (verified, nothing enabled), enable, canary on some nodes (their own rel
 new digest; judged by that version's process), promote, rollback, the kill switch, pins, uninstall, and
 the install refusals."""
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,12 +11,12 @@ from oarbank.coordinator import core, modcalls, modstore, ops, releases
 from oarbank_sdk import bundle as B
 
 from helpers import (CAPACITY, sign_in, DOCTOR_OK, FACTS, PARAMS, READY, RELAY_DIR, SCENES, certify, create_study,
-                     enrolled_node, fresh, golden_result, make_db, relay_result)
+                     enrolled_node, fresh, golden_result, make_db, relay_result, scratch)
 
 
 def relay_version(version: str, tweak: str = "", fields_type: str | None = None) -> Path:
     """A copy of the relay fixture at another version (a different digest)."""
-    d = Path(tempfile.mkdtemp()) / "relay"
+    d = scratch() / "relay"
     shutil.copytree(RELAY_DIR, d, ignore=shutil.ignore_patterns("__pycache__", "dist"))
     m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "1.0.0"', f'version = "{version}"')
     if fields_type:
@@ -30,7 +29,7 @@ def relay_version(version: str, tweak: str = "", fields_type: str | None = None)
 
 
 def bundle_of(src: Path) -> Path:
-    out, _ = B.build(src, Path(tempfile.mkdtemp()) / "m.mfb")
+    out, _ = B.build(src, scratch() / "m.mfb")
     return out
 
 
@@ -98,7 +97,7 @@ def test_install_refusals(db, tmp_path):
         modstore.install(db, bundle_of(relay_version("1.2.0", fields_type="number")), self_test=False)
     modstore.install(db, bundle_of(relay_version("2.0.0", fields_type="number")), self_test=False)   # a major may
     d = relay_version("1.3.0")
-    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.3,<3"', 'core = ">=3.0"')
+    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.9,<3"', 'core = ">=3.0"')
     (d / "oarbank-module.toml").write_text(m)
     with pytest.raises(modstore.InstallError, match="needs core >=3.0"):
         modstore.install(db, bundle_of(d), self_test=False)
@@ -118,7 +117,7 @@ def relay_declaring(version: str, requires: str = "", tail: str = "") -> Path:
     """The relay fixture at `version` with per-platform declarations: lines added to [requires], and
     tables appended to the manifest."""
     d = relay_version(version)
-    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.3,<3"', 'core = ">=2.3,<3"\n' + requires)
+    m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('core = ">=2.9,<3"', 'core = ">=2.9,<3"\n' + requires)
     (d / "oarbank-module.toml").write_text(m + tail)
     return d
 
@@ -268,7 +267,7 @@ def test_a_node_with_an_unrelated_digest_change_keeps_its_certification(db):
     """Certification is keyed by each module's digest: a new toy version re-certifies toy only."""
     n = certify(db, enrolled_node(db)[1])
     relay_before = state(db, n)
-    toy = Path(tempfile.mkdtemp()) / "toy"
+    toy = scratch() / "toy"
     from helpers import TOY_DIR
     shutil.copytree(TOY_DIR, toy, ignore=shutil.ignore_patterns("__pycache__", "dist"))
     (toy / "oarbank-module.toml").write_text((toy / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "0.1.0"', 'version = "0.2.0"'))
@@ -343,3 +342,17 @@ def test_the_fixture_modules_pass_the_sdk_conformance_kit():
                               "params": [PARAMS, {"samples": 0}]})
     assert rep.ok, rep.text()
     assert {c.status for c in rep.checks if c.suite == "runner" and "golden" in c.name} == {"skip"}   # no dataset files
+
+
+def test_a_canary_can_go_to_a_group(db):
+    """Canary to a group (docs/design/settings.md, "Canary to a group"): the group's members when it starts."""
+    a, b = (certify(db, enrolled_node(db, n)[1]) for n in ("lab", "other"))
+    install_via_api(db, relay_version("1.1.0"))
+    op(db, "groups.create", "Lab", params={"members": ["lab"]})
+    plan, r = planned(db, "modules.enable_canary", "relay@1.1.0", {"group": "Lab"})
+    assert plan["impact"]["nodes"] == ["lab"] and plan["impact"]["group"] == "Lab"
+    assert modstore.channel(db, "relay")["canary_nodes"] == [a["node_id"]]
+    assert db.one("SELECT reason FROM events WHERE kind='module_canary'")["reason"] == "relay 1.1.0 on the group Lab (lab)"
+    op(db, "groups.create", "Empty", params={"members": []})
+    with pytest.raises(core.ApiError, match="has no members"):
+        planned(db, "modules.enable_canary", "relay@1.1.0", {"group": "Empty"})

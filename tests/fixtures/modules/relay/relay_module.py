@@ -174,7 +174,8 @@ def op_apply(p: mp.OpApplyParams, ctx):
         jobs = _jobs(ctx.host, 0, base["params"], datasets, 1)
         effects = [mp.Effect(kind="campaigns.create", args={"campaign_id": cid, "name": q["name"], "priority": int(q.get("priority", 0)),
                                                            "weight": float(q.get("weight", 1.0)),
-                                                           **({"placement": q["placement"]} if q.get("placement") else {})}),
+                                                           **({"placement": q["placement"]} if q.get("placement") else {}),
+                                                           **({"settings": q["settings"]} if q.get("settings") else {})}),
                    mp.Effect(kind="store.write", args={"collection": "trial", "key": f"{cid}:0",
                                                        "doc": {"campaign_id": cid, "trial": 0, "label": base.get("label", "baseline"),
                                                                "params": base["params"], "created_at": time.time()}})]

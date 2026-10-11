@@ -16,22 +16,25 @@ pub fn resolve_exec(argv: &[Value], bundle: &Path, python: &Path) -> Vec<String>
     }).collect()
 }
 
-/// The per-module files the protocol passes by path: tools (resolved, as the sandbox grants them) and settings.
-pub fn grant_files(dir: &Path, entry: &Value, settings: &Value) -> std::io::Result<(PathBuf, PathBuf, Vec<String>)> {
+/// The per-module files the protocol passes by path: tools and settings. `granted` is the module's resolution on this
+/// node (tools.rs `granted`: `{tools, paths}`); only the tools the entry asks for are listed and granted, so a bootstrap
+/// entry (which asks for none) gets none.
+pub fn grant_files(dir: &Path, entry: &Value, settings: &Value, granted: &Value) -> std::io::Result<(PathBuf, PathBuf, Vec<String>)> {
     crate::fsutil::private_dir(dir)?;
     let mut tools = serde_json::Map::new();
     let mut paths = Vec::new();
     for t in entry["sandbox"]["tools"].as_array().cloned().unwrap_or_default() {
-        let id = t["id"].as_str().unwrap_or("").to_string();
-        let resolved: Vec<String> = t["paths"].as_array().cloned().unwrap_or_default().iter()
-            .filter_map(|p| p.as_str()).filter_map(|p| std::fs::canonicalize(p).ok()).map(|p| p.display().to_string()).collect();
-        paths.extend(resolved.iter().cloned());
-        tools.insert(id, json!(resolved));
+        let id = t["id"].as_str().unwrap_or("");
+        if let Some(inst) = granted["tools"].get(id) {
+            tools.insert(id.to_string(), inst.clone());
+            paths.extend(granted["paths"][id].as_str().map(str::to_string));
+        }
     }
     let tf = dir.join("tools.json");
     let sf = dir.join("settings.json");
-    std::fs::write(&tf, serde_json::to_vec(&Value::Object(tools))?)?;
-    std::fs::write(&sf, serde_json::to_vec(settings)?)?;
+    // each module's own files: a change to another module's settings or tools leaves these untouched
+    crate::fsutil::write_if_changed(&tf, &serde_json::to_vec(&Value::Object(tools))?)?;
+    crate::fsutil::write_if_changed(&sf, &serde_json::to_vec(settings)?)?;
     Ok((tf, sf, paths))
 }
 
@@ -69,10 +72,27 @@ pub fn base_env(module: &str, home: &Path, tmp: &Path) -> Vec<(String, String)> 
     env
 }
 
-pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings: &Value) -> Value {
+/// How much of a doctor's output the agent keeps when it is not a DoctorOutput: the end, where the error is.
+pub const OUTPUT_TAIL: usize = 4000;
+
+/// The last `n` characters of `s` (all of it when shorter).
+pub fn tail(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    s.chars().skip(count.saturating_sub(n)).collect()
+}
+
+/// The modules a doctor report offers in claims: those whose runner started (`ran`: their doctor printed a DoctorOutput),
+/// whatever their health. The coordinator places each stage by the report's checks and the module's certification.
+pub fn offered(rep: &Value) -> Vec<String> {
+    rep["modules"].as_object().map(|m| m.iter().filter(|(_, v)| v["ran"] == json!(true)).map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default()
+}
+
+pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings: &Value, tool_grants: &Value) -> Value {
     let name = entry["name"].as_str().unwrap_or("?");
     let started = Instant::now();
-    let fail = |detail: String| json!({"health": "unhealthy", "checks": [{"name": "doctor", "ok": false, "detail": detail}]});
+    // the runner did not start (or printed no DoctorOutput): `ran` false, the module is offered nowhere on this node
+    let fail = |detail: String| json!({"health": "unhealthy", "ran": false, "checks": [{"name": "doctor", "ok": false, "detail": detail}]});
     let bundle = rel.bundle(entry);
     let python = rt.module_python(&rel.dir, name);
     let data = l.module_data().join(name);
@@ -81,7 +101,7 @@ pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings:
         return fail("cannot create the module's data directory".into());
     }
     let grants = l.run().join(format!("doctor-{name}"));
-    let (tools_file, settings_file, tool_paths) = match grant_files(&grants, entry, settings) {
+    let (tools_file, settings_file, tool_paths) = match grant_files(&grants, entry, settings, tool_grants) {
         Ok(x) => x,
         Err(e) => return fail(format!("grant files: {e}")),
     };
@@ -138,17 +158,19 @@ pub fn run_one(l: &Layout, rt: &Runtime, rel: &Release, entry: &Value, settings:
         .unwrap_or_default();
     let last = out.0.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
     let Ok(d) = serde_json::from_str::<Value>(last) else {
-        return fail(format!("not a DoctorOutput: {}", out.1.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()));
+        let said = if out.1.trim().is_empty() { &out.0 } else { &out.1 };      // stderr, else stdout
+        return fail(format!("not a DoctorOutput: {}", tail(said.trim_end(), OUTPUT_TAIL)));
     };
     let health = match d["health"].as_str() {
         Some(h @ ("healthy" | "unhealthy" | "undetected")) => h.to_string(),
         _ => return fail(format!("DoctorOutput health is {}, not healthy, unhealthy or undetected", d["health"])),
     };
-    json!({"health": health, "checks": d["checks"].clone(), "capabilities": d["capabilities"].clone(),
+    json!({"health": health, "ran": true, "checks": d["checks"].clone(), "capabilities": d["capabilities"].clone(),
            "attrs": d["attrs"].clone(), "seconds": started.elapsed().as_secs_f64()})
 }
 
-/// Every module's doctor for the current release.
+/// Every module's doctor for the current release (`policy` as the agent hands it on: the coordinator's policy with the
+/// agent's own `tool_grants`).
 pub fn run_all(l: &Layout, rt: &Runtime, rel: &Release, policy: &Value) -> Value {
     let mut modules = serde_json::Map::new();
     for m in &rel.modules {
@@ -157,7 +179,7 @@ pub fn run_all(l: &Layout, rt: &Runtime, rel: &Release, policy: &Value) -> Value
         if settings.is_null() {
             settings = json!({});
         }
-        modules.insert(name.clone(), run_one(l, rt, rel, m, &settings));
+        modules.insert(name.clone(), run_one(l, rt, rel, m, &settings, &policy["tool_grants"][&name]));
     }
     json!({"at": now(), "release_id": rel.id, "modules": modules})
 }
@@ -170,6 +192,28 @@ pub fn now() -> f64 {
 mod tests {
     use super::*;
 
+    /// A module's settings file holds exactly that module's settings and is rewritten only when they change: setting
+    /// one module's node key never touches another module's file (docs/design/settings.md, "Module settings").
+    #[test]
+    fn a_modules_settings_file_changes_only_with_its_own_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = json!({"name": "a", "sandbox": {"tools": []}});
+        let policy = |a: Value, b: Value| json!({"module_settings": {"a": a, "b": b}});
+        let write = |p: &Value, m: &str| grant_files(&tmp.path().join(m), &entry, &p["module_settings"][m], &json!({})).unwrap().1;
+        let p1 = policy(json!({"vm_mem_gb": 8}), json!({"tile_size": 32}));
+        let (fa, fb) = (write(&p1, "a"), write(&p1, "b"));
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for f in [&fa, &fb] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(old).unwrap();
+        }
+        let p2 = policy(json!({"vm_mem_gb": 12}), json!({"tile_size": 32}));     // a's key changes, b's do not
+        let (fa, fb) = (write(&p2, "a"), write(&p2, "b"));
+        assert_eq!(std::fs::read_to_string(&fa).unwrap(), r#"{"vm_mem_gb":12}"#);
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), r#"{"tile_size":32}"#);
+        assert_eq!(std::fs::metadata(&fb).unwrap().modified().unwrap(), old, "b's settings file was rewritten");
+        assert_ne!(std::fs::metadata(&fa).unwrap().modified().unwrap(), old);
+    }
+
     /// The quoted names in one tuple assignment of the SDK's manifest.py, e.g. `RESERVED_ENV = ("PATH", ...)`.
     fn sdk_names(assignment: &str) -> Vec<String> {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../vendor/oarbank-sdk/src/oarbank_sdk/manifest.py"))
@@ -178,6 +222,34 @@ mod tests {
         let line_end = src[start..].find('\n').unwrap() + start;
         let end = if src[start..line_end].contains('(') { src[start..].find(')').unwrap() + start } else { line_end };
         src[start..end].split('"').skip(1).step_by(2).map(str::to_string).collect()
+    }
+
+    /// docs/design/stage-gating.md: a module is offered when its runner started (its doctor printed a DoctorOutput), healthy
+    /// or not; one whose doctor failed to run is offered nowhere.
+    #[test]
+    fn a_module_is_offered_when_its_runner_starts_whatever_its_health() {
+        let rep = json!({"modules": {
+            "ok": {"health": "healthy", "ran": true, "checks": []},
+            "sick": {"health": "unhealthy", "ran": true, "checks": [{"name": "pysam_import", "ok": false}]},
+            "away": {"health": "undetected", "ran": true, "checks": [{"name": "java17", "ok": false}]},
+            "broken": {"health": "unhealthy", "ran": false, "checks": [{"name": "doctor", "ok": false}]},
+            "old": {"health": "healthy", "checks": []}}});
+        let mut got = offered(&rep);
+        got.sort();
+        assert_eq!(got, ["away", "ok", "sick"]);
+        assert_eq!(offered(&json!({})), Vec::<String>::new());
+    }
+
+    /// The output of a doctor that printed no DoctorOutput is kept from its end, up to OUTPUT_TAIL characters.
+    #[test]
+    fn a_failed_doctors_output_keeps_its_end() {
+        assert_eq!(tail("abcdef", 3), "def");
+        assert_eq!(tail("ab", 3), "ab");
+        assert_eq!(tail("ééé", 2), "éé");
+        let long = format!("{}ImportError: dlopen failed (incompatible architecture)", "x".repeat(10_000));
+        let t = tail(&long, OUTPUT_TAIL);
+        assert_eq!(t.chars().count(), OUTPUT_TAIL);
+        assert!(t.ends_with("(incompatible architecture)"));
     }
 
     #[test]

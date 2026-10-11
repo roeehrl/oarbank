@@ -10,8 +10,6 @@ from . import clock
 from pathlib import Path
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT);
-
 CREATE TABLE IF NOT EXISTS enrollments (
   enrollment_id TEXT PRIMARY KEY, hostname TEXT, facts_json TEXT, peer_ip TEXT,
   ts_node_id TEXT, status TEXT NOT NULL,            -- pending|approved|claimed|rejected
@@ -29,7 +27,10 @@ CREATE TABLE IF NOT EXISTS nodes (
   agent_version TEXT, release_id TEXT, boot_id TEXT,
   cert_generation INT DEFAULT 0, cert_release TEXT, cert_os_version TEXT, cert_at REAL,
   platform TEXT, os TEXT, arch TEXT, os_version TEXT,   -- from the agent's facts (spec/platforms.md)
-  limits_json TEXT DEFAULT '{}', policy_json TEXT DEFAULT '{}',
+  settings_json TEXT, settings_digest TEXT, settings_rev INT,   -- the effective policy and caps the agent gets (settings/apply.py)
+  settings_applied_rev INT, settings_rejected_json TEXT,         -- what the agent reports it applied, and refused
+  settings_changed_at REAL,       -- when settings_rev last moved (the drift report: how long a node lags)
+  settings_managed_json TEXT,     -- what the machine's managed policy (MDM) sets, as the agent reports it (settings/apply.py)
   last_heartbeat_at REAL, last_hello_at REAL, capacity_json TEXT, telemetry_json TEXT,
   ready_datasets_json TEXT DEFAULT '[]', doctor_json TEXT, doctor_at REAL,
   breaker_failures INT DEFAULT 0, quarantine_reason TEXT, created_at REAL,
@@ -43,8 +44,15 @@ CREATE TABLE IF NOT EXISTS nodes (
   cik_pinned TEXT, cik_confirmed TEXT, cik_confirmed_by TEXT, cik_confirmed_at REAL,   -- the coordinator key the agent pinned
   install_coordinator_json TEXT, coordinator_move_json TEXT,
   folders_json TEXT,              -- the folders of the statement the agent applied: {id: {access, status}} (folders.py)
+  tools_json TEXT,                -- the host tools the agent detected: {detected_at, native_arch, tools: {id: [...]}} (tools.py)
+  want_detect INT DEFAULT 0,      -- tools.detect: ask the agent to detect its host tools again (the next directive)
+  detect_requested_at REAL,       -- when the last Re-detect was asked for (tools.py: "waiting for the node" until it reports)
   services_json TEXT, services_at REAL,   -- the agent's service report: {services: [...], probes: [...]} (protocol.md)
   clock_offset_s REAL);           -- the node's wall clock minus oarbankd's, at its last hello or heartbeat (protocol.md, "Clocks")
+
+-- host tool definitions an admin made or extended (tools.py; jdk and python are built in)
+CREATE TABLE IF NOT EXISTS tool_defs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, detector_json TEXT NOT NULL,
+  updated_by TEXT, updated_at REAL);
 
 CREATE TABLE IF NOT EXISTS node_samples (
   node_id TEXT, ts REAL, telemetry_json TEXT, capacity_json TEXT, busy INT,
@@ -172,7 +180,7 @@ CREATE TABLE IF NOT EXISTS modules (
   PRIMARY KEY (name, version));
 CREATE TABLE IF NOT EXISTS module_channels (
   name TEXT PRIMARY KEY, current TEXT, previous TEXT, canary TEXT, canary_nodes_json TEXT DEFAULT '[]',
-  disabled INT DEFAULT 0, updated_at REAL);
+  updated_at REAL);                               -- whether it runs is the setting [module] enabled
 CREATE TABLE IF NOT EXISTS module_pins (name TEXT NOT NULL, node_id TEXT NOT NULL, version TEXT NOT NULL,
   PRIMARY KEY (name, node_id));
 -- Module secrets (modsecrets.py): write-only values, encrypted under the coordinator's secrets key; node_id '' is the
@@ -213,7 +221,7 @@ CREATE TABLE IF NOT EXISTS coordinator_moves (
   created_at REAL, not_before REAL, ended_at REAL, actor TEXT, reason TEXT, final_snapshot_json TEXT, report_json TEXT,
   cancel_payload TEXT, cancel_sig TEXT,
   modules_json TEXT, force INT DEFAULT 0);          -- what modules said about the move; the operator's override of blockers
--- Immutable versions of each node's protection section (restore writes a new version)
+-- The history of each node's effective protection section (protection.record_if_changed), one row per change
 CREATE TABLE IF NOT EXISTS protection_versions (
   node_id TEXT NOT NULL, version INT NOT NULL, config_json TEXT NOT NULL, config_hash TEXT, actor TEXT, reason TEXT,
   source TEXT, created_at REAL, PRIMARY KEY (node_id, version));
@@ -263,7 +271,11 @@ class _TimedLock:
 
 
 # Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
-ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"}}
+ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
+                 "nodes": {"settings_json": "TEXT", "settings_digest": "TEXT",
+                           "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
+                           "tools_json": "TEXT", "want_detect": "INT DEFAULT 0", "settings_changed_at": "REAL",
+                           "settings_managed_json": "TEXT", "detect_requested_at": "REAL"}}
 
 
 def _ensure_columns(conn, table: str, cols: dict) -> None:
@@ -295,11 +307,27 @@ class DB:
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
+            from .settings import modkeys as settings_modkeys
+            from .settings import store as settings_store
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
-            self.conn.executescript("BEGIN;" + SCHEMA + ACCESS_SCHEMA + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
-            _ensure_columns(self.conn, "enrollments", ADDED_COLUMNS["enrollments"])
+            self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + settings_modkeys.SCHEMA + ACCESS_SCHEMA
+                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
+            for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
+                _ensure_columns(self.conn, table, cols)
+            settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
+        from .settings import migrate as settings_migrate
+        settings_migrate.run(self)              # a home made before the settings model: converted once
+        # host tools (docs/design/host-tools.md, "Migration"): the old tool registry becomes tool definitions, and the
+        # folder statements node statements
+        from .statements import migrate as statements_migrate
+        from .tools import migrate_registry
+        with self.tx():
+            migrate_registry(self)
+            statements_migrate(self)
+        from .protection import migrate as protection_migrate
+        protection_migrate(self)                # per-node protection sections: hoisted onto the settings chain once
 
     # -- low level ---------------------------------------------------------
     # Stored file paths are relative to the coordinator's home (the database's directory) whenever the file is inside
@@ -375,13 +403,13 @@ class DB:
         tmp.replace(dest)
         return dest
 
-    # -- settings ----------------------------------------------------------
-    def get_setting(self, key, default=None):
-        r = self.one("SELECT value_json FROM settings WHERE key=?", (key,))
+    # -- system state (machine state, never owner settings: those are settings/) ------------------------------------
+    def get_state(self, key, default=None):
+        r = self.one("SELECT value_json FROM system_state WHERE key=?", (key,))
         return json.loads(r["value_json"]) if r else default
 
-    def set_setting(self, key, value):
-        self.x("INSERT INTO settings(key,value_json) VALUES(?,?) "
+    def set_state(self, key, value):
+        self.x("INSERT INTO system_state(key,value_json) VALUES(?,?) "
                "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (key, json.dumps(value)))
 
     # -- events ------------------------------------------------------------

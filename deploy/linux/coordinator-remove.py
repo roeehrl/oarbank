@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Pre-removal cleanup, using the package's bundled Python (stdlib only).
+"""Pre-removal cleanup of per-user units, using the package's bundled Python (stdlib only).
 
-The wizard/helper must use the canonical unit names below and absolute executable
-paths under ROOT. For offline users with a custom XDG_CONFIG_HOME, write this
+Since 2.9 the coordinator is a system service (docs/design/coordinator-system-service.md),
+which coordinator-preremove.sh removes first; this finds what a 2.8 or earlier helper left in
+people's systemd user directories and a migration did not retire (one refused, or never
+run), so no unit is left running a payload that is about to disappear. Those helpers used
+the canonical unit names below and absolute executable paths under ROOT. For offline users with a custom XDG_CONFIG_HOME, write this
 registry even if XDG_DATA_HOME is customized, using the account's NSS home:
 
   ~/.local/share/oarbank/coordinator-package.json

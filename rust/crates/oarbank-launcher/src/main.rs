@@ -8,6 +8,8 @@
 //! within 10 minutes and within three starts, or the launcher flips back to the previous version and records
 //! `rolled_back` with the reason, which the old agent reports. Updates never replace the launcher.
 
+#[cfg_attr(not(windows), allow(dead_code))]
+mod container_support;
 mod node;
 mod setup;
 #[cfg_attr(target_os = "macos", path = "svc_launchd.rs")]
@@ -162,8 +164,11 @@ fn before_start(home: &Home) -> Result<()> {
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CHILD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-/// Stop: no new start, and ask the running agent to stop (SIGTERM on Unix; terminated on Windows, where a console
-/// control or the service manager's stop arrives here).
+/// Stop: no new start, and ask the running agent to stop. On Unix that is SIGTERM, and the launcher waits for the agent
+/// as long as it takes (the service manager's stop timeout, `AGENT_STOP_TIMEOUT_S`, bounds it). On Windows, where a
+/// console control or the service manager's stop arrives here and a process has no SIGTERM, the launcher sets the
+/// agent's stop event and ends the agent only if it has not stopped within that timeout (its runners' Job Objects
+/// then end with it).
 fn stop_now() {
     STOP.store(true, std::sync::atomic::Ordering::SeqCst);
     let c = CHILD.load(std::sync::atomic::Ordering::SeqCst);
@@ -171,14 +176,50 @@ fn stop_now() {
         #[cfg(unix)]
         unsafe { libc::kill(c, libc::SIGTERM) };
         #[cfg(windows)]
-        unsafe {
-            use windows_sys::Win32::Foundation::CloseHandle;
-            use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-            let h = OpenProcess(PROCESS_TERMINATE, 0, c as u32);
-            if !h.is_null() {
-                TerminateProcess(h, 0);
-                CloseHandle(h);
-            }
+        {
+            stop_event::set();
+            std::thread::spawn(move || {
+                let until = Instant::now() + Duration::from_secs(oarbank_core::service::AGENT_STOP_TIMEOUT_S as u64 - 5);
+                while Instant::now() < until && CHILD.load(std::sync::atomic::Ordering::SeqCst) == c {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                if CHILD.load(std::sync::atomic::Ordering::SeqCst) == c {
+                    eprintln!("oarbank-launcher: the agent did not stop in time; ending it");
+                    unsafe {
+                        use windows_sys::Win32::Foundation::CloseHandle;
+                        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                        let h = OpenProcess(PROCESS_TERMINATE, 0, c as u32);
+                        if !h.is_null() {
+                            TerminateProcess(h, 0);
+                            CloseHandle(h);
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Windows: the event that asks the agent this launcher started to stop (the agent's sys.rs `launcher_stop_event`),
+/// named after this launcher's pid; created before the first agent starts.
+#[cfg(windows)]
+mod stop_event {
+    use std::sync::OnceLock;
+    static EVENT: OnceLock<usize> = OnceLock::new();
+
+    pub fn create() {
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        let name: Vec<u16> = format!("Local\\oarbank-agent-stop-{}", std::process::id()).encode_utf16().chain([0]).collect();
+        // manual reset: it stays set for whichever agent opens it later
+        let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+        if !h.is_null() {
+            let _ = EVENT.set(h as usize);
+        }
+    }
+
+    pub fn set() {
+        if let Some(h) = EVENT.get() {
+            unsafe { windows_sys::Win32::System::Threading::SetEvent(*h as _) };
         }
     }
 }
@@ -199,10 +240,12 @@ fn handle_stop_requests() {
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_term as *const () as libc::sighandler_t);
     }
     #[cfg(windows)]
-    unsafe {
-        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_ctrl), 1);
+    {
+        stop_event::create();
+        unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_ctrl), 1) };
     }
 }
 
@@ -315,7 +358,14 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Some("setup") => return setup::setup(home.as_deref(), &rest),
+        // Windows: container support after the installer (container_support.rs; the MSI and its task run it)
+        Some("container-support") => {
+            let code = container_support::main(&rest)?;
+            std::process::exit(code);
+        }
         Some("remove") => return setup::remove(home.as_deref(), &rest),
+        // an upgrade's postinstall: the installed service definition, rendered again (it names its own home)
+        Some("service") if rest.get(1).map(String::as_str) == Some("refresh") => return svc::refresh(&rest[2..]),
         #[cfg(windows)]
         Some("helper-main") => return svc::helper_main(),
         #[cfg(windows)]

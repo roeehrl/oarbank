@@ -24,10 +24,17 @@ _last_fault: dict = {}
 
 def campaign_row(db: DB, c: dict) -> dict:
     """A campaign as modules see it (CampaignTickParams.campaign) and the API returns it; `placement` is
-    placement.summary (null: nothing is kept on one platform class)."""
+    placement.summary (null: nothing is kept on one platform class); `settings` the module's own settings as the
+    campaign's jobs get them (every key at fleet scope with the campaign's overrides on top, host capability
+    campaign_settings.v1); `overrides` what the campaign itself sets (docs/design/settings.md, "Campaign overrides")."""
+    from .settings import resolve as V
+    snap = V.snapshot(db)
+    overrides = {x["key"]: x["value"] for (scope, sid, _m, _k), x in snap.rows.items() if scope == "campaign" and sid == c["campaign_id"]}
     return {"campaign_id": c["campaign_id"], "module": c["module"], "name": c["name"], "state": c["state"],
             "priority": c["priority"], "weight": c["weight"], "labels": jl(c["labels_json"], {}) or {},
-            "created_at": c["created_at"], "finished_at": c["finished_at"], "placement": placement.summary(db, c["campaign_id"])}
+            "created_at": c["created_at"], "finished_at": c["finished_at"], "placement": placement.summary(db, c["campaign_id"]),
+            "settings": V.module_settings(snap, None, c["module"], scope=None, campaign=c["campaign_id"]),
+            "overrides": overrides}
 
 
 def campaign_jobs(db: DB, campaign_id: str, module: str | None = None) -> list[dict]:

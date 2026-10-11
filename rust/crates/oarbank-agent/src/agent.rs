@@ -17,6 +17,17 @@ use tracing::{info, warn};
 
 pub const VERSION: &str = crate::VERSION;
 
+/// How long a stopping agent gives its runners to stop, or to checkpoint first, before it kills them (each runner's
+/// own `stop_grace_s` or `checkpoint_grace_s` when shorter).
+pub const STOP_GRACE: Duration = Duration::from_secs(15);
+/// After that, how long it waits for the attempts' releases (and a last checkpoint's upload) to reach the coordinator.
+/// The two fit, with the services' stops, in the service managers' stop timeouts the launcher sets (60 s: launchd
+/// `ExitTimeOut`, systemd `TimeoutStopSec`, the Windows launcher's wait before it ends the agent).
+pub const STOP_REPORT: Duration = Duration::from_secs(10);
+/// The end reason of an attempt the agent releases because it is stopping (`AGENT_STOPPED`, no charge to the job or
+/// the node).
+pub const AGENT_STOP: &str = "agent_stop";
+
 /// An enrollment that cannot go on (the code was refused, the owner declined the machine): the agent goes back to
 /// waiting for a code. `.0` is the status error code.
 #[derive(Debug)]
@@ -48,8 +59,9 @@ pub struct Agent {
     /// Send hello instead of the next heartbeat (a new release is installed: the coordinator records it at hello).
     pub need_hello: bool,
     pub table: Table,
-    /// Modules whose doctor passed in the current release (offered in claims).
-    pub healthy: Vec<String>,
+    /// Modules whose runner started in the current release: their doctor printed a DoctorOutput, healthy or not (offered
+    /// in claims; the coordinator decides which of their stages run here: docs/design/stage-gating.md).
+    pub offered: Vec<String>,
     pub draining: bool,
     pub prot: Option<crate::prot::Protection>,
     /// Serve session helpers (`run --session-hub`: a system install's service).
@@ -65,7 +77,7 @@ pub struct Agent {
     pub containers: Option<crate::container_runtime::Containers>,
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
     images: Option<Arc<crate::imageset::Verifier>>,
-    /// The folder statement this node applies, and what it found for each folder (folders.rs).
+    /// The node statement this node applies (folders and added tool paths), and what it found for each folder (folders.rs).
     pub folders: crate::folders::Folders,
     /// Module services and probes (service protocol 1), created with the first release.
     pub services: Option<Arc<std::sync::Mutex<crate::services::ServiceManager>>>,
@@ -81,6 +93,29 @@ pub struct Agent {
     services_halted: bool,
     /// The status document (status.rs): joining, pending, connected, and errors with their codes.
     pub status: crate::status::Status,
+    /// The host tools this node detected (tools.rs), reported in hello and every heartbeat; Null before the first run.
+    pub tools: Value,
+    /// The `tool_pins` directive: paths chosen among what this node found, per module (tools.rs `granted`).
+    tool_pins: Value,
+    /// Detect again at the next chance: asked by the coordinator, a new statement, or never yet.
+    detect_due: bool,
+    detected: Option<std::time::Instant>,
+    /// The coordinator's settings revision this agent applied and the keys it refused (`settings` in heartbeats).
+    pub settings_report: Value,
+    /// The `policy` and `limits` as applied from the coordinator (or the table's defaults), before this machine's
+    /// managed settings tighten them: what a refused or missing key keeps, and what a change of managed policy re-applies to.
+    settings_base: Value,
+    /// This machine's managed settings (policy.rs `Settings`), raw, and who manages it (`ManagedByOrganizationName`).
+    pub managed: serde_json::Map<String, Value>,
+    pub managed_by: Option<String>,
+    /// When the managed policy was last read: at most once a minute, since a read runs plutil or reg.
+    managed_read: Option<std::time::Instant>,
+}
+
+/// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
+pub fn initial_directives() -> Value {
+    use oarbank_protection::settings::{defaults, Section};
+    json!({"policy": defaults(Section::Policy), "limits": defaults(Section::Limits)})
 }
 
 /// What the session asks of the rest of the agent each round (releases, jobs, protection), so the session logic can
@@ -109,16 +144,23 @@ impl Agent {
         cfg.save(&layout.config())?;
         let release = release::current(&layout);
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
-        let a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
-                   directives: Value::Null, hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
-                   last_release_error: None, need_hello: false, table: Table::default(), healthy: vec![],
+        let mut a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
+                   directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
+                   last_release_error: None, need_hello: false, table: Table::default(), offered: vec![],
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
                    containers: None, images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
-            services_halted: false, coord_install: Default::default(), status: Default::default(), layout };
+            services_halted: false, coord_install: Default::default(), status: Default::default(), layout,
+            tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null,
+            settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None };
+        a.refresh_managed();                    // the defaults the agent starts from are tightened, too
+        // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
+        // containers the facts show what the agent finds now
+        #[cfg(target_os = "macos")]
+        let _ = std::fs::remove_file(crate::colima::report_file(&a.layout.home));
         // folder entries a statement or a release no longer grants are removed when the agent starts, too
         #[cfg(windows)]
         crate::sandbox_windows::reconcile_folder_grants(&a.layout, a.release.as_ref(), &a.folders);
@@ -297,7 +339,7 @@ impl Agent {
 
     pub async fn hello(&mut self) -> Result<Value, ApiError> {
         let mut body = json!({"agent_version": VERSION, "boot_id": self.boot_id, "facts": facts::collect(&self.layout.home),
-                              "ready_datasets": staging::ready(&self.layout),
+                              "ready_datasets": staging::ready(&self.layout), "tools": self.tools,
                               "live_attempts": self.table.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         merge(&mut body, self.hooks.hello_extra());
@@ -317,10 +359,13 @@ impl Agent {
         };
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
-                              "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(),
+                              "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(), "tools": self.tools,
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         if let Some(svc) = &self.services {
             merge(&mut body, svc.lock().unwrap().report());              // `services` and `probes`
+        }
+        if !self.settings_report.is_null() {
+            body["settings"] = self.settings_report.clone();
         }
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
@@ -332,7 +377,89 @@ impl Agent {
         Ok(d)
     }
 
+    /// Read this machine's managed policy again when a minute has passed since the last read.
+    fn refresh_managed(&mut self) {
+        if self.managed_read.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        self.managed_read = Some(std::time::Instant::now());
+        let p = crate::policy::read();
+        self.set_managed(p.settings, p.managed_by);
+    }
+
+    /// Take new managed settings; they tighten the directives in force at once (and every directive after).
+    pub fn set_managed(&mut self, settings: serde_json::Map<String, Value>, by: Option<String>) {
+        if settings == self.managed && by == self.managed_by {
+            return;
+        }
+        let (_, _, _, refused) = self.with_managed();
+        let before: Vec<String> = refused.into_iter().map(|r| r.key).collect();
+        self.managed = settings;
+        self.managed_by = by;
+        let (policy, limits, _, refused) = self.with_managed();
+        let keys: Vec<String> = refused.into_iter().map(|r| r.key).collect();
+        if !keys.is_empty() && keys != before {
+            // the keys only: values stay out of logs (policy.rs)
+            warn!(keys = %keys.join(", "), "this machine's managed policy sets settings it may not set, or invalid values; they are ignored");
+        }
+        if self.directives.is_object() {
+            self.directives["policy"] = policy;
+            self.directives["limits"] = limits;
+        }
+    }
+
+    /// The settings in force: the coordinator's (`settings_base`) with this machine's managed settings laid over, each
+    /// only tightening. (policy, limits, the managed keys, the managed keys refused.)
+    fn with_managed(&self) -> (Value, Value, Vec<oarbank_protection::settings::Managed>, Vec<oarbank_protection::settings::Rejected>) {
+        use oarbank_protection::settings::{apply_managed, unknown_managed, Section};
+        let (policy, mut set, mut refused) = apply_managed(Section::Policy, &self.settings_base["policy"], &self.managed);
+        let (limits, more_set, more_refused) = apply_managed(Section::Limits, &self.settings_base["limits"], &self.managed);
+        set.extend(more_set);
+        refused.extend(more_refused);
+        refused.extend(unknown_managed(&self.managed));
+        (policy, limits, set, refused)
+    }
+
+    /// The directive's `policy` and `limits` checked against the settings table (docs/design/settings.md): a refused
+    /// or missing key keeps the value it had and is reported, with the revision, in the next heartbeat. This machine's
+    /// managed settings then tighten them ("Managed on this machine"), reported only when the policy sets any.
+    fn apply_settings(&mut self, d: &Value) -> Value {
+        use oarbank_protection::settings::{validate, Section};
+        let mut out = d.clone();
+        if !d.is_object() || (d.get("policy").is_none() && d.get("limits").is_none()) {
+            return out;
+        }
+        let (policy, mut rejected) = validate(Section::Policy, &d["policy"], &self.settings_base["policy"]);
+        let (limits, more) = validate(Section::Limits, &d["limits"], &self.settings_base["limits"]);
+        rejected.extend(more);
+        for r in &rejected {
+            warn!(key = %r.key, reason = %r.reason, "a setting from the coordinator was refused; the node keeps its previous value");
+        }
+        self.settings_base = json!({"policy": policy, "limits": limits});
+        let (policy, limits, set, refused) = self.with_managed();
+        out["policy"] = policy;
+        out["limits"] = limits;
+        if let Some(rev) = d["settings_rev"].as_i64() {
+            let mut rep = json!({"applied_rev": rev,
+                "rejected": rejected.iter().map(|r| json!({"key": r.key, "reason": r.reason})).collect::<Vec<_>>()});
+            if !self.managed.is_empty() {
+                rep["managed"] = set.iter().map(|m| json!({"key": m.key, "value": m.value, "binding": m.binding})).collect();
+                if !refused.is_empty() {
+                    rep["managed_refused"] = refused.iter().map(|r| json!({"key": r.key, "reason": r.reason})).collect();
+                }
+                if let Some(by) = &self.managed_by {
+                    rep["managed_by"] = json!(by);
+                }
+            }
+            self.settings_report = rep;
+        }
+        out
+    }
+
     async fn after_directives(&mut self, d: &Value) {
+        self.refresh_managed();
+        let applied = self.apply_settings(d);
+        let d = &applied;
         if let Some(n) = d["node_id"].as_str() {
             self.node_id = Some(n.to_string());
         }
@@ -350,11 +477,18 @@ impl Agent {
             self.cfg.release_pubkey = self.signing.pinned_key.clone();
             let _ = self.cfg.save(&self.layout.config());
         }
+        if !d["tool_pins"].is_null() && d["tool_pins"] != self.tool_pins {
+            self.tool_pins = d["tool_pins"].clone();
+            self.rerun_doctors = true;                          // the tools files change with the pins
+        }
+        if d["detect_tools"].as_bool() == Some(true) {
+            self.detect_due = true;
+        }
+        if d["statement"].is_object() {
+            self.observe_statement(&d["statement"].clone());
+        }
         if d["release"].is_object() {
             self.install_release(&d["release"].clone()).await;
-        }
-        if d["folders"].is_object() {
-            self.observe_folders(&d["folders"].clone());
         }
         for (key, stop) in [("cancel", Stop::Cancel), ("revoke", Stop::Revoke), ("kill", Stop::Revoke)] {
             for aid in d[key].as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_i64) {
@@ -376,7 +510,8 @@ impl Agent {
             }
         }
         if d["run_doctor"].as_bool() == Some(true) && self.doctor.is_none() {
-            self.run_doctors(&d["policy"].clone()).await;
+            let policy = self.with_grants(&d["policy"]);
+            self.run_doctors(&policy).await;
         }
         if d["agent_update"].is_object() {
             if let Some(api) = self.api.clone() {
@@ -421,7 +556,7 @@ impl Agent {
         s.set_gpu_apis(crate::gpuapi::host(&self.gpu_apis));
         let limits = &self.directives["limits"];
         // a module the coordinator disabled (its kill switch) has every service disabled here: stopped, never offered
-        let mut policy = self.directives["policy"].clone();
+        let mut policy = self.with_grants(&self.directives["policy"]);
         let off: Vec<&str> = self.directives["modules_disabled"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).collect();
         if !off.is_empty() {
             let mut disabled: Vec<Value> = policy["disabled_services"].as_array().cloned().unwrap_or_default();
@@ -472,8 +607,9 @@ impl Agent {
                 self.need_hello = true;
                 #[cfg(windows)]
                 crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
+                self.detect_tools().await;                      // the release carries the fleet's tool definitions
                 self.sync_services();
-                let policy = self.directives["policy"].clone();
+                let policy = self.with_grants(&self.directives["policy"]);
                 self.run_doctors(&policy).await;
             }
             Err(e) => {
@@ -511,8 +647,7 @@ impl Agent {
                 self.fold_requires(&mut rep);
                 self.fold_gpu_apis(&mut rep);
                 info!(report = %rep["modules"], "doctors ran");
-                self.healthy = rep["modules"].as_object().map(|m| m.iter().filter(|(_, v)| v["health"] == "healthy")
-                    .map(|(k, _)| k.clone()).collect()).unwrap_or_default();
+                self.offered = doctor::offered(&rep);
                 self.doctor = Some(rep);
             }
             Err(e) => warn!(error = %e, "doctor task failed"),
@@ -577,29 +712,68 @@ impl Agent {
         json!({"cik_pinned": fp, "coordinator_move_state": self.move_state})
     }
 
-    /// A folder statement in a directive (folders.rs): verified against the pinned release key, checked folder by folder
-    /// and applied; on Windows the folder entries no applied statement or current release grants any more are removed.
-    fn observe_folders(&mut self, d: &Value) {
-        // Oarbank's data: the agent's home, and the Oarbank directory it sits in by default (beside a coordinator's)
-        let home = &self.layout.home;
-        let data_root = match home.parent() {
-            Some(p) if p.file_name().is_some_and(|n| n == "Oarbank") => p.to_path_buf(),
-            _ => home.clone(),
-        };
+    /// The node's statement in a directive (folders.rs): verified against the pinned release key, its folders checked one
+    /// by one and applied; on Windows the folder entries no applied statement or current release grants any more are
+    /// removed. Tool paths it adds are detected again (tools.rs checks and verifies them).
+    fn observe_statement(&mut self, d: &Value) {
         match crate::folders::apply(&self.folders, d, self.node_id.as_deref().unwrap_or(""),
-                                    self.cfg.coordinator_trust.fleet_id.as_deref(), self.signing.pinned_key.as_deref(), &data_root) {
+                                    self.cfg.coordinator_trust.fleet_id.as_deref(), self.signing.pinned_key.as_deref(),
+                                    &data_root(&self.layout.home)) {
             Ok(Some(f)) => {
-                info!(seq = f.seq, folders = %f.report(), "folder statement applied");
+                info!(seq = f.seq, folders = %f.report(), tools = f.tools.len(), "statement applied");
                 if let Err(e) = f.save(&self.layout.state().join("folders.json")) {
-                    warn!(error = %e, "cannot keep the folder statement");
+                    warn!(error = %e, "cannot keep the statement");
+                }
+                if f.tools != self.folders.tools {
+                    self.detect_due = true;
                 }
                 self.folders = f;
                 #[cfg(windows)]
                 crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
             }
             Ok(None) => {}
-            Err(e) => warn!(error = %e, "folder statement refused (the last applied one stays)"),
+            Err(e) => warn!(error = %e, "statement refused (the last applied one stays)"),
         }
+    }
+
+    /// Detect the host tools now (tools.rs): the built-in ones, the release's definitions, the hints file and the
+    /// statement's added paths. A change re-runs the doctors (their tools files change) and reconfigures the services.
+    pub async fn detect_tools(&mut self) {
+        let defs = crate::tools::defs(self.release.as_ref().map(|r| &r.tools).unwrap_or(&Value::Null));
+        let (home, added) = (self.layout.home.clone(), self.folders.tools.clone());
+        let found = tokio::task::spawn_blocking(move || {
+            let run = crate::tools::sandboxed_runner(&home);
+            crate::tools::detect(&defs, &crate::tools::hints(&home), &added, &data_root(&home), &run)
+        }).await;
+        self.detect_due = false;
+        self.detected = Some(std::time::Instant::now());
+        match found {
+            Ok(rep) => {
+                if !crate::tools::same(&rep, &self.tools) {
+                    info!(tools = %rep["tools"], "host tools detected");
+                    if !self.tools.is_null() && self.release.is_some() {
+                        self.rerun_doctors = true;
+                    }
+                }
+                self.tools = rep;
+            }
+            Err(e) => warn!(error = %e, "tool detection task failed"),
+        }
+    }
+
+    /// Whether detection is due: asked for, never run, or the slow timer ran out.
+    fn detection_due(&self) -> bool {
+        self.detect_due || self.detected.is_none_or(|t| t.elapsed() >= crate::tools::REDETECT_EVERY)
+    }
+
+    /// The policy the agent hands doctors, services and runners: the coordinator's, with this node's resolution of each
+    /// module's tool requests (`tool_grants`, tools.rs `grants`), which grant_files reads.
+    fn with_grants(&self, policy: &Value) -> Value {
+        let mut p = if policy.is_object() { policy.clone() } else { json!({}) };
+        let defs = crate::tools::defs(self.release.as_ref().map(|r| &r.tools).unwrap_or(&Value::Null));
+        p["tool_grants"] = crate::tools::grants(&self.tools, self.release.as_ref().map(|r| r.modules.as_slice()).unwrap_or(&[]),
+                                                &self.tool_pins, &defs);
+        p
     }
 
     /// Owner key sets and move statements in a directive (or a 410's body): verify, then pin or record.
@@ -725,7 +899,7 @@ impl Agent {
     }
 
     /// The container runtimes, once a release has a module approved for containers and a runtime exists here (on
-    /// Windows it always does: it reports what is missing itself).
+    /// Windows and macOS it always does: it reports what is missing itself).
     fn container_runtime(&mut self) -> Option<crate::container_runtime::Containers> {
         let wants = self.release.as_ref().is_some_and(|r| r.modules.iter()
             .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))));
@@ -733,7 +907,19 @@ impl Agent {
             return None;
         }
         if self.containers.is_none() {
-            self.containers = crate::container_runtime::for_node(&self.layout);
+            #[cfg(target_os = "macos")]
+            {
+                // the agent's own runtime publishes its report (the facts' `containers`) and comes up now, in the
+                // background (docs/design/macos-containers.md, "Bring-up")
+                self.containers = crate::container_runtime::for_node_mac(&self.layout, true);
+                if let Some(rts) = &self.containers {
+                    rts.all().iter().for_each(|rt| rt.recheck());
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.containers = crate::container_runtime::for_node(&self.layout);
+            }
         }
         self.containers.clone()
     }
@@ -853,7 +1039,7 @@ impl Agent {
         let f = facts::collect(&self.layout.home);
         let cores = f["cpu"]["logical"].as_f64().unwrap_or(1.0);
         let mem = f["memory_gb"].as_f64().unwrap_or(8.0);
-        let reserve_mem = self.directives["policy"]["os_reserve_gb"].as_f64().unwrap_or(4.0);
+        let reserve_mem = self.directives["policy"]["os_reserve_gb"].as_f64().unwrap_or(oarbank_protection::settings_table::OS_RESERVE_GB);
         let t = self.table.lock().unwrap();
         let used_cpu: f64 = t.values().map(|j| j.cpu).sum();
         let used_mem: f64 = t.values().map(|j| j.mem_gb).sum();
@@ -877,7 +1063,7 @@ impl Agent {
     pub async fn claim(&mut self) -> Result<usize, ApiError> {
         let d = &self.directives;
         if self.draining || d["desired_state"].as_str() != Some("active") || d["lifecycle"].as_str() != Some("ready")
-            || self.release.is_none() || self.healthy.is_empty() || self.need_hello {
+            || self.release.is_none() || self.offered.is_empty() || self.need_hello {
             return Ok(0);
         }
         let (cpu, mem) = self.free();
@@ -891,9 +1077,12 @@ impl Agent {
         }
         let rel = self.release.clone().expect("checked");
         let cap = self.prot.as_ref().and_then(|p| p.capacity.as_ref());
-        let body = json!({"free_cpu": cpu, "free_mem_gb": mem, "modules": self.healthy, "release_id": rel.id,
+        // the work an active rule pauses: the coordinator grants none of it (it would be paused at once, released after
+        // the longest pause and granted here again)
+        let body = json!({"free_cpu": cpu, "free_mem_gb": mem, "modules": self.offered, "release_id": rel.id,
                           "ready_datasets": staging::ready(&self.layout), "pool_jobs_only": cap.is_some_and(|c| c.pool_jobs_only),
-                          "gpu_jobs": cap.and_then(|c| c.gpu_jobs)});
+                          "gpu_jobs": cap.and_then(|c| c.gpu_jobs), "paused": cap.map(|c| c.paused.clone()).unwrap_or_default(),
+                          "paused_by": cap.and_then(|c| c.paused_by.clone())});
         let r = self.api().map_err(io_err)?.post("/v1/agent/claim", &body).await?;
         let received = std::time::Instant::now();
         let grants = r["grants"].as_array().cloned().unwrap_or_default();
@@ -902,7 +1091,7 @@ impl Agent {
         }
         let rt = self.runtime().map_err(io_err)?;
         let ctx = Arc::new(jobs::Ctx { api: self.api.clone().expect("connected"), layout: Layout::new(self.layout.home.clone()),
-                                       runtime: rt, release: rel.clone(), policy: self.directives["policy"].clone(),
+                                       runtime: rt, release: rel.clone(), policy: self.with_grants(&self.directives["policy"]),
                                        table: self.table.clone(), registry: self.prot.as_ref().map(|p| p.registry.clone()),
                                        containers: self.container_runtime(),
                                        images: self.image_verifier().map_err(io_err)?,
@@ -922,7 +1111,7 @@ impl Agent {
                 usage: Default::default(), log_bytes: 0, started_at: doctor::now(),
                 caps: runner["capabilities"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
                 bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None,
-                needs, wake: Default::default() });
+                needs, wake: Default::default(), stop_by: None });
             info!(attempt = aid, kind = g["kind"].as_str().unwrap_or(""), module = g["module"].as_str().unwrap_or(""), "granted");
             tokio::spawn(jobs::run(ctx.clone(), g.clone(), crate::clock::local_deadline(g, received)));
         }
@@ -947,8 +1136,57 @@ impl Agent {
     /// services a release dropped, which the process's exit would cut short.
     pub async fn run(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
         let r = self.rounds(stop).await;
+        // however the rounds end (a stop, a fatal error, a rollback), no runner outlives the agent
+        self.stop_jobs().await;
         self.settle_services().await;
         r
+    }
+
+    /// The agent is ending: ask every runner to stop (a checkpointing one to checkpoint first) as a release does, kill
+    /// what has not stopped by STOP_GRACE, and release its attempt (`agent_stop`: requeued, no charge). A job a cancel or
+    /// revoke already ends keeps its own ending. Bounded, so the agent ends within its service manager's stop timeout.
+    pub async fn stop_jobs(&mut self) {
+        let deadline = std::time::Instant::now() + STOP_GRACE;
+        let n = {
+            let mut t = self.table.lock().unwrap();
+            for j in t.values_mut() {
+                j.stop_by = Some(deadline);
+                j.stop.get_or_insert_with(|| Stop::Release(AGENT_STOP.into()));
+                j.wake.notify_one();
+            }
+            t.len()
+        };
+        if n == 0 {
+            return;
+        }
+        info!(attempts = n, "stopping the running jobs: each runner is asked to stop (or checkpoint first) and its attempt released");
+        // a job protection froze could not act on the request: it runs again to stop
+        if let Some(p) = self.prot.as_mut() {
+            p.thaw_all(&self.table);
+        }
+        let until = deadline + STOP_REPORT;
+        while std::time::Instant::now() < until && !self.table.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // whatever is still here (its report hung, or it never got that far): its runner is killed and its attempt
+        // released here, briefly; the coordinator ends any it does not hear about at the next hello (agent_restart)
+        let left: Vec<(i64, Option<i32>, Option<Stop>)> = self.table.lock().unwrap().values()
+            .map(|j| (j.attempt_id, j.pgid, j.stop.clone())).collect();
+        for (aid, pgid, stop) in left {
+            if let Some(pg) = pgid {
+                crate::procs::signal_group(pg, crate::procs::Sig::Kill);
+            }
+            let reason = match stop {
+                Some(Stop::Release(r)) => r,
+                Some(Stop::Cancel) => "user_cancel".into(),
+                _ => continue,
+            };
+            warn!(attempt = aid, %reason, "still running when the agent stopped: killed");
+            if let Ok(api) = self.api() {
+                let _ = tokio::time::timeout(Duration::from_secs(2),
+                                             api.post(&format!("/v1/attempts/{aid}/release"), &json!({"reason": reason}))).await;
+            }
+        }
     }
 
     /// Wait for the stops of services a release no longer has (services.rs `Stops`).
@@ -959,26 +1197,42 @@ impl Agent {
     }
 
     async fn rounds(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
+        // runners an earlier agent left running (it was killed, or crashed): ended before this one takes work, so none
+        // runs twice and none holds the machine for an attempt the coordinator ends at hello (runners.rs)
+        #[cfg(unix)]
+        for line in crate::runners::reap(&self.layout, crate::runners::Whose::Ended) {
+            warn!("{line}");
+        }
         staging::sweep_partials(&self.layout);
         jobs::clear_workdirs(&self.layout);
         self.reap_containers().await;
         self.probe_gpu_apis().await;                // before any service is offered: a GPU service waits for it
+        self.detect_tools().await;                  // hello reports them
         let mut backoff = Duration::from_secs(2);
+        let mut stopped = stop.clone();
         loop {
             if *stop.borrow() {
                 return Ok(0);
             }
             if !keys::have_cert(&self.layout) {
-                if let Err(e) = self.enroll(Duration::from_secs(10), None).await {
+                // waiting for the owner's approval holds no work: a stop ends it at once
+                let enrolled = tokio::select! {
+                    r = self.enroll(Duration::from_secs(10), None) => r,
+                    Ok(_) = stopped.wait_for(|s| *s) => return Ok(0),
+                };
+                if let Err(e) = enrolled {
                     if e.downcast_ref::<EnrollmentEnded>().is_some() {
                         return Err(e);                  // refused or declined: main goes back to waiting for a code
                     }
                     warn!(error = %e, "enrollment failed");
-                    tokio::time::sleep(backoff).await;
+                    if sleep_or_stop(&mut stopped, backoff).await {
+                        return Ok(0);
+                    }
                     backoff = (backoff * 2).min(Duration::from_secs(300));
                     continue;
                 }
             }
+            let mut ticks = stop.clone();
             let round = async {
                 self.connect().await.map_err(|e| ApiError::Http { status: 0, code: "identity".into(), detail: e.to_string(),
                                                                   retry_after: None, body: Box::default() })?;
@@ -995,7 +1249,10 @@ impl Agent {
                     let until = std::time::Instant::now() + Duration::from_secs_f64(self.cfg.heartbeat_s);
                     while std::time::Instant::now() < until {
                         self.protect();
-                        tokio::time::sleep(Duration::from_secs(2).min(until.saturating_duration_since(std::time::Instant::now()))).await;
+                        // a stop request ends the wait at once
+                        if sleep_or_stop(&mut ticks, Duration::from_secs(2).min(until.saturating_duration_since(std::time::Instant::now()))).await {
+                            break;
+                        }
                     }
                     if *stop.borrow() {
                         return Ok::<i32, ApiError>(0);
@@ -1029,12 +1286,16 @@ impl Agent {
                         return Ok(crate::selfupdate::SWAP_EXIT);
                     }
                     self.drain_services().await;
+                    if self.detection_due() {
+                        self.detect_tools().await;
+                        self.sync_services();
+                    }
                     if std::mem::take(&mut self.rerun_doctors) && self.release.is_some() {
                         // the container runtime checks again too (Windows: what it missed may be installed by now)
                         if let Some(rts) = self.container_runtime() {
                             rts.all().iter().for_each(|rt| rt.recheck());
                         }
-                        let policy = self.directives["policy"].clone();
+                        let policy = self.with_grants(&self.directives["policy"]);
                         self.run_doctors(&policy).await;
                     }
                     self.claim().await?;
@@ -1075,11 +1336,32 @@ impl Agent {
                         }
                     }
                     let wait = e.retry_after().unwrap_or(backoff);
-                    tokio::time::sleep(wait).await;
+                    if sleep_or_stop(&mut stopped, wait).await {
+                        return Ok(0);
+                    }
                     backoff = (backoff * 2).min(Duration::from_secs(120));
                 }
             }
         }
+    }
+}
+
+/// Sleep for `d`, or less if a stop is requested meanwhile; true when the agent is to stop.
+async fn sleep_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>, d: Duration) -> bool {
+    // (a stop channel whose sender is gone never stops it: that branch is then disabled)
+    let stopped = tokio::select! {
+        Ok(_) = stop.wait_for(|s| *s) => true,
+        _ = tokio::time::sleep(d) => false,
+    };
+    stopped || *stop.borrow()
+}
+
+/// Oarbank's data: the agent's home, and the Oarbank directory it sits in by default (beside a coordinator's). No folder
+/// or tool path may lie in or around it.
+pub fn data_root(home: &std::path::Path) -> std::path::PathBuf {
+    match home.parent() {
+        Some(p) if p.file_name().is_some_and(|n| n == "Oarbank") => p.to_path_buf(),
+        _ => home.to_path_buf(),
     }
 }
 
@@ -1180,6 +1462,68 @@ pub mod tests {
     }
 
     /// The owner key set a directive carries pins its rescue locations; a rescue move published there is recorded as
+    /// The coordinator's settings: a section is checked key by key against the generated table; a refused key keeps
+    /// its last value and is reported with the revision (docs/design/settings.md), nothing falls back silently.
+    #[test]
+    fn settings_from_the_coordinator_are_checked_and_reported() {
+        use oarbank_protection::settings::{defaults, Section};
+        let tmp = crate::scratch("agent-settings");
+        let home = tmp.path().join("agent");
+        let mut agent = Agent::open(Layout::new(home), Some("https://127.0.0.1:9")).unwrap();
+        agent.set_managed(Default::default(), None);                          // whatever this machine's own policy sets
+        assert_eq!(agent.directives["policy"]["job_mem_gb"], json!(1.5));      // before the first heartbeat: the table's defaults
+        let mut policy = defaults(Section::Policy);
+        policy["job_mem_gb"] = json!(2.5);
+        let d = agent.apply_settings(&json!({"policy": policy, "limits": defaults(Section::Limits), "settings_rev": 7}));
+        assert_eq!(d["policy"]["job_mem_gb"], json!(2.5));
+        assert_eq!(agent.settings_report, json!({"applied_rev": 7, "rejected": []}));
+        agent.directives = d;
+        let mut bad = defaults(Section::Policy);
+        bad["job_mem_gb"] = json!("abc");
+        let d = agent.apply_settings(&json!({"policy": bad, "limits": defaults(Section::Limits), "settings_rev": 8}));
+        assert_eq!(d["policy"]["job_mem_gb"], json!(2.5));                      // the last applied value, not a default
+        assert_eq!(agent.settings_report["applied_rev"], json!(8));
+        assert_eq!(agent.settings_report["rejected"][0]["key"], json!("job_mem_gb"));
+    }
+
+    /// A machine's managed settings only tighten what the coordinator sends, from before the first heartbeat on, and
+    /// are reported with who manages it; a key managed policy may not set is refused and reported, not applied.
+    #[test]
+    fn managed_settings_only_tighten_the_coordinators() {
+        use oarbank_protection::settings::{defaults, Section};
+        let tmp = crate::scratch("agent-managed");
+        let mut agent = Agent::open(Layout::new(tmp.path().join("agent")), Some("https://127.0.0.1:9")).unwrap();
+        let managed = json!({"run_on_battery": false, "jobs": 4, "job_mem_gb": 3, "os_reserve_gb": "6", "enforce": "hard"});
+        agent.set_managed(managed.as_object().unwrap().clone(), Some("Example".into()));
+        // before the first heartbeat: the table's defaults, tightened
+        assert_eq!((&agent.directives["policy"]["os_reserve_gb"], &agent.directives["limits"]["enforce"]), (&json!(6), &json!("hard")));
+        assert_eq!((&agent.directives["limits"]["jobs"], &agent.directives["policy"]["job_mem_gb"]), (&json!(4), &json!(1.5)));
+        let mut policy = defaults(Section::Policy);
+        policy["run_on_battery"] = json!(true);
+        policy["os_reserve_gb"] = json!(10);
+        let mut limits = defaults(Section::Limits);
+        limits["jobs"] = json!(2);
+        let d = agent.apply_settings(&json!({"policy": policy, "limits": limits, "settings_rev": 3}));
+        assert_eq!(d["policy"]["run_on_battery"], json!(false));                // managed off holds
+        assert_eq!(d["limits"]["jobs"], json!(2));                              // managed 4 does not loosen 2
+        assert_eq!(d["policy"]["os_reserve_gb"], json!(10));
+        assert_eq!(d["limits"]["enforce"], json!("hard"));
+        assert_eq!(d["policy"]["job_mem_gb"], json!(1.5));                      // refused: not managed
+        assert_eq!(agent.settings_report, json!({"applied_rev": 3, "rejected": [],
+            "managed": [{"key": "run_on_battery", "value": false, "binding": true},
+                        {"key": "os_reserve_gb", "value": 6, "binding": false},
+                        {"key": "jobs", "value": 4, "binding": false},
+                        {"key": "enforce", "value": "hard", "binding": true}],
+            "managed_refused": [{"key": "job_mem_gb", "reason": "not a setting managed policy may set"}],
+            "managed_by": "Example"}));
+        agent.directives = d;
+        // the managed policy goes away: the coordinator's values apply at once, and the report is as without one
+        agent.set_managed(Default::default(), None);
+        assert_eq!((&agent.directives["policy"]["run_on_battery"], &agent.directives["limits"]["enforce"]), (&json!(true), &json!("soft")));
+        agent.apply_settings(&json!({"policy": defaults(Section::Policy), "limits": defaults(Section::Limits), "settings_rev": 4}));
+        assert_eq!(agent.settings_report, json!({"applied_rev": 4, "rejected": []}));
+    }
+
     /// The doctor report always names the node's capabilities, even before a release: the coordinator grants stages
     /// whose `requires.capabilities` only on nodes that report them.
     #[test]
@@ -1193,7 +1537,8 @@ pub mod tests {
     }
 
     /// The doctor report carries the GPU probe; a module whose runner needs an API this host lacks is `undetected`
-    /// (never offered or certified here), one that needs it in containers or names none is left to its own doctor.
+    /// (never certified here; the coordinator keeps its jobs off by GPU_API_MISSING), one that needs it in containers or
+    /// names none is left to its own doctor.
     #[test]
     fn the_doctor_report_names_the_gpu_apis_and_a_module_needing_another_is_undetected() {
         let tmp = crate::scratch("agent-gpuapis");
@@ -1208,7 +1553,7 @@ pub mod tests {
             entry("cuda", json!({"use": "shared", "apis_any": ["cuda"]})),
             entry("metal", json!({"use": "exclusive", "apis_any": ["metal", "cuda"]})),
             entry("boxed", json!({"use": "exclusive", "apis_any": ["cuda"], "in_container": true})),
-            entry("cpu", json!({"use": "none", "apis_any": []}))] });
+            entry("cpu", json!({"use": "none", "apis_any": []}))], tools: Value::Null });
         let ok = json!({"health": "healthy", "checks": []});
         let mut rep = json!({"modules": {"cuda": ok, "metal": ok, "boxed": ok, "cpu": ok}});
         agent.fold_gpu_apis(&mut rep);

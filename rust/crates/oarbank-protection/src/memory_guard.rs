@@ -83,6 +83,11 @@ impl GuardLevel {
     }
 }
 
+/// Swap growth counts only while free memory is under this multiple of the soft floor (30 % at the default 12 %).
+/// With more free than that, growing swap is the kernel's housekeeping, not pressure: Linux swaps idle anonymous
+/// pages out to keep file cache (swappiness) and Windows writes modified pages to its paging file ahead of need.
+pub const SWAP_GROWTH_FREE_FACTOR: f64 = 2.5;
+
 /// The soft floor stops admission; the hard floor evicts the largest-footprint fleet job, one every 15 s,
 /// until free memory has recovered by the reclaim margin (the Kubernetes guard against re-eviction).
 #[derive(Debug, Clone)]
@@ -151,8 +156,10 @@ impl MemoryGuard {
             self.swap_history.push((now, sw));
             self.swap_history.retain(|h| now - h.0 <= 120.0);
         }
-        let growth = self.swap_growth_mb_min(now);
         let free = s.free_pct();
+        let growth = self
+            .swap_growth_mb_min(now)
+            .filter(|_| free < floors.soft_free_pct * SWAP_GROWTH_FREE_FACTOR);
         let mut lvl = GuardLevel::Clear;
         let mut why: Vec<String> = vec![];
         if s.age_s > self.stale_after_s {

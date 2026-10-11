@@ -2,6 +2,10 @@
 # Install -First unattended with no properties: both services run, the node waits unjoined (its status document says
 # so), oarbank-node is on the machine PATH and answers `status --json`, the oarbank:// handler, the join window and the
 # Oarbank Node tray app (with its self-test) are in place; uninstall it and check that PATH and the handler are clean.
+# Install it with CONTAINERS=1: the MSI exits 0 or 3010 (never 1603: the WSL package, itself an MSI, is never installed
+# inside it), registers the container support task, which starts by itself once the installer has ended, runs
+# `oarbank-agent containers install` as LocalSystem and records the outcome (whatever the runner's WSL makes of it);
+# any WSL installation starts after the agent's installation ended; uninstalling removes the task and its record.
 # Install it again for an unreachable coordinator (COORDINATOR=, the node then tries to enroll), check both services,
 # open loopback for a test AppContainer through the elevated helper and see it close when its owner ends; open one again
 # and keep its owner running through a major upgrade to -Second, which keeps it (helper_windows.rs: a restarted helper
@@ -115,6 +119,8 @@ function Owner([int]$port) {
 }
 
 $Installed = "$env:ProgramFiles\Oarbank"
+$SupportTask = "OarbankContainerSupport"                       # container_support.rs TASK
+$SupportKey = "HKLM:\SOFTWARE\Codonic\Oarbank\ContainerSupport"  # container_support.rs KEY
 $StatusFile = "$env:ProgramData\Oarbank\status\node.json"
 $Protocol = "Registry::HKEY_CLASSES_ROOT\oarbank"
 $Shortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Oarbank Node.lnk"
@@ -154,6 +160,10 @@ function CheckNodePartsGone([string]$when) {
   Check (-not (Test-Path $Shortcut)) "$when`: the Start menu shortcut is gone"
 }
 
+function TaskPresent { & schtasks.exe /query /tn $SupportTask 2>$null | Out-Null; $LASTEXITCODE -eq 0 }
+
+function Support { Get-ItemProperty -Path $SupportKey -ErrorAction SilentlyContinue }
+
 function Until([scriptblock]$cond, [int]$seconds = 30) {
   $deadline = (Get-Date).AddSeconds($seconds)
   while (-not (& $cond) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
@@ -181,6 +191,41 @@ Check ($tray.ExitCode -eq 0) "the Oarbank Node tray app's self-test: $((Get-Cont
 Msi "/x" $First "uninstall-unjoined.log"
 Check (-not (Service $Agent) -and -not (Service $Helper)) "the uninstall removes both services"
 CheckNodePartsGone "uninstalled"
+
+# 1b. container support: registered by the MSI, run after it
+$since = Get-Date
+Msi "/i" $First "install-containers.log" @("CONTAINERS=1", "COORDINATOR=https://127.0.0.1:9")
+$log = Get-Content -Raw "$Logs\install-containers.log"
+Check ($log -match "(Doing action|Action start [0-9:]+): ScheduleContainers" -and $log -notmatch "oarbank-agent\.exe`"? containers install") `
+  "the MSI schedules container support and runs no containers install inside itself"
+$rec = Support
+Check ($rec -and $rec.State -in @("scheduled", "installing", "waiting", "restart", "done", "failed") -and $rec.Detail -notmatch "could not register") `
+  "the MSI recorded container support ($($rec.State): $($rec.Detail))"
+$defined = & schtasks.exe /query /tn $SupportTask /xml 2>$null | Out-String
+Check (($defined -match "<UserId>S-1-5-18</UserId>" -and $defined -match "<EventTrigger>" -and $defined -match "<BootTrigger>") -or
+       ($rec -and $rec.State -in @("done", "failed"))) "the container support task runs as LocalSystem after the installer and at boot (or already ran)"
+# the installer's end (MsiInstaller 1033 for this product) starts it: nobody runs it here
+$started = Until { (Support).State -ne "scheduled" } 180
+Check $started "the container support task started by itself once the installer had ended ($((Support).State))"
+if (-not $started) { & schtasks.exe /run /tn $SupportTask | Out-Null }
+$ended = Until { (Support).State -in @("done", "failed", "restart", "waiting") } 1500
+$rec = Support
+Check $ended "container support reached an outcome: $($rec.State) ($($rec.Detail)), attempt $($rec.Attempts)"
+if ($rec.State -in @("done", "failed")) {
+  Check (Until { -not (TaskPresent) } 30) "the task deleted itself after its outcome ($($rec.State))"
+} else {
+  Check (TaskPresent) "the task stays for the next start of Windows ($($rec.State))"
+}
+# never nested: any WSL installation began after this product's installation had ended
+$ours = Get-WinEvent -FilterHashtable @{LogName = "Application"; ProviderName = "MsiInstaller"; Id = 1033; StartTime = $since} -ErrorAction SilentlyContinue |
+  Where-Object { $_.Properties[0].Value -eq "Oarbank agent" } | Sort-Object TimeCreated | Select-Object -First 1
+$wsl = @(Get-WinEvent -FilterHashtable @{LogName = "Application"; ProviderName = "MsiInstaller"; Id = 1040; StartTime = $since} -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match "wsl" })
+Check ($ours -and @($wsl | Where-Object { $_.TimeCreated -lt $ours.TimeCreated }).Count -eq 0) `
+  "no WSL installation began inside the agent's ($($wsl.Count) WSL installation(s), the agent's ended $($ours.TimeCreated))"
+Msi "/x" $First "uninstall-containers.log"
+Check (-not (TaskPresent) -and -not (Support)) "the uninstall removes the container support task and its record"
+Check (-not (Service $Agent) -and -not (Service $Helper)) "the uninstall removes both services (CONTAINERS=1)"
 
 # 2. install for a coordinator that never answers: the node tries to enroll (and retries), the install still succeeds
 Msi "/i" $First "install.log" @("COORDINATOR=https://127.0.0.1:9")

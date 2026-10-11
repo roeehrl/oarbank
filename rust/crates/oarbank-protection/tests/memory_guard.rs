@@ -29,11 +29,12 @@ fn soft_and_hard_floors() {
 fn swap_growth_and_stale_signals() {
     let floors = MemoryFloors::default();
     let mut g = MemoryGuard::new();
-    g.update(&m(30.0, 0).with_swap(1.0), &floors, 0.0);
-    let r = g.update(&m(30.0, 0).with_swap(1.4), &floors, 30.0);
+    // 50 of 64 GB used: 21.9 % free, under 2.5 × the soft floor, so growing swap is pressure
+    g.update(&m(50.0, 0).with_swap(1.0), &floors, 0.0);
+    let r = g.update(&m(50.0, 0).with_swap(1.4), &floors, 30.0);
     assert_eq!(r.0, GuardLevel::Soft); // +800 MB/min
     assert_eq!(g.reason, "swap +819 MB/min");
-    let hard = g.update(&m(30.0, 0).with_swap(2.2), &floors, 50.0);
+    let hard = g.update(&m(50.0, 0).with_swap(2.2), &floors, 50.0);
     assert_eq!(hard.0, GuardLevel::Hard);
     let mut s = MemoryGuard::new();
     assert_eq!(
@@ -41,6 +42,25 @@ fn swap_growth_and_stale_signals() {
         GuardLevel::Soft
     );
     assert_eq!(s.reason, "memory signals stale (20 s)");
+}
+
+/// A Windows node (15.8 GB) was held at "swap +282 MB/min" with 54 % of its memory free: the commit charge beyond
+/// physical use had been read as swap. Swap growth with that much free is housekeeping, never a floor.
+#[test]
+fn swap_growth_with_plenty_free_is_not_pressure() {
+    let floors = MemoryFloors::default();
+    let mut g = MemoryGuard::new();
+    let pc = |swap: f64| MemorySignals::new(15.8, 7.3, 0).with_swap(swap);
+    g.update(&pc(0.50), &floors, 0.0);
+    g.update(&pc(0.64), &floors, 30.0);
+    assert_eq!(g.update(&pc(0.78), &floors, 60.0).0, GuardLevel::Clear);
+    assert_eq!(g.reason, "");
+    // the same growth once free memory is under 30 % counts (and 2 GB/min is the hard floor)
+    let mut h = MemoryGuard::new();
+    let tight = |swap: f64| MemorySignals::new(15.8, 11.5, 0).with_swap(swap);
+    h.update(&tight(0.50), &floors, 0.0);
+    assert_eq!(h.update(&tight(0.64), &floors, 30.0).0, GuardLevel::Soft);
+    assert_eq!(h.update(&tight(2.0), &floors, 60.0).0, GuardLevel::Hard);
 }
 
 #[test]

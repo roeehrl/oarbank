@@ -5,5 +5,6 @@
                 "configs": {"type": "array", "items": {"type": "object"}, "title": "Configs"},
                 "priority": {"type": "integer", "title": "Priority"},
                 "placement": {"type": "object", "title": "Placement"},
+                "settings": {"type": "object", "title": "Settings while it runs"},
                 "group_by": {"enum": ["trial", "dataset"], "title": "Group jobs by"},
                 "platforms": {"type": "array", "items": {"type": "string"}, "title": "Platforms"}}}

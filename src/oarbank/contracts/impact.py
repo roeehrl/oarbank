@@ -37,10 +37,11 @@ def label(key: str) -> str:
 
 
 def rows(impact: dict | None, skip=(MATCHES,)) -> list[dict]:
-    """[{"label", "items": [str, ...]}] for every key of the impact with a value, except those in `skip`."""
+    """[{"label", "items": [str, ...]}] for every key of the impact with a value, except those in `skip` and those whose
+    name starts with `_` (structured detail a page draws itself, such as a settings change set's per-node diff)."""
     out = []
     for k, v in (impact or {}).items():
-        if k in skip or v in (None, "", [], {}):
+        if k in skip or k.startswith("_") or v in (None, "", [], {}):
             continue
         if k.endswith("_s") and isinstance(v, (int, float)) and not isinstance(v, bool):
             items = [duration(v)]

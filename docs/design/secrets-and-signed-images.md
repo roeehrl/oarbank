@@ -72,7 +72,7 @@ There is no `required` flag and no manifest scope: a stage that lists a secret n
 
   | Coordinator OS | Where the key is |
   |---|---|
-  | macOS | the login Keychain, a generic password `module-secrets` (the store's default there) |
+  | macOS | an owner-only file `<home>/keys/module-secrets.key` in the system service's home (since 2.9; before, the login Keychain) |
   | Linux | `<home>/keys/module-secrets.key`, mode 0600 in a 0700 directory owned by the coordinator's account |
   | Windows | `<home>\keys\module-secrets.dpapi`, the key wrapped with DPAPI (`CryptProtectData`, for the coordinator service's virtual account) in an owner-only file (windows-coordinator.md) |
 
@@ -154,7 +154,7 @@ The secrets key cannot leave its machine (the Keychain cannot export it, and it 
 | The module's coordinator side | Only with `secrets:read:self`, module scope | The permission is in the manifest, so in the digest the owner installs and the approval diff |
 | A runner of another stage of the module | No | Its grant carries no secrets; the file is in the declaring job's own work directory, which no other job's sandbox may read |
 | Another module, a service, a probe, doctor | No | Never delivered; work directories are per attempt and outside every other sandbox |
-| A database or backup thief | No | Ciphertexts only; the key is in the Keychain or an owner-only file on the coordinator host |
+| A database or backup thief | No | Ciphertexts only; the key is in an owner-only file (or DPAPI) on the coordinator host |
 | Someone with the coordinator account | Yes | They hold the key and the database; out of scope, as for every coordinator credential |
 | The node's owner or root | Yes, while the job runs | The file is on their disk for the attempt; a node the owner does not trust should get node-scoped secrets of its own, or none |
 | A declaring runner itself | Yes, by design | Redaction catches careless logging; the egress allowlist limits where it can send the key |

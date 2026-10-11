@@ -1,5 +1,6 @@
 //! User presence on macOS: the HID system's idle time (keyboard, mouse, trackpad), and a Screen Sharing session
-//! (someone using the Mac remotely is present whatever the local keyboard says).
+//! (someone using the Mac remotely is present whatever the local keyboard says, unless the node policy's
+//! `screen_sharing_present` is off; `presence::hid`).
 
 use super::iokit::{matching_service, property};
 use super::{all_pids, cf, path};
@@ -19,23 +20,31 @@ pub fn screen_sharing() -> bool {
         .any(|pid| path(pid).is_some_and(|p| p.ends_with("/screensharingd")))
 }
 
-#[derive(Debug, Default)]
-pub struct NativePresence;
+#[derive(Debug)]
+pub struct NativePresence {
+    screen_sharing_present: bool,
+}
+
+impl Default for NativePresence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl NativePresence {
     pub fn new() -> Self {
-        Self
+        Self {
+            screen_sharing_present: true,
+        }
     }
 }
 
 impl Presence for NativePresence {
     fn read(&mut self) -> PresenceReading {
-        if screen_sharing() {
-            return PresenceReading::new(Some(0.0), "screen sharing");
-        }
-        match hid_idle_s() {
-            Some(s) => PresenceReading::new(Some(s), "hid"),
-            None => PresenceReading::new(None, "unknown: IOHIDSystem has no HIDIdleTime"),
-        }
+        crate::presence::hid::presence(screen_sharing(), hid_idle_s(), self.screen_sharing_present)
+    }
+
+    fn set_screen_sharing_present(&mut self, on: bool) {
+        self.screen_sharing_present = on;
     }
 }

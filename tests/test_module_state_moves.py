@@ -148,9 +148,9 @@ def test_modules_block_shape_and_finish_a_move(tmp_path, db, monkeypatch):
     time.sleep(1.1)
     coordmove.driver_tick(db)                           # draining; the toy blocks
     coordmove.driver_tick(db)
-    assert coordmove.phase(db) == "draining" and db.get_setting("move_blockers") == ["toy: mid-round"]
+    assert coordmove.phase(db) == "draining" and db.get_state("move_blockers") == ["toy: mid-round"]
     fx(db, {"kind": "store.delete", "args": {"collection": "toy_block", "key": "now"}})
-    db.set_setting("move_preflight_at", 0)
+    db.set_state("move_preflight_at", 0)
     coordmove.driver_tick(db)                           # unblocked -> frozen -> final snapshot
     assert coordmove.phase(db) == "final_ready"
     snap = json.loads(coordmove.move(db)["final_snapshot_json"])
@@ -170,10 +170,10 @@ def test_modules_block_shape_and_finish_a_move(tmp_path, db, monkeypatch):
     assert [f["path"] for f in modfiles.listing(db_b2, "toy")] == ["notes/a.txt"]
     assert not db_b2.one("SELECT 1 FROM module_store WHERE module='toy' AND collection='toy_scratch'")
     assert not db_b2.one("SELECT 1 FROM blobs WHERE digest=?", (big_digest,))
-    assert db_b2.get_setting("move_postflight_pending")["move_id"] == m["move_id"]
+    assert db_b2.get_state("move_postflight_pending")["move_id"] == m["move_id"]
     modcalls.use(db_b2)
     out = modlife.postflight(db_b2)                     # the toy rebuilds its cache and records the move
-    assert out["toy"]["ok"] and db_b2.get_setting("move_postflight_pending") is None
+    assert out["toy"]["ok"] and db_b2.get_state("move_postflight_pending") is None
     doc = json.loads(db_b2.one("SELECT doc_json FROM module_store WHERE module='toy' AND collection='toy_moves' AND key=?",
                                (m["move_id"],))["doc_json"])
     assert doc["postflight"] and doc["rebuilt"] == ["cache/"]

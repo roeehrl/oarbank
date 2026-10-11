@@ -3,33 +3,36 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="htmx-config" content='{"allowEval": false, "allowScriptTags": false, "selfRequestsOnly": true, "historyCacheSize": 0, "includeIndicatorStyles": false}'>
+<meta name="htmx-config" content='{"allowEval": false, "allowScriptTags": false, "selfRequestsOnly": true, "historyCacheSize": 0, "includeIndicatorStyles": false, "timeout": 30000}'>
 <meta name="csrf-token" content="{{ csrf }}">
 <title>{% block title %}Oarbank{% endblock %}</title>
-<link rel="stylesheet" href="/static/app.css">
-<link rel="stylesheet" href="/static-ui/ui.css">
-<link rel="stylesheet" href="/static/uplot.min.css">
-<script src="/static/htmx.min.js"></script>
-<script src="/static/htmx-sse.js"></script>
-<script src="/static/uplot.min.js"></script>
-<script src="/static/app.js" defer></script>
-<script src="/static-ui/ui.js" defer></script>
+<link rel="stylesheet" href="{{ asset('/static/app.css') }}">
+<link rel="stylesheet" href="{{ asset('/static-ui/ui.css') }}">
+<link rel="stylesheet" href="{{ asset('/static/uplot.min.css') }}">
+<script src="{{ asset('/static/htmx.min.js') }}"></script>
+<script src="{{ asset('/static/htmx-sse.js') }}"></script>
+<script src="{{ asset('/static/uplot.min.js') }}"></script>
+<script src="{{ asset('/static/app.js') }}" defer></script>
+<script src="{{ asset('/static-ui/ui.js') }}" defer></script>
 </head>
 <body hx-ext="sse" sse-connect="/sse" data-version="{{ meta.version }}" data-boot="{{ meta.boot_id }}">
 {% import "_macros.html" as m with context %}
 <span hidden aria-hidden="true" hx-trigger="sse:heartbeat"></span>{# lets app.js see heartbeats (htmx-sse only emits listened events) #}
-<div id="stale-banner" role="status">Data may be out of date; last update <span id="stale-age"></span>. Reconnecting…</div>
+<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>{# app.js: state transitions only, never polls #}
+<div id="stale-banner"><span id="stale-msg">Live updates paused, reconnecting; data may be out of date</span>; last update <span id="stale-age"></span>. <button type="button" data-reload data-always>Reload</button></div>
 <header>
   <b>Oarbank</b>
-  <a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/datasets">Datasets</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}
+  <nav class="main-nav" aria-label="Sections"><a href="/">Fleet</a><a href="/modules">Modules</a><a href="/agent">Agent</a><a href="/coordinator">Coordinator</a><a href="/campaigns">Campaigns</a><a href="/jobs">Jobs</a><a href="/datasets">Datasets</a><a href="/events">Events</a><a href="/audit">Audit</a><a href="/verify">Verify</a><a href="/groups">Groups</a><a href="/settings">Settings</a>{% if role == 'admin' %}<a href="/access">Access</a>{% endif %}</nav>
   {% if not meta.coordinator_ok %}<span class="chip bad">coordinator unreachable{% if meta.coordinator_down_since %} since {{ meta.coordinator_down_since | hm }}{% endif %}</span>{% endif %}
-  <span class="who">as of {{ meta.built_at | hm }} · <a href="/account">{{ actor }}</a></span>
+  <span class="who"><span id="live" class="live" data-state="connecting" title="Connecting to live updates"><i class="dot" aria-hidden="true"></i><span class="live-text">Connecting…</span></span> · as of <time id="as-of">{{ meta.built_at | hm }}</time> · <a href="/account">{{ actor }}</a></span>
   <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Sign out</button></form>
   {{ m.op_form("fleet.pause", "fleet", "Pause fleet", cls="danger", always=True) }}
 </header>
 <main>
-{% if flash %}<div class="flash {{ flash_kind }}" role="status">{{ flash }}</div>{% endif %}
-{% if coord %}<div class="flash warn" role="status">{% if coord.role == 'handed_off' %}This coordinator handed off; it only redirects agents now.
+{% if flash %}<div class="flash {{ flash_kind }}" role="{{ 'alert' if flash_kind == 'bad' else 'status' }}">{{ flash }}</div>{% endif %}
+{% if coord and coord.state == 'per_user' %}<div class="flash warn" role="status">This coordinator runs as a per-user service: it stops when {{ coord.account or 'its owner' }} logs out and does not start after a restart.
+<a href="/coordinator">Move it to a system service</a></div>
+{% elif coord %}<div class="flash warn" role="status">{% if coord.role == 'handed_off' %}This coordinator handed off; it only redirects agents now.
 {% elif coord.role == 'standby' %}This coordinator is a standby move target.
 {% else %}Coordinator move {{ coord.state | replace('_', ' ') }}{% if coord.to %} to <span class="mono">{{ coord.to }}</span>{% endif %}{% if coord.not_before and coord.state == 'pending' %}, starts {{ coord.not_before | ts }}{% endif %}{% if coord.phase not in ('idle',) %} ({{ coord.phase }}){% endif %}.{% endif %}
 <a href="/coordinator">Review{% if coord.state in ('pending', 'awaiting_owner') %} or cancel{% endif %}</a></div>{% endif %}

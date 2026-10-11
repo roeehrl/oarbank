@@ -43,6 +43,8 @@ def test_user_agent_definition(launcher, tmp_path):
     assert p["Label"] == "dev.example.test" and p["KeepAlive"] is True and p["ProcessType"] == "Standard"
     assert p["ProgramArguments"][1:] == ["--home", str(tmp_path / "a b"), "run", "--coordinator", "https://c.example:7443"]
     assert p["StandardOutPath"] == str(tmp_path / "a b" / "logs" / "launcher.log") and "UserName" not in p
+    # Login Items, Allow in the Background lists it as Oarbank Node (with the app's icon), not as the signing team
+    assert p["AssociatedBundleIdentifiers"] == ["dev.codonic.oarbank.node"]
     assert f"launchctl bootstrap gui/{os.getuid()} " in out
     if shutil.which("plutil"):
         f = tmp_path / "x.plist"
@@ -55,9 +57,41 @@ def test_system_daemon_runs_as_the_named_user(launcher, tmp_path):
     out = run(launcher, "--home", str(tmp_path), "service", "install", "--system", "--user", "oarbank", "--dry-run")
     assert out.startswith("# /Library/LaunchDaemons/dev.codonic.oarbank.agent.plist")
     assert "<key>UserName</key><string>oarbank</string>" in out and "launchctl bootstrap system " in out
+    assert "<key>AssociatedBundleIdentifiers</key><array><string>dev.codonic.oarbank.node</string></array>" in out
     out = run(launcher, "--home", str(tmp_path), "service", "uninstall", "--system", "--dry-run")
     assert "launchctl bootout system/dev.codonic.oarbank.agent" in out
 
+
+
+@macos
+def test_refresh_renders_a_28_job_again_with_the_stop_timeout(launcher, tmp_path, monkeypatch):
+    # what a package upgrade runs: a 2.8 job (no ExitTimeOut) is rendered again from what it holds, then reloaded
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = run(launcher, "--home", str(tmp_path / "a b"), "service", "install", "--label", "dev.example.refresh", "--dry-run",
+              "--", "--coordinator", "https://c.example:7443")
+    xml = out.split("\n", 1)[1]
+    xml = xml[:xml.index("</plist>") + len("</plist>")] + "\n"
+    assert "<key>ExitTimeOut</key><integer>60</integer>" in xml
+    old = xml.replace("  <key>ExitTimeOut</key><integer>60</integer>\n", "")
+    job = tmp_path / "Library/LaunchAgents/dev.example.refresh.plist"
+    job.parent.mkdir(parents=True)
+    job.write_text(old)
+    out = run(launcher, "service", "refresh", "--label", "dev.example.refresh", "--dry-run")
+    assert out.startswith(f"# {job}\n") and xml in out                    # the same job, with today's keys
+    uid = os.getuid()
+    assert f"launchctl bootout gui/{uid}/dev.example.refresh\nlaunchctl bootstrap gui/{uid} {job}\n" in out
+    assert job.read_text() == old                                           # a dry run writes nothing
+    job.write_text(xml)
+    out = run(launcher, "service", "refresh", "--label", "dev.example.refresh", "--dry-run")
+    assert out == f"launchctl kickstart -k gui/{uid}/dev.example.refresh\nup to date: gui/{uid}/dev.example.refresh restarted\n"
+    job.unlink()
+    r = subprocess.run([str(launcher), "service", "refresh", "--label", "dev.example.refresh", "--dry-run"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0 and "not installed" in r.stderr                # the postinstall then kickstarts the old job
+    job.write_text(old.replace("<key>ProcessType</key>", "<key>LimitLoadToSessionType</key><string>Aqua</string>\n  <key>ProcessType</key>"))
+    r = subprocess.run([str(launcher), "service", "refresh", "--label", "dev.example.refresh", "--dry-run"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0 and "not a job this launcher installs" in r.stderr
 
 def test_bad_label_is_refused(launcher, tmp_path):
     r = subprocess.run([str(launcher), "--home", str(tmp_path), "service", "install", "--label", "x/../y", "--dry-run"],
@@ -78,6 +112,25 @@ def test_systemd_units(launcher, tmp_path, monkeypatch):
     assert out.startswith("# /etc/systemd/system/dev.codonic.oarbank.agent.service") and "User=oarbank" in out
     assert "WantedBy=multi-user.target" in out and "systemctl enable --now" in out
 
+
+
+@linux
+def test_refresh_renders_a_28_unit_again_with_the_stop_timeout(launcher, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    out = run(launcher, "--home", str(tmp_path / "a b"), "service", "install", "--label", "dev.example.refresh", "--dry-run",
+              "--", "--coordinator", "https://c.example:7443")
+    unit = out.split("\n", 1)[1]
+    unit = unit[:unit.index("WantedBy=default.target\n") + len("WantedBy=default.target\n")]
+    assert "TimeoutStopSec=60\n" in unit
+    path = tmp_path / "cfg/systemd/user/dev.example.refresh.service"
+    path.parent.mkdir(parents=True)
+    path.write_text(unit.replace("TimeoutStopSec=60\n", ""))
+    out = run(launcher, "service", "refresh", "--label", "dev.example.refresh", "--dry-run")
+    assert out.startswith(f"# {path}\n{unit}")
+    assert "systemctl --user daemon-reload\nsystemctl --user try-restart dev.example.refresh.service\n" in out
+    path.write_text(unit)
+    out = run(launcher, "service", "refresh", "--label", "dev.example.refresh", "--dry-run")
+    assert out == "systemctl --user try-restart dev.example.refresh.service\nup to date: dev.example.refresh.service\n"
 
 @windows
 def test_windows_services_start_delayed_and_recover_from_any_failure(launcher, tmp_path):

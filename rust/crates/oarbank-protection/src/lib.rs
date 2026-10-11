@@ -28,6 +28,8 @@ pub mod platform;
 pub mod presence;
 pub mod procinfo;
 pub mod session;
+pub mod settings;
+pub mod settings_table;
 pub mod signals;
 pub mod sources;
 pub mod spawn_registry;

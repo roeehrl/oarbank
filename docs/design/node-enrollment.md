@@ -119,7 +119,8 @@ oarbank-node doctor [--json]
 
 With no code source on a terminal, `join` prompts with hidden input; `--no-input` fails instead. There is no
 `--code <value>` flag. `--scope` exists on macOS (default: system when run as root, else personal); Linux and Windows
-always install the system service. `--containers` installs Windows' container prerequisites. `--progress-file` writes
+always install the system service. `--containers` installs Windows' container prerequisites (waiting for any other
+Windows installation to finish first). `--progress-file` writes
 the check rows and states as JSON lines (the join window runs `join` elevated and reads them).
 
 Exit codes: 0 joined (or already joined to this coordinator), 2 usage or a malformed code, 3 pending approval
@@ -135,9 +136,20 @@ staged in `state/join-code` (0600, the service account's), then follows the stat
 |---|---|---|---|
 | Attended GUI | the pkg opens **Oarbank Node** (menu bar) at the join window after a double-click install | the **Oarbank Node** app entry opens the join window | the MSI's last page opens **Oarbank Node** (tray) at the join window; or paste the code on the MSI's join page |
 | SSH / script | `sudo installer -pkg … -target /` then `sudo oarbank-node join` (prompt or `--code-stdin`) | `sudo OARBANK_JOIN_CODE=… apt install ./….deb`, or install then `sudo oarbank-node join` | `msiexec /i … /qn JOINCODEFILE=…` or `JOINCODE=…` |
-| One-liner | `curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh \| sudo sh` (prompts on the terminal, or reads `OARBANK_JOIN_CODE`) | same | `irm https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.ps1 \| iex` |
+| One-liner | `curl -fsSL https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.sh \| sudo sh` installs and verifies; with `OARBANK_JOIN_CODE` (the console's command) it also joins, otherwise run `sudo oarbank-node join` afterwards (it never prompts: see below) | same | `irm https://github.com/roeehrl/oarbank/releases/latest/download/oarbank-install.ps1 \| iex` (asks for the code with `Read-Host -AsSecureString` when it has none) |
 | MDM / policy | profile, domain `dev.codonic.oarbank.agent` | `/etc/oarbank/policy.json` | `HKLM\SOFTWARE\Policies\Codonic\Oarbank\Agent` (ADMX template in the release) |
 | Deep link | `oarbank://join?code=…` → join window, confirmation first | same (`x-scheme-handler/oarbank`) | same (`HKCR\oarbank`) |
+
+The one-liner never prompts for the code when its standard input is not a terminal (piped, as above). sudo 1.9.14 and
+later (`use_pty`) runs the command on a pseudo-terminal of its own and puts the person's terminal in raw mode only when
+sudo's own standard input is a terminal; piped from curl it is not, so the person's terminal keeps echoing, and a prompt
+that turns echo off on sudo's pseudo-terminal would show the pasted code. Without `OARBANK_JOIN_CODE`,
+`OARBANK_JOIN_CODE_FILE` or `OARBANK_COORDINATOR` it installs, prints `Installed. Join this computer with: sudo
+oarbank-node join`, and exits 0; run as a file (`sudo sh oarbank-install.sh`, standard input the terminal) it runs
+`oarbank-node join` there. `OARBANK_COORDINATOR` may still ask the device-code fingerprint question (y/N, nothing secret)
+on the terminal. `oarbank-node join`'s own prompt reads the terminal back after turning echo off and says the code will
+show when the terminal did not take it; it cannot see a terminal beyond sudo's, which is why the one-liner does not
+prompt.
 
 ### Managed policy keys
 
@@ -149,6 +161,8 @@ staged in `state/join-code` (0600, the service account's), then follows the stat
 | `Name` | string | The node's name when the code has no label |
 | `AllowUserJoin` | boolean | `false` hides Join and Leave in the app |
 | `ManagedByOrganizationName` | string | Shown in the app and status |
+| `ShowStatusIcon` | boolean (Windows DWORD) | `false` hides Oarbank Node's menu bar (macOS) or notification-area (Windows) icon on every account and keeps it from opening at login; `true` keeps it shown. Set either way, the app's setting is greyed out ("Managed by …"). No effect on Linux (no node tray) or on the node itself. 2.9 and later |
+| `Settings` | dictionary (Windows: the `Settings` subkey) | Settings keys that tighten what the coordinator sends on this machine, never loosen it: the registry's `managed` keys (docs/design/settings.md, "Managed on this machine"; docs/install.md, "MDM"). 2.9 and later |
 
 A managed node is always the system service. Values are never logged. On macOS a root launchd job (`dev.codonic.oarbank.agent.policy`, `WatchPaths` on the
 managed-preferences file) applies policy, so a profile delivered before or after the pkg both work. On Linux and
@@ -164,9 +178,40 @@ waiting service, stages the code, and exits 0.
 
 `JOINCODE` (Secure, Hidden), `JOINCODEFILE`, `COORDINATOR`, `CONTAINERS`, `NAME`, `NOLAUNCH`. The join page's field is a
 password control (never logged). A code that is not valid (a wrong paste) installs the node waiting, with a warning
-in the installer's log, rather than failing the install. An installed node ignores them on repair and upgrade. Intune: a Win32 app with
+in the installer's log, rather than failing the install. An installed node ignores them on repair and upgrade, except
+`CONTAINERS=1`. Intune: a Win32 app with
 `msiexec /i oarbank-agent-<v>-windows-x64.msi /qn JOINCODE=…` and the file detection rule
 `%ProgramData%\Oarbank\status\joined` (the agent writes it once the node has joined, and removes it when it leaves).
+
+**Container support never runs inside the MSI.** `CONTAINERS=1` (the property, the join page's "Run container jobs"
+box) and a code made for container jobs (flag bit 2; `setup --containers-later`, which only the MSI passes) ask for
+the WSL components the container runtime needs (docs/design/windows-containers.md). The WSL package is itself a
+Windows Installer package, and Windows Installer runs one installation at a time: installing it from a custom action
+is a nested installation, which Microsoft deprecates ("Concurrent Installations": hard to service, and they share the outer
+installation's user interface and logging), and on a real PC it failed the agent's install with error 2755 (1622: the log) and
+status 1603 although the node had joined. A bootstrapper (a WiX Burn bundle that chains the WSL package before the MSI)
+would install it outside, but WSL's own installer picks the package (Windows Update, else its GitHub release) at run
+time and may need a restart in between, and the bundle would be a second artifact for every deployment channel. So the
+MSI's deferred action (`ScheduleContainers`, LocalSystem, `Return="ignore"`) runs `oarbank-launcher container-support
+schedule`, which only registers the task `\OarbankContainerSupport`:
+
+| | |
+|---|---|
+| Runs as | LocalSystem, highest privileges, on battery too, one run at a time, at most 2 h |
+| When | the installer logs that it installed or reconfigured the Oarbank agent (Application log, MsiInstaller event 1033 or 1035 with the product's name: the installation has ended), and 1 min after every start of Windows |
+| Does | `oarbank-launcher container-support run`: `oarbank-agent containers install --wait 1800` (which waits until no installation holds the `Global\_MSIExecute` mutex and exits 1618 if one still does), records the outcome, deletes the task once it is `done` or `failed` |
+| Records | `HKLM\SOFTWARE\Codonic\Oarbank\ContainerSupport`: `State` (`scheduled`, `installing`, `waiting`, `restart`, `done`, `failed`), `Detail`, `Attempts`, `Updated`; administrators and SYSTEM write it, everyone reads it (the status directory lets every user create files, which a LocalSystem task must not write through) |
+| Restart | exit 3010 records `restart` and keeps the task: the run after the next start of Windows finds nothing missing and records `done` |
+| Gives up | after 5 runs that still need a restart or found another installation running: `failed` |
+| Again | `"C:\Program Files\Oarbank\oarbank-launcher.exe" container-support run` as an administrator runs it now and records the outcome (`container-support status` prints the record) |
+| Goes | a first install or upgrade that rolls back cancels it (`RollbackContainers`); uninstalling ends and deletes it and the record (`CancelContainers`); a node whose agent is gone deletes it at its next run |
+
+The MSI exits 0 (3010 when Windows Installer itself asks for a restart) whatever WSL makes of it. Oarbank Node shows a line while it is not done ("Installing container
+support…", "Restart Windows to finish container support", "Container support failed: …"); `oarbank-node status` and
+`doctor` print the same line (`container_support` in `--json`). `oarbank-node join --containers` (and a code made for
+container jobs, unless `--no-containers`) runs `oarbank-agent containers install --wait 600` itself, outside any
+installer, records the outcome the same way, and leaves the task behind only when Windows must restart or another
+installation kept running.
 
 ## Join window
 
@@ -196,21 +241,27 @@ package's bundled runtime). Installed at:
 | Linux | `/usr/lib/oarbank/join/` | `/usr/lib/oarbank/runtime/bin/python3` | `/usr/lib/oarbank/oarbank-launcher` (symlink `/usr/bin/oarbank-node`) |
 | Windows | `[INSTALLFOLDER]join\` | `[INSTALLFOLDER]runtime\python.exe` (`pythonw.exe` from the tray) | `[INSTALLFOLDER]oarbank-node.exe` |
 
-`python -I join-window.py [--launcher PATH] [--link URL | --code-file PATH] [--no-browser]` serves the page on
+`python -I join-window.py [--launcher PATH] [--elevator PATH] [--link URL | --code-file PATH] [--no-browser]` serves the page on
 127.0.0.1 (a random port), prints `Open this private link on this computer: http://127.0.0.1:<port>/#<capability>` on
 stdout and opens it in the default browser unless `--no-browser`. A second launch while one is open reopens the open
 one (a private `join.active.json` in the user's temporary directory, as the coordinator setup wizard does).
 `--link oarbank://join?code=…` and `--code-file` prefill the code and show the confirmation screen first. The page
-checks the code unprivileged (`oarbank-node check --code-stdin --json`), then runs `oarbank-node join --code-file F
---no-input --no-wait --progress-file P` with the OS's own elevation (macOS: personal scope unelevated, system scope via
-the administrator prompt; Linux: `pkexec`; Windows: UAC) and follows the status document.
+checks the code unprivileged (`oarbank-node check --code-stdin --json`), then runs `oarbank-node join --no-input
+--no-wait --progress-file P` with the code on standard input (macOS, `--code-stdin`) or in a file (`--code-file F`:
+Linux, Windows) and the OS's own elevation (macOS: personal scope unelevated, system scope through Oarbank Node.app's
+`--elevate`, below; Linux: `pkexec` with the polkit actions `dev.codonic.oarbank.node.join` and `.leave`
+(`/usr/share/polkit-1/actions/dev.codonic.oarbank.node.policy`), whose messages and icon replace pkexec's generic
+prompt; Windows: UAC) and follows the status document. `--elevator` names the app's executable (the app passes its
+own; default `/Applications/Oarbank Node.app/Contents/MacOS/Oarbank Node`).
 
 A bare or empty `--link` means no link (the desktop entry's `--link %u` opened from the menu); a second launch with a
 link hands its code to the open window. An explicit `--launcher` must exist; without one the window looks at
 `OARBANK_NODE_LAUNCHER`, the package layout beside the script, then `oarbank-node` on PATH. The code file and the
 progress file live in a 0700 directory of the user's (`oarbank-join-<uid>` in the temporary directory, with the lock and
 `join.active.json`); the code file goes as soon as the launcher exits, and the window stays open until it has. Without
-`pkexec` Linux asks for `sudo oarbank-node join` in a terminal. The page's API (all `POST`, JSON, with the capability
+`pkexec` Linux asks for `sudo oarbank-node join` in a terminal, and without Oarbank Node.app so does macOS (there is no
+`osascript` fallback). A dismissed prompt is exit 126 on macOS and Linux, 1223 on Windows: the page says nothing
+changed. The page's API (all `POST`, JSON, with the capability
 in `X-Oarbank-Join`): `/state`, `/check {code}`, `/join {code, scope, containers, name}`, `/progress {offset}`, `/leave`,
 `/prefill {code, source}`, `/ping`, `/close`. Policy reaches the page only as `AllowUserJoin` and
 `ManagedByOrganizationName`, and `AllowUserJoin: false` refuses `/join` and `/leave`.
@@ -220,3 +271,124 @@ Node** tray app (`[INSTALLFOLDER]Oarbank Node.exe`, Start menu, registers `oarba
 `dev.codonic.oarbank.node.desktop` (registers `x-scheme-handler/oarbank`). Each shows the status document (state,
 coordinator, errors), offers **Join this machine…** while not joined (hidden when policy `AllowUserJoin` is false) and
 **Status…** once joining started, and runs the join window for both (a node does not know its console's address).
+How they appear, start and leave is [Menu bar and tray](#menu-bar-and-tray).
+
+## Menu bar and tray
+
+The node is a service with a lifetime of its own: on macOS a LaunchDaemon (`dev.codonic.oarbank.agent`, a personal
+install's LaunchAgent), on Windows the service `dev.codonic.oarbank.agent`, on Linux a systemd unit. It starts with the
+computer, before anyone signs in, and no front end starts or stops it. The front ends are views of it, and say so: there
+is no "Quit Oarbank Node", whose name reads as stopping the node. The coordinator's macOS app (Oarbank Coordinator) has
+the same model; both share `deploy/macos/shared/MenuBar.swift`. Practice followed: Apple's HIG on menu bar extras (an
+optional, user-removable item; a template image; a menu, not a window, as the main interface) and `SMAppService`;
+Tailscale, Docker Desktop and 1Password, whose menu bar apps open at login through a login item, keep their daemons
+separate, and say what keeps running when the app quits.
+
+**One setting: "Show Oarbank Node in the menu bar"** (Windows: "in the notification area").
+
+| | macOS | Windows |
+|---|---|---|
+| On | the item is shown; the app's login item is registered (`SMAppService.mainApp`), so it opens at login | the icon is shown; this user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `OarbankNode` starts it at sign-in |
+| Off | the app unregisters its login item and quits | the Run value goes and the app exits |
+| Source of truth | macOS: removing the app from System Settings, Login Items, Open at Login turns the setting off too | the Run value (Startup Apps can disable it) |
+| Default | on: the app's first launch registers it (an attended install opens the app; an MDM or command-line install starts nothing) | on: a start from the Start menu or the installer's last page registers it |
+| Turned off by | **Hide from Menu Bar** (⌘Q; the menu shows "This Mac's node keeps running" under it and asks first) or the setting in the window | **Hide from notification area** ("This PC's node keeps running" under it; asks first) |
+| Back on | open Oarbank Node from Applications or Spotlight: with no item to show it opens its window, where the setting is | start Oarbank Node from the Start menu |
+| Managed | `ShowStatusIcon`: the login item follows the policy, the setting is greyed out with "Managed by <org>" (and Hide is disabled while it forces the item on) | `ShowStatusIcon`: 0 never shows the icon (a Start-menu start only opens the join window); 1 hides nothing |
+
+**The window** (`--settings`, Settings… ⌘, in the menu, or any launch with no item to show) has two labelled sections:
+
+- **This Mac's node**: the service in plain words ("Running as a system service — starts with the Mac, before anyone
+  signs in, and keeps running when this app quits"; a personal install's: "…for your account — starts when you sign
+  in…"), the node's state from the status document (Connected to <coordinator>, Not joined, Waiting for approval…),
+  "Managed by <org>", **Join this Mac…** or **Status…** (the join window), and **Open Console** on a Mac that also runs
+  the coordinator (it asks Oarbank Coordinator to open its web app; elsewhere a node does not know its console's
+  address).
+- **Menu bar**: the setting and one line on what it does.
+
+**Open Login Items… is only a fix**, offered in two cases: macOS reports the app's login item `.requiresApproval`, or
+System Settings, Login Items, **Allow in the Background** has switched the node off. The second is detected with
+`SMAppService.statusForLegacyPlist(at:)` on each of the node's launchd property lists (`.requiresApproval` there means
+the person switched it off, and launchd then starts none of them): the window replaces the service line with "The node
+is turned off in Login Items → Allow in the Background. Turn Oarbank Node back on there." and the button, and the menu
+shows **Turned off in Login Items…**.
+
+**Allow in the Background names the app.** Every launchd job the node installs carries `AssociatedBundleIdentifiers`
+= `dev.codonic.oarbank.node` (the policy and helper daemons in the pkg, the agent's LaunchDaemon or LaunchAgent and the
+session helper the launcher writes, `svc_launchd.rs`), and the coordinator's oarbankd and console daemons carry
+`dev.codonic.oarbank.coordinator` (`install-oarbankd.sh`, which a coordinator move's standby also uses). System
+Settings then lists them under the app's name and icon instead of the signing team's ("BlueGuru LLC"), so switching
+that entry off visibly means switching off the node. Apple requires the job's program and the app to be signed by the
+same team for the association to hold (Developer ID builds are; ad-hoc test builds fall back to the old listing). The
+coordinator's programs are shell launchers inside its app: whether macOS attributes those (unsigned) scripts to the app
+is to be checked on a signed install. A managed profile's `com.apple.servicemanagement` rule (`LabelPrefix`
+`dev.codonic.oarbank`) still pre-approves them all.
+
+**One item per Mac.** Where Oarbank Coordinator is installed (Launch Services knows it, or it is running), it is the
+Mac's one Oarbank item: its menu gains a **This Mac's Node** section (the node's state and detail, **Turned off in
+Login Items…** when that applies, **Join this Mac…** while not joined and allowed, **Oarbank Node…** for the node's
+window), and Oarbank Node shows no item, unregisters its own login item at launch and greys its setting out with "On
+this Mac, Oarbank Coordinator's menu bar item shows this node." Opening Oarbank Node there opens its window (nothing
+opens it at login). The coordinator's menu opens the node app with `--join` (the join window) or plainly (a reopen:
+its window). Chosen over a shared defaults key or a distributed notification because installation is what decides,
+it needs no protocol between the apps, and nothing flickers at login (the node never races the coordinator for the
+menu bar). A test build with a suffixed bundle identifier (`dev.codonic.oarbank.node.preview`) pairs only with the
+coordinator of the same suffix.
+
+**Glyphs**: one oar for the node, the logo's three oars for the coordinator (deploy/icons/README.md), 18 pt template
+images at @1x and @2x.
+
+**Linux** has no node tray: the desktop entry `dev.codonic.oarbank.node.desktop` opens the join window when chosen
+from the applications menu and never starts at login, which is the hidden state of the model above. `ShowStatusIcon`
+has nothing to hide there.
+
+### macOS elevation
+
+The system-service join and leave need root. `osascript -e 'do shell script … with administrator privileges'`, which
+2.8.0 used, is out: macOS 27 words its prompt "Allow administrator access for a script started by python3.12? … Apple
+could not verify this script is free of malware", the very prompt a person should refuse, and it runs a shell command
+line as root for whoever asked. `AuthorizationExecuteWithPrivileges` is deprecated since 10.7 and checks nothing about
+what it runs; a setuid tool is ruled out the same way (Apple DTS, "BSD Privilege Escalation on macOS",
+developer.apple.com/forums/thread/708765). `SMAppService.daemon` (macOS 13) does not bootstrap a daemon "until an admin
+approves the LaunchDaemon in System Preferences" (`SMAppService.register()`): a detour through Login Items in the
+middle of joining, while the pkg already runs as root and can install a daemon outright (the installer-package route
+the same DTS note calls "by far the easiest"). So:
+
+- **The helper** `/Library/Oarbank/bin/oarbank-node-helper` (Swift, `deploy/macos/node/NodeHelper.swift` with
+  `Elevation.swift`), the LaunchDaemon `dev.codonic.oarbank.agent.helper` (Mach service of the same name, no RunAtLoad,
+  exits after a minute idle). It lives with the programs in `/Library/Oarbank` (root's alone), not in the app bundle,
+  which any administrator can move or replace in `/Applications` without a prompt. It accepts an XPC connection only
+  from a process whose code signature satisfies a requirement compiled in at package time
+  (`xpc_connection_set_peer_code_signing_requirement`, macOS 12+, checked on the peer's audit token): `anchor apple
+  generic and identifier "dev.codonic.oarbank.node" and` the Developer ID intermediate and leaf markers `and certificate
+  leaf[subject.OU] = "MKNM96EU7J"` (`OARBANK_TEAM_ID`); an ad-hoc test package pins its own app's cdhash instead
+  (`identifier "dev.codonic.oarbank.node" and cdhash H"…"`), which only that build satisfies, but an ad-hoc app has no
+  hardened runtime, so a local process able to start it with an injected library passes too (the administrator still
+  authenticates). `package-macos.sh` checks the app it ships satisfies the requirement (`codesign -R`).
+- **Two authorization rights**, registered by the postinstall (`oarbank-node-helper register-rights`, i.e.
+  `AuthorizationRightSet` as root) and removed by `oarbank-uninstall`: `dev.codonic.oarbank.node.join` ("Oarbank Node
+  wants to join this Mac to an Oarbank fleet.") and `dev.codonic.oarbank.node.leave` ("Oarbank Node wants to make this
+  Mac leave its Oarbank fleet."): class user, group admin, timeout 0, not shared, so an administrator authenticates for
+  each request and no credential cached by another prompt serves. One right per operation, so the prompt says which,
+  and a site can allow or deny each with `security authorizationdb`.
+- **The request.** The join window runs `Oarbank Node --elevate join --code-stdin --no-input --no-wait --progress-file P
+  --scope system [--name N]` (or `--elevate leave --progress-file P`) with the code on standard input. The app opens P
+  itself, as the person (`O_NOFOLLOW`, a regular file of theirs), makes an empty AuthorizationRef, and sends `{op, auth:
+  its external form, progress: the open descriptor, code, name}`. The helper checks every field again (exactly the
+  operation's keys, the name rule, a printable code of at most 4096 bytes, the descriptor a regular single-link file of
+  the caller's uid open for writing, the launcher root's and not writable by others), then asks for the operation's
+  right on the client's AuthorizationRef with interaction (`AuthorizationCopyRights`, extend rights, the prompt and the
+  app's icon in the environment). The system prompt names the AuthorizationRef's creator, Oarbank Node, with its icon,
+  and shows no unverified-script warning. Only then it runs `oarbank-launcher join --scope system --code-stdin
+  --no-input --no-wait --progress-file /dev/fd/3 [--containers] [--name N]` (or `leave --progress-file /dev/fd/3`)
+  with an argv it builds itself, the code on the launcher's standard input, the app's descriptor as fd 3, nothing else
+  inherited, launchd's kind of environment, an hour at most. Root never opens a path a request named, and nothing a
+  request sends reaches an argv but a checked name.
+- **The answer.** The helper replies `ok` with the launcher's exit code, `cancelled`, `denied` or `refused`; the app
+  exits with the launcher's code, 126 for a dismissed prompt, 8 (`E_PRIVILEGE`) for someone who is not an administrator,
+  1 when the helper is missing or refused, and writes a `result` line to the progress file for those so the page shows
+  why. Progress itself keeps flowing through the file the launcher writes.
+
+The menu bar app never handles a code; `--elevate` relays the one on its standard input and exits. What can only be
+seen on a Mac with the package installed: the XPC round trip, the prompt's wording and icon, and the code signature
+check of a notarized build.

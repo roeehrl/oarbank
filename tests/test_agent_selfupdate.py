@@ -29,8 +29,8 @@ def agent_bytes(version: str, platform: str = "darwin-arm64") -> bytes:
 
 
 def agent_bin(version: str, platform: str = "darwin-arm64") -> Path:
-    import tempfile
-    p = Path(tempfile.mkdtemp()) / "oarbank-agent"
+    from helpers import scratch
+    p = scratch() / "oarbank-agent"
     p.write_bytes(agent_bytes(version, platform))
     return p
 
@@ -189,7 +189,7 @@ def test_signing_mode_requires_a_signed_build_and_the_directive_carries_it(db, m
     _, a = enrolled_node(db, "mini")
     monkeypatch.setattr(C, "RELEASE_SIGNING", True)
     key = tmp_path / "k"
-    db.set_setting("release_pubkey", signing.keygen(key))
+    db.set_state("release_pubkey", signing.keygen(key))
     sha = upload(db, "0.4.0")
     with pytest.raises(core.ApiError, match="unsigned"):
         planned(db, "agent.canary", sha, {"nodes": ["mini"]})

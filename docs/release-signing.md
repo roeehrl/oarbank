@@ -20,8 +20,9 @@ The release key is the owner set's primary key. Keep the backup offline (another
 ## Setting it up
 
 The native coordinator installer's first-run wizard creates and pins the primary and backup keys before it
-finishes. Keep that backup offline. If you used the wizard, proceed to signing your module releases and agent builds
-below; do not create a second key set. For manual/archive setup or keys held on another trusted machine:
+finishes. Keep that backup offline. If you used the wizard, proceed to signing your module releases (after enabling a
+module, [sign each platform's release](#after-enabling-a-module-sign-each-platforms-release)) and agent builds below;
+do not create a second key set. For manual/archive setup or keys held on another trusted machine:
 
 1. Make the keys on a machine you trust, not necessarily the coordinator:
    `oarbank release keygen` writes the primary to `keys/release-ed25519.key` (0600) in the config directory
@@ -29,8 +30,33 @@ below; do not create a second key set. For manual/archive setup or keys held on 
    another file; `oarbank release --help` prints it); make the backup the same way with `--key <path>`.
 2. Pin the owner key set: `oarbank owner set --key <primary> --backup-key <backup>`. The primary becomes the
    release key the coordinator advertises.
-3. Sign each release before it can be promoted (`oarbank release sign <id> --promote`), each agent build before a
-   canary, each coordinator build before a move can install it.
+3. Sign each release before it can be promoted (`oarbank release sign <id> --promote`, once per platform after every
+   module change: see below), each agent build before a canary, each coordinator build before a move can install it.
+
+## After enabling a module: sign each platform's release
+
+Enabling, upgrading, canarying, pinning or rolling back a module changes what nodes run, so oarbankd builds a new
+release for every platform of the fleet (a macOS and a Windows node: two releases, one of them perhaps without the
+module, where it does not run). With signing on, each one stays a **candidate** and no node gets anything until the
+owner signs it, on the machine that holds the owner key:
+
+```bash
+oarbank release list                         # RELEASE, PLATFORM, STATUS, SIGNED, CONTENTS (module@version), and
+                                             # the releases waiting for your signature, each with its command
+oarbank release sign <release> --promote     # once per waiting platform release
+oarbank release sign <release>               # a canary or pinned node's own release (never --promote it)
+```
+
+`oarbank release build` builds every platform's release from the enabled modules (it refuses while none is enabled)
+and, when the owner key is on that machine, signs and promotes each one. oarbankd builds a platform's release once
+per composition: hellos while a candidate waits change nothing.
+
+Until a release is signed it is named everywhere the owner looks: a banner on the Fleet, Modules and Settings pages
+with each release's platform, contents and command; the `release_awaiting_owner:<release>` alert (after five
+minutes; it clears when the release is signed and current, or a newer build replaces it); each waiting node's card
+("release needs your signature"); the node's explain (`RELEASE_UNSIGNED`, with the command); and the module's
+readiness checklist. A node with no release at all says why: `NO_RELEASE` (no module enabled yet),
+`RELEASE_UNSIGNED` (its release waits for the owner), `RELEASE_PENDING` (it is installing it).
 
 ## What nodes do
 
@@ -67,9 +93,48 @@ targets, each version, hash and expiry checked, with versions remembered against
 - The owner mirrors what the vendor publishes: `oarbank vendor-metadata upload <repo>` (or the Agents page).
 - Developer builds without a compiled-in root skip the check; the owner's signature (above) still applies.
 
+## macOS code signatures
+
+Separate from the owner's statements above, the macOS packages carry Apple code signatures:
+`OARBANK_CODESIGN_IDENTITY` (a Developer ID Application identity) signs every Mach-O file with the hardened runtime
+and a secure timestamp, as notarization requires ([install.md](install.md); without it, everything is signed ad hoc).
+
+**The interpreters that run module code have library validation off.** The node runtime's
+`/Library/Oarbank/bin/runtime/bin/python3.12` and the coordinator's `python/bin/python3.12` (the coordinator build and
+`Oarbank Coordinator.app`) are signed with [`deploy/macos/python.entitlements`](../deploy/macos/python.entitlements),
+which holds one entitlement, `com.apple.security.cs.disable-library-validation`. Module environments (`uv venv`) link
+to these interpreters, so every module process runs under that signature.
+
+- **Why.** The hardened runtime turns on library validation: a process may map only code signed by Apple or by the
+  same team as its executable. Modules install wheels from PyPI (numpy, pysam, ...) whose extension modules and
+  bundled libraries are signed ad hoc by the linker or by their own publishers, never by the fleet's team, so without
+  the entitlement every one of them fails to import under a Developer ID build: `code signature ... not valid for use
+  in process: mapping process and mapped file (non-platform) have different Team IDs`. 2.8.0 shipped that way; only
+  the wheels the build itself signed (pydantic_core) loaded.
+- **The trade-off.** With library validation off, the interpreter will map any validly signed library, including one
+  a module brings. That is the point: module code is the owner's chosen code, already admitted by the release
+  signature checks above. What confines it does not depend on library validation: module processes still run in the
+  Seatbelt sandbox ([design/module-sandbox.md](design/module-sandbox.md)), which limits what they read, write, execute
+  and reach. The rest of the hardened runtime stays on (no DYLD_* environment variables, no unsigned executable
+  memory, no debugger attachment), every library must still carry a valid signature, and the entitlement is on the
+  interpreters alone: the agent, the launcher, uv and the apps keep library validation. Apple's notary service accepts
+  this entitlement.
+- **Checks.** `scripts/macos-codesign.sh` is the one place that signs the interpreters; the packaging scripts
+  (`scripts/package-macos.sh`, `scripts/build-coordinator.sh`, `scripts/package-coordinator-macos.sh`) then run
+  `scripts/check-macos-signing.py`, and a build fails unless each interpreter carries exactly that entitlement (with
+  `--developer-id`, also the hardened runtime and a team) and no other executable carries any. Its `--canary` makes a
+  fresh environment on the signed interpreter with the build's own uv, installs a pinned native wheel from PyPI that
+  the build did not sign, and imports its extension module: under a Developer ID build without the entitlement that
+  import fails as it did on 2.8.0 (an ad hoc build never enforces library validation, which is why the static check
+  exists too). CI builds the node runtime on every change, signs it ad hoc through the same script and runs both
+  checks; `tests/test_node_packages_macos.py` and `tests/test_coordinator_native_macos.py` cover the scripts and, given
+  `OARBANK_NODE_PKG`, `OARBANK_NODE_RUNTIME` or `OARBANK_COORDINATOR_PKG`, a built artifact.
+
 ## Testing
 
 `tests/test_signing.py` and `tests/test_coordinator_move.py` cover the statements and the owner rules;
+`tests/test_release_signing_ux.py` the waiting releases (one build per platform and composition, the banner, alert,
+reason codes and `oarbank release list`) and the module readiness checklist;
 `tests/rust/test_agent_tuf.py` installs a vendor-listed agent build and refuses an unlisted one;
 `tests/rust/test_agent_coordinator_install_signed.py` runs a whole signed move against real processes: the owner key
 set pinned by the agent, a signed coordinator build installed by it, and an owner-signed move it follows.

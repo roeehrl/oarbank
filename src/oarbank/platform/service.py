@@ -1,7 +1,7 @@
 """Running under the OS's service manager.
 
-On macOS and Linux oarbankd and the console are a LaunchAgent or a systemd unit: the service manager starts the
-process, SIGTERM stops it (uvicorn's handlers), its output goes to the log file the unit names, and its exit code
+On macOS and Linux oarbankd and the console are launchd daemons or systemd system units run by the coordinator's own
+account (docs/design/coordinator-system-service.md): the service manager starts the process, SIGTERM stops it (uvicorn's handlers), its output goes to the log file the unit names, and its exit code
 decides (`exit`): 0 stays down (a finalized old coordinator), anything else is restarted (75: a standby restarts on
 the copy a move installed).
 
@@ -125,38 +125,69 @@ def manager() -> str:
 
 
 def state(name: str) -> dict:
-    """One service as its manager reports it: {name, installed, state, start, account, pid}; `installed` False when
-    the manager does not know it (a coordinator run by hand, a test). The fields a manager has no answer for are None."""
+    """One service as its manager reports it: {name, installed, domain, state, start, account, pid}; `installed` False
+    when the manager does not know it (a coordinator run by hand, a test). `domain` is "system" (a launchd daemon, a
+    systemd system unit, a Windows service) or "user" (a per-user coordinator of an earlier release, until its
+    migration). The fields a manager has no answer for are None."""
     if sys.platform == "win32":
-        return _scm_state(name)
+        d = _scm_state(name)
+        return {**d, "domain": "system" if d["installed"] else None}
     import getpass
     import subprocess
     if sys.platform == "darwin":
+        r = subprocess.run(["launchctl", "print", f"system/{name}"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return parse_launchctl(name, r.returncode, r.stdout, None)
         r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{name}"], capture_output=True, text=True)
         return parse_launchctl(name, r.returncode, r.stdout, getpass.getuser())
-    r = subprocess.run(["systemctl", "--user", "show", f"{name}.service", "-p", "LoadState", "-p", "ActiveState",
-                        "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID"], capture_output=True, text=True)
+    props = ["-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "User"]
+    r = subprocess.run(["systemctl", "show", f"{name}.service", *props], capture_output=True, text=True)
+    sysstate = parse_systemctl(name, r.stdout if r.returncode == 0 else "", None)
+    if sysstate["installed"]:
+        return sysstate
+    r = subprocess.run(["systemctl", "--user", "show", f"{name}.service", *props], capture_output=True, text=True)
     return parse_systemctl(name, r.stdout if r.returncode == 0 else "", getpass.getuser())
 
 
-def parse_launchctl(name: str, code: int, out: str, user: str) -> dict:
-    """`launchctl print gui/<uid>/<label>`: a LaunchAgent runs as the user who loaded it, from that user's login."""
+def _absent(name: str) -> dict:
+    return {"name": name, "installed": False, "domain": None, "state": None, "start": None, "account": None, "pid": None}
+
+
+def parse_launchctl(name: str, code: int, out: str, user: str | None) -> dict:
+    """`launchctl print system/<label>` (a daemon: it starts at boot, as its `username`) or `gui/<uid>/<label>` (a
+    LaunchAgent: it runs as the person who loaded it, from that person's login; `user` names them)."""
     if code != 0:
-        return {"name": name, "installed": False, "state": None, "start": None, "account": None, "pid": None}
-    f = {k.strip(): v.strip() for k, _, v in (line.partition(" = ") for line in out.splitlines()) if _}
+        return _absent(name)
+    f: dict = {}
+    for k, sep, v in (line.partition(" = ") for line in out.splitlines()):
+        if sep:
+            f.setdefault(k.strip(), v.strip())        # the job's own fields come first; nested sections repeat `state`
     pid = f.get("pid")
-    return {"name": name, "installed": True, "state": f.get("state"), "start": "at login", "account": user,
+    system = f.get("domain") == "system" or f.get("type") == "LaunchDaemon" or user is None
+    return {"name": name, "installed": True, "domain": "system" if system else "user", "state": f.get("state"),
+            "start": "at boot" if system else "at login", "account": f.get("username") or (None if system else user) or "root",
             "pid": int(pid) if pid and pid.isdigit() else None}
 
 
-def parse_systemctl(name: str, out: str, user: str) -> dict:
-    """`systemctl --user show <unit> -p …`: a user unit runs as its user; UnitFileState says whether it starts."""
+def parse_systemctl(name: str, out: str, user: str | None) -> dict:
+    """`systemctl show <unit> -p …` (a system unit: `User` names its account, root when empty) or `systemctl --user show`
+    (a user unit, run as `user`); UnitFileState says whether it starts."""
     f = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     if f.get("LoadState") != "loaded":
-        return {"name": name, "installed": False, "state": None, "start": None, "account": None, "pid": None}
+        return _absent(name)
     pid = f.get("MainPID", "0")
-    return {"name": name, "installed": True, "state": f"{f.get('ActiveState')} ({f.get('SubState')})",
-            "start": f.get("UnitFileState") or None, "account": user, "pid": int(pid) if pid.isdigit() and pid != "0" else None}
+    return {"name": name, "installed": True, "domain": "user" if user else "system",
+            "state": f"{f.get('ActiveState')} ({f.get('SubState')})", "start": f.get("UnitFileState") or None,
+            "account": user or f.get("User") or "root", "pid": int(pid) if pid.isdigit() and pid != "0" else None}
+
+
+def form(services: list[dict]) -> str:
+    """How the coordinator is installed: "system" (system services, from boot), "per-user" (an earlier release's
+    LaunchAgents or user units, until migrated) or "none" (run by hand, a test)."""
+    domains = {s.get("domain") for s in services if s.get("installed")}
+    if "user" in domains:
+        return "per-user"
+    return "system" if "system" in domains else "none"
 
 
 def _scm_state(name: str) -> dict:
@@ -164,7 +195,7 @@ def _scm_state(name: str) -> dict:
     import ctypes
     from ctypes import wintypes
     from . import _win32 as W
-    absent = {"name": name, "installed": False, "state": None, "start": None, "account": None, "pid": None}
+    absent = {k: v for k, v in _absent(name).items() if k != "domain"}
     open_scm = W._fn(W.advapi32, "OpenSCManagerW", W.HANDLE, wintypes.LPCWSTR, wintypes.LPCWSTR, W.DWORD)
     open_svc = W._fn(W.advapi32, "OpenServiceW", W.HANDLE, W.HANDLE, wintypes.LPCWSTR, W.DWORD)
     close = W._fn(W.advapi32, "CloseServiceHandle", W.BOOL, W.HANDLE)

@@ -50,7 +50,8 @@ def _data_version(db: DB, module: str, inputs: list[str], campaign: str | None =
             r = db.one("SELECT COUNT(*) m, COALESCE(MAX(created_at),0) || '/' || COALESCE(SUM(length(meta_json)),0) n FROM datasets "
                        "WHERE kind=? AND " + VISIBLE, (inp.split(":", 1)[1], module))
         elif inp == "module_settings":
-            r = {"m": zlib.crc32(json.dumps(db.get_setting(f"module_settings:{module}", {}), sort_keys=True).encode()), "n": 0}
+            from . import effects
+            r = {"m": zlib.crc32(json.dumps(effects.module_settings(db, module), sort_keys=True).encode()), "n": 0}
         else:
             r = {"m": 0, "n": 0}
         parts.append(f"{inp}={r['m']}/{r['n']}")
@@ -90,7 +91,8 @@ def _inputs(db: DB, module: str, inputs: list[str], campaign: str | None = None)
                         for d in db.q("SELECT dataset_id, kind, module, meta_json, created_at FROM datasets WHERE kind=? AND "
                                       + VISIBLE + " ORDER BY created_at DESC LIMIT ?", (inp.split(":", 1)[1], module, INPUT_ROWS))]
         elif inp == "module_settings":
-            out["module_settings"] = db.get_setting(f"module_settings:{module}", {})
+            from . import effects
+            out["module_settings"] = effects.module_settings(db, module)
     return out
 
 

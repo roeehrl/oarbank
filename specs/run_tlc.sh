@@ -87,6 +87,8 @@ fi
 
 mkdir -p out
 fail=0
+meta=""
+trap 'rm -rf "$meta"' EXIT        # an interrupted TLC run leaves no metadata directory behind
 printf '%-50s %-34s %-34s %-6s %12s %12s %6s %8s\n' CONFIG EXPECTED GOT RESULT GENERATED DISTINCT DEPTH TIME
 for row in "${CONFIGS[@]}"; do
   read -r cfg expected <<<"$row"

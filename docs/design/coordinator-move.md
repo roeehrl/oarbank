@@ -125,11 +125,14 @@ secrets travel sealed: at pairing B sends an X25519 transport key, A seals every
 under its own secrets key ([secrets-and-signed-images.md](secrets-and-signed-images.md)). The move preview lists them
 by name and scope.
 
-**The service on B:** launchd on macOS (`bootstrap`, `enable`, then `kickstart -k` in `gui/<uid>`; preflight warns that
-a LaunchAgent runs only after a GUI login, so with FileVault and no auto-login B serves nothing after a power loss until
-someone logs in), systemd user units on Linux. On Windows the owner installs B with `install-oarbankd.ps1 -Pair`
-(two services under virtual accounts; a node's agent cannot create services, so it refuses `install_coordinator`
-there), and B restarts on its installed copy through the services' recovery actions ([windows-coordinator.md](windows-coordinator.md)).
+**The service on B** is the system service every coordinator is ([coordinator-system-service.md](coordinator-system-service.md)):
+launchd daemons run by `_oarbankd` on macOS, systemd system units run by `oarbankd` on Linux, two services under virtual
+accounts on Windows, installed by the build's own installer as root (`install-oarbankd.sh --build <bundle>
+--agent-bind <address> --pair <code> --from <url> --from-ca <pin>`, `install-oarbankd.ps1 -Pair` on Windows). A node's
+agent is unprivileged everywhere, so its `install_coordinator` downloads and verifies the signed build and then refuses
+with that command, naming the verified bundle; an agent run as root runs it itself. Preflight warns that with FileVault
+on, B serves nothing after a power loss until someone unlocks its disk. B restarts on its installed copy through
+launchd, systemd or the services' recovery actions ([windows-coordinator.md](windows-coordinator.md)).
 B loads the databases through SQLite's backup API, so no open file is replaced on any OS.
 
 ## Rollback

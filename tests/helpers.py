@@ -2,6 +2,8 @@
 `toy`, and `relay`, the core suite's fixture module in tests/fixtures/modules, a two-stage render-and-score parameter
 search), scene datasets, a composed release and certified nodes. The core itself ships no module."""
 import json
+import os
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -38,13 +40,27 @@ DOCTOR_OK = {"modules": {"relay": {"health": "healthy", "checks": []}, "toy": {"
 _BUNDLES: dict = {}
 
 
+def scratch(prefix: str = "") -> Path:
+    """A fresh directory that lasts the test session, for helpers called where no tmp_path is at hand (removed with the
+    run's temp directory, tests/tmpguard.py)."""
+    import tmpguard
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=tmpguard.suite_dir()))
+
+
 def bundle(src: Path) -> Path:
     """Each fixture module's bundle, built once per test session."""
     if src not in _BUNDLES:
         from oarbank_sdk import bundle as B
-        out, _ = B.build(src, Path(tempfile.mkdtemp(prefix="bundle-")) / f"{src.name}.mfb")
+        out, _ = B.build(src, scratch("bundle-") / f"{src.name}.mfb")
         _BUNDLES[src] = out
     return _BUNDLES[src]
+
+
+def apple_tool(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    """An Apple toolchain command (xcrun swiftc, xcrun swift) with its scratch in a directory removed when it returns:
+    swiftc's driver leaves a TemporaryDirectory.* behind in the temp directory on every run."""
+    with tempfile.TemporaryDirectory(prefix="xcrun-") as td:
+        return subprocess.run(cmd, env={**os.environ, **kw.pop("env", {}), "TMPDIR": td}, **kw)
 
 
 def install(db: DB, src: Path, enable: bool = True) -> dict:
@@ -60,7 +76,8 @@ def make_db(path, modules=(TOY_DIR, RELAY_DIR)) -> DB:
     for m in modules:
         install(d, m)
     modcalls.use(d)
-    d.set_setting("module_settings:relay", {"goldens": [GOLDEN]})
+    if RELAY_DIR in modules:
+        set_module(d, "relay", {"goldens": [GOLDEN]})
     for did in READY:
         d.x("INSERT INTO datasets(dataset_id,kind,module,meta_json,files_json,created_at) VALUES(?,?,?,?,?,?)",
             (did, did.split(":")[0], "relay", json.dumps({"frames": "1-24", "scene": "atrium"}), "[]", clock.now()))
@@ -110,6 +127,68 @@ def golden_result(grant, db=None):
 
 def fresh(db, node):
     return db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
+
+
+# ------------------------------------------------------------------ settings (docs/design/settings.md)
+
+def settings_apply(db, *changes, actor="test") -> dict:
+    """A change set, checked and committed as settings.apply does (hooks and node refresh included), without the
+    operation's preview and audit."""
+    from oarbank.coordinator.settings import apply
+    with db.tx():
+        return apply.commit(db, list(changes), actor)
+
+
+def set_fleet(db, key, value, module=""):
+    """An owner's fleet value: through settings.apply (a module's core key with `module`), or for a key another operation
+    owns (the folder registry, dataset origins) through that key's store as its operation writes it."""
+    from oarbank.coordinator.settings import REGISTRY, apply, write_fleet
+    d = REGISTRY.get(key)
+    if d is not None and d.writer:
+        with db.tx():
+            write_fleet(db, key, value, "test", module)
+            apply.sync_nodes(db)
+        return None
+    return settings_apply(db, {"scope": "fleet", "key": key, "value": value, **({"module": module} if module else {})})
+
+
+def set_module(db, module, values: dict, actor="test"):
+    """A module's own settings at fleet scope ({key: value}, None resets), validated against its settings schema."""
+    from oarbank.coordinator.settings import modkeys
+    with db.tx():
+        return modkeys.write(db, module, values, actor)
+
+
+def set_node(db, node, key, value=None, reset=False, module=""):
+    """A node's own value (or its reset) through settings.apply: effect hooks run (a services change re-doctors)."""
+    nid = node if isinstance(node, str) else node["node_id"]
+    return settings_apply(db, {"scope": "node", "scope_id": nid, "key": key, "module": module,
+                               **({"reset": True} if reset else {"value": value})})
+
+
+def put_node(db, node, key, value, module=""):
+    """A node's own value written straight into the store (no hooks): the state a test starts from."""
+    from oarbank.coordinator.settings import apply, store
+    nid = node if isinstance(node, str) else node["node_id"]
+    with db.tx():
+        store.put(db, "node", nid, module, key, value, "test", store.next_rev(db))
+        apply.sync_nodes(db, [nid])
+
+
+def node_settings(db, node) -> dict:
+    """The node's effective policy and caps as its agent gets them, in one dict."""
+    from oarbank.coordinator.settings.apply import flat_values
+    nid = node if isinstance(node, str) else node["node_id"]
+    return flat_values(db.one("SELECT * FROM nodes WHERE node_id=?", (nid,)))
+
+
+def set_protection(db, node, config, actor="test"):
+    """A node's (or `fleet`'s, or `group:<g>`'s) own protection section, validated and written onto the settings chain
+    as the protection editor's operation writes it."""
+    from oarbank.coordinator import protection
+    nid = node if isinstance(node, str) else node["node_id"]
+    with db.tx():
+        return protection.write(db, nid, config, actor, None)
 
 
 def node_key_and_csr():

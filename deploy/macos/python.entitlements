@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements of the Python interpreters that run module code on macOS, and of nothing else: the node runtime's
+  bin/python3.12 (scripts/package-macos.sh, /Library/Oarbank/bin/runtime) and the coordinator build's
+  python/bin/python3.12 (scripts/build-coordinator.sh, scripts/package-coordinator-macos.sh). Module environments
+  (uv venv) link to these interpreters, so their processes carry the same signature. scripts/check-macos-signing.py
+  refuses a build whose interpreter lacks this set or carries anything more; docs/release-signing.md, "macOS code
+  signatures", says why.
+
+  com.apple.security.cs.disable-library-validation
+    With a Developer ID, the interpreters are signed with the hardened runtime (needed for notarization), and the
+    hardened runtime turns on library validation: the process may then map only code signed by Apple or by the same
+    Team ID as its executable. Modules install third-party wheels from PyPI (numpy, pysam, ...) whose extension
+    modules and bundled libraries are signed ad hoc or by their own teams, so dlopen refuses them ("mapping process
+    and mapped file (non-platform) have different Team IDs"). This entitlement lets the interpreter load them. Code
+    must still carry a valid signature (every arm64 binary does; the linker signs ad hoc), and the hardened runtime's
+    other protections stay on.
+      https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.disable-library-validation
+      https://developer.apple.com/documentation/security/hardened-runtime
+    Notarization accepts it: it is one of the hardened runtime's documented exceptions, not a debugging entitlement
+    such as com.apple.security.get-task-allow, which the notary service refuses.
+      https://developer.apple.com/documentation/security/resolving-common-notarization-issues
+
+  Deliberately absent:
+    com.apple.security.cs.allow-dyld-environment-variables: nothing in Oarbank sets DYLD_* for these processes, and
+      the runtime is relocatable without them (@rpath and @loader_path).
+    com.apple.security.cs.allow-unsigned-executable-memory, com.apple.security.cs.allow-jit: CPython 3.12 does not
+      write executable memory (ctypes callbacks use libffi's static trampolines, which the build's canary calls under
+      the signed interpreter). A wheel that needs a JIT would be a separate decision, not part of this set.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

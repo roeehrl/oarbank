@@ -1,16 +1,19 @@
 # Bootstrap stages: a module provisions its own datasets on a fresh fleet
 
 Status: built as designed (owner decision: bootstrap stages; PLAN D34) in **oarbank-sdk 1.4.0** and **core 2.4.0**.
+Amended by [stage-gating.md](stage-gating.md) (PLAN D43): a bootstrap job now runs wherever the module's runner starts
+(its doctor printed a DoctorOutput, healthy or not), not only where the doctor is healthy, and an unmapped host tool or
+folder no longer keeps it off a node.
 Found on the way: a bundle whose manifest does not validate made `oarbank_sdk.bundle.verify` raise pydantic's error
 instead of a `BundleError`, so the core's install crashed on it instead of refusing it; it is a `BundleError` now.
 
 ## The problem
 
-A module that provisions its own tools and reference data (minos-gatk: the GATK jar, fgkl, nine chromosome references)
+A module that provisions its own tools and reference data (a genomics module: a toolkit jar, a helper tool, nine chromosome references)
 does it with fetch jobs: a job downloads pinned files from public origins through its egress allowlist and uploads them
 as artifacts, and the module's `campaign.tick` registers each one with `datasets.create`. On a fresh fleet that never
 starts. Every non-golden job needs a node certified for the module (S8), certification needs the goldens to pass, and
-the goldens mount the datasets the fetch jobs would bring. The minos-gatk 3.2.0 canary got past it only because the
+the goldens mount the datasets the fetch jobs would bring. That module's canary got past it only because the
 operator registered the datasets by hand.
 
 ## The decision
@@ -32,7 +35,7 @@ certification, and carries nothing but the pinned datasets.
 ```toml
 [[stages]]
 name = "fetch"
-bootstrap = true                  # runs on doctor-healthy nodes before the goldens pass
+bootstrap = true                  # runs where the module's runner starts, before the goldens pass
 determinism = "none"              # required: a bootstrap stage never compares
 timeout_s = 3600
 requires = { resources = { cpu = 1, mem_gb = 1.0 } }
@@ -182,7 +185,7 @@ The Hypothesis machine, the simulator, the Verify page and `oarbank verify` chec
 | The result carries a payload or an extra artifact | `pin_mismatch`; nothing is registered. |
 | An operator registered the id by hand with other contents | The result is accepted, nothing is overwritten, alert `pinned_dataset_conflict:<id>`. |
 | The node's agent predates bootstrap grants | The job waits there with `CAPABILITY_NOT_ENFORCED`. |
-| No node has a healthy doctor | The job waits with `MODULE_NOT_READY`; the doctor alert says why. |
+| No node's runner starts (its doctor does not run) | The job waits with `MODULE_NOT_READY`, explain saying the runner did not start (stage-gating.md). |
 | The node is certified while it fetches | The result is accepted (no certification fence for bootstrap jobs). |
 | The module is revoked or disabled on the node while it fetches | The attempt is ended as for any job; the job runs again. |
 | A golden waits for a dataset nobody provisions | It waits with `DATASETS_NOT_REGISTERED`; `certifying_stuck` names the datasets after 30 minutes. |

@@ -10,7 +10,10 @@ enabled implicitly. Which version runs where is the `module_channels` row of eac
   never silently re-bound);
 - `canary` + `canary_nodes`: a version staged on a few nodes first (their release carries it; they
   re-doctor and re-certify on its goldens), then `promote`d;
-- `disabled`: the kill switch: no dispatch fleet-wide from the next claim, live attempts revoked.
+
+Whether a module runs is not a channel fact but a setting, `[module] enabled` (docs/design/settings.md, "Module
+settings"): off for the fleet is the kill switch (no dispatch from the next claim, live attempts released, services
+stopped), off for a group or a node keeps it off those nodes only.
 
 `module_pins` pins one node to a version. The release a node installs is composed from these facts
 (releases.compose_for); certification is keyed by the module's content digest, so any digest change
@@ -89,8 +92,10 @@ def record(db: DB, name: str, version: str) -> dict | None:
 def channel(db: DB, name: str) -> dict:
     r = db.one("SELECT * FROM module_channels WHERE name=?", (name,))
     if not r:
-        return {"name": name, "current": None, "previous": None, "canary": None, "canary_nodes": [], "disabled": 0}
-    return {**{k: v for k, v in r.items() if k != "canary_nodes_json"}, "canary_nodes": jl(r["canary_nodes_json"], []) or []}
+        return {"name": name, "current": None, "previous": None, "canary": None, "canary_nodes": [],
+                "disabled": name in disabled_names(db)}
+    return {**{k: v for k, v in r.items() if k != "canary_nodes_json"}, "canary_nodes": jl(r["canary_nodes_json"], []) or [],
+            "disabled": name in disabled_names(db)}
 
 
 def channels(db: DB) -> dict:
@@ -103,11 +108,12 @@ def pins(db: DB, name: str | None = None) -> dict:
 
 
 def _save_channel(db: DB, ch: dict):
-    db.x("INSERT INTO module_channels(name,current,previous,canary,canary_nodes_json,disabled,updated_at) VALUES(?,?,?,?,?,?,?) "
+    db.x("INSERT INTO module_channels(name,current,previous,canary,canary_nodes_json,updated_at) VALUES(?,?,?,?,?,?) "
          "ON CONFLICT(name) DO UPDATE SET current=excluded.current, previous=excluded.previous, canary=excluded.canary, "
-         "canary_nodes_json=excluded.canary_nodes_json, disabled=excluded.disabled, updated_at=excluded.updated_at",
-         (ch["name"], ch["current"], ch["previous"], ch["canary"], json.dumps(ch["canary_nodes"] or []),
-          int(bool(ch["disabled"])), time.time()))
+         "canary_nodes_json=excluded.canary_nodes_json, updated_at=excluded.updated_at",
+         (ch["name"], ch["current"], ch["previous"], ch["canary"], json.dumps(ch["canary_nodes"] or []), time.time()))
+    from .settings import modkeys
+    modkeys.register(db, ch["name"])           # its registered version may have changed: its own settings follow
 
 
 def version_for_node(db: DB, name: str, node_id: str | None) -> str | None:
@@ -336,6 +342,8 @@ def install(db: DB, bundle_path, actor: str = "oarbank", self_test: bool = True)
               json.dumps(info.manifest.model_dump(mode="json", by_alias=True)), time.time(), actor, runtime,
               len(info.files), size))
         db.event("module_installed", actor=actor, reason=f"{info.name} {info.version}", digest=info.content_digest, module=info.name)
+        from .settings import modkeys
+        modkeys.register(db, info.name, actor)  # a first or newer version declares the module's settings
     return {"name": info.name, "version": info.version, "content_digest": info.content_digest, "path": str(dest)}
 
 
@@ -381,8 +389,9 @@ def _runs_here(db: DB, name: str, version: str):
         raise LifecycleError(f"{name} {version}: {why}")
 
 
-def enable(db: DB, name: str, version: str) -> dict:
-    """First enable of a module (no current version yet), or re-enable after `disable`."""
+def enable(db: DB, name: str, version: str, actor: str = "oarbank") -> dict:
+    """First enable of a module (no current version yet), or re-enable after `disable` (the fleet's `[module] enabled`
+    reset to its default, on; a group's or node's own value stays)."""
     ch = channel(db, name)
     if version is None:
         version = ch["current"]
@@ -390,9 +399,14 @@ def enable(db: DB, name: str, version: str) -> dict:
     _may_run(db, name, version)
     if ch["current"] and ch["current"] != version:
         raise LifecycleError(f"{name} runs {ch['current']}; stage {version} with a canary, then promote")
-    ch.update(current=version, disabled=0)
+    ch.update(current=version)
     _save_channel(db, ch)
-    return ch
+    from .settings import apply as settings_apply
+    from .settings import store as settings_store
+    if settings_store.row(db, "fleet", "", name, "enabled"):
+        settings_apply.commit(db, [{"scope": "fleet", "key": "enabled", "module": name, "reset": True}], actor,
+                              "re-enabled (modules.enable)")
+    return channel(db, name)
 
 
 def canary(db: DB, name: str, version: str, nodes: list[str]) -> dict:
@@ -433,13 +447,16 @@ def rollback(db: DB, name: str) -> dict:
     return ch
 
 
-def disable(db: DB, name: str) -> dict:
+def disable(db: DB, name: str, actor: str = "oarbank", comment: str | None = None) -> dict:
+    """The kill switch: the fleet's `[module] enabled` off (a settings change set; its effects release the module's live
+    attempts on every node it reaches, and each node's heartbeat stops its services)."""
     ch = channel(db, name)
     if not ch["current"]:
         raise LifecycleError(f"{name} is not enabled")
-    ch["disabled"] = 1
-    _save_channel(db, ch)
-    return ch
+    from .settings import apply as settings_apply
+    settings_apply.commit(db, [{"scope": "fleet", "key": "enabled", "module": name, "value": False}], actor,
+                          comment or "kill switch (modules.disable)")
+    return channel(db, name)
 
 
 def pin(db: DB, name: str, node_id: str, version: str | None) -> dict:
@@ -453,12 +470,23 @@ def pin(db: DB, name: str, node_id: str, version: str | None) -> dict:
     return {"name": name, "node_id": node_id, "version": version}
 
 
-def disabled_names(db: DB) -> set[str]:
-    return {r["name"] for r in db.q("SELECT name FROM module_channels WHERE disabled=1")}
+def disabled_names(db, node: dict | None = None) -> set[str]:
+    """Modules that do not run: for the fleet (the kill switch: `[module] enabled` off at fleet scope), or on one node
+    (its effective `enabled`, as the coordinator last computed the node's settings)."""
+    if node is not None:
+        from .settings.apply import node_values
+        doc = node_values(node)
+        if "modules_disabled" in doc:
+            return set(doc["modules_disabled"])
+    from .settings import resolve as V
+    snap = V.snapshot(db)
+    return {m for m in snap.modules if not V.resolve(snap, None, "enabled", m)["value"]}
 
 
 def enabled_names(db: DB) -> list[str]:
-    return [r["name"] for r in db.q("SELECT name FROM module_channels WHERE current IS NOT NULL AND disabled=0 ORDER BY name")]
+    off = disabled_names(db)
+    return [r["name"] for r in db.q("SELECT name FROM module_channels WHERE current IS NOT NULL ORDER BY name")
+            if r["name"] not in off]
 
 
 def bundle_path(db: DB, name: str, version: str) -> Path | None:

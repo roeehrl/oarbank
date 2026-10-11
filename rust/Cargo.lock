@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-agent"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1142,6 +1142,7 @@ dependencies = [
  "oarbank-protection",
  "rand",
  "rcgen",
+ "regex",
  "reqwest",
  "ring",
  "rustls",
@@ -1163,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-core"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -1178,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-core-py"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "oarbank-core",
  "pyo3",
@@ -1188,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-launcher"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -1202,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-protection"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "fancy-regex",
  "libc",
@@ -1425,6 +1426,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

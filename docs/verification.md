@@ -18,7 +18,7 @@ proved in one layer means the same thing in every other.
 | S5 | pending, done, cancelled and quarantined jobs have no live attempts |
 | S6 | accepted results are exactly the canonical ones, except results superseded by a later generation |
 | S7 | live attempts only run on ready nodes |
-| S8 | a live attempt runs a module certified on its node, under the current certification; a bootstrap job's attempt, on a node where the module is certifying or certified |
+| S8 | a live attempt runs a module certified on its node, under the current certification; an attempt of a stage that needs no certification (a bootstrap stage, or one that compares nothing and needs no capability or pool), on a node where the module is in a state its doctor decides (not revoked) |
 | S9 | attempt bookkeeping: `ended_at` is set if and only if the attempt is no longer live |
 | S10 | a job's `exec_failures` never exceeds its failed or killed attempts |
 | S11 | no node holds more live attempts than its hard `jobs` cap |

@@ -3,12 +3,16 @@
 {% block title %}Modules · Oarbank{% endblock %}
 {% block body %}
 <h1>Modules</h1>
+{{ m.release_banner(releases_awaiting) }}
 <div class="grid">{% for x in modules %}
 <div class="card"><div class="row"><a href="/modules/{{ x.name }}"><b>{{ x.name }}</b></a><span class="chip">{{ x.version }}</span>
-  <span class="chip {{ 'ok' if x.host.state == 'ready' else ('bad' if x.host.state == 'fault' else '') }}">{{ x.host.state or 'stopped' }}</span>
+  {% set rd = readiness.get(x.name) if readiness else none %}
+  {% if rd %}<span class="chip {{ {'ready': 'ok', 'blocked': 'bad', 'waiting': 'warn'}[rd.state] }}">{{ rd.summary }}</span>{% endif %}
+  {% if x.host.state == 'fault' %}<span class="chip bad">coordinator side: fault</span>{% endif %}
   {% if not x.enabled %}<span class="chip warn">disabled</span>{% endif %}</div>
   <div class="small mut">{{ x.description }}</div>
-  <div class="small">stages {{ x.stages | join(', ') }}{% if x.has_ui %} · has pages{% endif %}</div></div>
+  <div class="small">stages {{ x.stages | join(', ') }}{% if x.has_ui %} · has pages{% endif %} · coordinator side {{ x.host.state or 'stopped' }}</div>
+  {% if rd %}{{ m.readiness(rd, compact=True) }}{% endif %}</div>
 {% else %}<div class="card mut">No modules enabled. Install a bundle below, then enable it.</div>{% endfor %}</div>
 
 <h2>Lifecycle <span class="small mut">(bundles by digest; nothing is enabled on install; canary → promote; rollback keeps the previous version)</span></h2>
@@ -21,6 +25,7 @@
 {% for s in store %}{% set ch = s.channel %}
 <div class="card" style="margin-top:8px">
   <div class="row"><b>{{ s.name }}</b>
+    {% if readiness and readiness.get(s.name) and not ch.current %}<span class="chip {{ {'ready': 'ok', 'blocked': 'bad', 'waiting': 'warn'}[readiness[s.name].state] }}">{{ readiness[s.name].summary }}</span>{% endif %}
     {% if ch.current %}<span class="chip ok">current {{ ch.current }}</span>{% else %}<span class="chip">not enabled</span>{% endif %}
     {% if ch.previous %}<span class="chip">previous {{ ch.previous }}</span>{% endif %}
     {% if ch.canary %}<span class="chip warn">canary {{ ch.canary }}</span>{% endif %}
@@ -40,15 +45,16 @@
   {% if ch.canary %}<div class="small">canary nodes: {% for c in s.canary_state %}<span class="chip {{ 'ok' if c.state == 'certified' else 'warn' }}">{{ c.hostname }}: {{ c.state or 'installing' }}</span>{% endfor %}</div>{% endif %}
   <table class="small" style="margin-top:6px"><tr><th>version</th><th>digest</th><th>bundle</th><th>installed and sandbox grants</th><th><span class="sr-only">actions</span></th></tr>
   {% for v in s.versions %}<tr><td class="mono">{{ v.version }}</td><td class="mono" title="{{ v.content_digest }}">{{ v.content_digest[:15] }}…</td>
-    <td>{{ v.bundle_files }} files ({{ (v.bundle_bytes / 1e6) | round(1) }} MB)</td>
+    <td class="nowrap">{{ v.bundle_files }} files ({{ (v.bundle_bytes / 1e6) | round(1) }} MB)</td>
     <td class="mut">{{ v.installed_at | ago }} by {{ v.installed_by }}
       {% if v.sandbox.requests %}<div class="small">sandbox: {{ v.sandbox.requests }}
         {% if v.sandbox.approved %}<span class="chip ok">approved</span>{% else %}<span class="chip warn">needs approval</span>
         {{ m.op_form("modules.approve", s.name ~ "@" ~ v.version, "Review grants…", cls="pri") }}{% endif %}</div>{% endif %}</td>
-    <td class="row">
+    <td class="actions">
       {% if not ch.current %}{{ m.op_form("modules.enable", s.name ~ "@" ~ v.version, "Enable", cls="pri", confirm="Enable " ~ s.name ~ " " ~ v.version ~ " on every node?") }}
       {% elif v.version != ch.current and v.version != ch.canary %}
-        {% call m.op_form("modules.enable_canary", s.name ~ "@" ~ v.version, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes" size="1">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}
+        {% call m.op_form("modules.enable_canary", s.name ~ "@" ~ v.version, "Canary…") %}<select name="pl.nodes" multiple aria-label="canary nodes" size="1">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>
+          <select name="p.group" aria-label="or a group's members"><option value="">or a group…</option>{% for g in groups or [] %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select>{% endcall %}
         {% if v.version != ch.previous %}{{ m.op_form("modules.uninstall", s.name ~ "@" ~ v.version, "Uninstall…", cls="danger") }}{% endif %}
       {% endif %}
       {% call m.op_form("modules.pin", s.name ~ "@" ~ v.version, "Pin") %}<select name="p.node" aria-label="node to pin">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select>{% endcall %}

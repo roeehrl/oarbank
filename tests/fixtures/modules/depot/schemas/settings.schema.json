@@ -1,0 +1,14 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "title": "depot settings",
+ "type": "object",
+ "properties": {
+  "mirror": {
+   "type": "string",
+   "maxLength": 200,
+   "title": "Mirror",
+   "description": "A node setting its runners read; a bootstrap job never gets it.",
+   "x-oarbank": {"scope": "node"}
+  }
+ }
+}

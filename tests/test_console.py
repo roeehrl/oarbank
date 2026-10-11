@@ -5,12 +5,14 @@ import re
 import socket
 import threading
 import time
+from urllib.parse import unquote
 
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 
 from helpers import sign_in, create_study, release_id, PARAMS, certify, enrolled_node, fresh, make_db
+from helpers import node_settings, put_node, set_fleet, set_node
 from oarbank.console.app import console_app
 from oarbank.console.state import ConsoleState, wait_for_schema
 from oarbank.coordinator import app as coord_app
@@ -134,7 +136,7 @@ def test_cross_site_posts_are_refused(env):
     assert r.status_code == 403
     r = env["c"].post("/do/fleet.pause", data={"target": "fleet"}, headers={"origin": "https://evil.example"})
     assert r.status_code == 403
-    assert env["db"].get_setting("fleet_state", "active") == "active"
+    assert env["db"].get_state("fleet_state", "active") == "active"
 
 
 def _signed_out(c):
@@ -265,7 +267,7 @@ def test_invariant_conditions_render_and_latch(env):
     from oarbank.coordinator.app import _check_invariants
     db = env["db"]
     _check_invariants(db)
-    conds = db.get_setting("invariant_conditions")
+    conds = db.get_state("invariant_conditions")
     assert [c["id"] for c in conds][:2] == ["S1", "S2"] and {c["status"] for c in conds} == {"True"}
     assert "S15" in [c["id"] for c in conds]
     assert "s15_module_faults_not_charged" in env["c"].get("/verify").text
@@ -309,11 +311,12 @@ def test_protection_editor_previews_live_and_applies_through_a_plan(env):
     plan_id = r.text.split('name="plan_id" value="')[1].split('"')[0]
     r = c.post("/apply/protection.rules.update", data={"plan_id": plan_id, "reason": "protect the studio tool",
                                                         "return_to": "/", "idem": "k1"}, follow_redirects=False)
-    assert r.status_code == 303 and protection.current(db, n["node_id"]) == (1, {"schema": 1, "rule": [RULE]})
+    assert r.status_code == 303 and protection.current(db, n["node_id"]) == (1, {"schema": 1, "node": {"mode": "moderate"},
+                                                                                 "rule": [RULE]})
     r = form(c, "nodes.set_mode", target=n["node_id"], **{"p.mode": "strict_yield", "reason": "away"})
     assert r.status_code == 303 and protection.current(db, n["node_id"])[1]["node"]["mode"] == "strict_yield"
     r = c.get(f"/nodes/{n['node_id']}/protection")
-    assert "Restore…" in r.text and "mode.set" in r.text
+    assert "History" in r.text and "settings rev" in r.text and "This node sets its own mode (strict_yield)" in r.text
 
 
 def test_a_session_in_use_stays_signed_in(env):
@@ -340,9 +343,9 @@ def node_html(env):
     nid = env["node"]["node_id"]
     fleet = env["c"].get("/frag/fleet").text
     card = fleet[fleet.index(f'href="/nodes/{nid}"'):]
-    card = card[:card.index("Details & caps")]
+    card = card[:card.index(">Details<")]
     page = env["c"].get(f"/nodes/{nid}").text
-    page = page[page.index("<b>Hardware</b>"):page.index("<h2>Policy</h2>")]
+    page = page[page.index("<b>Hardware</b>"):page.index('<h2 id="settings-summary">')]
     strip = lambda h: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", h))
     return strip(card), strip(page)
 
@@ -360,7 +363,7 @@ def test_a_node_without_telemetry_shows_only_what_it_reported(env):
     assert "capacity not reported yet" in card and "pools scorer 4" in card and "mem 24.0 GB" in card
     assert "CPU" not in card and "pressure" not in card and "thermal" not in card
     assert "Apple M5 Pro (5P + 10E)" in page and "24.0 GB" in page and "macOS 27.0" in page
-    assert "15 cores · caps concurrent jobs" in page and "disk free" not in page and "user / power" not in page
+    assert "disk free" not in page and "user / power" not in page
 
 
 def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
@@ -434,14 +437,14 @@ def test_slots_show_the_automatic_count_and_what_binds(env):
     db, n = env["db"], env["node"]
     cap = {"cpu_slots": 4, "auto_cpu_slots": 7, "mem_gb_free": 12.5, "pools": {"scorer": 2, "gpu": 1},
            "binding_limit": "cap.cpu_cores", "admit": True}
-    db.x("UPDATE nodes SET capacity_json=?, limits_json=? WHERE node_id=?",
-         (_json.dumps(cap), _json.dumps({"cpu_cores": 4}), n["node_id"]))
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (_json.dumps(cap), n["node_id"]))
+    put_node(db, n, "cpu_cores", 4)
     card, page = node_html(env)
     assert_clean(card, page)
     assert "jobs 0 / 4 CPU slots (auto 7)" in card and "12.5 GB free for jobs" in card and "pools gpu 1, scorer 2" in card
-    assert "cap on cpu cores" in page and "7 automatic CPU slots now" in page
+    assert "cap on cpu cores" in page and "auto 7" in page
     cap.update(cpu_slots=0, auto_cpu_slots=0, binding_limit="auto")
-    db.x("UPDATE nodes SET capacity_json=?, telemetry_json=?, limits_json=NULL WHERE node_id=?",
+    db.x("UPDATE nodes SET capacity_json=?, telemetry_json=? WHERE node_id=?",
          (_json.dumps(cap), _json.dumps({"thermal": 2}), n["node_id"]))
     card, page = node_html(env)
     assert_clean(card, page)
@@ -616,6 +619,33 @@ def test_fragments_are_never_shared_between_sessions(env):
     assert _form_fields(c.get("/frag/fleet").text, "nodes.pause")["csrf"] == other["csrf"] != first
 
 
+def test_node_show_lists_gpu_in_containers_only_with_a_container_runtime_and_doctor_details_whole(monkeypatch, capsys):
+    """A Mac with Colima and krunkit reports its runtime, so its GPU API in containers sits beside a runtime; a node without
+    one shows none (docs/design/stage-gating.md, decision 7). Doctor details print whole, never cut (decision 6)."""
+    from oarbank.cli import main as cli
+    from oarbank.coordinator import detail
+    rep = {"gpu_apis": {"host": ["metal"], "containers": ["vulkan"]}}
+    colima = {"containers": {"runtime": "colima", "state": "installed", "gpu": "virtio-gpu:venus",
+                             "detail": "the agent's Colima VMs start when a job needs one"}}
+    assert detail.gpu(colima, rep)["containers"] == ["vulkan"]
+    none = {"containers": {"runtime": None, "state": "absent", "gpu": "undetected", "detail": "no container runtime installed"}}
+    assert detail.gpu(none, rep) == {"reported": True, "host": ["metal"], "containers": [], "evidence": {}, "mechanism": None}
+    why = "dlopen(/x/libchtslib.so): tried: " + "'/x' (no such file), " * 40 + "(mach-o file, but is an incompatible architecture)"
+    doctor = detail.doctor({"at": 1.0, "release_id": "r_1", "capabilities": [], "modules": {"genomics": {
+        "health": "undetected", "ran": True, "checks": [{"name": "pysam_import", "ok": False, "detail": why}]}}})
+    for facts, line in ((colima, "containers: colima installed; the agent's Colima VMs start when a job needs one"),
+                        (none, "containers: none (no container runtime installed)")):
+        doc = {"node": {"node_id": "n_1", "hostname": "mac", "platform": "darwin-arm64", "lifecycle": "ready",
+                        "desired_state": "active", "online": True, "agent_version": "2.9.0", "quarantine_reason": None},
+               "modules": {}, "doctor": doctor, "gpu": detail.gpu(facts, rep), "containers": facts["containers"], "services": [],
+               "services_at": None, "folders": [], "sandbox": {"backend": "seatbelt", "capabilities": []}}
+        monkeypatch.setattr(cli, "api", lambda method, path, *a, **k: doc)
+        cli.node_show("mac")
+        out = capsys.readouterr().out
+        assert line in out and f"failed pysam_import: {why}" in out
+        assert ("containers vulkan (Venus over virtio-gpu (krunkit))" in out) == (facts is colima), out
+
+
 def test_oarbank_node_show_prints_the_services_report(monkeypatch, capsys):
     from oarbank.cli import main as cli
     from oarbank.coordinator import detail, nodeservices
@@ -643,3 +673,157 @@ def test_oarbank_node_show_prints_the_services_report(monkeypatch, capsys):
     assert "service relay/vm: ready, healthy, 2 jobs using it" in out and "module relay: certified" in out
     with pytest.raises(SystemExit):
         cli.node_show("nope")
+
+
+def settings_html(env, nid=None, path=None) -> tuple[str, str]:
+    """The node's Settings tab (or another settings page): its HTML and its text."""
+    page = env["c"].get(path or f"/nodes/{nid or env['node']['node_id']}/settings").text
+    return page, re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page))
+
+
+def section_fields(html: str, section: str) -> dict:
+    """The hidden fields of one settings section's form (csrf, scope, keys, what each row had)."""
+    start = html.index(f'id="{section}"')
+    form_html = html[start:html.index("</form>", start)]
+    out: dict = {}
+    for name, value in re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', form_html):
+        out.setdefault(name, []).append(value.replace("&#34;", '"').replace("&quot;", '"'))
+    return out
+
+
+def save_section(env, section, nid=None, page=None, **values):
+    """Post one section as the page draws it, with `values` as {"o.<key>": "1", "v.<key>": ...} or `reset`."""
+    html, _ = settings_html(env, nid, page)
+    f = section_fields(html, section)
+    data = [(k, v) for k, vs in f.items() for v in vs if k not in ("reason",)]
+    data += [(k.replace("__", "."), v) for k, v in values.items()]
+    from urllib.parse import urlencode
+    return env["c"].post("/do/settings.apply", content=urlencode(data), follow_redirects=False,
+                         headers={"content-type": "application/x-www-form-urlencoded"})
+
+
+def test_the_node_settings_tab_shows_each_setting_with_its_source(env):
+    """Every setting with its label and unit, a line of help, the raw key (copyable, never the label) and the badge
+    naming where its value comes from: the 24 GB fixture keeps 4 GB for the system by default, with that reason."""
+    html, text = settings_html(env)
+    assert_clean(text)
+    for label in ("Memory kept for the system", "Memory kept for the person using it", "Jobs while someone is using this computer",
+                  "Idle time before the computer counts as free", "Screen sharing counts as someone using it", "Run jobs on battery",
+                  "Fit jobs into the memory free now", "Memory per job slot", "Threads per job", "Most jobs at once",
+                  "Job priority (nice)", "Hard limits", "CPU cores", "Concurrent jobs", "Schedule", "Cap enforcement",
+                  "Modules on this node", "Run this module", "Services that do not run"):
+        assert label in text, label
+    assert "Default · 24 GB RAM" in text and 'data-copy="key-node-os_reserve_gb"' in html
+    assert "changed here" not in text and 'name="reset"' not in html
+    # a section is a fieldset with a legend; help and source describe each field
+    assert '<fieldset class="settings-fieldset">' in html and '<legend id="h-node-memory">' in html
+    assert 'aria-describedby="h-os_reserve_gb src-os_reserve_gb"' in html
+    assert "Pending: this agent does not report what it applied" in text or "Pending: node offline" in text
+    assert 'aria-current="page">Settings' in html
+
+
+def test_override_and_reset_on_a_node_store_only_the_choice(env):
+    """Override writes a node value; the row is marked changed here (bar and text) and Reset to inherited deletes it,
+    so a later fleet default reaches the node again."""
+    db, n = env["db"], env["node"]
+    r = save_section(env, "memory", o__os_reserve_gb="1", v__os_reserve_gb="10")
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"] and "Saved" in unquote(r.headers["location"])
+    assert db.q("SELECT key, value_json FROM setting_values WHERE scope='node'") == [{"key": "os_reserve_gb", "value_json": "10"}]
+    assert node_settings(db, n)["os_reserve_gb"] == 10
+    a = last_audit(db)
+    assert (a["operation"], a["source"], a["outcome"]) == ("settings.apply", "gui", "ok")
+    html, text = settings_html(env)
+    assert 'class="setting changed" id="s-os_reserve_gb"' in html and "changed here" in text
+    assert 'name="reset" value="os_reserve_gb"' in html and "inherits 4 GB · Default · 24 GB RAM" in text
+    r = save_section(env, "memory", reset="os_reserve_gb")
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"]
+    assert db.q("SELECT 1 FROM setting_values WHERE scope='node'") == []
+    assert "changed here" not in settings_html(env)[1] and node_settings(db, n)["os_reserve_gb"] == 4
+
+
+def test_a_mistyped_value_is_refused_with_an_error_summary(env):
+    """A refused save comes back to the page with a GOV.UK-style summary that takes focus, links to the field and
+    keeps what was typed; nothing is stored."""
+    r = save_section(env, "memory", o__job_mem_gb="1", v__job_mem_gb="abc")
+    assert r.status_code == 400
+    html = r.text
+    assert 'class="error-summary" role="alert" tabindex="-1" data-focus-on-load' in html
+    assert '<a href="#v-job_mem_gb">Memory per job slot: \'abc\' is not a number</a>' in html.replace("&#39;", "'")
+    assert 'value="abc"' in html and 'aria-invalid="true"' in html
+    assert env["db"].q("SELECT 1 FROM setting_values WHERE scope='node'") == []
+    r = save_section(env, "memory", o__user_reserve_gb="1", v__user_reserve_gb="30")      # 4 + 30 GB on a 24 GB node
+    assert r.status_code == 400 and "leave no memory for jobs" in r.text
+
+
+def test_fleet_node_defaults_preview_the_nodes_they_reach_then_save(env):
+    """The exit test of phase 1 in the console: a fleet default change shows which nodes it reaches and which keep their
+    own value before anything is written ("Save for N nodes"), then every non-overriding node gets it."""
+    db, n = env["db"], env["node"]
+    other = certify(db, enrolled_node(db, "desk")[1])
+    set_node(db, other, "job_mem_gb", 3)
+    html, text = settings_html(env, path="/settings")
+    assert "Node defaults" in text and "Overridden on 1 node" in text and 'href="/settings/overrides?key=job_mem_gb"' in html
+    r = save_section(env, "memory", page="/settings", o__job_mem_gb="1", v__job_mem_gb="2")
+    assert r.status_code == 200, r.text[:500]
+    plan = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", r.text))
+    assert "Changes the effective value on 1 node (mini); 1 node keeps theirs (desk)" in plan
+    assert "Save for 1 node" in plan and "mini Memory per job slot 1.5 GB 2 GB" in plan
+    assert db.q("SELECT 1 FROM setting_values WHERE scope='fleet' AND module=''") == []   # a preview writes nothing
+    pid = re.search(r'name="plan_id" value="([^"]+)"', r.text).group(1)
+    r = env["c"].post("/apply/settings.apply", data={"plan_id": pid, "reason": "bigger jobs", "return_to": "/settings"},
+                      follow_redirects=False)
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"], r.headers["location"]
+    assert node_settings(db, n)["job_mem_gb"] == 2 and node_settings(db, other)["job_mem_gb"] == 3
+    over, otext = settings_html(env, path="/settings/overrides?key=job_mem_gb")
+    assert "desk" in otext and "3 GB" in otext and "Fleet value: 2 GB (Fleet)" in otext
+
+
+def test_explain_shows_the_whole_chain(env):
+    db, n = env["db"], env["node"]
+    set_fleet(db, "run_on_battery", True)
+    html, text = settings_html(env, path=f"/nodes/{n['node_id']}/settings?explain=run_on_battery")
+    i = html.index('id="s-run_on_battery"')
+    row = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html[i:html.index("</details>", i)]))
+    assert "In effect: on from Fleet" in row and "Default off" in row and "Fleet on in effect" in row
+    assert "This node not set" in row and "rev " in row and "test" in row
+    assert '<details class="small explain" open>' in html[i:]
+
+
+def test_the_why_line_cites_settings_with_their_source(env):
+    db, n = env["db"], env["node"]
+    cap = {"cpu_slots": 0, "auto_cpu_slots": 0, "slots": 0, "mem_gb_free": 0.0, "admit": False, "why": "guard:battery",
+           "binding_limit": "guard:battery"}
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(cap), n["node_id"]))
+    page = env["c"].get(f"/nodes/{n['node_id']}").text
+    assert f'href="/nodes/{n["node_id"]}/settings?explain=run_on_battery#s-run_on_battery">Run jobs on battery: off · Default</a>' in page
+
+
+def test_the_why_line_explains_slots_and_memory(env):
+    """The agent's capacity says which bound set the memory and whether someone is present: the card and the page say
+    it in a line."""
+    db, n = env["db"], env["node"]
+    cap = {"cpu_slots": 2, "auto_cpu_slots": 2, "idle_cpu_slots": 10, "slots": 2, "mem_gb_free": 4.12, "mem_binding": "in_use",
+           "mem_in_use_gb": 16.0, "user_present": True, "admit": True, "binding_limit": "auto", "pools": {}}
+    db.x("UPDATE nodes SET capacity_json=?, telemetry_json=? WHERE node_id=?",
+         (json.dumps(cap), json.dumps({"user_idle_s": 3.0, "presence": "hid"}), n["node_id"]))
+    card, page = node_html(env)
+    assert_clean(card, page)
+    line = "2 slots while someone is using this Mac (10 when idle) · 4.1 GB free for jobs (apps and the system use 16 GB)"
+    assert line in card and line in page
+    cap.update(admit=False, why="guard:battery", binding_limit="guard:battery", cpu_slots=0, slots=0, mem_gb_free=0.0)
+    db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(cap), n["node_id"]))
+    card, page = node_html(env)
+    assert "no new jobs: on battery (allow it in settings: Run jobs on battery)" in card
+    assert "no new jobs: on battery (allow it in settings: Run jobs on battery)" in page
+
+
+def test_caps_are_node_values_that_can_only_lower_capacity(env):
+    db, n = env["db"], env["node"]
+    put_node(db, n, "jobs", 3)
+    html, text = settings_html(env)
+    i = html.index('id="caps"')
+    caps = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html[i:html.index("</form>", i)]))
+    assert "Concurrent jobs (jobs)" in caps and caps.count("changed here") == 2          # the row and the section
+    assert "the lowest wins" in caps
+    set_fleet(db, "jobs", 2)                                    # a fleet cap below the node's: min wins
+    assert node_settings(db, n)["jobs"] == 2

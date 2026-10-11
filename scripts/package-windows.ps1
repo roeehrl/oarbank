@@ -97,7 +97,7 @@ Remove-Item -LiteralPath $Admx -Force -ErrorAction SilentlyContinue
 $AdmxSrc = Join-Path ([IO.Path]::GetTempPath()) "oarbank-admx-$PID"
 Remove-Item -LiteralPath $AdmxSrc -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse "$Repo\deploy\windows\admx" $AdmxSrc
-Get-ChildItem -LiteralPath $AdmxSrc -Recurse | ForEach-Object { $_.LastWriteTimeUtc = [DateTime]::new(2000, 1, 1, 0, 0, 0, 'Utc') }
+Get-ChildItem -LiteralPath $AdmxSrc -Recurse | ForEach-Object { $_.LastWriteTimeUtc = [DateTime]::new(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Utc) }
 & "$env:SystemRoot\System32\tar.exe" -a -c -f $Admx -C $AdmxSrc oarbank.admx en-US/oarbank.adml
 $AdmxExit = $LASTEXITCODE
 Remove-Item -LiteralPath $AdmxSrc -Recurse -Force -ErrorAction SilentlyContinue

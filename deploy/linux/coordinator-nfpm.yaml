@@ -8,7 +8,8 @@ priority: optional
 maintainer: Codonic <support@codonic.dev>
 description: |
   Oarbank coordinator and browser setup wizard.
-  Launch Oarbank Coordinator to configure services for your own user account.
+  The coordinator runs as system services under its own oarbankd account, from boot.
+  Launch Oarbank Coordinator to set it up.
 vendor: Codonic
 homepage: https://codonic.dev
 license: Proprietary
@@ -28,6 +29,10 @@ contents:
   - src: ${ROOT}
     dst: /opt/oarbank/coordinator
     type: tree
+  # The operator CLI and the setup helper on the PATH; both launchers follow the link back to the payload.
+  - src: /opt/oarbank/coordinator/bin/oarbank
+    dst: /usr/bin/oarbank
+    type: symlink
   - src: /opt/oarbank/coordinator/bin/oarbank-setup
     dst: /usr/bin/oarbank-setup
     type: symlink
@@ -49,6 +54,8 @@ contents:
   - src: ${REMOVE}
     dst: /usr/lib/oarbank/coordinator-remove.py
     file_info: {mode: 0644}
-# No install/upgrade hook starts or enables services. Only final removal cleans up.
+# Install and upgrade refresh or migrate an existing coordinator, never create a new one (the wizard does); final
+# removal stops and removes the services and keeps the coordinator's data.
 scripts:
+  postinstall: ${POSTINSTALL}
   preremove: ${PREREMOVE}

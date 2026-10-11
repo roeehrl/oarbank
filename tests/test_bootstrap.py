@@ -11,6 +11,7 @@ from oarbank.coordinator import core, datasets, effects, explain, invariants, mo
 from oarbank.coordinator.db import jl
 
 from helpers import FACTS, FIXTURES, enrolled_node, fresh, install, make_db, run_op
+from helpers import set_fleet
 
 DEPOT_DIR = FIXTURES / "depot"
 TOOL = "tool:depot-1"
@@ -77,7 +78,7 @@ def provision(db, evals=0):
 
 
 def test_a_fresh_fleet_provisions_its_datasets_with_a_bootstrap_job_and_then_certifies(db):
-    db.set_setting("replica_rate", 1.0)                 # every comparing job would get a replica
+    set_fleet(db, "replica_rate", 1.0)                 # every comparing job would get a replica
     node = fresh_node(db)
     golden = db.one("SELECT * FROM jobs WHERE kind='golden'")
     assert state(db, node) == "certifying" and json.loads(golden["datasets_json"]) == [TOOL]
@@ -91,7 +92,8 @@ def test_a_fresh_fleet_provisions_its_datasets_with_a_bootstrap_job_and_then_cer
     doc = explain.job_doc(db, fetch["job_id"])
     assert doc.headline.code == "QUEUED_BEHIND" and "bootstrap job" in doc.system_actions[0]
     check = next(r for r in doc.matrix[0].results if r.predicate == "module_ready_for_bootstrap(depot)")
-    assert (check.outcome, check.observed, check.required) == ("pass", "certifying", "certified or certifying")
+    assert (check.outcome, check.observed, check.required) == ("pass", "certifying, runner started",
+                                                               "runner started (a doctor report), not revoked")
     g = claim(db, node)
     assert [(x["job_id"], x["spec"]["stage"]) for x in g] == [(fetch["job_id"], "fetch")]      # the evals need certification
     assert "Running as a bootstrap job on mini" in explain.job_doc(db, fetch["job_id"]).headline.text
@@ -205,21 +207,84 @@ def test_pinned_datasets_are_waiting_until_a_bootstrap_job_registers_them(db):
     assert pin["state"] == "registered" and pin["held_by"] is None and pin["registered_at"]
 
 
-def test_bootstrap_jobs_run_only_where_the_doctor_is_healthy_and_the_agent_applies_the_bootstrap_grants(db, monkeypatch):
-    sick = fresh_node(db, "sick", doctor={"modules": {"depot": {"health": "unhealthy", "checks": [{"name": "disk", "ok": False}]}}})
-    assert state(db, sick) == "doctor_failed"
+GRANTS = {**FACTS, "sandbox": {**FACTS["sandbox"], "enforcement": {**FACTS["sandbox"]["enforcement"],
+                                                                    modsandbox.BOOTSTRAP_GRANTS: "enforced"}}}
+
+
+def test_bootstrap_jobs_run_where_the_runner_starts_and_the_agent_applies_the_bootstrap_grants(db, monkeypatch):
+    """docs/design/stage-gating.md: a bootstrap job needs the module's runner to start on the node (its doctor printed a
+    DoctorOutput, whatever its health) and the bootstrap grants; a failed check that proves no capability the stage needs
+    does not keep it off the node."""
     monkeypatch.setattr(modsandbox, "REQUIRE_SANDBOXED_AGENTS", True)
+    sick = fresh_node(db, "sick", facts=GRANTS, doctor={"modules": {"depot": {"health": "undetected", "ran": True, "checks": [
+        {"name": "java17", "ok": False}, {"name": "pysam_import", "ok": False, "detail": "dlopen(...)"}]}}})
+    broken = fresh_node(db, "broken", facts=GRANTS, doctor={"modules": {"depot": {"health": "unhealthy", "ran": False, "checks": [
+        {"name": "doctor", "ok": False, "detail": "not a DoctorOutput: Traceback ..."}]}}})
+    legacy = fresh_node(db, "legacy", facts=GRANTS, doctor={"modules": {"depot": {"health": "unhealthy", "checks": [
+        {"name": "doctor", "ok": False, "detail": "doctor did not finish within 60 s"}]}}})   # an agent without `ran`
     old = fresh_node(db, "old")                                      # FACTS: a sandbox, but no grants.bootstrap
-    new = fresh_node(db, "new", facts={**FACTS, "sandbox": {**FACTS["sandbox"], "enforcement": {
-        **FACTS["sandbox"]["enforcement"], modsandbox.BOOTSTRAP_GRANTS: "enforced"}}})
+    assert (state(db, sick), state(db, broken), state(db, legacy)) == ("undetected", "doctor_failed", "doctor_failed")
     fetch = provision(db)
-    assert claim(db, sick) == [] and claim(db, old) == []
-    matrix = {r.node: r.results for r in explain.job_doc(db, fetch["job_id"]).matrix}
-    check = next(r for r in matrix["sick"] if r.predicate == "module_ready_for_bootstrap(depot)")
-    assert (check.outcome, check.code, check.observed) == ("fail", "MODULE_NOT_READY", "doctor_failed")
+    assert claim(db, broken) == [] and claim(db, legacy) == [] and claim(db, old) == []
+    doc = explain.job_doc(db, fetch["job_id"])
+    matrix = {r.node: r.results for r in doc.matrix}
+    for name in ("broken", "legacy"):
+        check = next(r for r in matrix[name] if r.predicate == "module_ready_for_bootstrap(depot)")
+        assert (check.outcome, check.code, check.observed) == ("fail", "MODULE_NOT_READY", "doctor_failed, runner not started")
     assert predicates_first_failure(matrix["old"]) == ("CAPABILITY_NOT_ENFORCED", "bootstrap grants enforced")
-    assert predicates_first_failure(matrix["new"]) is None
-    assert [x["job_id"] for x in claim(db, new)] == [fetch["job_id"]]
+    assert predicates_first_failure(matrix["sick"]) is None          # undetected, but its runner starts
+    ready = next(s for s in doc.summary if s.code == "MODULE_NOT_READY")
+    assert sorted(ready.nodes) == ["broken", "legacy"] and "its runner did not start" in ready.detail["text"]
+    assert [x["job_id"] for x in claim(db, sick)] == [fetch["job_id"]]
+    assert ok(db)
+
+
+def depot_fetch_requires(monkeypatch, *capabilities):
+    """depot's fetch stage requiring node capabilities (patched in the catalog)."""
+    import dataclasses
+    info = modcalls.info("depot")
+    stages = [st.model_copy(update={"requires": st.requires.model_copy(update={"capabilities": list(capabilities)})})
+              if st.name == "fetch" else st for st in info.manifest.stages]
+    monkeypatch.setitem(modcalls.CATALOG, "depot", dataclasses.replace(info, manifest=info.manifest.model_copy(update={"stages": stages})))
+
+
+def test_a_failed_check_named_after_a_capability_keeps_off_only_the_stages_that_need_it(db, monkeypatch):
+    """A doctor check named after a capability proves it for the module (oarbank-sdk DoctorCheck.name): when it fails the
+    node lacks the capability whatever its probes say, so a stage that requires it waits there; one that does not runs."""
+    from oarbank.coordinator import predicates
+    with_probe = lambda checks, health="healthy": {"capabilities": ["netcheck"], "modules": {"depot": {
+        "health": health, "ran": True, "checks": checks}}}
+    good = fresh_node(db, "good", facts=GRANTS, doctor=with_probe([{"name": "netcheck", "ok": True}]))
+    healthy_but = fresh_node(db, "healthy-but", facts=GRANTS, doctor=with_probe([{"name": "netcheck", "ok": False, "detail": "x"}]))
+    sick = fresh_node(db, "sick", facts=GRANTS, doctor=with_probe([{"name": "netcheck", "ok": False}, {"name": "disk", "ok": False}],
+                                                                 "unhealthy"))
+    assert predicates.node_capabilities(fresh(db, good), "depot") == {"netcheck"}
+    assert predicates.node_capabilities(fresh(db, sick), "depot") == set()
+    fetch = provision(db)
+    depot_fetch_requires(monkeypatch, "netcheck")
+    assert claim(db, healthy_but) == [] and claim(db, sick) == []
+    doc = explain.job_doc(db, fetch["job_id"])
+    matrix = {r.node: r.results for r in doc.matrix}
+    assert predicates_first_failure(matrix["healthy-but"]) == ("STAGE_CAPABILITY_MISSING", "stage capabilities")
+    assert predicates_first_failure(matrix["sick"]) == ("STAGE_CAPABILITY_MISSING", "stage capabilities")
+    row = next(r for r in doc.summary if r.code == "STAGE_CAPABILITY_MISSING")
+    assert row.detail["text"] == ("Its stage needs netcheck; this node's services, probes and module doctor do not provide "
+                                  "netcheck (2 nodes: 2 darwin-arm64)") and row.detail["platforms"] == {"darwin-arm64": 2}
+    depot_fetch_requires(monkeypatch)                          # the stage needs nothing: the unrelated failures do not matter
+    assert [x["job_id"] for x in claim(db, sick)] == [fetch["job_id"]]
+    assert ok(db)
+
+
+def test_explain_says_which_capability_no_node_has(db, monkeypatch):
+    nodes = [fresh_node(db, n, facts=GRANTS, doctor={"modules": {"depot": {"health": "undetected", "ran": True, "checks": [
+        {"name": "netcheck", "ok": False, "detail": "no route"}]}}}) for n in ("a", "b")]
+    fetch = provision(db)
+    depot_fetch_requires(monkeypatch, "netcheck")
+    assert all(claim(db, n) == [] for n in nodes)
+    head = explain.job_doc(db, fetch["job_id"]).headline
+    assert head.code == "NO_ELIGIBLE_NODE"
+    assert head.text == ("No node can run this job right now: Its stage needs netcheck; this node's services, probes and "
+                         "module doctor do not provide netcheck (2 nodes: 2 darwin-arm64)")
 
 
 def predicates_first_failure(results):
@@ -266,10 +331,10 @@ def test_datasets_create_of_a_pinned_id_needs_the_pinned_contents(db):
 @pytest.mark.parametrize("edit, why", [
     (lambda t: t.replace('determinism = "none"\n', ""), "a bootstrap stage has determinism none"),
     (lambda t: t[:t.index("\n[[datasets.pinned]]")] + "\n" + t[t.index("[[operations]]"):], r"need \[\[datasets.pinned\]\]"),
-    (lambda t: t.replace('core = ">=2.4,<3"', 'core = ">=2.3,<3"'), "need requires.core >= 2.4"),
+    (lambda t: t.replace('core = ">=2.9,<3"', 'core = ">=2.3,<3"'), "need requires.core >= 2.4"),
 ])
 def test_install_refuses_a_bootstrap_stage_the_sdk_refuses(tmp_path, db, monkeypatch, edit, why):
-    from oarbank_sdk import bundle as B, manifest as mf
+    from oarbank_sdk import bundle as B, manifest as mf, settings as S
     src = tmp_path / "depot"
     shutil.copytree(DEPOT_DIR, src, ignore=shutil.ignore_patterns("__pycache__"))
     (src / "oarbank-module.toml").write_text(edit((src / "oarbank-module.toml").read_text(encoding="utf-8")))
@@ -278,6 +343,7 @@ def test_install_refuses_a_bootstrap_stage_the_sdk_refuses(tmp_path, db, monkeyp
     with monkeypatch.context() as m:                                    # a bundle made by a tool that skips the rules
         m.setattr(mf.Manifest, "_bootstrap_rules", lambda self, chain: None)
         m.setattr(mf.Manifest, "core_keys_used", lambda self: [])
+        m.setattr(S, "core_gate", lambda *a, **k: [])                   # depot's node setting needs core 2.9 too
         out, _ = B.build(src, tmp_path / "d.mfb")
     with pytest.raises(modstore.InstallError, match=why):
         modstore.install(db, out, actor="test", self_test=False)        # the core refuses to install it
@@ -314,7 +380,7 @@ def test_depot_passes_the_conformance_kit_its_fetch_proven_against_the_pins(tmp_
         (tmp_path / "tool" / path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / "tool" / path).write_bytes(body)
     rep = conform(DEPOT_DIR, {"datasets": {TOOL: {"kind": "tool", "attrs": {"version": "1"}, "dir": str(tmp_path / "tool")}},
-                              "settings": {"token": "secret"},
+                              "settings": {"mirror": "https://mirror.example/secret"},
                               "runner_specs": [{"name": "fetch", "stage": "fetch", "payload": {"fetch": TOOL},
                                                 "expect": {"artifacts": ["tool"]}}]})
     assert rep.ok, rep.text()

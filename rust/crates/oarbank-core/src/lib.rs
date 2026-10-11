@@ -12,6 +12,7 @@ pub mod joincode;
 pub mod portable;
 mod py;
 pub mod sandbox;
+pub mod tools;
 pub mod service;
 
 pub fn version() -> &'static str {

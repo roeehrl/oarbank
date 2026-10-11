@@ -152,7 +152,7 @@ pub struct SetupOpts {
 }
 
 /// `setup [--scope personal|system] [--join-code-file F | --join-code-stdin | --join-code C] [--coordinator URL]
-/// [--name NAME] [--agent PATH] [--no-service] [--dry-run]`. Without a code or a coordinator the service starts and
+/// [--name NAME] [--agent PATH] [--no-service] [--dry-run] [--or-wait] [--containers-later]`. Without a code or a coordinator the service starts and
 /// waits for one (`oarbank-node join` stages it later, or managed policy names it). `--no-service` lays out the home and
 /// prints the agent arguments without loading a service (image builds, tests). `--join-code` is for the Windows
 /// installer's elevated custom action, whose command line only administrators can read.
@@ -184,10 +184,19 @@ pub fn setup(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
         }
         c => c,
     };
+    let wants_containers = code.as_deref().and_then(|c| oarbank_core::joincode::decode(c).ok()).is_some_and(|c| c.containers());
     let o = SetupOpts { scope: flag(opts, "--scope").unwrap_or_else(|| "personal".into()), code,
                         coordinator: flag(opts, "--coordinator"), name: flag(opts, "--name"), agent: flag(opts, "--agent").map(PathBuf::from),
                         no_service: opts.iter().any(|o| o == "--no-service"), dry: opts.iter().any(|o| o == "--dry-run") };
-    setup_with(explicit_home, &o).map(|_| ())
+    setup_with(explicit_home, &o)?;
+    // `--containers-later` (the Windows installer): a code that asks for container jobs gets container support once the
+    // installer has finished, never inside it (container_support.rs). `oarbank-node join` installs it itself.
+    if cfg!(windows) && wants_containers && opts.iter().any(|o| o == "--containers-later") && !o.dry {
+        if let Err(e) = crate::container_support::schedule() {
+            eprintln!("warning: container support could not be scheduled: {e:#}; run `oarbank-agent containers install` as an administrator");
+        }
+    }
+    Ok(())
 }
 
 /// The install plan for `o`; returns the home.

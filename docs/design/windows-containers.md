@@ -147,9 +147,9 @@ Facts `containers` (every hello; `oarbank-agent facts`; the console's node page)
 
 `oarbank-agent containers doctor` prints the same report from a fresh check of the prerequisites and the running
 agent's last state (exit 0 when ready, 3 when something is missing); `--probe` also runs a container (and with
-`--gpu` a GPU container) through the real runtime. `oarbank-agent containers install` installs what is missing
-(administrator; exit 3010 when a reboot is needed), `oarbank-agent containers remove` deletes the agent's session
-storage.
+`--gpu` a GPU container) through the real runtime. `oarbank-agent containers install [--wait SECONDS]` installs what
+is missing (administrator; exit 3010 when a reboot is needed, 1618 while another Windows Installer installation runs),
+`oarbank-agent containers remove` deletes the agent's session storage.
 
 ## Packaging
 
@@ -157,8 +157,16 @@ storage.
   the script's pin, and puts the architecture's `wslcsdk.dll` (MIT) beside the agent; `check-pe-imports.py` keeps the
   agent free of a link-time dependency on it (it is loaded at run time), and `check-package.py` checks it is for the
   MSI's architecture.
-- The MSI installs the DLL. `CONTAINERS=1` runs `oarbank-agent containers install` (the Virtual Machine Platform and
-  WSL, unattended; a reboot may follow). Without it nothing is installed and doctor names what is missing.
+- The MSI installs the DLL. `CONTAINERS=1` (or a join code made for container jobs) registers a one-shot task that runs
+  `oarbank-agent containers install` (the Virtual Machine Platform and WSL, unattended; a restart may follow) as
+  LocalSystem once the installer has ended, never inside it: the WSL package is a Windows Installer package, and a
+  nested installation failed the agent's MSI on a real PC (2755/1622, status 1603). The outcome is in
+  `HKLM\SOFTWARE\Codonic\Oarbank\ContainerSupport`, shown by Oarbank Node and `oarbank-node status`
+  ([node-enrollment.md](node-enrollment.md), "Windows MSI properties"). Without it nothing is installed and doctor
+  names what is missing.
+- `oarbank-agent containers install` never starts inside another Windows Installer installation: it waits up to
+  `--wait SECONDS` for the `Global\_MSIExecute` mutex to be free and exits 1618 (ERROR_INSTALL_ALREADY_RUNNING) if it
+  is not, or if the WSL package's own install was refused for that reason.
 - Uninstalling (`oarbank-launcher remove`, which the MSI runs) ends the agent's session and deletes its storage through
   `oarbank-agent containers remove` once the service is gone: the images are a cache, never the node's identity. The
   WSL package stays (other software may use it).
@@ -189,7 +197,7 @@ storage.
   24H2 needs VHE), and without it there is no hypervisor. A clone of it with WSL 3.0.1 ran everything up to the VM
   start for real: the SDK library loaded by the agent (version, missing components), the agent's session created
   through the SDK and found by name by `wslc`, the MSI with `CONTAINERS=1` installing the Virtual Machine Platform
-  unattended (as LocalSystem, through the SDK; it answers "restart required"), and the doctor reporting first
+  unattended (as LocalSystem, through the SDK, then still from a custom action; it answers "restart required"), and the doctor reporting first
   `virtual_machine_platform`, then after the restart `virtualization` (the VM cannot start without nesting). The CLI's
   outputs are the unit tests' recorded fixtures. GitHub's `windows-2025` runners have
   nested virtualization and WSL 2 (`windows-11-arm` has neither): CI installs WSL 3.0.1 there and runs

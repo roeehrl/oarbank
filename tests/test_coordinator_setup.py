@@ -479,14 +479,17 @@ def test_completed_reopen_refreshes_only_changed_or_stopped_install(wizard, monk
         wizard.backend.running = False
     new = restarted(wizard, monkeypatch)
     assert "/login/link?t=" in new.reopen()
-    assert len(wizard.backend.installs) == 2 and wizard.backend.installs[-1] == (wizard.root, "127.0.0.1")
+    # stopped services are reinstalled everywhere; an upgrade or a relocation only on Windows (the macOS and Linux
+    # packages refresh the system services themselves: coordinator-system-service.md, decision 8)
+    installs = 2 if change == "stopped" or sys.platform == "win32" else 1
+    assert len(wizard.backend.installs) == installs and wizard.backend.installs[-1] == (wizard.root if installs == 2 else wizard.backend.installs[-1][0], "127.0.0.1")
     marker = json.loads(wizard.marker.read_text())
     assert marker["root"] == str(wizard.root) and marker["version"] == new.version
     assert marker["fleet"] == initial["fleet"] and marker["address"] == initial["address"]
     assert [p.read_bytes() for p in (wizard.primary, wizard.backup)] == original_keys
     assert access.account(wizard.backend.db, "admin") == original_account
     assert "/login/link?t=" in new.reopen()
-    assert len(wizard.backend.installs) == 2
+    assert len(wizard.backend.installs) == installs
 
 
 def test_readiness_timeout_is_bounded_and_does_not_create_account(wizard, monkeypatch):
@@ -512,12 +515,23 @@ def test_helper_fixed_argv_no_password(wizard, monkeypatch, platform):
     recorded = []
     monkeypatch.setattr(setup.sys, "platform", platform)
     monkeypatch.setattr(subprocess, "run", lambda command, **kw: recorded.append((command, kw)) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(setup.sys, "stdin", io.StringIO())             # launched by the app: no terminal
     setup.Backend.install(wizard.backend, wizard.root, "127.0.0.1")
     argv, kwargs = recorded[0]
     if platform == "win32":
         assert argv == ["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(wizard.root / "install-oarbankd.ps1"), "-Installed", str(wizard.root), "-AgentBind", "127.0.0.1"]
     else:
-        assert argv == ["bash", str(wizard.root / "install-oarbankd.sh"), "--installed", str(wizard.root), "--agent-bind", "127.0.0.1"]
+        # the system services are root's: the installer runs through the system's administrator prompt
+        import getpass
+        tail = ["/bin/bash", str(wizard.root / "install-oarbankd.sh"), "--installed", str(wizard.root), "--agent-bind", "127.0.0.1",
+                "--owner", getpass.getuser()]
+        if getattr(os, "geteuid", lambda: -1)() == 0:                    # (no geteuid on a Windows runner)
+            assert argv == tail
+        elif platform == "darwin":
+            assert argv[0] == "/usr/bin/osascript" and argv[-len(tail):] == tail
+            assert "quoted form of (a as text)" in " ".join(argv) and "with administrator privileges" in " ".join(argv)
+        else:
+            assert argv[0] in ("pkexec", "sudo") and argv[1:] == tail
     assert PASSWORD not in str(recorded) and kwargs["stdin"] == subprocess.DEVNULL and kwargs["capture_output"]
 
 
@@ -665,6 +679,7 @@ def test_upgraded_marker_written_only_after_successful_refresh(wizard, monkeypat
     (wizard.root / "oarbank-coordinator.json").write_text('{"format":1,"version":"2.6.1"}')
     new = restarted(wizard, monkeypatch)
     wizard.backend.fail_install = True
+    wizard.backend.running = False                      # the services stopped: reopening reinstalls them
     with pytest.raises(setup.SetupError, match="exit 9"):
         new.reopen()
     assert wizard.marker.read_bytes() == before

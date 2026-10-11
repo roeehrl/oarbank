@@ -1,7 +1,9 @@
 {% if error %}<div class="flash bad" role="alert">{{ error }}</div>
 {% else %}
 <div class="kv small">
-  <span class="mut">against</span><span>version {{ p.base_version }} · {{ p.processes_reported }} reported processes{% if p.processes_age_s is not none %}, {{ p.processes_age_s | int }} s old{% endif %}</span>
+  <span class="mut">against</span><span>the effective protection now (history version {{ p.base_version }}) · {{ p.processes_reported }} reported processes{% if p.processes_age_s is not none %}, {{ p.processes_age_s | int }} s old{% endif %}</span>
+  {% if p.inherited %}<span class="mut">inherited</span><span>{{ p.inherited | join(', ') }}</span>{% endif %}
+  {% if p.skipped %}<span class="mut">skipped here</span><span>{{ p.skipped | join('; ') }}</span>{% endif %}
   <span class="mut">change</span><span>{% if p.diff.rules_added %}added <b>{{ p.diff.rules_added | join(', ') }}</b> {% endif %}{% if p.diff.rules_removed %}removed <b>{{ p.diff.rules_removed | join(', ') }}</b> {% endif %}{% if p.diff.rules_changed %}changed <b>{{ p.diff.rules_changed | join(', ') }}</b> {% endif %}{% if p.diff.node_changed %}node section{% if p.diff.mode.from != p.diff.mode.to %} (mode {{ p.diff.mode.from or 'moderate' }} → {{ p.diff.mode.to or 'moderate' }}){% endif %}{% endif %}{% if not (p.diff.rules_added or p.diff.rules_removed or p.diff.rules_changed or p.diff.node_changed) %}<span class="mut">no change</span>{% endif %}</span>
 </div>
 <table class="small" style="margin-top:6px"><tr><th>rule</th><th class="num">matches now</th><th>processes</th></tr>

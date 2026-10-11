@@ -54,8 +54,9 @@ def test_no_operation_points_at_a_missing_route(routes):
 
 def test_console_mutations_are_only_operation_forwards(routes):
     """oarbank-console has no write path of its own: its mutating routes forward operations, proxy /api, or stage a
-    browser upload's bytes for datasets.register (forwarded to oarbankd, which changes nothing until the operation)."""
-    allowed = {("POST", ops.CONSOLE_ROUTE_PATH), ("POST", "/apply/{op}"),
+    browser upload's bytes for datasets.register or an upload operation (forwarded to oarbankd, which changes nothing
+    until the operation)."""
+    allowed = {("POST", ops.CONSOLE_ROUTE_PATH), ("POST", "/apply/{op}"), ("POST", ops.CONSOLE_STAGE_PATH),
                ("POST", "/api/{path:path}"), ("PUT", "/api/{path:path}"), ("PATCH", "/api/{path:path}"),
                ("DELETE", "/api/{path:path}")} | {(r.method, r.path) for r in ops.CONSOLE_UPLOADS}
     assert routes["console"] <= allowed | ops.CONSOLE_SESSION_ROUTES
@@ -124,7 +125,7 @@ def test_bulk_moves_up_one_tier():
 # ------------------------------------------------------------------ reason codes
 
 # every attempt end reason (and result reason) oarbankd and the agent write (rust/crates/oarbank-agent, oarbank-protection)
-END_REASONS = ["ok", "exit_nonzero", "bad_input", "doctor", "transient", "timeout", "lease_expired", "agent_restart",
+END_REASONS = ["ok", "exit_nonzero", "bad_input", "doctor", "transient", "timeout", "lease_expired", "agent_restart", "agent_stop",
                "release_invalid", "stale_generation", "lost_race", "module_revoked", "module_disabled", "node_quarantined",
                "node_retired", "dispute_party", "fleet_halt", "golden_failed", "superseded", "oom", "preempt_memory",
                "preempt_protection", "limit_cpu", "limit_mem", "limit_schedule", "user_cancel", "input_invalidated", "placement_rebound",

@@ -186,12 +186,13 @@ A path is an absolute path for the node's OS, not a root, no globs, no `..` (the
 tools). What the node accepts is decided **on the node** (below).
 
 **Delivery, signed.** Releases are per platform and folder paths are per node, so paths cannot travel in a release.
-Each node gets a **folder statement**: canonical JSON `{"type": "oarbank.folders/v1", "fleet_id", "node_id", "seq",
-"folders": {id: {"access", "path"}}, "signed_at"}`, built by the coordinator from the registry whenever it changes, and
-sent in directives as `folders: {statement, signature}`. In signing mode (docs/release-signing.md) a node accepts it only
-with a valid signature by the pinned release key and a seq above the last one it accepted, as for releases:
-`oarbank folders sign <node>` signs it on the owner's machine and uploads only the signature (operation
-`folders.sign`). Until the owner signs, a node keeps applying the last statement it accepted. So a compromised
+Each node gets a **statement** (since core 2.9 the node statement, which also carries the host tool paths added for the
+node: [host-tools.md](host-tools.md)): canonical JSON `{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq",
+"folders": {id: {"access", "path"}}, "tools": [...], "signed_at"}`, built by the coordinator whenever its content
+changes, and sent in directives as `statement: {statement, signature}`. In signing mode (docs/release-signing.md) a node
+accepts it only with a valid signature by the pinned release key and a seq above the last one it accepted, as for
+releases: `oarbank node sign <node>` signs it on the owner's machine and uploads only the signature (operation
+`nodes.sign_statement`). Until the owner signs, a node keeps applying the last statement it accepted. So a compromised
 coordinator or admin account cannot point an approved module's folder at `~/.ssh`: it would need the owner's key. In
 developer mode statements are unsigned. Which modules may use which folder ids still comes from the signed release's
 module entries (`sandbox.folders: [{id, access}]`, the approved requests); the statement only says where they are.

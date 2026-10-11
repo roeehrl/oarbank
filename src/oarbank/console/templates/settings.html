@@ -1,59 +1,101 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m with context %}
+{% import "_settings.html" as S with context %}
 {% block title %}Settings · Oarbank{% endblock %}
 {% block body %}
 <h1>Settings</h1>
-<div class="grid">
-<div class="card">
-  <b>Notifications (ntfy)</b>
-  {% call m.op_form("settings.notifications.update", "ntfy", "Save…", inline=False) %}
-    <div class="kv small">
-      <span>topic URL</span><input name="ntfy_url" aria-label="ntfy topic URL" value="{{ (s.ntfy.url if s.ntfy else '') or '' }}" placeholder="https://ntfy.sh/your-secret-topic" style="width:100%">
-      <span>token</span><input name="ntfy_token" aria-label="ntfy token" value="{{ s.ntfy.token if s.ntfy and s.ntfy.token else '' }}" style="width:100%">
-      <span>click link</span><input name="click_base" aria-label="click link base URL" value="{{ s.ntfy.click_base if s.ntfy and s.ntfy.click_base else '' }}" placeholder="https://oarbank.<tailnet>.ts.net" style="width:100%">
-    </div>
+<nav class="row small mod-tabs-nav" aria-label="settings sections"><a href="#node-defaults">Node defaults</a><a href="#protection-rules">Protection rules</a><a href="/groups">Groups</a><a href="#notifications">Notifications</a><a href="#access">Access</a><a href="#verification">Data and verification</a><a href="#tools">Host tools</a><a href="#folders">Folders</a><a href="#origins">Dataset origins</a><a href="#releases">Releases</a><a href="#job-modules">Job modules</a><a href="/settings/shadowed">Shadowed values</a><a href="/settings/drift">Applied drift</a><a href="/settings/import">Export and import</a></nav>
+
+<h2 id="node-defaults">Node defaults</h2>
+<p class="small mut">Every node ({{ fs.nodes }}) inherits these unless one of its <a href="/groups">groups</a> or the node itself sets its
+own; built-in groups ({{ fs.groups | selectattr('builtin') | map(attribute='name') | join(', ') }}) apply by system and coordinator
+machine. Tick <b>lock</b> beside a value so no group or node can override it. Saving shows which nodes the change reaches and which
+keep their own value, before anything is written.</p>
+<div class="settings-sections">
+{% for sec in fs.node_defaults %}{{ S.section_form(sec, "fleet", "", "fleet", "/settings", "the fleet", explain) }}{% endfor %}
+</div>
+
+<section class="card wide" id="protection-rules" aria-labelledby="h-fprot">
+<h2 id="h-fprot">Protection rules for every node</h2>
+<p class="small mut">The fleet's protected-process rules: every node applies them together with its groups' and its own (a rule a node's OS
+cannot run is skipped there, and named). Roll a new rule out by adding it to a canary group first, then promoting it from the group's page.
+The mode is in Node defaults above.</p>
+{% call m.op_form("protection.rules.update", "fleet", "Review and apply…", cls="pri", inline=False, return_to="/settings#protection-rules") %}
+  <label class="small" for="fprot">The fleet's own protection section (JSON)</label>
+  <textarea id="fprot" name="pj.config" rows="8" class="mono" spellcheck="false">{{ s.fleet_protection }}</textarea>
+{% endcall %}
+</section>
+
+<div class="settings-sections">
+{% for sec in fs.fleet %}{{ S.section_form(sec, "fleet", "", "fleet", "/settings", "the fleet", explain) }}
+{% if sec.id == 'notifications' %}<section class="card small" aria-labelledby="h-token"><h2 id="h-token">ntfy access token</h2>
+  <p class="mut">Write-only: it is stored encrypted and never shown again, only its fingerprint. Leave it unset for a public topic.</p>
+  <p>{% if s.ntfy_token.set %}<span class="chip ok">set</span> <span class="mono">{{ s.ntfy_token.fingerprint }}</span> <span class="mut">by {{ s.ntfy_token.set_by }} {{ s.ntfy_token.set_at | ago }}</span>{% else %}<span class="chip">not set</span>{% endif %}</p>
+  {% call m.op_form("settings.secrets.set", "ntfy_token", "Set token", inline=False, confirm="Set the ntfy token?") %}
+    <label for="ntfy-token">New token</label> <input id="ntfy-token" name="secret" type="password" autocomplete="off" required>
   {% endcall %}
+  {% if s.ntfy_token.set %}{{ m.op_form("settings.secrets.clear", "ntfy_token", "Clear token", cls="danger", confirm="Clear the ntfy token? Notifications go without it.") }}{% endif %}
+</section>{% endif %}
+{% if sec.id == 'access' %}<p class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page.</p>{% endif %}
+{% endfor %}
 </div>
-<div class="card">
-  <b>Access</b>
-  <div class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page. Host names the console and the
-  admin API answer to besides localhost (the remote mode): setting <span class="mono">console_hosts</span>, a JSON list.</div>
-</div>
-<div class="card">
+
+<div class="grid dense stack">
+<div class="card wide" id="tools">
   <b>Host tools</b>
-  <div class="small mut">Modules ask for host tools by id (<span class="mono">[sandbox].tools</span>); this registry says where each
-  tool lives on each OS. An approved module's runners may read and execute exactly these paths.</div>
-  <table class="small">{% for id, t in (s.tool_registry or {}).items() %}<tr><td class="mono">{{ id }}</td>
-    <td>{% if t.trust == 'code-exec' %}<span class="chip warn">runs code</span>{% endif %}</td>
-    <td class="mono">{% for os_, ps in t.paths.items() %}{{ os_ }}: {{ ps | join(', ') }}<br>{% endfor %}</td></tr>
-  {% else %}<tr><td class="mut">No tools registered.</td></tr>{% endfor %}</table>
-  <details class="small"><summary>Add or change a tool…</summary>
-  {% call m.op_form("settings.tools.update", "", "Review…", inline=False) %}
-    <label>tool id <input name="target_input" class="mono" required placeholder="java17"></label>
-    <label>trust <select name="trust"><option value="read">read</option><option value="code-exec">code-exec (a JVM, an interpreter, a shell)</option></select></label>
-    <label>macOS paths (one per line) <textarea name="paths_darwin" rows="2" class="mono" style="width:100%" placeholder="/opt/homebrew/opt/openjdk@17"></textarea></label>
-    <label>Linux paths <textarea name="paths_linux" rows="2" class="mono" style="width:100%" placeholder="/usr/lib/jvm/java-17-openjdk-amd64"></textarea></label>
-    <label>Windows paths <textarea name="paths_windows" rows="2" class="mono" style="width:100%" placeholder="C:\Program Files\Eclipse Adoptium\jdk-17"></textarea></label>
-    <span class="mut">No paths removes the tool.</span>
+  <div class="small mut">Modules ask for a host tool by id with the versions they accept (<span class="mono">[sandbox].tools =
+  [{id = "jdk", version = "&gt;=17"}]</span>). Each node finds the installations itself and the agent grants one per module:
+  these definitions say how to find a tool. <span class="mono">jdk</span> and <span class="mono">python</span> are built in; add
+  search paths where your nodes keep a tool elsewhere, or define another tool. What each node found is on its page; a module's
+  Nodes tab shows every node's resolution.</div>
+  <table class="small"><tr><th>tool</th><th>kind</th><th>searched on each OS</th><th>asked for by</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for id, d in s.tool_defs.items() %}<tr><td class="mono nowrap">{{ id }}</td>
+    <td class="nowrap">{{ d.kind }}{% if d.builtin %} <span class="chip">built in</span>{% endif %}</td>
+    <td>{% for scope, ps in d.search.items() %}<div><b>{{ {'fleet': 'every OS', 'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}[scope] }}</b>: <span class="mono">{{ ps | join(', ') }}</span></div>{% endfor %}
+      {% if d.builtin_search %}<details class="small"><summary>built-in patterns</summary>{% for os_, ps in d.builtin_search.items() %}<div><b>{{ {'darwin': 'macOS', 'linux': 'Linux', 'windows': 'Windows'}[os_] }}</b>: <span class="mono">{{ ps | join(', ') }}</span></div>{% endfor %}</details>{% endif %}
+      {% if d.kind == 'executable' and d.version %}<div class="mut">version: <span class="mono">{{ d.version.args | join(' ') }}</span> → <span class="mono">{{ d.version.regex }}</span></div>{% endif %}</td>
+    <td>{{ (s.tool_users.get(id) or []) | join(', ') or '–' }}</td>
+    <td class="actions">{% if not d.builtin or d.search %}{{ m.op_form("tools.delete", id, "Remove extra paths…" if d.builtin else "Delete…", cls="danger" if not d.builtin else "") }}{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5" class="mut">No tools defined.</td></tr>{% endfor %}</table>
+  {% set unknown = s.tool_users.keys() | reject('in', s.tool_defs) | list %}
+  {% if unknown %}<div class="flash warn small" role="status">Approved module versions ask for tools this fleet does not define:
+    <span class="mono">{{ unknown | join(', ') }}</span>. They never run until you define the tool here or publish a new module version
+    that asks for a defined tool (such as <span class="mono">jdk</span> with a version constraint).</div>{% endif %}
+  <details class="small"{% if prefill_tool %} open{% endif %}><summary>Add search paths, or define a tool…</summary>
+  {% if prefill_tool %}<div class="mut">A module asks for <span class="mono">{{ prefill_tool }}</span>.{% if prefill_tool not in s.tool_defs %} Define it (a
+    generic executable with its version command), or publish a module version that asks for a built-in tool.{% else %} Give extra
+    search patterns where your nodes keep it.{% endif %}</div>{% endif %}
+  {% call m.op_form("tools.define", "", "Review…", inline=False) %}
+    <label>tool id <input name="target_input" class="mono" required placeholder="jdk" value="{{ prefill_tool or '' }}"></label>
+    <label>kind <select name="kind"><option value="">(built in: jdk, python; otherwise executable)</option><option value="executable">executable (a version command)</option></select></label>
+    <div class="mut">Search patterns, one per line: an absolute path whose parts may hold <span class="mono">*</span> and <span class="mono">?</span>, or
+      <span class="mono">$VARIABLE/sub/path</span>. The node verifies every candidate (a JDK by its <span class="mono">release</span> file).</div>
+    <label>every OS <textarea name="search_fleet" rows="1" class="mono" style="width:100%" placeholder="$TOOLS_HOME/jdk-*"></textarea></label>
+    <label>macOS <textarea name="search_darwin" rows="2" class="mono" style="width:100%" placeholder="/opt/java/*/Contents/Home"></textarea></label>
+    <label>Linux <textarea name="search_linux" rows="2" class="mono" style="width:100%" placeholder="/opt/tools/jdk-*"></textarea></label>
+    <label>Windows <textarea name="search_windows" rows="2" class="mono" style="width:100%" placeholder="D:\Tools\jdk-*"></textarea></label>
+    <label>executable: version arguments <input name="version_args" class="mono" placeholder="--version"></label>
+    <label>executable: version regex (its first group is the version) <input name="version_regex" class="mono" placeholder="samtools (\d+(?:\.\d+)*)"></label>
+    <span class="mut">Saving replaces the tool's extra patterns; releases are rebuilt with the definitions.</span>
   {% endcall %}</details>
 </div>
-<div class="card">
+<div class="card" id="folders">
   <b>Folders</b>
   <div class="small mut">Modules ask for folders by id (<span class="mono">[sandbox].folders</span>): an input folder their runners
   may read, or an outbox they may only write new files into. This registry says where each folder is on each node; the node checks
-  the path (no homes, roots, data or system directories) and reports it.{% if s.folder_statements %} In signing mode a node applies a
-  changed mapping only once the owner signed its statement: <span class="mono">oarbank folders sign &lt;node&gt;</span>.{% endif %}</div>
+  the path (no homes, roots, data or system directories) and reports it.{% if s.node_statements %} In signing mode a node applies a
+  changed mapping only once the owner signed its statement: <span class="mono">oarbank node sign &lt;node&gt;</span>.{% endif %}</div>
   <table class="small">{% for id, f in (s.folder_registry or {}).items() %}<tr><td class="mono">{{ id }}</td>
     <td><span class="chip {{ 'warn' if f.access == 'write' else '' }}">{{ 'outbox (write)' if f.access == 'write' else 'read' }}</span></td>
     <td class="mono">{% for nid, path in f.nodes.items() %}{% set n = s.nodes.get(nid) %}{{ n.hostname if n else nid }}: {{ path }}
       {% set st = (n.folders.get(id) if n else none) %}{% if st %} <span class="chip {{ 'ok' if st.status == 'ok' else 'bad' }}" title="{{ st.status }}">{{ 'ok' if st.status == 'ok' else 'refused' }}</span>{% else %} <span class="chip">not applied yet</span>{% endif %}
-      {% set stmt = (s.folder_statements or {}).get(nid) %}{% if stmt and not stmt.signature %} <span class="chip warn" title="statement seq {{ stmt.seq }}">unsigned</span>{% endif %}<br>{% endfor %}</td></tr>
+      {% set stmt = (s.node_statements or {}).get(nid) %}{% if stmt and not stmt.signature %} <span class="chip warn" title="statement seq {{ stmt.seq }}">unsigned</span>{% endif %}<br>{% endfor %}</td></tr>
   {% else %}<tr><td class="mut">No folders mapped.</td></tr>{% endfor %}</table>
-  {% for nid, stmt in (s.folder_statements or {}).items() if not stmt.signature %}
-  <details class="small"><summary>Attach the owner's signature to {{ s.nodes[nid].hostname if s.nodes.get(nid) else nid }}'s statement (seq {{ stmt.seq }})</summary>
-  {% call m.op_form("folders.sign", nid, "Attach", inline=False) %}
+  {% for nid, stmt in (s.node_statements or {}).items() if not stmt.signature %}
+  <details class="small"><summary>Attach the owner's signature to {{ s.nodes[nid].hostname if s.nodes.get(nid) else nid }}'s statement (seq {{ stmt.seq }}: folders and added tool paths)</summary>
+  {% call m.op_form("nodes.sign_statement", nid, "Attach", inline=False) %}
     <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" readonly>{{ stmt.statement }}</textarea></label>
-    <label>signature <input name="p.signature" class="mono" style="width:100%" placeholder="from: oarbank folders sign {{ nid }}"></label>
+    <label>signature <input name="p.signature" class="mono" style="width:100%" placeholder="from: oarbank node sign {{ nid }}"></label>
   {% endcall %}</details>{% endfor %}
   <details class="small"><summary>Map a folder…</summary>
   {% call m.op_form("settings.folders.update", "", "Review…", inline=False) %}
@@ -63,27 +105,35 @@
       <textarea name="nodes" rows="3" class="mono" style="width:100%" placeholder="{% for nid, n in s.nodes.items() %}{{ nid }}=/path/on/{{ n.hostname }}&#10;{% endfor %}"></textarea></label>
   {% endcall %}</details>
 </div>
-<div class="card">
+<div class="card" id="origins">
   <b>Dataset origins</b>
   <div class="small mut">Datasets may name public https origins for their files (model weights, reference data): nodes download
   from them and check each file's sha256, and the coordinator fetches a file only when every origin fails for a node. Restrict the
   hosts here (<span class="mono">example.org</span>, <span class="mono">*.example.org</span>, an optional <span class="mono">:port</span>);
   none admits any public host.</div>
-  <div class="small">{% for h in (s.dataset_origins or {}).get('hosts') or [] %}<span class="chip mono">{{ h }}</span> {% else %}<span class="mut">any public https host</span>{% endfor %}</div>
+  <div class="small">{% for h in s.dataset_origins or [] %}<span class="chip mono">{{ h }}</span> {% else %}<span class="mut">any public https host</span>{% endfor %}</div>
   <details class="small"><summary>Change…</summary>
   {% call m.op_form("settings.origins.update", "dataset_origins", "Review…", inline=False) %}
-    <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ ((s.dataset_origins or {}).get('hosts') or []) | join('\n') }}</textarea></label>
+    <label>hosts, one per line <textarea name="hosts" rows="3" class="mono" style="width:100%">{{ (s.dataset_origins or []) | join('\n') }}</textarea></label>
   {% endcall %}</details>
 </div>
-<div class="card">
-  <b>Releases</b> {{ m.op_form("releases.build", "release", "Build release", confirm="Build a release bundle from the installed modules? It is not deployed until promoted.") }}
-  <table class="small">{% for r in releases %}<tr><td class="mono">{{ r.release_id }}</td><td class="mono">{{ r.platform }}</td><td>{{ r.status }}</td><td class="mut">{{ r.created_at | ago }}</td>
-  <td>{% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
+<div class="card wide" id="releases">
+  <div class="row"><b>Releases</b><span class="sp"></span>{% if modules_enabled %}{{ m.op_form("releases.build", "release", "Build releases", confirm="Build each fleet platform's release from the enabled modules? Nodes get a release once it is signed and promoted.") }}{% endif %}</div>
+  {% if not modules_enabled %}<div class="small mut">None yet: a release is the bundle of the enabled modules; <a href="/modules">install and enable a module</a> first.</div>{% endif %}
+  <div class="small mut">After a module is enabled or changed, each platform's release waits for your signature:
+    <span class="mono">oarbank release sign &lt;release&gt; --promote</span>, run where the owner key is.</div>
+  {{ m.release_banner(releases_awaiting) }}
+  <table class="small"><tr><th>release</th><th>platform</th><th>status</th><th>contents</th><th>built</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for r in releases %}<tr><td class="mono nowrap">{{ r.release_id }}</td><td class="mono nowrap">{{ r.platform }}</td><td>{{ r.status }}
+    {% if r.awaiting %}<span class="chip warn" title="{{ r.awaiting.command }}">needs your signature</span>{% elif not r.signed and r.status != 'current' %}<span class="chip">unsigned</span>{% endif %}</td><td class="mono">{{ r.modules | join(', ') if r.modules else '(no module)' }}</td><td class="mut nowrap">{{ r.created_at | ago }}</td>
+  <td class="actions">{% if r.awaiting %}<code class="small">{{ r.awaiting.command }}</code>{% endif %}
+    {% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
     <details class="small"><summary>signature</summary>
     {% call m.op_form("releases.attach_signature", r.release_id, "Attach", inline=False) %}
       <label>statement <textarea name="p.statement" rows="2" class="mono" style="width:100%" placeholder="from: oarbank release sign {{ r.release_id }}"></textarea></label>
       <label>signature <input name="p.signature" class="mono" style="width:100%"></label>
-    {% endcall %}</details></td></tr>{% endfor %}</table>
+    {% endcall %}</details></td></tr>
+  {% else %}<tr><td colspan="6" class="mut">No releases built yet.</td></tr>{% endfor %}</table>
   <details class="small"><summary>Release signing key (optional, D6)</summary>
   {% call m.op_form("releases.pin_key", "release-key", "Pin key…", inline=False, reason_prompt=True) %}
     <label>base64 Ed25519 public key <input name="p.pubkey" class="mono" style="width:100%" placeholder="oarbank release keygen"></label>
@@ -99,24 +149,17 @@
       placeholder='{"dataset_id": "...", "kind": "...", "module": "...", "meta": {...}, "files": [{"path": "...", "digest": "...", "size": 0}]}'></textarea>
   {% endcall %}</details>
 </div>
-<div class="card">
-  <b>Other settings</b>
-  {% call m.op_form("settings.update", "", "Set…", inline=False) %}
-    <div class="small mut">A setting without its own control (e.g. <span class="mono">replica_rate</span>). The value is JSON.</div>
-    <label class="small">key <input name="target_input" class="mono" required></label>
-    <label class="small">value <input name="pj.value" class="mono" required></label>
-  {% endcall %}
-</div>
-<div class="card">
+<div class="card wide" id="job-modules">
   <b>Job modules</b>
-  <table class="small"><tr><th>module</th><th>v</th><th>stages</th><th>requires</th><th>host</th><th><span class="sr-only">actions</span></th></tr>
-  {% for x in modules %}<tr><td><a href="/modules/{{ x.name }}">{{ x.name }}</a></td><td>{{ x.version }}</td><td>{{ x.stages | join(', ') }}</td><td>{{ x.requires | join(', ') }}</td>
+  <table class="small"><tr><th>module</th><th>v</th><th>stages</th><th>requires</th><th>host</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for x in modules %}<tr><td class="nowrap"><a href="/modules/{{ x.name }}">{{ x.name }}</a></td><td class="nowrap">{{ x.version }}</td><td>{{ x.stages | join(', ') }}</td><td>{{ x.requires | join(', ') }}</td>
   <td><span class="chip {{ 'ok' if x.host.state == 'ready' else ('bad' if x.host.state == 'fault' else '') }}" title="{{ x.host.last_error or '' }}">{{ x.host.state or 'stopped' }}</span>
-    <span class="mut">{{ x.host.calls or 0 }} calls, p99 {{ x.host.latency_p99_ms | num(1) }} ms</span></td>
-  <td>{{ m.op_form("modules.restart_host", x.name, "Restart") }}
-      {% if x.stages | length > 1 %}{% call m.op_form("modules.set_pipeline", x.name, "Pipeline…") %}<select name="mode" aria-label="pipeline mode"><option>single</option><option>split</option></select>{% endcall %}{% endif %}
+    <span class="mut nowrap">{{ x.host.calls or 0 }} calls, p99 {{ x.host.latency_p99_ms | num(1) }} ms</span></td>
+  <td class="actions">{{ m.op_form("modules.restart_host", x.name, "Restart") }}
+      {% if x.stages | length > 1 %}<a href="/modules/{{ x.name }}/settings#s-pipeline">Pipeline…</a>{% endif %}
       {% if x.enabled %}{{ m.op_form("modules.disable", x.name, "Disable", confirm="Disable " ~ x.name ~ "? Dispatch stops fleet-wide and live attempts are requeued.") }}
-      {% else %}{{ m.op_form("modules.enable", x.name, "Enable", confirm="Re-enable " ~ x.name ~ "?") }}{% endif %}</td></tr>{% endfor %}</table>
+      {% else %}{{ m.op_form("modules.enable", x.name, "Enable", confirm="Re-enable " ~ x.name ~ "?") }}{% endif %}</td></tr>
+  {% else %}<tr><td colspan="6" class="mut">No job modules enabled.</td></tr>{% endfor %}</table>
 </div>
 </div>
 {% endblock %}

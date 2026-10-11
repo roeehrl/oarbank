@@ -9,6 +9,7 @@ from oarbank.coordinator import core
 
 from helpers import (CAPACITY, DOCTOR_OK, FACTS, PARAMS, create_study, enrolled_node, fresh, golden_result, make_db,
                      node_key_and_csr, release_id, relay_result as result, tick)
+from helpers import set_node
 
 READY = ["demo:atrium", "scene:s1", "scene:s2"]
 
@@ -111,29 +112,30 @@ def test_dispatch_ready_datasets_and_limits(db):
     assert len(core.claim(db, node, {"free_cpu": 8, "free_mem_gb": 3.0, "ready_datasets": READY})["grants"]) == 2
     db.x("UPDATE attempts SET state='released' WHERE node_id=?", (node["node_id"],))
     db.x("UPDATE jobs SET state='pending' WHERE state='leased'")
-    core.set_limits(db, node["node_id"], {"jobs": 1}, "test")
+    set_node(db, node, "jobs", 1)
     node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
     g = core.claim(db, node, {"free_slots": 4, "ready_datasets": READY})["grants"]
     assert len(g) == 1, "user cap jobs=1 must bound grants"
-    core.set_limits(db, node["node_id"], {}, "test", clear_all=True)
+    set_node(db, node, "jobs", reset=True)
     node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
-    assert node["limits_json"] == "{}"
+    assert core.node_limits(node) == {"enforce": "soft"}
     g2 = core.claim(db, node, {"free_slots": 4, "ready_datasets": READY})["grants"]
     assert len(g2) == 3   # 4 jobs total (2 trials x 2 datasets), 1 already granted
 
 
 def test_limits_validation(db):
+    from oarbank.coordinator.settings.apply import ApplyError
     _, node = enrolled_node(db)
-    with pytest.raises(core.ApiError):
-        core.set_limits(db, node["node_id"], {"mem_gb": 64}, "t")     # > 24 GB RAM
-    with pytest.raises(core.ApiError):
-        core.set_limits(db, node["node_id"], {"cpu_cores": 99}, "t")  # > 15 cores
-    with pytest.raises(core.ApiError):
-        core.set_limits(db, node["node_id"], {"bogus": 1}, "t")
-    new = core.set_limits(db, node["node_id"], {"mem_gb": 12, "enforce": "hard"}, "t")
-    assert new == {"mem_gb": 12.0, "enforce": "hard"}
-    new = core.set_limits(db, node["node_id"], {"mem_gb": None}, "t")   # turning the only cap off drops enforce too
-    assert new == {}
+    for key, value, why in (("mem_gb", 64, "more than this node's 24 GB of RAM"), ("cpu_cores", 99, "more than this node's 15 cores"),
+                            ("bogus", 1, "no setting 'bogus'"), ("jobs", 0, "below 1"), ("jobs", "two", "expected integer")):
+        with pytest.raises(ApplyError) as e:
+            set_node(db, node, key, value)
+        assert why in e.value.detail, e.value.detail
+    set_node(db, node, "mem_gb", 12)
+    set_node(db, node, "enforce", "hard")
+    assert core.node_limits(fresh(db, node)) == {"mem_gb": 12, "enforce": "hard"}
+    set_node(db, node, "mem_gb", reset=True)
+    assert core.node_limits(fresh(db, node)) == {"enforce": "hard"}
 
 
 def test_fencing_stale_generation_and_late_replica(db):

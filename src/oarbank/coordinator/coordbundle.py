@@ -2,10 +2,12 @@
 (docs/design/coordinator-move.md, "B pairs with A instead of using SSH").
 
 It is the tracked files of the running checkout (and of the vendored SDK), as a gzipped tar, content-addressed.
-The agent downloads it (sha256 checked), unpacks it under ~/oarbank-coordinator/<sha12>, runs `uv sync --frozen`,
-writes the oarbankd and console LaunchAgents with `--standby --pair <code> --from <url>`, and bootstraps them. Only
-the node named in a T3 `coordinator.prepare` is told to; the coordinator can already run code on its nodes through
-releases, so this adds no power.
+The agent downloads it (sha256 checked) and unpacks it under ~/oarbank-coordinator/<sha12>. A checkout bundle (developer
+mode, signing off) runs only under the agent's process host (`OARBANK_SERVICE_HOST=process`, the tests: `uv sync
+--frozen`, then oarbankd with `--standby --pair <code> --from <url>`); a signed build is installed as the system service
+by its own installer, as root (docs/design/coordinator-system-service.md, decision 11). Only the node named in a T3
+`coordinator.prepare` is told to; the coordinator can already run code on its nodes through releases, so this adds no
+power.
 """
 import hashlib
 import io

@@ -1,0 +1,61 @@
+{
+ "jdk": {
+  "kind": "jdk",
+  "search": {
+   "darwin": [
+    "/opt/homebrew/opt/openjdk@*",
+    "/opt/homebrew/opt/openjdk",
+    "/usr/local/opt/openjdk@*",
+    "/usr/local/opt/openjdk",
+    "/Library/Java/JavaVirtualMachines/*/Contents/Home",
+    "$JAVA_HOME"
+   ],
+   "linux": [
+    "/usr/lib/jvm/*",
+    "/usr/lib64/jvm/*",
+    "/usr/java/*",
+    "/opt/java/*",
+    "/opt/jdk*",
+    "/home/linuxbrew/.linuxbrew/opt/openjdk@*",
+    "$JAVA_HOME"
+   ],
+   "windows": [
+    "C:\\Program Files\\Eclipse Adoptium\\jdk-*",
+    "C:\\Program Files\\Microsoft\\jdk-*",
+    "C:\\Program Files\\Zulu\\zulu-*",
+    "C:\\Program Files\\Java\\jdk*",
+    "C:\\Program Files\\Amazon Corretto\\jdk*",
+    "C:\\Program Files\\BellSoft\\LibericaJDK-*",
+    "$JAVA_HOME"
+   ]
+  }
+ },
+ "python": {
+  "kind": "python",
+  "search": {
+   "darwin": [
+    "/opt/homebrew/bin/python3.?",
+    "/opt/homebrew/bin/python3.??",
+    "/usr/local/bin/python3.?",
+    "/usr/local/bin/python3.??",
+    "/Library/Frameworks/Python.framework/Versions/3.*/bin/python3"
+   ],
+   "linux": [
+    "/usr/bin/python3.?",
+    "/usr/bin/python3.??",
+    "/usr/local/bin/python3.?",
+    "/usr/local/bin/python3.??"
+   ],
+   "windows": [
+    "C:\\Program Files\\Python3*\\python.exe",
+    "$LOCALAPPDATA\\Programs\\Python\\Python3*\\python.exe"
+   ]
+  },
+  "version": {
+   "args": [
+    "--version"
+   ],
+   "regex": "Python (\\d+(?:\\.\\d+)*)"
+  }
+ }
+}

@@ -11,6 +11,7 @@ from oarbank.coordinator.db import DBBusy
 
 from helpers import (CAPACITY, admin_headers, agent_client, api_op, node_headers, node_key_and_csr, release_id,
                      create_study, SCENES, DOCTOR_OK, FACTS, PARAMS, READY, golden_result, make_db, relay_result)
+from helpers import enrolled_node
 
 LOCAL = ("127.0.0.1", 50000)
 TAILNET = ("100.64.0.9", 50000)
@@ -143,8 +144,8 @@ def test_gui_identity(db):
     {"sec-fetch-site": "same-site"},
 ])
 def test_csrf_blocks_cross_origin_mutations(gui, headers):
-    r = gui.post("/api/v1/ops/settings.update", json={"target": "replica_rate", "params": {"value": 0.5}, "dry_run": True},
-                 headers=headers)
+    r = gui.post("/api/v1/ops/settings.apply", json={"params": {"changes": [{"scope": "fleet", "key": "replica_rate", "value": 0.5}]},
+                                                     "dry_run": True}, headers=headers)
     assert r.status_code == 403 and r.json()["error"] == "csrf"
 
 
@@ -154,8 +155,11 @@ def test_csrf_blocks_cross_origin_mutations(gui, headers):
     {"origin": "http://testserver"},
 ])
 def test_same_origin_mutations_pass(gui, db, headers):
-    assert api_op(gui, "settings.update", "replica_rate", {"value": 0.05}, headers=headers).status_code == 200
-    assert db.get_setting("replica_rate") == 0.05
+    node = enrolled_node(db)[1]
+    change = {"changes": [{"scope": "node", "scope_id": node["node_id"], "key": "jobs", "value": 2}]}     # T0: applied at once
+    assert api_op(gui, "settings.apply", node["node_id"], change, headers=headers).status_code == 200
+    from oarbank.coordinator.core import node_limits
+    assert node_limits(db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],)))["jobs"] == 2
 
 
 def test_metrics_requires_identity(db):

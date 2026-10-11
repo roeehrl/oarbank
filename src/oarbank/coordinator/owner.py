@@ -27,7 +27,7 @@ class OwnerError(Exception):
 
 
 def anchors(db: DB) -> dict | None:
-    a = db.get_setting("owner_anchors")
+    a = db.get_state("owner_anchors")
     if not a:
         return None
     return {**a, "doc": json.loads(a["statement"])}
@@ -38,7 +38,7 @@ def keys(db: DB) -> list[str]:
     a = anchors(db)
     if a:
         return list(a["doc"]["keys"])
-    k = db.get_setting("release_pubkey")
+    k = db.get_state("release_pubkey")
     return [k] if k else []
 
 
@@ -91,8 +91,8 @@ def check_anchors(db: DB, statement: str, signatures: list) -> dict:
 
 def set_anchors(db: DB, statement: str, signatures: list, actor: str) -> dict:
     doc = check_anchors(db, statement, signatures)
-    db.set_setting("owner_anchors", {"statement": statement, "signatures": signatures})
-    db.set_setting("release_pubkey", doc["keys"][0])        # the primary keeps signing releases as before
+    db.set_state("owner_anchors", {"statement": statement, "signatures": signatures})
+    db.set_state("release_pubkey", doc["keys"][0])        # the primary keeps signing releases as before
     db.event("owner_anchors_set", actor=actor, reason=f"version {doc['version']}: {len(doc['keys'])} keys")
     return {"version": doc["version"], "keys": [identity.fingerprint(k)[:16] for k in doc["keys"]], "rescue": doc.get("rescue") or []}
 
@@ -110,9 +110,9 @@ def disable(db: DB, statement: str, signatures: list, actor: str) -> dict:
         raise OwnerError("version is not the next one")
     if not any(identity.verify(k, statement, s["sig"]) for s in _sigs(signatures) for k in keys(db) if s["key"] == k):
         raise OwnerError("not signed by an owner key")
-    db.set_setting("owner_security", {"statement": statement, "signatures": signatures})
-    db.set_setting("owner_anchors", None)
-    db.set_setting("release_pubkey", None)
+    db.set_state("owner_security", {"statement": statement, "signatures": signatures})
+    db.set_state("owner_anchors", None)
+    db.set_state("release_pubkey", None)
     db.event("owner_signing_disabled", actor=actor)
     return {"disabled": True}
 
@@ -120,10 +120,10 @@ def disable(db: DB, statement: str, signatures: list, actor: str) -> dict:
 def directives(db: DB) -> dict:
     out = {}
     if C.RELEASE_SIGNING:
-        a = db.get_setting("owner_anchors")
+        a = db.get_state("owner_anchors")
         if a:
             out["owner_anchors"] = a
-    s = db.get_setting("owner_security")
+    s = db.get_state("owner_security")
     if s:
         out["owner_security"] = s
     return out

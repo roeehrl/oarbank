@@ -1,9 +1,12 @@
 """SecretStore (architecture.md, "The coordinator"): small secrets the coordinator keeps outside its database.
 
-- macOS: the login Keychain (a generic password per name), the default there;
-- Windows: a file under <home>/keys/ holding the secret wrapped with DPAPI for the current user (`CryptProtectData`), in
-  a directory private to the account;
-- Linux, or with OARBANK_SECRET_STORE=file: an owner-only file (0600) under <home>/keys/ (0700).
+- macOS and Linux (the default there, `file`): an owner-only file (0600) under <home>/keys/ (0700), in the system
+  service's home that only its account may enter (coordinator-system-service.md, decision 5);
+- Windows (`dpapi`): a file under <home>/keys/ holding the secret wrapped with DPAPI for the current user
+  (`CryptProtectData`), in a directory private to the account;
+- `keychain`, only when OARBANK_SECRET_STORE names it: the person's login Keychain, a generic password per name. A
+  per-user coordinator of an earlier release kept its keys there; its migration pins it to the Keychain until the
+  person exports them (`read_keychain`, sysmigrate.py) into the file store the system service reads.
 
 Secrets are raw bytes, created on first use.
 """
@@ -22,7 +25,34 @@ def backend() -> str:
     want = os.environ.get("OARBANK_SECRET_STORE")
     if want in ("file", "keychain", "dpapi"):
         return want
-    return {"darwin": "keychain", "win32": "dpapi"}.get(sys.platform, "file")
+    return "dpapi" if sys.platform == "win32" else "file"
+
+
+def read_keychain(name: str, keychain: str | None = None) -> bytes | None:
+    """The secret `name` from a login Keychain (the person's search list, or the keychain file `keychain`), None when
+    it holds no such item. Run as the person, in their session: the Keychain is theirs."""
+    argv = ["security", "find-generic-password", "-s", name, "-a", ACCOUNT, "-w"] + ([keychain] if keychain else [])
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return base64.b64decode(r.stdout.strip())
+
+
+def file_path(name: str, home) -> Path:
+    """Where the file store keeps `name` in `home`."""
+    return Path(home) / "keys" / f"{name}.key"
+
+
+def write_file_secret(name: str, home, raw: bytes, exclusive: bool = True):
+    """Put `raw` into the file store of `home`, in its own format (base64 and a newline, 0600)."""
+    p = file_path(name, home)
+    files.private_dir(p.parent)
+    files.write_private(p, base64.b64encode(raw).decode() + "\n", exclusive=exclusive)
+
+
+def read_file_secret(name: str, home) -> bytes | None:
+    p = file_path(name, home)
+    return base64.b64decode(p.read_text(encoding="utf-8").strip()) if p.exists() else None
 
 
 def get_or_create(name: str, home, size: int = 32) -> bytes:
@@ -42,12 +72,11 @@ def get_or_create(name: str, home, size: int = 32) -> bytes:
         raw = os.urandom(size)
         files.write_private(p, _dpapi(raw, protect=True))
         return raw
-    p = Path(home) / "keys" / f"{name}.key"
-    if p.exists():
-        return base64.b64decode(p.read_text(encoding="utf-8").strip())
-    files.private_dir(p.parent)
+    existing = read_file_secret(name, home)
+    if existing is not None:
+        return existing
     raw = os.urandom(size)
-    files.write_private(p, base64.b64encode(raw).decode() + "\n")
+    write_file_secret(name, home, raw, exclusive=False)
     return raw
 
 

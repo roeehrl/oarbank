@@ -1,7 +1,8 @@
 # The Windows agent package installed, upgraded and removed for real on a throwaway runner (scripts/ci-windows-msi.ps1):
 # both services with their accounts and start types, the waiting (unjoined) node and its status document, oarbank-node
-# on PATH, the oarbank:// handler and the tray app's self-test, the elevated helper's loopback openings across a major
-# upgrade, and an uninstall that leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
+# on PATH, the oarbank:// handler and the tray app's self-test, container support (CONTAINERS=1) installed by a task after
+# the MSI rather than inside it, the elevated helper's loopback openings across a major upgrade, and an uninstall that
+# leaves nothing behind. Runs when the package or what it installs changes, and on every tag.
 name: msi
 on:
   workflow_dispatch:
@@ -38,7 +39,7 @@ jobs:
   msi:
     if: '!inputs.coordinator_fixture_only'
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:

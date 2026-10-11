@@ -106,7 +106,8 @@ def test_a_real_listener_answers_only_to_allowed_hosts(db):
             url = f"http://127.0.0.1:{s.port}/api/v1/fleet"
             assert httpx.get(url, headers=admin_headers(db)).status_code == 200
             assert httpx.get(url, headers={**admin_headers(db), "host": f"rebind.example:{s.port}"}).status_code == 421
-            db.set_setting("console_hosts", ["rebind.example"])
+            from helpers import set_fleet
+            set_fleet(db, "console_hosts", ["rebind.example"])
             assert httpx.get(url, headers={**admin_headers(db), "host": f"rebind.example:{s.port}"}).status_code == 200
     finally:
         A.TEST_HOSTS.add("testserver")

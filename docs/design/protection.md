@@ -1,21 +1,38 @@
 # Host protection
 
 A node runs fleet jobs beside its owner's own work. Protection decides, every few seconds, how much fleet work the
-machine may run without harming that work (PLAN D3, D3a–D3d, D20). The owner sets it per node; modules can never
-declare or loosen it.
+machine may run without harming that work (PLAN D3, D3a–D3d, D20). The owner sets it for the fleet, a group of nodes or
+one node; modules can never declare or loosen it.
 
 - **The contract** is `oarbank.contracts.protection` (schema 1, `schemas/protection-config-1.schema.json`), with a
   worked example in `src/oarbank/contracts/fixtures/protection-example.toml`.
 - **The engine** is the agent's `oarbank-protection` crate: a pure decision core over process, meter and owner sources,
   with a native backend per OS (macOS, Linux and Windows).
-- **The central copy** is the `protection` section of the node's policy, edited in the console (versioned, with restore
-  and canary). **The local copy** is `protection.json` beside the agent's home on the node. The agent unions both, and
-  the stricter setting wins on every dimension, so the two never conflict.
+- **The central copy** is on the settings chain (docs/design/settings.md, "Protection on the chain"): three settings,
+  `protection.mode` (the most specific value wins; a fleet or group value may lock it), `protection.rules` (every
+  scope's rules apply together: a rule only ever protects more) and `protection.node` (the rest of the node section:
+  memory guard, timing, GPU jobs, longest pause). The coordinator assembles each node's effective section from the
+  fleet's, its groups' and its own values, leaves out a rule its OS cannot run (and names it), and sends the result in
+  the node's policy. **The local copy** is `protection.json` beside the agent's home on the node. The agent unions both,
+  and the stricter setting wins on every dimension, so the two never conflict.
+- **Editing**: the protection page of a node shows its effective rules with where each comes from and edits the node's
+  own section; the fleet's section is on Settings, a group's on its page (`protection.rules.update` with a node,
+  `fleet` or `group:<group>`; a T2 change with the per-node review and, for a node, the live matches). Rule ids are
+  unique on a node: a change that would meet the same id from two scopes is refused. **Rolling out**: add rules to a
+  small group first (a canary group), watch it, then promote them to the fleet (`settings.promote`: they join the
+  fleet's rules and leave the group's in one change, so the canary nodes see no change). This replaces the per-node
+  copy, canary and promote of earlier versions, which wrote the same section to every node.
+- **History**: each change of a node's effective section appends a row to `protection_versions` (with the settings
+  revision that made it); S18 judges a rule by the version in effect when it became active. A home whose nodes still
+  held their own sections is converted once: what every node had in common became the fleet's, the rest stayed on each
+  node (`protection.hoist`, the `protection_hoisted` event).
 
 ## Authority: only the fleet's own processes
 
 The agent signals, lowers or pauses only processes in its spawn registry (a pid plus its start time, or a descendant of
-one). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
+one). Ending its own runners when it stops, or those an agent that was killed left behind, goes by the agent's
+runner records, which hold the same identity (a pid and its start time) for every process of a runner
+([architecture.md](architecture.md), "Stopping the agent"). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
 one (S16). Unknown processes are never signalled; their memory always counts.
 
 ## Whose processes
@@ -82,9 +99,14 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   prefix or substring, and an argv pattern. A signature survives updates and relocation; a path does not; argv is the
   only way to tell one interpreter's script from another's. A key whose fact the agent cannot read (another account's
   path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
-  the processes it matched that way (`unreadable`). The console's process picker writes the matcher from the
-  processes a node reports, and its preview uses a Python matcher held equal to the agent's by shared test vectors
-  (`fixtures/protection-match-vectors.json`).
+  the processes it matched that way (`unreadable`). Such a process takes part from its second sighting on (the next
+  tick): an owner's process whose facts fail to read is nearly always one exiting between the listing and the read,
+  and on a busy machine those would otherwise switch every such rule on every few ticks. Identity is read once per
+  process and program: an exec keeps the pid and start time, so a new path or short name reads the process again, and
+  the arguments of a process seen for the first time are read once more on its next sighting (a child listed between
+  its fork and its exec still carries its parent's arguments, and an argv rule would miss the app it becomes). The console's process picker
+  writes the matcher from the processes a node reports, and its preview uses a Python matcher held equal to the
+  agent's by shared test vectors (`fixtures/protection-match-vectors.json`).
 - **Trees:** `self`, `descendants` (pid and parent tracking) or `same_team` (helpers signed by the same team).
 - **Activity:** `present`, or thresholds on CPU cores (`cpu_cores_gt`), footprint (`footprint_gb_gt`) or GPU activity
   (`gpu_active = { min_busy = 0.05 }`), or `frontmost` (true: the app in front is one of the group's processes; false:
@@ -116,7 +138,12 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   jobs to background scheduling: macOS background QoS, low priority on the efficiency cores; on Linux a CPU quota of a
   tenth of a core on the job's cgroup, since the agent's cgroup and the owner's are scheduled apart and no class an
   unprivileged agent can set yields to the owner; on Windows the Job Object's idle priority class with EcoQoS; where it
-  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`, `cpu`, `gpu` or `io`), `protect` (keep a metric of the
+  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`,
+  `cpu`, `gpu` or `io`; while the rule is active the node also takes none of the work it pauses: capacity's `paused`
+  names the scopes and the claim carries them, so the coordinator grants no job there that the rule would pause at
+  once and release after the longest pause, only to grant it to the same node again; explain shows such a job, or the
+  node, as `PROTECTION_ACTIVE`; `all` and `io` stop admission altogether, and `gpu`, `all` and `io` hold GPU jobs at 0
+  whatever `gpu_jobs` says), `protect` (keep a metric of the
   protected group within a target: `cpu_stall`, `ipc_ratio`, `gpu_share`, `pageins_rate`, or `progress_rate` read from
   an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on.
   `ignore` only removes processes from the heuristic triggers.
@@ -149,14 +176,69 @@ have no instruction or cycle counters (`PROTECTION_NO_IPC_COUNTERS`: a virtual m
 budget does not grow on it), and a node that cannot lower its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused
 instead).
 
+## Capacity
+
+Every tick the agent turns the node's hardware, its policy, the owner's caps and protection's combined constraint into
+what the node may still take (`CapacityModel::compute`; the heartbeat's `capacity`, docs/protocol.md):
+
+```text
+cores       = perf + eff/2                       (physical cores; SMT threads never count)
+cpu         = cores − protection.reserved_cpu; ×0.75 at thermal fair, 0 at serious+; ≤ user_present_slots while present
+reserve     = ram − os_reserve − services − protection reservations − (someone present: user_reserve)
+in_use      = available + fleet resident − margin          margin = soft_free_pct × ram + 1 GB
+host_budget = min(reserve, in_use, cap.mem_gb − services)  (mem_binding: reserve | in_use | cap)
+mem_gb_free = host_budget − Σ running jobs' resources.mem_gb
+slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap.cpu_cores / threads, protection.slots)
+paused      = the pause_fleet scopes of the active rules (no work of theirs is granted; all or io: admit = false)
+```
+
+- **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with
+  46 GB in use offered 50 GB to jobs. The in-use bound starts from the memory available now, RAM minus what the host
+  signals count as used: on macOS app memory (internal minus purgeable pages), wired and compressed, so free, file
+  cache (inactive and speculative pages) and purgeable pages count as available (Activity Monitor's Memory Used); on
+  Linux `MemAvailable`; on Windows `ullAvailPhys` (free, zeroed and standby pages). It adds back the part of the
+  fleet jobs' reservations they already hold (Σ min(footprint, `resources.mem_gb`): in use, yet charged to the budget
+  through their reservations, so never counted twice and never credited past a reservation), and keeps the memory
+  guard's soft floor plus 1 GB free, since the guard stops admission below its floor anyway (8.7 GB on 64 GB). The
+  node policy's `mem_in_use_bound` (on by default) switches the bound off, leaving the reserves and the guard.
+  `capacity` names the bound that set the budget (`mem_binding`) beside both bounds (`mem_budget_reserve_gb`,
+  `mem_budget_in_use_gb`) and `mem_in_use_gb`, the memory everything but the fleet's jobs uses. Placement reads only
+  `mem_gb_free`, the same figure the console shows. When memory on the in-use bound holds the slots under the cores,
+  `binding_limit` is `memory_in_use`.
+- **Cores mean the same on every OS.** Facts report physical cores by class (`perf_cores`, `eff_cores`) beside the
+  logical processors: macOS `hw.perflevel0.physicalcpu` and `hw.perflevel1.physicalcpu` (an Intel Mac's
+  `hw.physicalcpu`); Linux the distinct `topology/core_cpus_list` sets of the online CPUs, classed by Intel hybrid's
+  `cpu_core` and `cpu_atom` thread lists or by Arm's `cpu_capacity` (under 60 % of the largest is an efficiency core),
+  while AMD's compact cores (Zen 4c, 5c) run the same instructions at lower clocks and count as performance cores;
+  Windows one `RelationProcessorCore` record per core from GetLogicalProcessorInformationEx, the highest
+  `EfficiencyClass` being the performance cores. A CPU without classes has only performance cores (`eff_cores` 0);
+  only facts without core counts fall back to logical processors.
+- **Someone present** means input within `user_idle_s` (300 s), or presence that cannot be read. On macOS a Screen
+  Sharing session counts too, even without input, unless the node policy's `screen_sharing_present` is off; Windows'
+  Remote Desktop sessions and Linux's remote logins are sessions with their own input time.
+- **Why.** The console's node cards and node page, `oarbank node show` and `oarbank fleet` print one line from the
+  reported capacity: "2 slots while someone is using this Mac (14 when idle) · 9.2 GB free for jobs (apps and the
+  system use 46 GB)", or what holds the node back and how to allow it ("no new jobs: on battery (allow it in
+  settings: Run jobs on battery)"); `coordinator/nodepolicy.py`.
+- **Settings.** The why line cites the settings it rests on with their value and source ("Run jobs on battery: off ·
+  Default"), each linked to its Explain row on the node's Settings tab, which labels every setting and shows where its
+  value comes from ("Default · 64 GB RAM", "Fleet", "This node"); Override and Reset to inherited write and delete the
+  node's own value through `settings.apply` (`oarbank settings set|reset <key> --node <node>`). The model:
+  [settings.md](settings.md).
+
 ## The controller
 
 One pure decision function over signals, configuration and its own state, on the agent's two-second loop:
 
 - **L0, the guard**, needs no rule. Memory is budgeted before admission; the soft floor stops admitting, the hard floor
   evicts the largest-footprint job in the lowest band, one at a time, until free memory has recovered by the reclaim
-  margin. Swap growth counts, because the kernel's pressure level can read normal with swap nearly full. Thermal and
-  battery gates pause or stop admission.
+  margin. Swap growth counts, because the kernel's pressure level can read normal with swap nearly full, but only
+  while free memory is under 2.5 times the soft floor (30 %): with more free, growing swap is the kernel's
+  housekeeping (Linux swaps idle pages out to keep file cache; Windows writes modified pages to its paging file ahead
+  of need). Windows' swap is what its paging files hold (`SystemPageFileInformation`, Win32_PageFileUsage's figure),
+  never the commit charge beyond physical use, which grows whenever programs commit memory they have not touched; the
+  commit charge counts as pressure against its limit instead (90 % warning, 97 % critical), where allocations start
+  failing. Thermal and battery gates pause or stop admission.
 - **L2, the fast throttle**, activates a rule after `enter_for_s` and releases it after `exit_after_s`; a protected
   metric over twice its target for two samples lowers fleet jobs at once, restored after 30 s clean.
 - **L1, the resize loop**, runs AIMD on the fleet CPU budget each interval: one core up while every metric is in its
@@ -207,7 +289,8 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | Longest pause before eviction | 10 min; `[node] max_pause_s` sets less (10 to 600 s) |
 | Pause probe | 6 s every 10 min, only while a `protect` rule is active |
 | `strict_yield` admission | after 15 min idle, one slot a minute |
-| Memory floors | soft 12 % free or swap +256 MB/min; hard 8 % free or swap +1 GB/min; reclaim 2 GB |
+| Memory floors | soft 12 % free or swap +256 MB/min; hard 8 % free or swap +1 GB/min (swap growth only under 30 % free); reclaim 2 GB |
+| Capacity's in-use margin | the soft floor plus 1 GB |
 | Implicit owner stall (`moderate`, `strict_yield`) | `cpu_stall` at most 0.15 above the owner's own level |
 | Implicit signal smoothing | weight 0.1 a sample (about 20 s) |
 | `protect` window | 20 s |

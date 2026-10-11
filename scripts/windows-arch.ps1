@@ -14,11 +14,15 @@ if (-not ("Oarbank.Machine" -as [type])) {
   Add-Type -Namespace Oarbank -Name Machine -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+[DllImport("kernel32.dll")]
+public static extern IntPtr GetCurrentProcess();
 '@
 }
+# the pseudo-handle (-1) is always valid; a Process object's .Handle is closed when the GC finalizes that object, which
+# made the call fail now and then
 $process, $native = [uint16]0, [uint16]0
-if (-not [Oarbank.Machine]::IsWow64Process2([System.Diagnostics.Process]::GetCurrentProcess().Handle, [ref]$process, [ref]$native)) {
-  throw "IsWow64Process2 failed"
+if (-not [Oarbank.Machine]::IsWow64Process2([Oarbank.Machine]::GetCurrentProcess(), [ref]$process, [ref]$native)) {
+  throw ("IsWow64Process2 failed ({0})" -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
 }
 switch ($native) {
   0xAA64 { "arm64" }                       # IMAGE_FILE_MACHINE_ARM64

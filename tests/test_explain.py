@@ -65,14 +65,15 @@ def test_explain_verdict_equals_claim_decision(world, s):
     nid, jid = node["node_id"], job["job_id"]
     try:
         with db.tx():
-            db.set_setting("fleet_state", s["fleet_state"])
-            db.set_setting("modules_disabled", ["relay"] if s["disabled"] else [])
+            db.set_state("fleet_state", s["fleet_state"])
+            db.set_state("modules_disabled", ["relay"] if s["disabled"] else [])
             mods = json.loads(fresh(db, node)["modules_json"])
             mods["relay"]["state"] = s["mod_state"]
             caps = {} if s["pool_cap"] is None else {"pools": {"scorer": s["pool_cap"]}}
-            db.x("UPDATE nodes SET desired_state=?, lifecycle=?, modules_json=?, limits_json=?, capacity_json=? WHERE node_id=?",
-                 (s["desired_state"], s["lifecycle"], json.dumps(mods),
-                  json.dumps({} if s["jobs_cap"] is None else {"jobs": s["jobs_cap"]}), json.dumps(caps), nid))
+            limits = json.loads(fresh(db, node)["settings_json"])
+            limits["limits"]["jobs"] = s["jobs_cap"]
+            db.x("UPDATE nodes SET desired_state=?, lifecycle=?, modules_json=?, settings_json=?, capacity_json=? WHERE node_id=?",
+                 (s["desired_state"], s["lifecycle"], json.dumps(mods), json.dumps(limits), json.dumps(caps), nid))
             res = {"cpu": s["cpu"], "mem_gb": s["mem"]}
             if s["pools"] == "reserve":
                 res["pools"] = {"scorer": 1}

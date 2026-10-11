@@ -5,11 +5,13 @@
 //! the owner key set (its statement names the build's sha256, version and platform); with signing off it may be the
 //! old coordinator's checkout (`dev-checkout`), never when a release key is pinned. The agent downloads the bundle
 //! (sha256 and size checked), unpacks it under `oarbank-coordinator/<sha12>` (absolute or `..` member paths are
-//! refused), and starts the coordinator with the standby arguments under the service manager (launchd: a
-//! LaunchAgent restarted after a failed exit, as the standby exits 75 to restart on its installed copy; systemd user
-//! units). On Windows the agent's account is an unprivileged virtual account, which cannot create services: the
-//! install is refused there with the way the owner installs a standby instead (deploy\oarbankd\install-oarbankd.ps1
-//! with the pairing code; docs/design/windows-coordinator.md). It reports
+//! refused), and installs the standby as the system service every coordinator is (docs/design/coordinator-system-service.md,
+//! decision 11): the build's own installer, `install-oarbankd.sh --build <bundle> ... --pair <code> --from <url>
+//! --from-ca <pin>`, run as root, writes the launchd daemons or systemd system units run by the coordinator's account.
+//! Only root may create system services, and a node's agent never runs as root (`_oarbank`, `oarbank`, a person's
+//! account; on Windows an unprivileged virtual account): an agent that is not root refuses the install with the one
+//! command the owner runs on this machine instead, naming the bundle it already verified (on Windows,
+//! deploy\oarbankd\install-oarbankd.ps1 with the pairing code; docs/design/windows-coordinator.md). It reports
 //! `coordinator_install {plan_id, state: installing|installed|failed, error}`; the final state is sent once.
 
 use crate::api::Api;
@@ -24,8 +26,6 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
-pub const COORDINATOR_LABEL: &str = "dev.codonic.oarbank.oarbankd";
-pub const CONSOLE_LABEL: &str = "dev.codonic.oarbank.console";
 const MAX_BUNDLE: u64 = 1024 * 1024 * 1024;
 
 #[derive(Default)]
@@ -109,11 +109,6 @@ async fn install(api: &Api, d: &Value, signing: &Signing, trust: &Trust) -> Resu
         bail!("this node's agent runs under an unprivileged service account, which cannot install services: prepare the \
                move with this machine's URL and install the standby here with deploy\\oarbankd\\install-oarbankd.ps1 -Pair");
     }
-    #[cfg(target_os = "linux")]
-    if std::env::var("OARBANK_SERVICE_HOST").as_deref() != Ok("process") && !user_systemd() {
-        bail!("this node's account has no systemd user instance to run the standby coordinator under; install the \
-               coordinator here with deploy/oarbankd/install-oarbankd.sh instead");
-    }
     let s = |k: &str| d[k].as_str().filter(|v| !v.is_empty()).with_context(|| format!("install_coordinator without {k}"));
     let (code, from, bind, sha, url) = (s("pair_code")?, s("from_url")?, s("bind")?, s("bundle_sha256")?, s("bundle_url")?);
     if sha.len() != 64 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -161,30 +156,106 @@ async fn install(api: &Api, d: &Value, signing: &Signing, trust: &Trust) -> Resu
     let (from, code, bind) = (from.to_string(), code.to_string(), bind.to_string());
     tokio::task::spawn_blocking(move || -> Result<()> {
         unpack(&tgz2, &root2)?;
-        let (program, console) = programs(&kind, &root2)?;
         let coordinator_home = std::env::var_os("OARBANK_COORDINATOR_HOME").map(PathBuf::from);
-        let mut args = program;
-        args.extend(["--agent-bind".into(), bind.clone(), "--agent-port".into(), port.to_string(), "--standby".into(),
-                     "--pair".into(), code, "--from".into(), from, "--url".into(), format!("https://{bind}:{port}")]);
-        if let Some(ca) = d2["from_ca"].as_str().filter(|c| !c.is_empty()) {
-            args.extend(["--from-ca".into(), ca.to_string()]);
-        }
         let existing = coordinator_home.clone().unwrap_or_else(default_coordinator_home);
-        if existing.join("oarbank.sqlite3").exists() {
-            args.push("--archive-home".into());
+        let standby = Standby {
+            url: format!("https://{bind}:{port}"), bind, port, code, from,
+            from_ca: d2["from_ca"].as_str().filter(|c| !c.is_empty()).map(str::to_string),
+            archive_home: existing.join("oarbank.sqlite3").exists(),
+        };
+        if std::env::var("OARBANK_SERVICE_HOST").as_deref() == Ok("process") {
+            let (program, _console) = programs(&kind, &root2)?;
+            let mut args = program;
+            args.extend(standby.oarbankd_args());
+            return start_process(&root2, args, coordinator_home);
         }
-        start_services(&root2, args, console, coordinator_home)
+        install_system(&kind, &root2, &tgz2, &standby)
     }).await.context("install task")??;
     Ok(())
 }
 
+/// What makes the coordinator a move's standby (coordinator-move.md): its agent address, the pairing with the old one.
+struct Standby {
+    bind: String,
+    port: u64,
+    url: String,
+    code: String,
+    from: String,
+    from_ca: Option<String>,
+    archive_home: bool,
+}
+
+impl Standby {
+    /// oarbankd's standby arguments.
+    fn oarbankd_args(&self) -> Vec<String> {
+        let mut a = vec!["--agent-bind".into(), self.bind.clone(), "--agent-port".into(), self.port.to_string(), "--standby".into(),
+                         "--pair".into(), self.code.clone(), "--from".into(), self.from.clone(), "--url".into(), self.url.clone()];
+        if let Some(ca) = &self.from_ca {
+            a.extend(["--from-ca".into(), ca.clone()]);
+        }
+        if self.archive_home {
+            a.push("--archive-home".into());
+        }
+        a
+    }
+
+    /// The build installer's arguments for this standby (deploy/oarbankd/install-oarbankd.sh); `code` stands for the
+    /// pairing code (the real one, or a placeholder in the owner's instructions).
+    fn installer_args(&self, bundle: &Path, code: &str) -> Vec<String> {
+        let mut a = vec!["--build".into(), bundle.display().to_string(), "--agent-bind".into(), self.bind.clone(),
+                         "--agent-port".into(), self.port.to_string(), "--url".into(), self.url.clone(), "--pair".into(),
+                         code.into(), "--from".into(), self.from.clone()];
+        if let Some(ca) = &self.from_ca {
+            a.extend(["--from-ca".into(), ca.clone()]);
+        }
+        if self.archive_home {
+            a.push("--archive-home".into());
+        }
+        a
+    }
+}
+
+/// The coordinator's home on this machine: the system service's (paths.coordinator_home in the coordinator).
 fn default_coordinator_home() -> PathBuf {
     if cfg!(windows) {
         return std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
             .join("Oarbank").join("coordinator");
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    if cfg!(target_os = "macos") { home.join("Library/Application Support/Oarbank/coordinator") } else { home.join(".local/share/oarbank/coordinator") }
+    PathBuf::from(if cfg!(target_os = "macos") { "/Library/Application Support/Oarbank/coordinator" } else { "/var/lib/oarbank/coordinator" })
+}
+
+/// The standby as the system service: the build's own installer, as root. An agent that is not root (every node's
+/// agent) refuses with the command the owner runs on this machine, naming the bundle it verified.
+fn install_system(kind: &str, root: &Path, bundle: &Path, standby: &Standby) -> Result<()> {
+    let installer = root.join("install-oarbankd.sh");
+    if kind != "build" || !installer.is_file() {
+        bail!("a checkout bundle runs only under OARBANK_SERVICE_HOST=process; install a signed coordinator build");
+    }
+    #[cfg(unix)]
+    let is_root = crate::sys::uid() == 0;
+    #[cfg(not(unix))]
+    let is_root = false;
+    if !is_root {
+        let args = standby.installer_args(bundle, "<the pairing code>");
+        bail!("creating the standby's system services needs root, and this node's agent is unprivileged: on this machine, \
+               run `sudo bash {} {}` with the pairing code `oarbank coordinator prepare` printed",
+              shell_quote(&installer.display().to_string()), args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" "));
+    }
+    let o = std::process::Command::new("/bin/bash").arg(&installer).args(standby.installer_args(bundle, &standby.code))
+        .current_dir(root).stdin(std::process::Stdio::null()).output()?;
+    if !o.status.success() {
+        let e = String::from_utf8_lossy(&o.stderr);
+        bail!("install-oarbankd.sh failed: {}", &e[e.len().saturating_sub(400)..]);
+    }
+    Ok(())
+}
+
+fn shell_quote(a: &str) -> String {
+    if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c)) {
+        a.to_string()
+    } else {
+        format!("'{}'", a.replace('\'', "'\\''"))
+    }
 }
 
 /// The system's tar: bsdtar on macOS and Windows (System32\tar.exe since Windows 10 1803), GNU tar on Linux.
@@ -274,9 +345,9 @@ fn which(name: &str) -> Option<PathBuf> {
     found
 }
 
-/// Start the standby. `OARBANK_SERVICE_HOST=process` runs it as a supervised child of the agent (tests) instead of
-/// a launchd job: restarted after a failed exit, its pid in `<install>/standby.pid`.
-fn start_services(root: &Path, args: Vec<String>, console: Option<Vec<String>>, home: Option<PathBuf>) -> Result<()> {
+/// The standby as a supervised child of the agent (`OARBANK_SERVICE_HOST=process`, the tests): restarted after a failed
+/// exit, its pid in `<install>/standby.pid`.
+fn start_process(root: &Path, args: Vec<String>, home: Option<PathBuf>) -> Result<()> {
     let mut env = if cfg!(windows) {
         // what a Windows program needs to start, from the agent's own environment
         ["SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "PATH", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA",
@@ -290,76 +361,14 @@ fn start_services(root: &Path, args: Vec<String>, console: Option<Vec<String>>, 
     }
     let logs = home.clone().unwrap_or_else(default_coordinator_home).join("logs");
     std::fs::create_dir_all(&logs)?;
-    if std::env::var("OARBANK_SERVICE_HOST").as_deref() == Ok("process") {
-        for (k, v) in std::env::vars() {
-            let knob = k.starts_with("OARBANKD_") || ["OARBANK_RELEASE_SIGNING", "OARBANK_SECRET_STORE", "OARBANK_SANDBOX_EXEC"]
-                .contains(&k.as_str());
-            if knob && !env.iter().any(|(e, _)| *e == k) {
-                env.push((k, v));                                 // test knobs: the move time lock, the module launcher
-            }
-        }
-        return supervise(root, args, env, &logs.join("oarbankd.log"));
-    }
-    #[cfg(target_os = "linux")]
-    return systemd_units(root, &args, console.as_deref(), &env, &logs);
-    #[allow(unreachable_code)]
-    let uid = crate::sys::uid();
-    let la = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?.join("Library/LaunchAgents");
-    std::fs::create_dir_all(&la)?;
-    let mut jobs = vec![(COORDINATOR_LABEL, args, false, "oarbankd.log")];
-    if let Some(c) = console {
-        jobs.push((CONSOLE_LABEL, c, true, "console.log"));
-    }
-    for (label, program, keep, log) in jobs {
-        let spec = oarbank_core::service::ServiceSpec {
-            label: label.into(), program, env: env.clone(), working_dir: Some(root.display().to_string()),
-            stdout: Some(logs.join(log).display().to_string()), stderr: Some(logs.join(log).display().to_string()),
-            user: None, keep_alive: keep, restart_on_failure: true,
-        };
-        let plist = la.join(format!("{label}.plist"));
-        crate::fsutil::write_private(&plist, oarbank_core::service::launchd_plist(&spec).as_bytes())?;
-        let _ = std::process::Command::new("/bin/launchctl").args(["bootout", &format!("gui/{uid}/{label}")]).output();
-        let b = std::process::Command::new("/bin/launchctl").arg("bootstrap").arg(format!("gui/{uid}")).arg(&plist).output()?;
-        if !b.status.success() {
-            bail!("launchctl bootstrap {label}: {}", String::from_utf8_lossy(&b.stderr).trim());
+    for (k, v) in std::env::vars() {
+        let knob = k.starts_with("OARBANKD_") || ["OARBANK_RELEASE_SIGNING", "OARBANK_SECRET_STORE", "OARBANK_SANDBOX_EXEC"]
+            .contains(&k.as_str());
+        if knob && !env.iter().any(|(e, _)| *e == k) {
+            env.push((k, v));                                     // test knobs: the move time lock, the module launcher
         }
     }
-    Ok(())
-}
-
-/// The agent's account has a reachable systemd user instance (a person's login, or lingering).
-#[cfg(target_os = "linux")]
-fn user_systemd() -> bool {
-    std::process::Command::new("systemctl").args(["--user", "show-environment"]).output().is_ok_and(|o| o.status.success())
-}
-
-/// The standby (and its console) as systemd user units: restarted after a failed exit (a standby exits 75 to restart
-/// on its installed copy), like the macOS LaunchAgents.
-#[cfg(target_os = "linux")]
-fn systemd_units(root: &Path, args: &[String], console: Option<&[String]>, env: &[(String, String)], logs: &Path) -> Result<()> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).context("HOME is not set")?
-        .join("systemd/user");
-    std::fs::create_dir_all(&base)?;
-    let mut jobs = vec![("oarbankd", args.to_vec(), false)];
-    if let Some(c) = console {
-        jobs.push(("oarbank-console", c.to_vec(), true));
-    }
-    for (name, program, keep) in jobs {
-        let spec = oarbank_core::service::ServiceSpec {
-            label: name.into(), program, env: env.to_vec(), working_dir: Some(root.display().to_string()),
-            stdout: Some(logs.join(format!("{name}.log")).display().to_string()), stderr: None, user: None,
-            keep_alive: keep, restart_on_failure: true,
-        };
-        let unit = format!("dev.codonic.oarbank.{name}.service");
-        crate::fsutil::write_private(&base.join(&unit), oarbank_core::service::systemd_unit(&spec, &format!("Oarbank {name}"), false).as_bytes())?;
-        let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).output();
-        let o = std::process::Command::new("systemctl").args(["--user", "enable", "--now", &unit]).output()?;
-        if !o.status.success() {
-            bail!("systemctl --user enable {unit}: {}", String::from_utf8_lossy(&o.stderr).trim());
-        }
-    }
-    Ok(())
+    supervise(root, args, env, &logs.join("oarbankd.log"))
 }
 
 fn supervise(root: &Path, args: Vec<String>, env: Vec<(String, String)>, log: &Path) -> Result<()> {
@@ -423,6 +432,27 @@ mod tests {
         assert!(console.is_none());
         std::fs::write(root.join("oarbank-coordinator.json"), r#"{"exec":["../../etc/x"]}"#).unwrap();
         assert!(programs("build", &root).is_err());
+    }
+
+    #[test]
+    fn an_unprivileged_agent_refuses_with_the_owner_s_command_and_never_shows_the_code() {
+        let t = scratch();
+        let root = t.path().join("unpacked");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("install-oarbankd.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+        let s = Standby { bind: "100.64.0.9".into(), port: 7443, url: "https://100.64.0.9:7443".into(), code: "SECRET-CODE".into(),
+                          from: "https://100.64.0.1:7443".into(), from_ca: Some("abc".into()), archive_home: true };
+        assert_eq!(s.installer_args(Path::new("/b/bundle.tar.gz"), "X"),
+                   ["--build", "/b/bundle.tar.gz", "--agent-bind", "100.64.0.9", "--agent-port", "7443", "--url",
+                    "https://100.64.0.9:7443", "--pair", "X", "--from", "https://100.64.0.1:7443", "--from-ca", "abc", "--archive-home"]);
+        assert!(s.oarbankd_args().windows(2).any(|w| w == ["--pair", "SECRET-CODE"]));
+        if cfg!(unix) && crate::sys::uid() == 0 {
+            return;                                   // as root it would run the installer
+        }
+        let e = format!("{:#}", install_system("build", &root, Path::new("/b/bundle.tar.gz"), &s).unwrap_err());
+        assert!(e.contains("needs root") && e.contains("sudo bash") && e.contains("install-oarbankd.sh") && e.contains("--build /b/bundle.tar.gz"), "{e}");
+        assert!(e.contains("'<the pairing code>'") && !e.contains("SECRET-CODE"), "{e}");
+        assert!(install_system("dev-checkout", &root, Path::new("/b"), &s).is_err());
     }
 
     #[test]

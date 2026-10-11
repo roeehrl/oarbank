@@ -9,5 +9,6 @@
 <td>{% if e.node_id %}<a href="/nodes/{{ e.node_id }}">{{ e.node_id }}</a>{% endif %}</td>
 <td>{% if e.campaign_id %}<a href="/campaigns/{{ e.campaign_id }}">{{ e.campaign_id }}</a>{% endif %}</td>
 <td>{% if e.job_id %}<a href="/jobs/{{ e.job_id }}">{{ e.job_id }}</a>{% endif %}</td><td>{{ e.reason or '' }}</td>
-<td class="mono">{{ (e.payload_json or '')[:200] }}</td></tr>{% endfor %}</table>
+<td class="mono">{{ (e.payload_json or '')[:200] }}</td></tr>
+{% else %}<tr><td colspan="8" class="mut">no events{% if kind %} of kind {{ kind }}{% endif %}</td></tr>{% endfor %}</table>
 {% endblock %}

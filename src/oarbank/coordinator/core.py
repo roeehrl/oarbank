@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases
+from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -34,7 +34,7 @@ AWAIT_MODULE_TTL = 600.0     # lease held for a completion waiting on a module f
 
 
 NON_FAILURE_RELEASES = {"preempt_memory", "preempt_protection", "user_cancel", "limit_mem", "limit_cpu", "limit_schedule",
-                        "transient"}
+                        "transient", "agent_stop"}
 HOST_FAILURES = {"doctor", "mode_mismatch", "oom", "no_metrics"}   # failures that implicate the host first
 
 
@@ -193,11 +193,13 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
                  " ts_ip=?, quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
                  (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], node_id))
         else:
-            db.x("INSERT INTO nodes(node_id,ts_node_id,hostname,label,ts_ip,facts_json,lifecycle,desired_state,"
-                 "limits_json,policy_json,created_at) VALUES(?,?,?,?,?,?,'enrolled','active','{}',?,?)",
-                 (node_id, e["ts_node_id"], label or e["hostname"], label, e["peer_ip"], json.dumps(facts),
-                  json.dumps(C.policy_for(facts, db.get_setting("default_worker_disabled_services"))), now()))
+            # nothing of its settings is copied: it inherits the defaults, the fleet's and its groups' values (settings/)
+            db.x("INSERT INTO nodes(node_id,ts_node_id,hostname,label,ts_ip,facts_json,lifecycle,desired_state,created_at)"
+                 " VALUES(?,?,?,?,?,?,'enrolled','active',?)",
+                 (node_id, e["ts_node_id"], label or e["hostname"], label, e["peer_ip"], json.dumps(facts), now()))
         db.x("UPDATE nodes SET platform=?, os=?, arch=?, os_version=? WHERE node_id=?", (*_platform_cols(facts), node_id))
+        from .settings import apply as settings_apply
+        settings_apply.sync_nodes(db, [node_id])
         from . import tlsca
         try:
             cert = tlsca.issue_client(Path(db.path).parent, e["csr_pem"], node_id)
@@ -280,20 +282,24 @@ def _node_directives(db: DB, node: dict) -> dict:
                    "sha256": rel["sha256"]}
         if C.RELEASE_SIGNING:
             release.update(statement=rel["statement"], signature=rel["signature"])
+    from .settings import apply as settings_apply
     return {"now": now(), "desired_state": node["desired_state"], "lifecycle": node["lifecycle"],
-            "limits": jl(node["limits_json"], {}), "policy": jl(node["policy_json"], {}),
+            # the complete effective policy and caps, with the revision the agent reports back once it applied them
+            **settings_apply.directive(db, node),
             "heartbeat_s": C.HEARTBEAT_S, "release": release,
-            "release_pubkey": db.get_setting("release_pubkey") if C.RELEASE_SIGNING else None,
+            "release_pubkey": db.get_state("release_pubkey") if C.RELEASE_SIGNING else None,
             "prefetch": prefetch_for(db, node), "run_doctor": bool(node["want_doctor"]),
             "run_probe": bool(node.get("want_probe")), "send_processes": bool(node.get("want_processes")),
             "agent_update": agentbuilds.directive(db, node),
             "coordinator": {"fleet_id": identity.fleet_id(db), "cik": identity.key(Path(db.path).parent).public_b64,
                             "epoch": identity.epoch(db)},
             "install_coordinator": jl(node.get("install_coordinator_json")),
-            "folders": folders.directive(db, node["node_id"]),
+            # the node's signed statement (folders and added tool paths), the tool paths chosen among what it found, and a
+            # request to detect its host tools again (docs/design/host-tools.md)
+            "statement": statements.directive(db, node["node_id"]),
+            "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
+            "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
-            # the kill switch: a disabled module's services stop on every node (its attempts are revoked)
-            "modules_disabled": sorted(modstore.disabled_names(db)),
             **coordmove.directives(db), **owner.directives(db)}
 
 
@@ -349,11 +355,14 @@ def hello(db: DB, node: dict, body: dict) -> dict:
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         agentbuilds.observe(db, node, body)
         _observe_identity(db, node, body)
+        _observe_tools(db, node, body)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         _lifecycle_step(db, node, facts)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
+    # the release in words: the id it runs, or why it runs none ("none yet (no module enabled)", "waiting for signature: r_…")
+    rel = releases.node_release(db, node)
     db.event("hello", actor=node["hostname"], node_id=node["node_id"], reason=body.get("boot_id"),
-             agent_version=body.get("agent_version"), release_id=body.get("release_id"))
+             agent_version=body.get("agent_version"), release=rel["text"])
     run_pending_goldens(db, node["node_id"])
     d = _node_directives(db, node)
     d.update(node_id=node["node_id"], kill=kill)
@@ -374,6 +383,18 @@ def _observe_identity(db: DB, node: dict, body: dict):
     if fp and fp != node.get("cik_pinned"):
         db.x("UPDATE nodes SET cik_pinned=? WHERE node_id=?", (fp, node["node_id"]))
         db.event("node_identity_pinned", node_id=node["node_id"], actor=node["hostname"], reason=fp[:16])
+
+
+def _observe_tools(db: DB, node: dict, body: dict):
+    """The host tools the agent detected (docs/design/host-tools.md): kept as the node's `tools_json`."""
+    rep = body.get("tools")
+    if not isinstance(rep, dict) or not isinstance(rep.get("tools"), dict):
+        return
+    keep = {"detected_at": rep.get("detected_at"), "native_arch": rep.get("native_arch"),
+            "tools": {str(k)[:64]: [i for i in (v or [])[:64] if isinstance(i, dict)] for k, v in list(rep["tools"].items())[:64]}}
+    text = json.dumps(keep)[:400_000]
+    if text != node.get("tools_json"):
+        db.x("UPDATE nodes SET tools_json=? WHERE node_id=?", (text, node["node_id"]))
 
 
 def heartbeat(db: DB, node: dict, body: dict) -> dict:
@@ -415,6 +436,10 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
                  (json.dumps(body["doctor"]), t, nid))
         if isinstance(body.get("folders"), dict):           # the folders of the statement the agent applied (folders.py)
             db.x("UPDATE nodes SET folders_json=? WHERE node_id=?", (json.dumps(body["folders"])[:100_000], nid))
+        _observe_tools(db, node, body)
+        if "settings" in body:                              # the revision the agent applied, and keys it refused
+            from .settings import apply as settings_apply
+            settings_apply.observe(db, node, body.get("settings"))
         if isinstance(body.get("services"), list):          # the agent's service report (protocol.md, "Services")
             rep = {"services": [x for x in body["services"][:200] if isinstance(x, dict)],
                    "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
@@ -430,6 +455,8 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             db.x("UPDATE nodes SET want_recertify=0 WHERE node_id=?", (nid,))
         if node.get("want_probe"):
             db.x("UPDATE nodes SET want_probe=0 WHERE node_id=?", (nid,))     # sent once, in this reply
+        if node.get("want_detect"):
+            db.x("UPDATE nodes SET want_detect=0 WHERE node_id=?", (nid,))    # sent once, in this reply
     if was_offline:
         db.event("node_online", node_id=nid, actor=node["hostname"])
     run_pending_goldens(db, nid)
@@ -611,8 +638,8 @@ def _insert_goldens(db: DB, node_id: str, module: str, goldens: list[dict], vers
 
 def _certify(db: DB, node_id: str, module: str, note: str = ""):
     node = db.one("SELECT * FROM nodes WHERE node_id=?", (node_id,))
-    gen = int(db.get_setting("cert_counter", 0)) + 1
-    db.set_setting("cert_counter", gen)
+    gen = int(db.get_state("cert_counter", 0)) + 1
+    db.set_state("cert_counter", gen)
     fp = platforms.facts_platform(jl(node["facts_json"], {}))
     digest = (releases.composition_of(db, node["release_id"]).get(module) or {}).get("digest")
     _set_module_state(db, node_id, module, state="certified", generation=gen, release=node["release_id"], digest=digest,
@@ -715,8 +742,15 @@ def prefetch_for(db: DB, node: dict) -> list[str]:
 # ---------------------------------------------------------------- dispatch
 # ---------------------------------------------------------------- staged pipelines
 def node_disabled_services(node: dict) -> list[str]:
-    """Services the owner disabled on this node ("<module>/<service>" or "*/<service>")."""
-    return list((jl(node.get("policy_json"), {}) or {}).get("disabled_services") or [])
+    """Services the owner disabled on this node, as "<module>/<service>": each module's effective `services.disabled`."""
+    from .settings.apply import node_values
+    return list((node_values(node).get("policy") or {}).get("disabled_services") or [])
+
+
+def node_limits(node: dict) -> dict:
+    """The node's effective caps (null: uncapped), as the coordinator last computed them for its agent."""
+    from .settings.apply import node_values
+    return {k: v for k, v in (node_values(node).get("limits") or {}).items() if v is not None}
 
 
 def expand_pipeline(db: DB, job_id: int) -> int | None:
@@ -742,25 +776,6 @@ def expand_pipeline(db: DB, job_id: int) -> int | None:
     if hit:
         db.x("UPDATE jobs SET state='done', canonical_result_id=?, done_at=? WHERE job_id=?", (hit, now(), cid))
     return cid
-
-
-def set_pipeline(db: DB, module: str, mode: str, actor: str) -> dict:
-    """Switch a module between single-stage and split (its stage chain). Enabling split expands every queued
-    (pending, never started) eval job into head -> tail, so queued work is not funnelled to the nodes that
-    can run the tail. Disabling leaves already-split jobs as they are (they finish as staged jobs). The
-    module's golden.list gives nodes that can run only the head its head-stage goldens."""
-    if mode not in ("single", "split") or (mode == "split" and not modcalls.info(module).splittable):
-        raise ApiError(400, "bad_pipeline", f"{module}: {mode}")
-    out = {"module": module, "mode": mode, "expanded": 0}
-    with db.tx():
-        db.set_setting(f"pipeline:{module}", mode)
-        if mode == "split":
-            for j in db.q("SELECT job_id FROM jobs WHERE module=? AND kind='eval' AND state='pending' AND depends_on IS NULL "
-                          "AND stage IS NULL AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.job_id=jobs.job_id)", (module,)):
-                if expand_pipeline(db, j["job_id"]):
-                    out["expanded"] += 1
-    db.event("pipeline_changed", actor=actor, reason=f"{module}: {mode} ({out['expanded']} queued jobs split)", module=module)
-    return out
 
 
 def _dep_result(db: DB, j: dict) -> dict | None:
@@ -816,7 +831,7 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
     f = _job_facts(db, j)
     disputed = set(f["dispute"].get("nodes", []))
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json, facts_json FROM nodes "
+    for n in db.q("SELECT node_id, platform, release_id, modules_json, capacity_json, settings_json, doctor_json, facts_json FROM nodes "
                   "WHERE lifecycle='ready' AND node_id!=?", (nid,)):
         if n["node_id"] in failed or n["node_id"] in disputed or not predicates.platform_fits(f, n["platform"]) \
                 or predicates.retry_max(f, n["platform"]) <= j["exec_failures"]:
@@ -830,11 +845,19 @@ def _other_node_can_take(db: DB, j: dict, nid: str) -> bool:
 
 
 def _module_serves(node: dict, f: dict) -> bool:
-    """Does the node's state for the job's module let it run the job (predicates.module_serves): certified, or, for a
-    bootstrap job, certifying on a node whose agent applies the bootstrap grants."""
+    """Does the node's state for the job's module let it run the job (predicates.module_serves): certified, or, for a job
+    of a stage that needs no certification, a node where the module's runner started (and, for a bootstrap job, whose
+    agent applies the bootstrap grants). `node` carries modules_json, doctor_json, release_id and facts_json."""
     from . import modsandbox
     state = (jl(node["modules_json"], {}) or {}).get(f["module"], {}).get("state")
-    return predicates.module_serves(f, state, modsandbox.bootstrap_enforced(node))
+    return predicates.module_serves(f, state, modsandbox.bootstrap_enforced(node),
+                                    bool(f.get("exempt")) and predicates.doctor_ran(node, f["module"]))
+
+
+def runner_ready(node: dict, module: str) -> bool:
+    """Whether the node runs the module's certification-exempt stages (docs/design/stage-gating.md): its runner started
+    there (a doctor report for the current release) and the module is in one of predicates.RUNNER_STATES."""
+    return node_modules(node).get(module, {}).get("state") in predicates.RUNNER_STATES and predicates.doctor_ran(node, module)
 
 
 def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: float, free_mem: float,
@@ -843,27 +866,51 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
     from . import modsandbox, modsecrets
     nid = node["node_id"]
     excluded = modsandbox.node_exclusions(db, node, set(offered))
+    # a module excluded only for some of its stages (predicates.SPARED) stays offered: the module check decides per job
+    runs = set(offered) - {m for m, code in excluded.items() if code not in predicates.SPARED}
     unset = {}
-    for m in set(offered) - set(excluded):
+    for m in runs:
         names = list(modsecrets.declared(m))
         if names:
             unset[m] = set(modsecrets.missing_for(db, m, names, nid))
+    from .settings.apply import node_values
+    settings_unset = {m: set(v) for m, v in (node_values(node).get("settings_unset") or {}).items() if m in runs}
+    rules_cache: dict = {}
+
+    def campaign_rules(cid):
+        """What a running campaign holds its jobs to on this node (read once per campaign, and only for campaigns that
+        set a node-applied key)."""
+        if cid not in rules_cache:
+            if "snap" not in rules_cache:
+                from .settings import resolve as V
+                ids = {r["scope_id"] for r in db.q("SELECT DISTINCT scope_id FROM setting_values WHERE scope='campaign' "
+                                                   "AND key IN ('jobs','run_on_battery','user_present_slots')")}
+                rules_cache["snap"] = V.snapshot(db) if ids else None
+                rules_cache["ids"] = ids
+            snap = rules_cache["snap"]
+            from .settings import resolve as V
+            rules_cache[cid] = V.campaign_rules(snap, node, cid) if snap is not None and cid in rules_cache["ids"] else {}
+        return rules_cache[cid]
+    tel, cap = jl(node.get("telemetry_json"), {}) or {}, jl(node.get("capacity_json"), {}) or {}
     return predicates.NodeView(
-        secrets_unset=unset,
-        node=node, states=node_modules(node), offered=set(offered) - set(excluded), excluded=excluded,
+        secrets_unset=unset, settings_unset=settings_unset, campaign_rules=campaign_rules,
+        on_battery=bool(tel.get("on_battery")), user_present=bool(cap.get("user_present")),
+        node=node, states=node_modules(node), offered=runs, excluded=excluded,
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
-        capabilities={m: predicates.node_capabilities(node, m) for m in set(offered) - set(excluded)},
+        capabilities={m: predicates.node_capabilities(node, m) for m in runs},
         gpu_apis=predicates.node_gpu_apis(node),
         bootstrap_grants=modsandbox.bootstrap_enforced(node),
-        disabled=modstore.disabled_names(db),
+        runner_ready={m for m in runs if runner_ready(node, m)},
+        disabled=modstore.disabled_names(db, node),
         ready=set(ready), free_cpu=free_cpu, free_mem=free_mem,
         live=db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"],
-        limits=jl(node["limits_json"], {}) or {}, fleet_state=db.get_setting("fleet_state", "active"),
-        current_release=releases.assigned(db, node),
+        limits=node_limits(node), fleet_state=db.get_state("fleet_state", "active"),
+        current_release=releases.assigned(db, node), release_of=lambda: releases.node_release(db, node),
         pool_cap=_node_pools(node), pool_use=_pool_usage(db, nid),
         failed_here={r["job_id"] for r in db.q("SELECT DISTINCT job_id FROM attempts WHERE node_id=? AND state='failed'", (nid,))},
         pool_jobs_only=bool(body.get("pool_jobs_only")),
-        gpu_cap=None if body.get("gpu_jobs") is None else int(body["gpu_jobs"]), gpu_use=_gpu_usage(db, nid, node.get("platform")))
+        gpu_cap=None if body.get("gpu_jobs") is None else int(body["gpu_jobs"]), gpu_use=_gpu_usage(db, nid, node.get("platform")),
+        paused=frozenset(str(s) for s in body.get("paused") or ()), paused_by=body.get("paused_by"))
 
 
 def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = None) -> dict:
@@ -875,7 +922,10 @@ def _job_facts(db: DB, j: dict, cache: dict | None = None, cmp: dict | None = No
             "stage_capabilities": modcalls.stage_capabilities(j["module"], j["stage"]),
             "gpu_apis": modcalls.stage_gpu_apis(j["module"], j["stage"]),
             "secrets": modcalls.stage_secrets(j["module"], j["stage"]),
-            "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]), "placement": placement.facts(db, j, cache)}
+            "bootstrap": modcalls.stage_bootstrap(j["module"], j["stage"]),
+            # golden jobs are certification itself: never exempt from it, whatever their stage
+            "exempt": j["kind"] != "golden" and modcalls.stage_exempt(j["module"], j["stage"]),
+            "placement": placement.facts(db, j, cache)}
 
 
 def sent_stage(mi, stage: str | None) -> str | None:
@@ -916,6 +966,20 @@ def envelope(db: DB, j: dict, version: str | None, resources: dict | None = None
             "payload": {k: v for k, v in spec.items() if k not in ENVELOPE_KEYS + HOST_KEYS}}
 
 
+def _campaign_settings(db: DB, j: dict, cache: dict) -> dict:
+    """A campaign's values of its module's own keys a job's runner gets over the node's (settings/resolve.campaign_values),
+    read once per claim for the campaigns that set any."""
+    key = ("campaign_settings", j["campaign_id"])
+    if key not in cache:
+        if not db.one("SELECT 1 FROM setting_values WHERE scope='campaign' AND scope_id=? AND module=?",
+                      (j["campaign_id"], j["module"])):
+            cache[key] = {}
+        else:
+            from .settings import resolve as V
+            cache[key] = V.campaign_values(V.snapshot(db), j["campaign_id"], j["module"])
+    return cache[key]
+
+
 def claim(db: DB, node: dict, body: dict) -> dict:
     """Grant pending jobs whose module is certified here (or golden jobs of a doctor-passed module)
     and whose resources fit the node's free CPU and memory."""
@@ -925,21 +989,22 @@ def claim(db: DB, node: dict, body: dict) -> dict:
         return {"grants": []}
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
-    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db)
+    offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
     from . import modsandbox
     offered -= modsandbox.node_excluded(db, node, offered)     # platform, OS version, sandbox or agent mismatch
     ready = set(body.get("ready_datasets") or [])
     grants = []
     if free_cpu <= 0 or node["desired_state"] != "active" or node["lifecycle"] != "ready":
         return {"grants": []}
-    if db.get_setting("fleet_state", "active") != "active":       # fleet.pause / fleet.halt (D14)
+    if db.get_state("fleet_state", "active") != "active":       # fleet.pause / fleet.halt (D14)
         return {"grants": []}
     if node["release_id"] != releases.assigned(db, node):
         return {"grants": []}
-    states = node_modules(node)
-    certified = {m for m, st in states.items() if st.get("state") == "certified"} & offered
-    certifying = {m for m, st in states.items() if st.get("state") == "certifying"} & offered
-    if not certified and not certifying:
+    def serving(node) -> set:
+        """Modules some job may run on this node: certified, certifying or runner-ready (predicates.NodeView.serving)."""
+        states = node_modules(node)
+        return {m for m in offered if states.get(m, {}).get("state") in ("certified", "certifying") or runner_ready(node, m)}
+    if not serving(node):
         return {"grants": []}
     with db.tx():
         # every node-level decision comes from a row read inside the transaction: the row auth read
@@ -947,10 +1012,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         if node["desired_state"] != "active" or node["lifecycle"] != "ready":
             return {"grants": []}
-        states = node_modules(node)
-        certified = {m for m, st in states.items() if st.get("state") == "certified"} & offered
-        certifying = {m for m, st in states.items() if st.get("state") == "certifying"} & offered
-        if not certified and not certifying:
+        if not serving(node):
             return {"grants": []}
         nv = node_view_for_claim(db, node, offered, ready, free_cpu, free_mem, body)
         if not predicates.eligible(predicates.admission(nv, first_fail=True)):
@@ -1014,6 +1076,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             for p, k in (res.get("pools") or {}).items():
                 nv.pool_use[p] = nv.pool_use.get(p, 0) + int(k)
             nv.gpu_use += modcalls.job_uses_gpu(j["module"], res, node.get("platform"))
+            nv.granted += 1
             per_campaign[j["campaign_id"]] = per_campaign.get(j["campaign_id"], 0) + 1
             grant = {"attempt_id": aid, "job_id": j["job_id"], "job_key": j["job_key"],
                      "generation": j["generation"], "kind": j["kind"], "module": j["module"],
@@ -1028,6 +1091,9 @@ def claim(db: DB, node: dict, body: dict) -> dict:
                 grant["images"] = images
             if ckpt:                        # the job resumes from its checkpoint: the agent stages these files
                 grant["checkpoint"] = {"files": jl(ckpt["files_json"], [])}
+            over = _campaign_settings(db, j, cache=bindings) if j.get("campaign_id") else {}
+            if over:                        # the campaign's values of the module's own keys, over the node's (its runners)
+                grant["settings"] = over
             grants.append(grant)
     for g in grants:
         db.event("granted", node_id=nid, job_id=g["job_id"], attempt_id=g["attempt_id"], reason=g["module"], module=g["module"])
@@ -1085,7 +1151,8 @@ def _retry_possible(db: DB, j: dict) -> bool:
     retry (stages[].retry.max_attempts, for that node's platform) above the job's failures."""
     f = _job_facts(db, j)
     res = jl(j["resources_json"], {})
-    for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, facts_json FROM nodes WHERE lifecycle='ready'"
+    for n in db.q("SELECT node_id, platform, release_id, modules_json, capacity_json, settings_json, doctor_json, facts_json "
+                  "FROM nodes WHERE lifecycle='ready'"
                   + (" AND node_id=?" if j["target_node"] else ""), (j["target_node"],) if j["target_node"] else ()):
         if (predicates.retry_max(f, n["platform"]) > j["exec_failures"] and predicates.platform_fits(f, n["platform"])
                 and _module_serves(n, f) and _pools_fit(n, res)):
@@ -1210,7 +1277,7 @@ def _eligible_nodes(db: DB, j: dict, exclude: set, cmp: dict | None = None) -> i
     outside `exclude`. `cmp`: the comparison class {scope, class} to use instead of the job's own dispute's (a replica
     about to be queued)."""
     res, f = jl(j["resources_json"], {}), _job_facts(db, j, cmp=cmp)
-    return sum(1 for n in db.q("SELECT node_id, platform, modules_json, capacity_json, policy_json, doctor_json FROM nodes "
+    return sum(1 for n in db.q("SELECT node_id, platform, modules_json, capacity_json, settings_json, doctor_json FROM nodes "
                                "WHERE lifecycle='ready'")
                if n["node_id"] not in exclude and _can_serve((jl(n["modules_json"], {}) or {}).get(j["module"], {}))
                and _pools_fit(n, res) and predicates.capabilities_fit(f, predicates.node_capabilities(n, j["module"]))
@@ -1274,7 +1341,9 @@ def _maybe_replicate(db: DB, j: dict, node_id: str, cmp: dict | None, version: s
     another node's checkpoint, whose writer `exclude` names: the replica runs on a third node)."""
     if not modcalls.compares(j["module"], j["stage"], version):
         return
-    rate = float(db.get_setting("replica_rate", 0.03))
+    from .settings import resolve as V
+    # the module's rate when higher, and a running campaign's (which may only raise it) for that campaign's jobs
+    rate = float(V.resolve(V.snapshot(db), None, "replica_rate", j["module"] or "", j.get("campaign_id"))["value"])
     if not force and (rate <= 0 or int(j["job_key"][:8], 16) / 0xFFFFFFFF >= rate):
         return
     if db.one("SELECT 1 FROM jobs WHERE kind='replica' AND job_key=?", (j["job_key"] + ":replica",)):
@@ -1360,6 +1429,7 @@ class _Evaluation:
     problem: str | None = None      # why the payload is unfit for campaign.tick (result_invalid), or the pin check failed
     bootstrap: bool = False         # judged by the host's pin check (a bootstrap stage's job), not by the module
     pinned: tuple = ()              # a bootstrap job's datasets (oarbank-sdk PinnedDataset), registered when it is accepted
+    exempt: bool = False            # its stage needs no certification (Manifest.certification_exempt): no certification fence
 
 
 def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
@@ -1398,7 +1468,8 @@ def _pre_evaluate(db: DB, attempt_id: int, res: dict) -> "_Evaluation | None":
         problem = modcalls.payload_problem(j["module"], ver, (merged or {}).get("payload"))
         if problem:
             ok, reason = False, "result_invalid"
-    return _Evaluation(j["job_id"], dep_id, merged, ok, reason, v.value, v.digest, v.digest_version, v.fields, gok, problem)
+    return _Evaluation(j["job_id"], dep_id, merged, ok, reason, v.value, v.digest, v.digest_version, v.fields, gok, problem,
+                       exempt=j["kind"] != "golden" and man is not None and man.certification_exempt(j["stage"]))
 
 
 def _bootstrap_verdict(db: DB, job_id: int, man, res: dict) -> _Evaluation:
@@ -1544,8 +1615,9 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             reason, accepted = {"quarantined": "node_quarantined", "retired": "node_retired"}[node["lifecycle"]], 0
         elif a["generation"] != j["generation"]:
             reason, accepted = "stale_generation", 0
-        elif j["kind"] != "golden" and not boot and a["cert_generation"] != mstate.get("generation"):
-            # a bootstrap result never depended on certification: its pins decide (a revocation ends its attempt)
+        elif j["kind"] != "golden" and not (boot or ev.exempt) and a["cert_generation"] != mstate.get("generation"):
+            # a result of a stage that needs no certification never depended on it: a bootstrap result's pins decide,
+            # another's the module's verdict (a revocation ends its attempt)
             reason, accepted = "release_invalid", 0
         elif not ok:
             reason, accepted = why, 0
@@ -1731,7 +1803,7 @@ def _goldens_waiting(db: DB, node_id: str, module: str) -> str:
 
 def reap(db: DB):
     t = now()
-    if (db.get_setting("reaper_grace_until") or 0) > t:
+    if (db.get_state("reaper_grace_until") or 0) > t:
         return                                  # just took over in a move: agents are still re-pointing to us
     with db.tx():
         for a in db.q("SELECT * FROM attempts WHERE state='live' AND expires_at<?", (t,)):
@@ -1786,6 +1858,7 @@ def reap(db: DB):
             _resolve_alert(db, "node_offline", n["node_id"])
     from . import alerting, protection
     protection.check_alerts(db, t)
+    releases.note_awaiting(db)          # releases waiting for the owner's signature (a key pinned, a node gone, ...)
     alerting.promote_pending(db, t)
 
 
@@ -1856,74 +1929,6 @@ def set_node_state(db: DB, node_id: str, desired: str, actor: str):
         raise ApiError(400, "bad_state", desired)
     db.x("UPDATE nodes SET desired_state=? WHERE node_id=?", (desired, node_id))
     db.event("node_state", actor=actor, node_id=node_id, reason=desired)
-
-
-def set_limits(db: DB, node_id: str, patch: dict, actor: str, clear_all=False) -> dict:
-    node = db.one("SELECT * FROM nodes WHERE node_id=?", (node_id,))
-    if not node:
-        raise ApiError(404, "not_found", node_id)
-    old = jl(node["limits_json"], {})
-    new = {} if clear_all else dict(old)
-    facts = jl(node["facts_json"], {})
-    for k, v in (patch or {}).items():
-        if k == "enforce":
-            if v not in ("soft", "hard"):
-                raise ApiError(400, "bad_enforce", v)
-            new[k] = v
-            continue
-        if k not in C.LIMIT_KEYS:
-            raise ApiError(400, "unknown_limit", k)
-        if v is None or v == "":
-            new.pop(k, None)
-            continue
-        if k == "schedule":
-            new[k] = v
-            continue
-        v = float(v)
-        if v <= 0:
-            raise ApiError(400, "bad_limit", f"{k} must be > 0")
-        cores, ram = platforms.cores(facts), platforms.memory_gb(facts)
-        if k == "cpu_cores" and cores and v > cores:
-            raise ApiError(400, "over_hardware", f"cpu_cores {v} > {cores} cores")
-        if k in ("mem_gb", "vm_mem_gb") and ram and v > ram:
-            raise ApiError(400, "over_hardware", f"{k} {v} > {ram:g} GB RAM")
-        new[k] = int(v) if k in ("cpu_cores", "jobs", "vm_cpus") else v
-    if [k for k in new if k != "enforce"] == []:
-        new.pop("enforce", None)
-    db.x("UPDATE nodes SET limits_json=? WHERE node_id=?", (json.dumps(new), node_id))
-    db.event("limits_changed", actor=actor, node_id=node_id, old=old, new=new)
-    return new
-
-
-def set_policy(db: DB, node_id: str, patch: dict, actor: str, reason: str | None = None, source: str = "set_policy") -> dict:
-    node = db.one("SELECT * FROM nodes WHERE node_id=?", (node_id,))
-    pol = jl(node["policy_json"], {})
-    for k, v in patch.items():
-        if k not in C.DEFAULT_POLICY:
-            raise ApiError(400, "unknown_policy", k)
-        if k == "protection":
-            from ..contracts import protection as P
-            try:
-                P.ProtectionConfig.model_validate(v)
-            except ValueError as e:
-                raise ApiError(422, "bad_protection", str(e)[:500])
-            refused = P.refusals(v, node["os"]) if node["os"] else []
-            if refused:
-                raise ApiError(422, "bad_protection", f"on {node['os']}: " + "; ".join(refused)[:500])
-        pol[k] = v
-    if "protection" in patch:
-        from . import protection
-        protection.record_version(db, node_id, patch["protection"], actor, reason, source)
-    old_disabled = set(node_disabled_services(node))
-    db.x("UPDATE nodes SET policy_json=? WHERE node_id=?", (json.dumps(pol), node_id))
-    db.event("policy_changed", actor=actor, node_id=node_id, patch=patch)
-    if "disabled_services" in patch and set(pol.get("disabled_services") or []) != old_disabled:
-        # the node's role changed (a service on or off): doctor checks and golden proof may differ, so every
-        # module is re-doctored and re-certified under the new role
-        for m in node_modules(db.one("SELECT modules_json FROM nodes WHERE node_id=?", (node_id,))):
-            _revoke_quiet(db, node_id, m, f"disabled_services -> {sorted(pol.get('disabled_services') or [])}")
-        db.x("UPDATE nodes SET want_doctor=1 WHERE node_id=?", (node_id,))
-    return pol
 
 
 def retry_job(db: DB, job_id: int, actor: str):

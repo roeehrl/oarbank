@@ -409,6 +409,32 @@ pub mod wts {
     }
 }
 
+/// macOS: the HID system's idle time, and a Screen Sharing session. Someone controlling the Mac remotely may give
+/// it no local input, so by default a running session counts as someone present (`screen_sharing_present` in the
+/// node policy); with that off, only the input idle time decides.
+pub mod hid {
+    use super::*;
+
+    pub fn presence(
+        screen_sharing: bool,
+        hid_idle_s: Option<f64>,
+        screen_sharing_present: bool,
+    ) -> PresenceReading {
+        if screen_sharing && screen_sharing_present {
+            return PresenceReading::new(Some(0.0), "screen sharing");
+        }
+        let note = if screen_sharing {
+            " (screen sharing not counted)"
+        } else {
+            ""
+        };
+        match hid_idle_s {
+            Some(s) => PresenceReading::new(Some(s), format!("hid{note}")),
+            None => PresenceReading::new(None, "unknown: IOHIDSystem has no HIDIdleTime"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::logind::*;
@@ -810,5 +836,22 @@ mod tests {
             wts::parse_helper_reply(r#"{"ok": true, "sessions": []}"#),
             Some(vec![])
         );
+    }
+
+    #[test]
+    fn screen_sharing_counts_as_present_unless_the_owner_turns_it_off() {
+        use super::hid::presence;
+        let r = presence(true, Some(900.0), true);
+        assert_eq!((r.idle_s, r.source.as_str()), (Some(0.0), "screen sharing"));
+        let r = presence(true, Some(900.0), false);
+        assert_eq!(
+            (r.idle_s, r.source.as_str()),
+            (Some(900.0), "hid (screen sharing not counted)")
+        );
+        let r = presence(false, Some(12.0), true);
+        assert_eq!((r.idle_s, r.source.as_str()), (Some(12.0), "hid"));
+        // unreadable input time stays unknown (counted as present) either way
+        assert_eq!(presence(true, None, false).idle_s, None);
+        assert_eq!(presence(false, None, true).effective_idle_s(), 0.0);
     }
 }

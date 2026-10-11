@@ -221,7 +221,7 @@ def postflight(db: DB) -> dict:
     """On the new coordinator, once: every module with the capability gets what moved and what was skipped. A failed
     `error` check raises an alert (the move is committed; going back is a reverse move)."""
     from .core import _alert
-    pend = db.get_setting("move_postflight_pending")
+    pend = db.get_state("move_postflight_pending")
     if not pend:
         return {}
     out, left = {}, []
@@ -244,7 +244,7 @@ def postflight(db: DB) -> dict:
         if not ok:
             _alert(db, f"integrity_failed:{name}", "coordinator", f"{name}: postflight after move {pend['move_id']} failed", priority="high")
         out[name] = {"ok": ok, "applied": applied}
-    db.set_setting("move_postflight_pending", {**pend, "modules": left} if left else None)
+    db.set_state("move_postflight_pending", {**pend, "modules": left} if left else None)
     if not left:
         db.event("coordinator_move_postflight", reason=f"{pend['move_id']}: {len(out)} modules")
     return out

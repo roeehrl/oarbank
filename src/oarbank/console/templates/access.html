@@ -6,9 +6,9 @@
 <p class="small mut">Console accounts sign in with a password and an authenticator code, or a passkey. Nothing is trusted for being
 local: the CLI on the coordinator uses the owner's admin token, and scripts elsewhere use personal access tokens.</p>
 <table class="small">
-  <tr><th>account</th><th>role</th><th>state</th><th><span class="sr-only">actions</span></th></tr>
+  <tr><th>account</th><th>role</th><th>state</th><th class="actions"><span class="sr-only">actions</span></th></tr>
   {% for a in accounts %}<tr><td>{{ a.name }}</td><td>{{ a.role }}</td><td>{% if a.disabled %}<span class="chip bad">disabled</span>{% else %}<span class="chip ok">enabled</span>{% endif %}</td>
-  <td class="row">
+  <td class="actions">
     {{ m.op_form("access.accounts.update", a.name, "Enable…" if a.disabled else "Disable…", params={"disabled": not a.disabled}) }}
     {% call m.op_form("access.accounts.update", a.name, "Set role…") %}<select name="p.role" aria-label="role for {{ a.name }}">{% for r in ('admin', 'operator', 'viewer') %}<option{% if r == a.role %} selected{% endif %}>{{ r }}</option>{% endfor %}</select>{% endcall %}
     {{ m.op_form("access.accounts.reset_totp", a.name, "New TOTP…") }}

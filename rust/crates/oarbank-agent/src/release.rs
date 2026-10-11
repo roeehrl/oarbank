@@ -16,6 +16,9 @@ pub struct Release {
     pub id: String,
     pub dir: PathBuf,
     pub modules: Vec<Value>,
+    /// The fleet's host tool definitions for this platform (docs/design/host-tools.md): what tools.rs detects besides
+    /// its built-in kinds. Never a path to grant.
+    pub tools: Value,
 }
 
 impl Release {
@@ -34,7 +37,8 @@ fn load(dir: &Path) -> Result<Release> {
         bail!("modules.json format {} is not 2", doc["format"]);
     }
     let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-    Ok(Release { id, dir: dir.to_path_buf(), modules: doc["modules"].as_array().cloned().unwrap_or_default() })
+    Ok(Release { id, dir: dir.to_path_buf(), modules: doc["modules"].as_array().cloned().unwrap_or_default(),
+                 tools: doc["tools"].clone() })
 }
 
 pub fn current(l: &Layout) -> Option<Release> {

@@ -1,4 +1,4 @@
-"""oarbankd configuration: paths, protocol constants and policy defaults."""
+"""oarbankd configuration: paths and protocol constants (owner settings and their defaults: settings/registry.py)."""
 import os
 import shutil
 from pathlib import Path
@@ -42,38 +42,9 @@ TAILSCALE = os.environ.get("OARBANKD_TAILSCALE") or shutil.which("tailscale") or
                  "/Applications/Tailscale.app/Contents/MacOS/Tailscale") if os.path.exists(p)), "tailscale")
 TAILSCALE_SOCKET = os.environ.get("OARBANKD_TAILSCALE_SOCKET", "")
 
-DEFAULT_POLICY = {
-    "os_reserve_gb": 4, "user_reserve_gb": 8, "max_slots": None, "threads_per_job": 1, "job_mem_gb": 1.5,
-    "user_present_slots": 2, "user_idle_s": 300, "run_on_battery": False, "nice": 10,
-    # jobs' reservations become hard limits where the OS has them (Linux cgroups, Windows Job Objects): going over
-    # the memory reservation is then the job's fault (oom). Off: reservations steer admission only.
-    "hard_limits": False,
-    # services this node must not run, as "<module>/<service>" (e.g. a VM kept to the coordinator's machine)
-    "disabled_services": [],
-    # per-module node settings, handed to the module's services (e.g. a VM size)
-    "module_settings": {},
-    # owner-set protection (D3; schema 1): new nodes are "moderate" with no rules
-    "protection": {"schema": 1, "node": {"mode": "moderate"}, "rule": []},
-}
-
-LIMIT_KEYS = ("cpu_cores", "mem_gb", "jobs", "vm_mem_gb", "vm_cpus", "disk_gb", "staging_mbps", "schedule")
-
 
 def is_coordinator_host(facts: dict) -> bool:
+    """Is this the coordinator's own machine (the built-in "Coordinator host" group: it runs every service)?"""
     import socket
     short = lambda h: (h or "").split(".")[0].lower()
     return bool(facts.get("hostname")) and short(facts.get("hostname")) == short(socket.gethostname())
-
-
-def policy_for(facts: dict, default_worker_disabled: list | None = None) -> dict:
-    """Per-node defaults from detected hardware; the owner edits them in the console. Workers get the
-    fleet's default disabled services (setting `default_worker_disabled_services`); the coordinator's own
-    machine runs everything."""
-    import copy
-    p = copy.deepcopy(DEFAULT_POLICY)
-    if not is_coordinator_host(facts):
-        p["disabled_services"] = list(default_worker_disabled or [])
-    from .platforms import memory_gb
-    ram = memory_gb(facts)
-    p["os_reserve_gb"] = 4 if ram and ram <= 32 else (8 if ram >= 96 else 6)
-    return p

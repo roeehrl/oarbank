@@ -36,8 +36,22 @@ def _own_campaign(db: DB, module: str, cid: str) -> dict:
     return c
 
 
-def settings_key(module: str) -> str:
-    return f"module_settings:{module}"
+def _campaign_settings(db: DB, module: str, cid: str, values, actor: str) -> list[str]:
+    """A campaign's settings overrides from its module (campaigns.create / campaigns.update `settings`): one change set
+    through the owner's checks, or the whole effect is refused (`bad_settings`). Returns the keys it set or reset."""
+    from .settings.apply import ApplyError, campaign_write
+    try:
+        campaign_write(db, cid, values, actor, f"{module}'s campaign {cid}")
+    except ApplyError as ae:
+        raise EffectError(422, "bad_settings", f"{module} campaign {cid}: {ae.detail}"[:400])
+    return sorted(values)
+
+
+def module_settings(db, module: str) -> dict:
+    """The module's own settings as its coordinator side reads them: every key its settings schema declares, at fleet
+    scope, the owner's value else its default (docs/design/settings.md, "Module settings")."""
+    from .settings import resolve as V
+    return V.module_settings(V.snapshot(db), None, module, scope=None)
 
 
 def enqueue(db: DB, module: str, campaign: dict, jobs: list[dict]) -> dict:
@@ -106,8 +120,12 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
         raise EffectError(502, "undeclared_effect", f"{module} asked for {kind!r}, which it did not declare")
     rec = {"kind": kind}
     if kind == "module_settings.update":
-        cur = db.get_setting(settings_key(module), {}) or {}
-        db.set_setting(settings_key(module), {**cur, **a})
+        from .settings import modkeys
+        from .settings.apply import ApplyError
+        try:                                            # each key declared, each value valid, or none of it is written
+            modkeys.write(db, module, a, f"module:{module}", f"{module}'s own operation")
+        except ApplyError as ae:
+            raise EffectError(422, "bad_settings", f"{module}: {ae.detail}"[:400])
         rec["keys"] = sorted(a)
     elif kind == "campaigns.create":
         cid = a.get("campaign_id", "")
@@ -123,6 +141,8 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
         db.event("campaign_created", actor=actor, campaign_id=cid, reason=f"{module}: {a.get('name') or cid}", module=module)
         if pol and pol["unit"] == "campaign":
             placement.open_campaign_unit(db, module, cid, pol)        # pinned now, or bound by capacity
+        if a.get("settings"):
+            rec["settings"] = _campaign_settings(db, module, cid, a["settings"], actor)
         rec["campaign_id"] = cid
     elif kind == "campaigns.update":
         c = _own_campaign(db, module, a.get("campaign_id", ""))
@@ -144,6 +164,8 @@ def _apply_one(db: DB, module: str, allowed: set, e: dict, actor: str) -> dict:
             if state == "done":
                 from . import notify
                 notify.send(db, "Oarbank: campaign finished", f"{c['name']}: {a.get('message') or 'done'}"[:300])
+        if "settings" in a:
+            rec["settings"] = _campaign_settings(db, module, c["campaign_id"], a["settings"], actor)
         rec.update(campaign_id=c["campaign_id"], state=state)
     elif kind == "campaigns.cancel":
         c = _own_campaign(db, module, a.get("campaign_id", ""))

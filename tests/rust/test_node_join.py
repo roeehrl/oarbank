@@ -143,6 +143,10 @@ def test_a_policy_code_for_many_machines_waits_for_approval(agent_bin, coordinat
     policy = tmp_path / "policy.json"
     policy.write_text(json.dumps({"JoinCode": mint(coordinator, uses=5, ttl_s=3600)["code"], "Name": "lab-7",
                                   "ManagedByOrganizationName": "Example Lab"}))
+    code = json.loads(policy.read_text())["JoinCode"]
+    shown = lambda *extra: json.loads(subprocess.run([str(agent_bin), "policy", *extra], capture_output=True, text=True, check=True,
+                                                     env={**os.environ, "OARBANK_POLICY_FILE": str(policy)}).stdout)["JoinCode"]
+    assert shown() == "(set)" and shown("--with-join-code") == code       # a person's terminal never sees the code
     p = start(home, args, env={"OARBANK_POLICY_FILE": str(policy)})
     try:
         st = wait(lambda: status(home).get("state") == "pending" and status(home), 60)

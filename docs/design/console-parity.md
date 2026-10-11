@@ -30,9 +30,10 @@ plan's impact as raw JSON.
 3. **The CLI covers what operators do from the console:** `oarbank node show` (D41's, now from the node document: its
    modules, the doctor's failed checks, GPU APIs with evidence, the container runtime and what it misses, services,
    folder grants and per-capability enforcement), `oarbank node mode`, `oarbank job show|retry|cancel`,
-   `oarbank protection show|set|preview|restore|canary|promote|probe` (rules files in JSON, as the console edits them,
-   or TOML, the local protection file's format; `preview` is the T2 dry run, exit 2; `promote` targets the running
-   canary's node, which the operation now fills in itself). `oarbank fleet` shows a node's container runtime state and
+   `oarbank protection show|set|preview|probe` (a node's, `fleet`'s or `group:<g>`'s own section in JSON, as the console
+   edits it, or TOML, the local protection file's format; `preview` is the T2 dry run, exit 2; rolling rules out is a
+   group's rules promoted with `oarbank settings promote protection.rules --group <g>`), `oarbank groups`,
+   `oarbank node label`. `oarbank fleet` shows a node's container runtime state and
    what is missing. Every `--json` prints the document as served.
 4. **Remedies carry their target.** An explain remedy has `target` when the subject names it: a node operation on the
    node, a job operation on the job, a campaign operation on the job's campaign, a fleet operation on the fleet; job

@@ -103,21 +103,17 @@ cat > "$ROOT/oarbank-coordinator.json" <<JSON
 JSON
 
 # 5. signatures (macOS), then the archive
+#    The interpreter modules run on is signed with deploy/macos/python.entitlements: library validation off, so it loads
+#    the wheels modules install, signed ad hoc or by other teams (scripts/macos-codesign.sh, docs/release-signing.md
+#    "macOS code signatures"). It must carry exactly that, and load a native wheel from PyPI the build did not sign.
 if [[ "$(uname -s)" == Darwin ]]; then
     ID="${OARBANK_CODESIGN_IDENTITY:--}"
-    sign_with_timestamp() {
-        local attempt
-        for attempt in 1 2 3; do
-            codesign --force --options runtime --timestamp --sign "$ID" "$1" && return 0
-            [[ $attempt == 3 ]] || sleep 3
-        done
-        return 1
-    }
-    find "$ROOT" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) -print0 | while IFS= read -r -d '' f; do
-        file -b "$f" | grep Mach-O >/dev/null || continue
-        if [[ "$ID" == "-" ]]; then codesign --force --sign - "$f" 2>/dev/null
-        else sign_with_timestamp "$f"; fi
-    done
+    source "$REPO/scripts/macos-codesign.sh"
+    macos_sign_tree "$ID" "$ROOT"
+    DEVELOPER_ID=()
+    [[ "$ID" == "-" ]] || DEVELOPER_ID=(--developer-id)
+    "$PY" -I -B "$REPO/scripts/check-macos-signing.py" ${DEVELOPER_ID[@]+"${DEVELOPER_ID[@]}"} --canary --work "$WORK/canary" "$ROOT"
+    rm -rf "$WORK/canary"
 fi
 # it runs from wherever it is unpacked (a copy, so the run writes no bytecode into the build), and it ships no link out
 # of itself, no path of this build machine and no native file for another platform

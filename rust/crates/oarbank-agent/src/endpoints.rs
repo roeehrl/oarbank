@@ -834,7 +834,7 @@ pub mod tests {
                 "probes": [], "sandbox": {"contract": 1, "net": {"mode": "none"}, "tools": [], "devices": {"gpu": "none"},
                                           "exec_writable": false}});
             let (python, roots) = python();
-            Fx { root, release: Release { id: "r_test".into(), dir, modules: vec![entry] }, python, roots, _tmp: tmp }
+            Fx { root, release: Release { id: "r_test".into(), dir, modules: vec![entry], tools: Value::Null }, python, roots, _tmp: tmp }
         }
 
         fn manager(&self) -> ServiceManager {
@@ -1092,7 +1092,7 @@ pub mod tests {
         // all of the service's processes, which end with it (not only its daemon)
         #[cfg(windows)]
         let members = crate::sys::Members::of(m.fleet_view()[0].pgid.unwrap());
-        let empty = Release { id: "r_none".into(), dir: fx.release.dir.clone(), modules: vec![] };
+        let empty = Release { id: "r_none".into(), dir: fx.release.dir.clone(), modules: vec![], tools: Value::Null };
         m.configure(&empty, &json!({}), None);
         // what is left for the dropped service (an op still in flight on it, then its stop) runs on threads of the
         // manager's, their processes in the fixture's directory: the test waits for that, as the agent does, before the

@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tarfile
 import xml.etree.ElementTree as ET
@@ -249,3 +250,63 @@ def test_powershell_sources_and_generated_elevation_broker_parse(tmp_path):
         parser.write_text(command)
         r = windows_powershell("-ExecutionPolicy", "Bypass", "-File", str(parser), str(script), capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
+
+
+def _forwarder():
+    """package\\cli\\oarbank.cmd as the packager writes it."""
+    block = re.search(r"\$cliForwarder = @\(\n(.*?)\n  \)", PACKAGER.read_text(), re.S).group(1)
+    return [re.fullmatch(r"\s*'(.*)',?", line).group(1).replace("''", "'") for line in block.splitlines()]
+
+
+def test_msi_puts_only_the_cli_forwarder_folder_on_the_system_path_and_removes_it_on_uninstall():
+    pkg = _package()
+    component = pkg.find(".//w:Directory[@Id='PACKAGEFOLDER']/w:Component[@Id='CoordinatorCliPath']", NS)
+    assert component is not None and component.get("Condition") is None
+    assert pkg.find("w:Feature/w:ComponentRef[@Id='CoordinatorCliPath']", NS) is not None
+    env = component.findall("w:Environment", NS)
+    assert len(env) == 1 and env[0].attrib == {
+        "Id": "CoordinatorCliPath", "Name": "PATH", "Value": "[PACKAGEFOLDER]cli", "Action": "set", "Part": "last",
+        "System": "yes", "Permanent": "no"}
+    # one PATH entry in the whole package: not bin\ (uv.exe, the setup scripts) and not the moving current junction
+    assert len(pkg.findall(".//w:Environment", NS)) == 1
+    key = component.find("w:RegistryValue", NS)
+    assert key.get("KeyPath") == "yes" and key.get("Value") == "[PACKAGEFOLDER]cli"
+    text = PACKAGER.read_text()
+    assert 'New-Item -ItemType Directory -Force "$Root\\cli"' in text
+    assert 'WriteAllText("$Root\\cli\\oarbank.cmd", (($cliForwarder -join "`r`n") + "`r`n"))' in text
+
+
+def test_the_path_forwarder_runs_the_services_build_else_the_packages_own():
+    lines = _forwarder()
+    assert lines[0] == "@echo off"
+    assert lines[2:] == [
+        'if not exist "%~dp0..\\..\\current\\bin\\oarbank.cmd" goto package',
+        '"%~dp0..\\..\\current\\bin\\oarbank.cmd" %*',      # no `call`: control and the exit code stay with the CLI
+        ':package',
+        '"%~dp0..\\bin\\oarbank.cmd" %*',
+    ]
+    assert all("(" not in line for line in lines[2:])  # no block: %* may hold a parenthesis
+
+
+@WINDOWS
+def test_the_path_forwarder_forwards_arguments_and_exit_codes(tmp_path):
+    coordinator = tmp_path / "Oarbank with spaces" / "Coordinator"
+    cli = coordinator / "package" / "cli"
+    cli.mkdir(parents=True)
+    (cli / "oarbank.cmd").write_bytes(("\r\n".join(_forwarder()) + "\r\n").encode("ascii"))
+
+    def build(name, code):
+        (coordinator / name / "bin").mkdir(parents=True)
+        (coordinator / name / "bin" / "oarbank.cmd").write_bytes(f"@echo {name}: %*& exit /b {code}\r\n".encode("ascii"))
+
+    def run():
+        return subprocess.run(["cmd.exe", "/d", "/c", "oarbank", "join-code", "--label", "a b"], cwd=tmp_path,
+                              env={**os.environ, "PATH": f"{cli};{os.environ['SystemRoot']}\\System32"},
+                              capture_output=True, text=True)
+
+    build("package", 3)
+    r = run()                                              # before setup: the package's own CLI
+    assert (r.returncode, r.stdout.strip()) == (3, 'package: join-code --label "a b"'), r
+    build("current", 7)
+    r = run()                                              # after setup: the build Coordinator\current names
+    assert (r.returncode, r.stdout.strip()) == (7, 'current: join-code --label "a b"'), r
