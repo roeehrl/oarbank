@@ -73,7 +73,7 @@ pub use signals::{
     Front, FrontReading, GroupMetrics, Meter, NullMeter, Presence, PresenceReading, ProcCounters,
 };
 pub use certificates::{CertContext, Certificate};
-pub use events::{EventSources, FastPath, PhaseHit};
+pub use events::{EventSources, FastPath, PhaseHit, PhaseListener};
 pub use harness::{AbSpec, Arm, Harness, OffMode, WorkSelector};
 pub use sources::{FileOwnerSources, NoOwnerSources, OwnerSources, PhaseReport, Progress};
 pub use spawn_registry::{

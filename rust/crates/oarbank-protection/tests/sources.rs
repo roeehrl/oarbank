@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::scratch;
-use oarbank_protection::events::{EventSources, FastPath, PhaseHit};
+use oarbank_protection::events::{EventSources, FastPath, PhaseHit, PhaseListener};
 use oarbank_protection::sources::{
     name_matches, newest, Location, PersonReader, PersonReading, PhaseRule, RelayedSource, Start, Tail,
 };
@@ -323,6 +323,48 @@ fn the_event_path_pauses_an_immediate_phase_between_ticks() {
     assert!(on.iter().all(|r| r.get("event_t").is_some() && r.get("tags").is_some()));
     let ph = s.phases();
     assert_eq!((ph[0].immediate, ph[0].tags.clone()), (true, vec!["uplink".to_string()]));
+}
+
+struct RecordingListener(Mutex<Vec<(String, bool, Vec<String>)>>);
+
+impl PhaseListener for RecordingListener {
+    fn phase_changed(&self, key: &str, on: bool, tags: &[String], _event_t: f64) {
+        self.0.lock().unwrap().push((key.to_string(), on, tags.to_vec()));
+    }
+}
+
+/// The phase listener (docs/design/sites.md) hears every phase change with its tags, on and off, immediate or not and
+/// armed or not: the agent reports an `uplink` phase to its site at once instead of at the next heartbeat.
+#[test]
+fn the_phase_listener_hears_every_change_with_its_tags() {
+    let dir = scratch("listener");
+    let f = dir.path().join("events-1.jsonl");
+    append(&f, "{\"event\": \"phase\", \"value\": \"idle\"}\n");
+    let mut s = EventSources::new(FileOwnerSources::new(), None, None);
+    let heard = Arc::new(RecordingListener(Mutex::new(vec![])));
+    s.set_phase_listener(heard.clone());
+    let cfg = ProtectionConfig::from_json(&json!({"rule": [{
+        "id": "t", "match": {"name": "trainer"},
+        "during": [{"source": {"jsonl": format!("{}/events-*.jsonl", dir.path().display()), "event": "phase",
+                               "field": "value", "on": ["upload"]},
+                    "cap_fleet": {"staging_mbps": 0}, "tags": ["uplink"]}]}]}), "x").unwrap();
+    s.configure(&cfg);
+    let spec = cfg.rules[0].during[0].source_json.clone();
+    assert!(!s.phase_on("t#0", &spec));
+    std::thread::sleep(Duration::from_millis(600));
+    append(&f, "{\"event\": \"phase\", \"value\": \"upload\"}\n");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !heard.0.lock().unwrap().iter().any(|x| x.1) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(s.phase_on("t#0", &spec));
+    append(&f, "{\"event\": \"phase\", \"value\": \"idle\"}\n");
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!s.phase_on("t#0", &spec));
+    let h = heard.0.lock().unwrap().clone();
+    let uplink = vec!["uplink".to_string()];
+    assert!(h.contains(&("t#0".to_string(), true, uplink.clone())), "{h:?}");
+    assert_eq!(h.last(), Some(&("t#0".to_string(), false, uplink)), "{h:?}");
 }
 
 /// A rule not armed (inactive, and its group absent) is never paused by the event path; nor is a rule that is not

@@ -174,8 +174,8 @@ CODES: list[ReasonCode] = [
     C("AB_IDLE", "protection", "Harness run {run_id} ended: its work runs as protection allows"),
     C("AB_FINISHED", "protection", "Harness run {run_id} ended: {decision} ({why})"),
     C("AB_REFUSED", "protection", "Harness run {run_id} refused by the node: {why}", "P4"),
-    C("TRANSFER_PAUSED", "protection", "A {kind} transfer paused: {why}", node=False, job=False),
-    C("TRANSFER_RESUMED", "protection", "A {kind} transfer resumed after {paused_s} s"),
+    C("TRANSFER_PAUSED", "protection", "A {transfer} transfer paused: {why}", node=False, job=False),
+    C("TRANSFER_RESUMED", "protection", "A {transfer} transfer resumed after {paused_s} s"),
     C("SITE_PAUSE", "protection", "Network-heavy attempts paused: their site is in an uplink phase", node=False, job=False),
     C("SITE_RESUME", "protection", "Network-heavy attempts resumed: their site's uplink phase ended", node=False, job=False),
 

@@ -423,7 +423,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             if not row or row["state"] != "live" or row["node_id"] != nid:
                 continue
             progressed = (a.get("cpu_s", 0) > (row["cpu_s"] or 0) + 0.01 or
-                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing")
+                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing", "uploading")
                           or row["cpu_s"] is None)
             if a.get("phase") and a.get("phase") != row["phase"]:
                 db.x("INSERT OR IGNORE INTO attempt_phases VALUES(?,?,?)", (row["attempt_id"], a["phase"], t))

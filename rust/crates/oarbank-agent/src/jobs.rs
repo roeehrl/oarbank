@@ -836,6 +836,8 @@ async fn report(ctx: &Ctx, aid: i64, ws: &Path, o: Outcome, ran: Duration, image
     let ran_s = (ran.as_secs_f64() * 10.0).round() / 10.0;
     match o {
         Outcome::Completed(mut result) => {
+            // an upload the site holds may take a while: the attempt stays leased while it waits (docs/design/sites.md)
+            set_phase(&ctx.table, aid, "uploading");
             if let Err(e) = upload_artifacts(ctx, ws, &mut result).await {
                 warn!(attempt = aid, error = %e, "artifact upload failed");
                 let _ = ctx.api.post(&format!("/v1/attempts/{aid}/fail"),

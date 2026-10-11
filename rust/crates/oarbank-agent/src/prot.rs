@@ -36,6 +36,11 @@ pub struct Protection {
     pub service_reserved_mem_gb: f64,
     /// Running module services, set by the agent before each tick: fleet work, which protection may stop.
     pub services: Vec<crate::services::ServiceView>,
+    /// The node's site holds network-heavy work (why, and the network-heavy attempts), set before each tick
+    /// (docs/design/sites.md): those attempts pause, or are released when they can neither pause nor wait longer.
+    pub site_hold: Option<(String, BTreeSet<i64>)>,
+    /// Attempts paused for the site, and since when.
+    site_paused: HashMap<i64, f64>,
 }
 
 impl Protection {
@@ -61,7 +66,8 @@ impl Protection {
         Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(),
                      frozen: Default::default(), fast_paused: Default::default(), certs_seen: Value::Null, fast_attached: false,
                      last: None, capacity: None, telemetry: json!({}),
-                     service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![] }
+                     service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![], site_hold: None,
+                     site_paused: Default::default() }
     }
 
     /// Give the controller the event path's fast pause over the agent's job table (D51): an immediate rule's phase
@@ -73,6 +79,9 @@ impl Protection {
         let f = FastPause { table: table.clone(), registry: self.registry.clone(), journal: self.journal.clone(),
                             frozen: self.frozen.clone(), fast_paused: self.fast_paused.clone() };
         self.ctrl.set_fast_path(Arc::new(f));
+        // every phase change, so an uplink phase holds this node's transfers and its site at once (docs/design/sites.md)
+        self.ctrl.set_phase_listener(Arc::new(crate::uplink::Listener(crate::uplink::global().clone())));
+        crate::uplink::global().set_journal(self.journal.clone());
     }
 
     /// The harness and certificate directives (D52, D50): start or abort a run, forget a run the coordinator stored,
@@ -196,7 +205,8 @@ impl Protection {
         inputs.allocatable_cores = perf as f64 + eff as f64 / 2.0;
         inputs.lowering = can_lower();
         let r = self.ctrl.tick(&inputs);
-        self.actuate(&r, table, tick_started);
+        let max_pause = self.ctrl.config().max_pause_s;
+        self.actuate(&r, table, tick_started, now, max_pause);
         let limits = P::Limits::from_json(d.get("limits"));
         let at = now as i64;
         let in_schedule = limits.schedule.as_ref().is_none_or(|s| s.contains_unix(at, crate::sys::utc_offset_s(at)));
@@ -237,7 +247,7 @@ impl Protection {
 
     /// Apply this tick's plan to the agent's own process groups, only through the registry. `tick_started`: when
     /// the tick began reading its sources; a pause the event path made after that stands until the next tick.
-    fn actuate(&mut self, r: &P::ProtectionTickResult, table: &Table, tick_started: f64) {
+    fn actuate(&mut self, r: &P::ProtectionTickResult, table: &Table, tick_started: f64, now: f64, max_pause_s: f64) {
         let mut t = table.lock().unwrap();
         let mut fast = self.fast_paused.lock().unwrap();
         let mut frozen = self.frozen.lock().unwrap();
@@ -250,15 +260,36 @@ impl Protection {
             }
             // a fast pause newer than this tick's reading of the sources: this tick did not see its phase
             let fresh_fast = fast.get(aid).is_some_and(|at| *at >= tick_started);
-            let pause = r.paused.contains(aid) || fresh_fast;
+            let freeze = j.caps.iter().any(|c| c == "freeze_ok");
+            // the node's site holds network-heavy work: such an attempt pauses; one that cannot, or has waited longer
+            // than the node's longest pause, is released (preempt_site: requeued, never charged)
+            let site = self.site_hold.as_ref().is_some_and(|(_, heavy)| heavy.contains(aid));
+            let pausable = freeze || j.caps.iter().any(|c| c == "cooperative_pause");
+            let was_site = self.site_paused.contains_key(aid);
+            if site {
+                let since = *self.site_paused.entry(*aid).or_insert(now);
+                if (!pausable || now - since > max_pause_s) && j.stop.is_none() {
+                    j.stop = Some(crate::jobs::Stop::Release("preempt_site".into()));
+                    j.wake.notify_one();
+                }
+            } else {
+                self.site_paused.remove(aid);
+            }
+            let by_rule = r.paused.contains(aid) || fresh_fast;
+            let pause = by_rule || (site && pausable && j.stop.is_none());
             if !fresh_fast {
                 fast.remove(aid);
             }
-            let freeze = j.caps.iter().any(|c| c == "freeze_ok");
             if pause != (frozen.contains(aid) || j.pause) {
                 if freeze {
                     let sig = if pause { P::Signal::Stop } else { P::Signal::Cont };
-                    let _ = self.registry.signal(pg, sig, if pause { "PROTECTION_PAUSE" } else { "PROTECTION_RESUME" });
+                    let why = match (pause, by_rule, was_site) {
+                        (true, true, _) => "PROTECTION_PAUSE",
+                        (true, false, _) => "SITE_PAUSE",
+                        (false, _, true) => "SITE_RESUME",
+                        (false, _, false) => "PROTECTION_RESUME",
+                    };
+                    let _ = self.registry.signal(pg, sig, why);
                     if pause { frozen.insert(*aid); } else { frozen.remove(aid); }
                 } else {
                     j.pause = pause;                        // cooperative: the job monitor writes control.json
@@ -278,6 +309,7 @@ impl Protection {
             }
         }
         self.lowered.retain(|a| t.contains_key(a));
+        self.site_paused.retain(|a, _| t.contains_key(a));
         frozen.retain(|a| t.contains_key(a));
         fast.retain(|a, _| t.contains_key(a));
     }
@@ -292,6 +324,14 @@ impl Protection {
                 let _ = self.registry.signal(pg, P::Signal::Cont, "PROTECTION_RESUME");
             }
         }
+    }
+
+    /// This node's `uplink`-tagged phases that are on or unreadable (an unreadable phase counts as on).
+    pub fn uplink_phases(&self) -> BTreeSet<String> {
+        self.telemetry["protection"]["phases"].as_array().into_iter().flatten()
+            .filter(|p| p["tags"].as_array().is_some_and(|t| t.iter().any(|x| x == crate::uplink::TAG)))
+            .filter(|p| p["on"].as_bool() == Some(true) || p["readable"].as_bool() == Some(false))
+            .filter_map(|p| p["key"].as_str().map(str::to_string)).collect()
     }
 
     pub fn journal_out(&self) -> Value {
@@ -632,6 +672,43 @@ mod e2e {
                    wake: Default::default(), stop_by: None }
     }
 
+    /// The site's hold (docs/design/sites.md): a network-heavy attempt that can pause is paused (here cooperatively)
+    /// and resumed when the hold ends; one that cannot pause, or that waited past the longest pause, is released as
+    /// `preempt_site`; an attempt that is not network-heavy is untouched.
+    #[test]
+    fn a_site_hold_pauses_network_heavy_attempts_and_releases_what_cannot_wait() {
+        let tmp = crate::scratch("prot-site");
+        let l = Layout::new(tmp.path().to_path_buf());
+        l.ensure().unwrap();
+        let mut p = Protection::new(&l, false);
+        let table = Table::default();
+        for (aid, caps) in [(1, vec!["cooperative_pause"]), (2, vec![]), (3, vec!["cooperative_pause"])] {
+            table.lock().unwrap().insert(aid, state(aid, 900_000 + aid as i32, &caps));
+        }
+        p.tick(&json!({"desired_state": "active", "limits": {}, "policy": {}}), &Table::default(), &json!({"cpu": {"logical": 4}}));
+        let r = P::ProtectionTickResult { paused: Default::default(), ..p.last.clone().unwrap() };
+        let now = crate::doctor::now();
+        p.site_hold = Some(("site home: mini's rule t is in an upload phase".into(), BTreeSet::from([1, 2])));
+        p.actuate(&r, &table, now, now, 600.0);
+        {
+            let t = table.lock().unwrap();
+            assert!(t[&1].pause && t[&1].stop.is_none(), "a pausable network-heavy attempt pauses");
+            assert!(matches!(&t[&2].stop, Some(crate::jobs::Stop::Release(x)) if x == "preempt_site"), "one that cannot is released");
+            assert!(!t[&3].pause, "an attempt that is not network-heavy runs on");
+        }
+        // past the longest pause, a paused one is released too
+        p.actuate(&r, &table, now, now + 601.0, 600.0);
+        assert!(matches!(&table.lock().unwrap()[&1].stop, Some(crate::jobs::Stop::Release(x)) if x == "preempt_site"));
+        // the hold ends: a paused attempt still running resumes
+        table.lock().unwrap().insert(4, state(4, 900_004, &["cooperative_pause"]));
+        p.site_hold = Some(("x".into(), BTreeSet::from([4])));
+        p.actuate(&r, &table, now, now, 600.0);
+        assert!(table.lock().unwrap()[&4].pause);
+        p.site_hold = None;
+        p.actuate(&r, &table, now, now + 5.0, 600.0);
+        assert!(!table.lock().unwrap()[&4].pause);
+    }
+
     /// CPU seconds the container uses over `secs`.
     fn cpu_over(pgid: i32, secs: f64) -> f64 {
         let a = procs::group_usage(pgid).cpu_s;
@@ -764,7 +841,7 @@ mod e2e {
         assert!(frozen < 0.05, "a frozen job used {frozen} s of CPU");
         // a tick that read its sources before the fast pause does not resume it
         let r = P::ProtectionTickResult { paused: Default::default(), ..p.last.clone().unwrap() };
-        p.actuate(&r, &table, crate::doctor::now() - 60.0);
+        p.actuate(&r, &table, crate::doctor::now() - 60.0, crate::doctor::now(), 600.0);
         assert!(p.frozen.lock().unwrap().contains(&1), "a fast pause newer than the tick's read stands");
         // the next tick reads the phase on, then off after its exit
         p.tick(&d, &table, &facts);

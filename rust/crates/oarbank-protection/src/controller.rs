@@ -442,6 +442,11 @@ impl ProtectionController {
         self.sources.set_fast_path(f);
     }
 
+    /// The agent's listener for every phase change (a site's uplink phases: docs/design/sites.md).
+    pub fn set_phase_listener(&mut self, l: Arc<dyn crate::events::PhaseListener>) {
+        self.sources.set_phase_listener(l);
+    }
+
     /// Why the last config could not be applied in full (shown as PROTECTION_CONFIG_ERROR).
     pub fn config_error(&self) -> Option<&str> {
         self.config_error.as_deref()

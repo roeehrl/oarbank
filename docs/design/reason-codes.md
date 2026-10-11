@@ -117,8 +117,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `AB_IDLE` | Harness run {run_id} ended: its work runs as protection allows | P1 | – | – | – |
 | `AB_FINISHED` | Harness run {run_id} ended: {decision} ({why}) | P1 | – | – | – |
 | `AB_REFUSED` | Harness run {run_id} refused by the node: {why} | P4 | – | – | – |
-| `TRANSFER_PAUSED` | A {kind} transfer paused: {why} | P1 | no / no | – | – |
-| `TRANSFER_RESUMED` | A {kind} transfer resumed after {paused_s} s | P1 | – | – | – |
+| `TRANSFER_PAUSED` | A {transfer} transfer paused: {why} | P1 | no / no | – | – |
+| `TRANSFER_RESUMED` | A {transfer} transfer resumed after {paused_s} s | P1 | – | – | – |
 | `SITE_PAUSE` | Network-heavy attempts paused: their site is in an uplink phase | P1 | no / no | – | – |
 | `SITE_RESUME` | Network-heavy attempts resumed: their site's uplink phase ended | P1 | no / no | – | – |
 

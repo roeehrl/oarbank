@@ -48,6 +48,14 @@ pub trait FastPath: Send + Sync {
     fn phase_on(&self, hit: &PhaseHit) -> usize;
 }
 
+/// The agent's listener for every phase change (immediate or not), as the event path or the tick sees it: a feature
+/// that aggregates tagged phases beyond this node (a site's `uplink` phases: docs/design/sites.md) hears of a change at
+/// once instead of at the next heartbeat. Called with the sources' lock held: it must only record and wake.
+pub trait PhaseListener: Send + Sync {
+    /// `key` (`<rule>#<n>`) is now `on` (an unreadable phase counts as on), seen at `event_t`; `tags` are its block's.
+    fn phase_changed(&self, key: &str, on: bool, tags: &[String], event_t: f64);
+}
+
 /// The latencies the event path measured (source event to pause request sent), last 1000.
 #[derive(Debug, Default)]
 pub struct Latency(VecDeque<f64>);
@@ -87,6 +95,7 @@ struct Shared {
     armed: BTreeSet<String>,
     fleet_pids: HashSet<i32>,
     fast: Option<Arc<dyn FastPath>>,
+    listener: Option<Arc<dyn PhaseListener>>,
     journal: Option<Arc<DecisionJournal>>,
     latency: Latency,
     /// The exec triggers' last state (the fast listing's).
@@ -113,6 +122,9 @@ impl Shared {
             d.insert("tags".into(), Value::from(b.tags.clone()));
         }
         self.journal("phase_change", if on { "PROTECTION_PHASE_ON" } else { "PROTECTION_PHASE_OFF" }, &b.rule, d);
+        if let Some(l) = &self.listener {
+            l.phase_changed(key, on, &b.tags, event_t);
+        }
         if !on || !self.armed.contains(&b.rule) {
             return;
         }
@@ -163,6 +175,7 @@ impl EventSources {
             armed: BTreeSet::new(),
             fleet_pids: HashSet::new(),
             fast: None,
+            listener: None,
             journal,
             latency: Latency::default(),
             exec_on: HashMap::new(),
@@ -318,6 +331,10 @@ impl OwnerSources for EventSources {
 
     fn set_fast_path(&mut self, f: Arc<dyn FastPath>) {
         lock(&self.shared).fast = Some(f);
+    }
+
+    fn set_phase_listener(&mut self, l: Arc<dyn PhaseListener>) {
+        lock(&self.shared).listener = Some(l);
     }
 
     fn latency(&self) -> Option<Value> {
