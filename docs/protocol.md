@@ -693,7 +693,7 @@ docs/design/inbound-listeners.md is the full contract; in short:
 - **Facts** (hello): `"listeners": {"version": 1, "probe": true}`: the agent runs listeners and can dial back for
   others.
 - **What the agent runs.** For each statement entry `<module>/<listener>`, a listener when the module version in its
-  release requests that `inbound` listener, an enabled endpoint service of the module lists it, `listeners_disabled`
+  release requests that `inbound` listener, an enabled endpoint service or a workload of the module lists it, `listeners_disabled`
   is off, the policy's `inbound_listeners` is not false and the protection mode is not `strict_yield`; else a refusal
   (`LISTENER_NOT_GRANTED`, `LISTENER_NO_TARGET`, `MODULE_DISABLED`, `LISTENERS_DISABLED`, `LISTENERS_FORBIDDEN`,
   `LISTENER_STRICT_YIELD`, `LISTENER_HANDOVER_UNSUPPORTED`, `LISTENER_BIND_FAILED`).

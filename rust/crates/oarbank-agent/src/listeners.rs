@@ -20,7 +20,8 @@
 use crate::endpoints::{self, Channel};
 use crate::paths::Layout;
 use crate::release::Release;
-use crate::services::ServiceManager;
+use crate::services::{ListenerTarget, ServiceManager};
+use crate::workloads::WorkloadManager;
 use oarbank_portmap::addr::{self, Cidr};
 use oarbank_portmap::classify::{self, Dialback};
 use oarbank_portmap::journal::Journal;
@@ -236,15 +237,20 @@ pub fn plan(i: &Inputs) -> BTreeMap<String, Plan> {
             if i.modules_disabled.iter().any(|m| m == module) {
                 return refuse("MODULE_DISABLED", format!("{module} is disabled on this node"));
             }
-            let Some(svc) = entry["services"].as_array().into_iter().flatten().find(|s| {
-                s["endpoint"].as_bool() == Some(true)
-                    && s["listeners"].as_array().is_some_and(|l| l.iter().any(|x| x.as_str() == Some(listener)))
-            }) else {
-                return refuse("LISTENER_NO_TARGET", format!("no endpoint service of {module} serves {listener}"));
+            let lists = |p: &&Value| p["listeners"].as_array().is_some_and(|l| l.iter().any(|x| x.as_str() == Some(listener)));
+            let svc = entry["services"].as_array().into_iter().flatten()
+                .find(|s| s["endpoint"].as_bool() == Some(true) && lists(s));
+            // a workload may serve it instead (docs/design/workloads.md): connections reach it while it runs here
+            let wl = entry["workloads"].as_array().into_iter().flatten().find(lists);
+            let Some(target) = svc.or(wl) else {
+                return refuse("LISTENER_NO_TARGET", format!("no endpoint service or workload of {module} serves {listener}"));
             };
-            let service = svc["name"].as_str().unwrap_or("").to_string();
-            if disabled_services.contains(&format!("{module}/{service}").as_str()) {
+            let service = target["name"].as_str().unwrap_or("").to_string();
+            if svc.is_some() && disabled_services.contains(&format!("{module}/{service}").as_str()) {
                 return refuse("LISTENER_NO_TARGET", format!("{module}/{service} does not run on this node"));
+            }
+            if svc.is_none() && spec.listen_fd {
+                return refuse("LISTENER_HANDOVER_UNSUPPORTED", "a workload is handed its connections, never a listening socket".into());
             }
             if spec.listen_fd && i.windows {
                 return refuse("LISTENER_HANDOVER_UNSUPPORTED", "a listen_fd listener cannot run on Windows".into());
@@ -257,6 +263,13 @@ pub fn plan(i: &Inputs) -> BTreeMap<String, Plan> {
         out.insert(key.clone(), p);
     }
     out
+}
+
+/// The process serving a listener now: the module's endpoint service that lists it, else its workload that does.
+fn target_of(svc: &Option<Arc<Mutex<ServiceManager>>>, wl: &Option<Arc<Mutex<WorkloadManager>>>, module: &str, listener: &str)
+             -> Option<ListenerTarget> {
+    svc.as_ref().and_then(|s| lock(s).listener_target(module, listener))
+        .or_else(|| wl.as_ref().and_then(|w| lock(w).listener_target(module, listener)))
 }
 
 /// The internal port for a listener: derived from its key in the node's range (the same on every start while free).
@@ -683,6 +696,8 @@ pub struct Hub {
     listeners: BTreeMap<String, Listener>,
     refused: BTreeMap<String, Refused>,
     services: Option<Arc<Mutex<ServiceManager>>>,
+    /// Workloads may serve listeners too (docs/design/workloads.md): a listener no service lists is a workload's.
+    workloads: Option<Arc<Mutex<WorkloadManager>>>,
     map_tx: Option<tokio::sync::mpsc::UnboundedSender<MapCmd>>,
     view: Arc<Mutex<MapView>>,
     net: NetSnapshot,
@@ -713,7 +728,7 @@ impl Hub {
     pub fn new(layout: Layout, env: Env) -> Hub {
         let history = std::fs::read(layout.state().join("listener-addresses.json")).ok()
             .and_then(|b| serde_json::from_slice::<Vec<(String, f64)>>(&b).ok()).unwrap_or_default();
-        Hub { layout, env, listeners: BTreeMap::new(), refused: BTreeMap::new(), services: None, map_tx: None, view: Arc::default(),
+        Hub { layout, env, listeners: BTreeMap::new(), refused: BTreeMap::new(), services: None, workloads: None, map_tx: None, view: Arc::default(),
               net: NetSnapshot::default(), net_at: None, clock: None, node_prefix: "node".into(), statement_seq: 0, policy: json!({}),
               reach: Map::new(), observed: None, stun_observed: Arc::default(), stun_at: 0.0, probe_results: Arc::default(),
               dialed: BTreeMap::new(), send_talkers: false, firewall: Arc::default(), firewall_at: None, history,
@@ -884,15 +899,18 @@ impl Hub {
         let _ = release;
     }
 
+    /// The workloads, whose listeners the hub relays to as it does to services' (the agent sets them once).
+    pub fn set_workloads(&mut self, w: Arc<Mutex<WorkloadManager>>) {
+        self.workloads = Some(w);
+    }
+
     fn lookup_for(&self, module: &str, listener: &str) -> Lookup {
-        let svc = self.services.clone();
+        let (svc, wl) = (self.services.clone(), self.workloads.clone());
         let (m, l) = (module.to_string(), listener.to_string());
-        Arc::new(move || match &svc {
-            None => (None, Some("no services yet".into())),
-            Some(s) => match lock(s).listener_target(&m, &l) {
-                Some(t) => (t.channel, t.why),
-                None => (None, Some("no service serves it".into())),
-            },
+        Arc::new(move || match target_of(&svc, &wl, &m, &l) {
+            Some(t) => (t.channel, t.why),
+            None if svc.is_none() && wl.is_none() => (None, Some("no services yet".into())),
+            None => (None, Some("no service or workload serves it".into())),
         })
     }
 
@@ -986,7 +1004,7 @@ impl Hub {
                 }
             }
         }
-        let data = self.services.as_ref().and_then(|s| lock(s).listener_target(module, &spec.name)).map(|t| t.data);
+        let data = target_of(&self.services, &self.workloads, module, &spec.name).map(|t| t.data);
         Ok(Listener { module: module.into(), service: service.into(), spec, entry, rt, bind: at, bind_v6, tasks, data, announced: None,
                       channel_seen: None, since: now(), last_external: None, probe_wanted_at: 0.0, probed_endpoint: None,
                       endpoint_probe_at: 0.0 })
@@ -1507,6 +1525,24 @@ mod tests {
             Plan::Refuse(r) => r.code,
             Plan::Run { .. } => "run",
         }
+    }
+
+    /// A workload may serve a listener (docs/design/workloads.md): planned as a service's is, with the workload's name;
+    /// a listen_fd listener is never a workload's.
+    #[test]
+    fn a_workload_serves_a_listener_no_service_lists() {
+        let mut rel = release(json!([]), inbound());
+        rel.modules[0]["workloads"] = json!([{"name": "worker", "listeners": ["peer"]}]);
+        let p = plan_one(Some(&rel), json!({}), json!({}), &[], false);
+        let Plan::Run { service, .. } = &p else { panic!("{p:?}") };
+        assert_eq!(service, "worker");
+        // a disabled service of the same name does not stop a workload's listener
+        assert_eq!(code(&plan_one(Some(&rel), json!({}), json!({"disabled_services": ["mod/worker"]}), &[], false)), "run");
+        let mut fd = inbound();
+        fd[0]["handover"] = json!("listen_fd");
+        let mut rel_fd = release(json!([]), fd);
+        rel_fd.modules[0]["workloads"] = json!([{"name": "worker", "listeners": ["peer"]}]);
+        assert_eq!(code(&plan_one(Some(&rel_fd), json!({}), json!({}), &[], false)), "LISTENER_HANDOVER_UNSUPPORTED");
     }
 
     #[test]

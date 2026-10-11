@@ -588,7 +588,9 @@ impl Agent {
         let registry = self.prot.get_or_insert_with(|| crate::prot::Protection::new(&self.layout, hub)).registry.clone();
         let mut m = crate::workloads::WorkloadManager::new(Layout::new(self.layout.home.clone()), rt, Some(registry));
         m.adopt(self.release.as_ref());
-        self.workloads = Some(Arc::new(std::sync::Mutex::new(m)));
+        let m = Arc::new(std::sync::Mutex::new(m));
+        self.listeners.set_workloads(m.clone());       // a workload may serve inbound listeners
+        self.workloads = Some(m);
         self.sync_workloads();
     }
 

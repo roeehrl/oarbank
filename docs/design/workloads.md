@@ -76,7 +76,7 @@ reports = true                    # its `report` events reach the module's `work
 platforms = []                    # only on these platforms (empty: every declared one)
 ```
 
-Rules (SDK manifest rule 23; errors in `oarbank-sdk check`, at install and in the catalogue):
+Rules (SDK manifest rule 24; errors in `oarbank-sdk check`, at install and in the catalogue):
 
 1. Names are unique among workloads and services (both appear as `<module>/<name>` in node reports).
 2. `identity = "per_node"` needs at least one secret in `secrets`; every secret listed is a declared one, each once.
@@ -87,7 +87,8 @@ Rules (SDK manifest rule 23; errors in `oarbank-sdk check`, at install and in th
 4. `pause_tolerance_s` defaults to 0 for a workload that declares neither `cooperative_pause` nor `freeze_ok` (such a
    workload is never paused: it is throttled where it can be, lowered, or stopped) and to 20 otherwise; it is at most
    600 (the pause ceiling).
-5. `listeners` name `[sandbox].net.inbound` entries (inbound-listeners.md).
+5. `listeners` name `[sandbox].net.inbound` entries with handover `connections` (inbound-listeners.md); each listener is
+   served by exactly one endpoint service or workload of the module.
 6. `reports = true` needs the coordinator capability `workload.report`, and the capability needs a workload with it.
 7. Workloads need `requires.workload_protocol` and `requires.core >= 2.10`.
 8. A workload whose network mode is `egress-any` is placed on macOS and Windows nodes only (Linux cannot enforce it,
@@ -155,7 +156,8 @@ arrived. Then the agent:
    `OARBANK_WORKLOAD`, `OARBANK_WORKLOAD_RUN`, `OARBANK_MODULE_DATA`, `OARBANK_CONTROL_FILE`, `OARBANK_EVENTS_FILE`,
    `OARBANK_SECRETS_FILE` (when it has secrets), `OARBANK_SETTINGS_FILE`, `OARBANK_TOOLS_FILE`, `OARBANK_LIMITS_FILE`,
    `OARBANK_NODE_ID`, `OARBANK_SEAT_ID` and `OARBANK_SEAT_FENCE`, the egress proxy for an allowlist, the control event on
-   Windows, and the endpoint channel (`OARBANK_ENDPOINT_CHANNEL`) when it serves listeners; stdout and stderr go to
+   Windows, and the endpoint channel (`OARBANK_ENDPOINT_CHANNEL`) and the listeners file (`OARBANK_LISTENERS_FILE`) when
+   it serves listeners; stdout and stderr go to
    `<home>/logs/workloads/<module>.<name>.log` (appended; kept under 4 MiB, the older part in `.1`);
 4. registers the container's leader in the spawn registry with the workload's key (S16) and writes its record,
    `<home>/state/workloads/<module>.<name>.json`: the leader's pid and start time, the members seen, the seat and fence,
@@ -390,9 +392,9 @@ table of configurations and results.
 
 ## Implementation status
 
-Built in core 2.10 and SDK 1.6:
+Built in core 2.10 and SDK 1.7:
 
-- **SDK**: the `[[workloads]]` manifest model and rule 23, the `workload.report` verb, the workload protocol in the
+- **SDK**: the `[[workloads]]` manifest model and rule 24, the `workload.report` verb, the workload protocol in the
   spec and schemas, `oarbank_sdk.workload.Supervisor` (the shim between the agent and a third-party daemon: control
   document, cooperative pause and throttle, `status`, reports), a conformance suite, `examples/workload` and
   docs/workloads.md.
@@ -423,11 +425,14 @@ Not in this release, or limited:
 - **Stopping a delegated process** is not offered: delegation allows `pause` and `lower` only.
 - **Linux lowering** of a delegated process cannot always be undone by an unprivileged agent (raising a nice value back
   needs `CAP_SYS_NICE`); the agent restores what it can and journals the rest.
-- **Listeners**: a workload that declares listeners gets its endpoint channel and `listener_lookup` in the agent, but
-  serving inbound traffic is the inbound listener's work (inbound-listeners.md); such a workload is not adopted across
-  agent restarts.
-- **GPU duty** (`gpu_duty` in the control document) is read by the SDK's supervisor but not yet written by the agent;
-  the GPU duty throttle adds it.
+- **Listeners**: a workload that lists inbound listeners gets its endpoint channel and `OARBANK_LISTENERS_FILE`, and the
+  agent's listener hub relays each accepted connection into that channel as it does for an endpoint service
+  (`WorkloadManager::listener_target`; handover `connections` only). Such a workload is not adopted across agent
+  restarts (its channel ends with the agent).
+- **GPU duty**: under `gpu_jobs = certified`, a running workload that uses the GPU and declares `cooperative_throttle`
+  shares a valid certificate's duty with the cooperative jobs, and the agent writes it as `gpu_duty` in the workload's
+  control document beside `threads` and `pause`. The duty governor that adjusts it while the work runs comes with the
+  GPU duty throttle.
 - The end-to-end test sets `OARBANK_TEST_IGNORE_OS_MEMORY_PRESSURE` on its agent, a test-only switch that ignores the
   OS-wide memory-pressure level (the memory floors still apply), because the shared test host's pressure is not the
   test's.

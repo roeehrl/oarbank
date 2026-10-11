@@ -17,7 +17,7 @@
 //! (which waits up to `stop_timeout_s`) and a health check run on threads of their own.
 
 use crate::doctor::{base_env, grant_files, resolve_exec};
-use crate::endpoints::{self, Channel, Refusal};
+use crate::endpoints::{self, Channel};
 use crate::jobs::ControlFile;
 use crate::paths::Layout;
 use crate::procs;
@@ -374,7 +374,7 @@ impl Wl {
     }
 }
 
-/// Wakes what waits for a workload's channel (`listener_lookup`).
+/// Counts changes of a workload's endpoint channel (its waker).
 #[derive(Default)]
 struct Changed {
     seq: Mutex<u64>,
@@ -385,23 +385,6 @@ impl Changed {
     fn bump(&self) {
         *lock(&self.seq) += 1;
         self.cv.notify_all();
-    }
-
-    fn wait_for<T>(&self, deadline: Instant, mut f: impl FnMut() -> Option<T>) -> Option<T> {
-        loop {
-            let seen = *lock(&self.seq);
-            if let Some(v) = f() {
-                return Some(v);
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return None;
-            }
-            let g = lock(&self.seq);
-            if *g == seen {
-                let _ = self.cv.wait_timeout(g, deadline - now);
-            }
-        }
     }
 }
 
@@ -1196,35 +1179,28 @@ impl WorkloadManager {
         }
     }
 
-    /// For the inbound listener (inbound-listeners.md; built beside this): how to reach the running workload of `module` that serves
-    /// `listener`, as a connector's lookup (wait up to its limit for one that is starting, refuse at once when none
-    /// will come). None when no workload of the module lists it.
-    #[allow(dead_code)]
-    pub fn listener_lookup(&self, module: &str, listener: &str) -> Option<endpoints::Lookup> {
-        let key = lock(&self.shared).w.iter()
-            .find(|(_, w)| w.decl.module == module && w.decl.listeners.iter().any(|l| l == listener)).map(|(k, _)| k.clone())?;
-        let (sh, changed) = (self.shared.clone(), self.changed.clone());
-        Some(Arc::new(move |limit: Duration| {
-            let mut why = String::new();
-            changed.wait_for(Instant::now() + limit, || {
-                let g = lock(&sh);
-                let Some(w) = g.w.get(&key) else {
-                    why = format!("{key} is not in this node's release");
-                    return Some(None);
-                };
-                if !w.want.running || w.blocked.is_some() || w.hold.is_some() || w.withdrawn {
-                    why = format!("{key} does not run here now");
-                    return Some(None);
-                }
-                match w.run.as_ref().and_then(|r| r.channel.clone()) {
-                    Some(c) if c.accepting() => Some(Some(c)),
-                    _ => {
-                        why = format!("{key} did not come up in time");
-                        None
-                    }
-                }
-            }).flatten().ok_or_else(|| Refusal::new("workload_unavailable", why))
-        }))
+    /// The listener hub's view of a listener's workload (inbound-listeners.md, docs/design/workloads.md): the workload
+    /// of `module` that lists `listener`, its endpoint channel while it accepts connections, the module data directory
+    /// its listeners file is in, and why it is not accepting (not assigned here, held by protection, down). None when
+    /// no workload of the module lists it.
+    pub fn listener_target(&self, module: &str, listener: &str) -> Option<crate::services::ListenerTarget> {
+        let sh = lock(&self.shared);
+        let w = sh.w.values().find(|w| w.decl.module == module && w.decl.listeners.iter().any(|l| l == listener))?;
+        let data = self.ctxs.get(module).map(|c| c.data.clone()).unwrap_or_else(|| self.layout.module_data().join(module));
+        let channel = w.run.as_ref().filter(|_| w.phase == Phase::Running && w.hold.is_none())
+            .and_then(|r| r.channel.clone()).filter(|c| c.accepting());
+        let why = if channel.is_some() {
+            None
+        } else if !w.want.running {
+            Some("not running here")
+        } else if w.hold.is_some() {
+            Some("held")
+        } else if w.withdrawn {
+            Some("withdrawn")
+        } else {
+            Some("down")
+        };
+        Some(crate::services::ListenerTarget { data, channel, why: why.map(str::to_string) })
     }
 
     /// The keys of workloads running now (tests and the status page).
@@ -1396,6 +1372,10 @@ fn workload_env(ctx: &Ctx, decl: &Decl, private: &Path, run_dir: &Path, seat: &O
                 ("OARBANK_SEAT_FENCE".into(), fence.to_string())]);
     if secrets {
         env.push(("OARBANK_SECRETS_FILE".into(), private.join("secrets.json").display().to_string()));
+    }
+    if !decl.listeners.is_empty() {
+        // the listeners' announcements, as an endpoint service that lists listeners gets them (service-protocol.md)
+        env.push(("OARBANK_LISTENERS_FILE".into(), crate::services::listeners_file(&ctx.data, &decl.name).display().to_string()));
     }
     env
 }
@@ -2107,6 +2087,10 @@ mod tests {
             m.tick();
             m.fleet_pids().contains(&daemon)
         }), "the daemon was not tracked: {}", m.report());
+        // this test's own spawn tree: every process of the workload it started (the guard at the end checks that no
+        // other process was ever signalled or rescheduled)
+        let mut own: BTreeSet<i32> = m.fleet_pids().into_iter().collect();
+        own.extend([leader, daemon]);
         assert!(fx.run_file("listen.txt").unwrap_or_default().starts_with("refused"), "{:?}", fx.run_file("listen.txt"));
         // nothing but the workload's own processes is ever taken for a member (every other process of this account,
         // sandboxed apps and system services among them, fails the identity check)
@@ -2147,6 +2131,7 @@ mod tests {
             m2.tick();
             m2.fleet_pids().contains(&daemon)
         }), "the adopted workload's daemon was not found again");
+        own.extend(m2.fleet_pids());
         // unassigned: everything of it ends
         m2.set_wanted(&json!([]), boot::now_s());
         assert!(until(30.0, || {
@@ -2159,6 +2144,19 @@ mod tests {
             m2.report());
         assert!(!record_path(&fx.layout(), "mod/w").exists(), "its record goes with it");
         assert!(!fx.root.join("home/run/workloads/mod/w/secrets.json").exists());
+        // the guard: every signal and reschedule the agent's code journaled targets this test's own processes
+        let mut acted = 0;
+        for f in std::fs::read_dir(fx.layout().state().join("journal")).unwrap().flatten() {
+            for line in std::fs::read_to_string(f.path()).unwrap_or_default().lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                if v["kind"] == "actuation" {
+                    let pid = v["pid"].as_i64().unwrap_or(0) as i32;
+                    assert!(own.contains(&pid), "a process outside this test's spawn tree was acted on: {v}");
+                    acted += 1;
+                }
+            }
+        }
+        assert!(acted > 0, "the pause and the stop are journaled");
     }
 
     /// A per-node identity: the workload waits for its secrets for its seat and fence, runs with them in an owner-only
