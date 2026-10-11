@@ -188,8 +188,8 @@ module's settings (oarbank-sdk `spec/manifest.md`, "Settings"):
 {"type": "object", "properties": {
   "vm_mem_gb": {"type": "number", "minimum": 2, "maximum": 64, "default": 8, "title": "VM memory",
                 "description": "Memory the module's VM gets on a node.", "x-oarbank": {"scope": "node", "unit": "GB"}},
-  "pool_tao": {"type": "number", "minimum": 0, "title": "Miner pool per round",
-               "x-oarbank": {"scope": "fleet", "unit": "TAO", "required": true}}}}
+  "credits_per_round": {"type": "number", "minimum": 0, "title": "Credit pool per round",
+                        "x-oarbank": {"scope": "fleet", "unit": "credits", "required": true}}}}
 ```
 
 - **Registration** (modkeys.py). When a version is installed, enabled, promoted, rolled back or uninstalled, the
@@ -554,9 +554,9 @@ the command that resets each.
 - Values the registry refuses (an undeclared module key, a value its schema refuses, a fleet-only module key set on a
   node) are dropped and named, with the counts and each module's registration, in the `settings_migrated` event.
 
-On the owner's fleet (six nodes whose policies differed only in the RAM-computed `os_reserve_gb`, `module_settings`
-`{}` and `disabled_services` `[]` everywhere, no caps, no owner keys, minos-gatk 4.0.0 installed and current) this
-yields no rows at all, only minos-gatk's registration: the old model stored copies, not choices.
+On a six-node 2.8 fleet (nodes whose policies differed only in the RAM-computed `os_reserve_gb`, `module_settings`
+`{}` and `disabled_services` `[]` everywhere, no caps, no owner keys, genomics 4.0.0 installed and current) this
+yields no rows at all, only genomics's registration: the old model stored copies, not choices.
 
 ## Deferred
 

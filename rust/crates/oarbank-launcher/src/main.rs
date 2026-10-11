@@ -364,6 +364,8 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Some("remove") => return setup::remove(home.as_deref(), &rest),
+        // an upgrade's postinstall: the installed service definition, rendered again (it names its own home)
+        Some("service") if rest.get(1).map(String::as_str) == Some("refresh") => return svc::refresh(&rest[2..]),
         #[cfg(windows)]
         Some("helper-main") => return svc::helper_main(),
         #[cfg(windows)]

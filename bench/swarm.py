@@ -691,7 +691,19 @@ def endpoint_table(samples, t_lo, t_hi):
 
 
 def harness_invariants(db_path: Path, canonical_acks, attempts, expected_jobs: int | None) -> tuple[list, dict]:
-    """Exactly-once checks from the DB and from the clients' ack history, plus check_all if available."""
+    """Exactly-once checks from the DB and from the clients' ack history, plus check_all if available. A read-only
+    connection beside a writing coordinator can see a transient error (Windows: "disk I/O error" while the WAL index is
+    remapped); the checks are read-only, so they are retried briefly."""
+    for attempt in range(10):
+        try:
+            return _harness_invariants(db_path, canonical_acks, attempts, expected_jobs)
+        except sqlite3.OperationalError:
+            if attempt == 9:
+                raise
+            time.sleep(0.5)
+
+
+def _harness_invariants(db_path: Path, canonical_acks, attempts, expected_jobs: int | None) -> tuple[list, dict]:
     v, info = [], {}
     c = ro(db_path)
     try:

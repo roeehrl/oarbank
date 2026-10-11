@@ -31,7 +31,7 @@ pub struct WinMemory {
 }
 
 /// The signals from Windows' figures. Swap is what the paging files actually hold: the commit charge beyond physical
-/// use is not paging (programs commit memory long before they touch it; TNT-PC's guard read +282 MB/min of "swap"
+/// use is not paging (programs commit memory long before they touch it; a 15.8 GB Windows node's guard read +282 MB/min of "swap"
 /// from that with 54 % of its memory free and 39 MB in its paging file). Pressure is the worse of physical load
 /// (85 % warning, 92 % critical) and the commit charge against its limit (90 %, 97 %): at the limit allocations fail
 /// even with physical memory free.
@@ -359,7 +359,7 @@ pub fn has_battery() -> bool {
 mod tests {
     use super::*;
 
-    /// TNT-PC (Core i7-9700, 15.8 GB, a 1 GB paging file), recorded read-only on 2026-10-10: Get-Counter's Available
+    /// A Windows node (8 cores, 15.8 GB, a 1 GB paging file), recorded read-only: Get-Counter's Available
     /// MBytes 8,810, Committed Bytes 8,230,338,560 of a Commit Limit of 18,016,935,936, Paging File % Usage 4,
     /// Win32_PageFileUsage CurrentUsage 39 MB. The old reading called commit − physical use "swap" (0.7 GB, and its
     /// growth +282 MB/min); the paging file holds 39 MB.
@@ -391,7 +391,7 @@ mod tests {
             r[12..16].copy_from_slice(&(in_use + 512).to_le_bytes());
             r
         };
-        // TNT-PC: one 1 GB file (262,144 pages of 4 KiB), 9,984 pages (39 MB) in use
+        // that node: one 1 GB file (262,144 pages of 4 KiB), 9,984 pages (39 MB) in use
         assert_eq!(pagefile_pages_in_use(&rec(0, 262_144, 9_984)), Some(9_984));
         let mut two = rec(64, 262_144, 100);
         two.resize(64, 0);

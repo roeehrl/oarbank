@@ -369,7 +369,7 @@ def test_a_copy_of_a_real_home_migrates(tmp_path):
     la.mkdir(parents=True)
     for label in sysmigrate.LABELS:
         (la / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": [
-            "/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin/oarbankd", "--agent-bind", "100.91.247.93"],
+            "/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin/oarbankd", "--agent-bind", "100.64.0.1"],
             "EnvironmentVariables": {"OARBANKD_HOME": str(old), "OARBANK_RELEASE_SIGNING": "1"}}))
     lay = layout(tmp_path, "darwin")
     [inst] = sysmigrate.find_installs(lay, people(person))
