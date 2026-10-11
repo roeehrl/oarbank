@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla, OarbankGpuDuty.tla, OarbankSiteUplink.tla) under every config and compare
-# each outcome with the expected one. A config's spec is its name up to the first underscore: OarbankLease_liveness.cfg
-# checks OarbankLease.tla, OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla, OarbankGpuDuty.tla,
+# OarbankSiteUplink.tla, OarbankRollout.tla) under every config and compare each outcome with the expected one. A
+# config's spec is its name up to the first underscore: OarbankLease_liveness.cfg checks OarbankLease.tla,
+# OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
 #
 #   ./run_tlc.sh                 run every config
 #   ./run_tlc.sh a_nofence       run only the configs whose name contains "a_nofence"
@@ -137,6 +138,24 @@ CONFIGS+=(
   "OarbankSeat_unbounded                             ok"
 )
 SLOW+=" OarbankSeat OarbankSeat_fence_per_run OarbankSeat_faults2 OarbankSeat_unbounded "
+# OarbankRollout (docs/design/fleet-updates.md, D57-D61, S29-S31)
+CONFIGS+=(
+  "OarbankRollout                                    ok"
+  "OarbankRollout_noautorollback                     ok"
+  "OarbankRollout_liveness                           ok"
+  "OarbankRollout_witness_FleetUpdated               inv:W_FleetUpdated"
+  "OarbankRollout_witness_RolledBackAfterCanaryFailure inv:W_RolledBackAfterCanaryFailure"
+  "OarbankRollout_witness_MovedNodeRolledBack        inv:W_MovedNodeRolledBack"
+  "OarbankRollout_witness_OfflineNodeCaughtUp        inv:W_OfflineNodeCaughtUp"
+  "OarbankRollout_witness_CommittedAfterRunnerCrash  inv:W_CommittedAfterRunnerCrash"
+  "OarbankRollout_witness_CoordinatorRolledBack      inv:W_CoordinatorRolledBack"
+  "OarbankRollout_witness_BroadWithoutCanary         inv:W_BroadWithoutCanary"
+  "OarbankRollout_a_nocap                            inv:CapRespected"
+  "OarbankRollout_b_noorder                          inv:RingOrder"
+  "OarbankRollout_c_coordlast                        inv:NoNodeAheadOfCoordinator"
+  "OarbankRollout_d_nohalt                           inv:BudgetHalts"
+  "OarbankRollout_e_norunnerjournal                  inv:RunnerSafe"
+)
 
 if [ ! -f "$JAR" ]; then
   echo "missing $JAR: download https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar" >&2
@@ -167,7 +186,7 @@ for row in "${CONFIGS[@]}"; do
     got="ok"
   elif inv=$(grep -oE "Invariant [A-Za-z0-9_]+ is violated" "$log" | head -1) && [ -n "$inv" ]; then
     got="inv:$(echo "$inv" | awk '{print $2}')"
-  elif grep -q "Temporal properties were violated" "$log"; then
+  elif grep -qE "Temporal propert(ies were|y [A-Za-z0-9_]+ was) violated" "$log"; then   # TLC 2.19; newer TLC
     got="liveness"
   else
     got="error"
