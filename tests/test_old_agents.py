@@ -68,3 +68,20 @@ def test_the_console_names_old_agents_and_what_to_do(console):
     assert "agent 2.8.0 is older than 2.9.0 and does not report host tools" in page
     assert "update to" not in c.get(f"/nodes/{new['node_id']}").text.split("<nav")[0]
     assert "the node&#39;s agent reports its tools after it connects" in c.get(f"/nodes/{new['node_id']}").text
+
+
+def test_the_node_detail_the_cli_prints_carries_the_update(tmp_path, capsys, monkeypatch):
+    import time
+    from oarbank.cli import main as cli
+    from oarbank.coordinator import detail
+    db = make_db(tmp_path / "oarbank.sqlite3")
+    node = enrolled_node(db, "oldmac")[1]
+    db.x("UPDATE nodes SET agent_version='2.8.0' WHERE node_id=?", (node["node_id"],))
+    d = detail.node(db, node["node_id"], time.time(), lambda m: None)
+    assert d["node"]["agent_behind"]["version"] == "2.8.0"
+    assert "does not report host tools" in d["tools"]["unreported_why"]
+    monkeypatch.setattr(cli, "api", lambda method, path, body=None, timeout=600: d)
+    cli.node_show(node["node_id"])
+    out = capsys.readouterr().out
+    assert "  update: agent 2.8.0 is older than this coordinator" in out
+    assert "host tools: not reported: the node's agent 2.8.0 is older than 2.9.0" in out
