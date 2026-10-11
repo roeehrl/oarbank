@@ -46,6 +46,7 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
 #[cfg(target_os = "macos")]
 const SOCKETFILTERFW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 /// `socketfilterfw --getglobalstate`: "Firewall is enabled. (State = 1)", "... disabled. (State = 0)".
 pub fn parse_macos_global(s: &str) -> Option<bool> {
     let l = s.to_ascii_lowercase();
@@ -58,6 +59,7 @@ pub fn parse_macos_global(s: &str) -> Option<bool> {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 /// `socketfilterfw --getappblocked <path>`: "The application ... is permitted" / "... is blocked"; an application the
 /// firewall does not list yet is judged by "allow signed software" (`--getallowsigned`).
 pub fn parse_macos_app(s: &str) -> Option<bool> {
@@ -71,6 +73,7 @@ pub fn parse_macos_app(s: &str) -> Option<bool> {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 /// `netsh advfirewall show currentprofile state`: "State                                 ON".
 pub fn parse_windows_state(s: &str) -> Option<bool> {
     s.lines().find(|l| l.trim_start().to_ascii_lowercase().starts_with("state")).map(|l| l.to_ascii_uppercase().contains("ON"))
@@ -110,6 +113,7 @@ pub fn status() -> State {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// The nftables table `allow` installs on Linux: only the listener ports, a per-address connection limit.
 pub fn nft_table(ports: &[u16]) -> String {
     let set = ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");

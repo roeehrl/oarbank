@@ -705,8 +705,6 @@ enum Job {
 
 /// A listener's service, for the listener hub (`listener_target`).
 pub struct ListenerTarget {
-    pub key: String,
-    pub service: String,
     pub data: PathBuf,
     pub channel: Option<Arc<Channel>>,
     pub why: Option<String>,
@@ -1148,7 +1146,8 @@ impl ServiceManager {
             && s.channel.as_ref().is_some_and(|c| c.accepting());
         let why = if s.disabled { Some("disabled") } else if s.held.is_some() { Some("held") } else if !s.running || !s.ready { Some("down") }
                   else { None };
-        Some(ListenerTarget { key: key.clone(), service: s.decl.name.clone(), data,
+        let _ = key;
+        Some(ListenerTarget { data,
                               channel: if accepting { s.channel.clone() } else { None }, why: why.map(str::to_string) })
     }
 
