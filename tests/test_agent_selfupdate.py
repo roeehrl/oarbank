@@ -29,8 +29,8 @@ def agent_bytes(version: str, platform: str = "darwin-arm64") -> bytes:
 
 
 def agent_bin(version: str, platform: str = "darwin-arm64") -> Path:
-    import tempfile
-    p = Path(tempfile.mkdtemp()) / "oarbank-agent"
+    from helpers import scratch
+    p = scratch() / "oarbank-agent"
     p.write_bytes(agent_bytes(version, platform))
     return p
 

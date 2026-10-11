@@ -1498,8 +1498,8 @@ def cmd_cli(a):
     py = module_python(bundle)
     argv = mf.resolve_exec(info["exec"], bundle, py) + list(a.args)
     tmp = Path(tempfile.mkdtemp(prefix=f"oarbank-cli-{a.module}-"))
-    env = cli_env(tmp, port, tok, a.module)
     try:
+        env = cli_env(tmp, port, tok, a.module)
         if modsandbox.backend() is None:
             sys.exit("no module sandbox backend on this OS: a module CLI does not run unconfined")
         from ..coordinator import sandboxexec

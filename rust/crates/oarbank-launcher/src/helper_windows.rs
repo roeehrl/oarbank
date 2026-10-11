@@ -838,6 +838,7 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = clear(&self.store);
+            let _ = std::fs::remove_file(&self.store.state);    // clear() stops early when the engine does not open
         }
     }
 
