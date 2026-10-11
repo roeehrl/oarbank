@@ -244,8 +244,9 @@ fence for it stops the current run first.
 ### Adoption across agent restarts
 
 A graceful stop of the agent (SIGTERM, the launcher's stop event) stops jobs but **not** workloads, as with lasting
-services (architecture.md, "Stopping the agent"): their records stay and the watchdog that ends a dead agent's runners
-ignores them. A new agent reads each record before its first hello and adopts the workload when (a) the leader still
+services (architecture.md, "Stopping the agent"): their records stay. The watchdog that ends a dead agent's runners
+leaves them running while their leases run and ends each at its lease's end (`guard_leases`; the TLA+ finding below),
+so a workload never outlives its lease when no agent comes back. A new agent reads each record before its first hello and adopts the workload when (a) the leader still
 has its recorded start time, (b) the record's boot is the current boot and its lease's end on the boot clock is still
 ahead, and (c) the workload does not serve listeners (its endpoint channel ended with the old agent). Then it registers
 the leader again, finds the members again (macOS by identity, Linux in the leaf, Windows in the job opened by name) and
@@ -362,7 +363,9 @@ whose agent is down gets it back before the lease ends unless `AgentDownPastLeas
 
 Properties: **AtMostOneRunning** (no two nodes run the seat at once; S26), **RunningHasLease**, **FenceMonotonic**,
 and, under bounded faults and a timely network, **EventuallyRuns** (a node that stays assigned runs) and
-**SeatReGranted** (a seat its holder gave up reaches another assigned node). Weakened variants, each of which TLC
+**SeatReGranted** (a seat its holder gave up reaches another assigned node), both once the owner's assignments stop
+changing (an owner who moves the assignment back and forth faster than a heartbeat round trip keeps every node from the
+seat, which TLC shows without that premise). Weakened variants, each of which TLC
 shows violating AtMostOneRunning: (a) freeing on any release report whatever its fence; (b) the agent applying a late
 reply to a request it gave up on, after its lease lapsed; (c) re-granting before the lease and grace end without a
 release; (d) the lease measured from the reply's receipt instead of the request's sending; (e) adopting a workload
@@ -374,7 +377,8 @@ longer assigned is unsafe (a stale stop report frees a seat its sender runs agai
 frees only on `release` with the current fence, and the agent sends `release` whenever it was told to stop (the model's
 alternative, a fence per run, also passes: `OarbankSeat_fence_per_run`). **An agent down past its lease** leaves a
 lasting workload running after the seat moved; the dead agent's watchdog now ends recorded workloads at their leases'
-end. `./run_tlc.sh OarbankSeat` checks every configuration (`QUICK=1` skips the unbounded-fault one).
+end. `./run_tlc.sh OarbankSeat` checks every configuration (`QUICK=1` skips the four slow ones); specs/README.md has the
+table of configurations and results.
 
 ## Invariants
 
@@ -385,9 +389,44 @@ end. `./run_tlc.sh OarbankSeat` checks every configuration (`QUICK=1` skips the 
 
 ## Implementation status
 
-Built in core 2.10 and SDK 1.6, verified by unit and property tests (the ladder, the lease on a virtual boot clock, the
-backoff), the TLA+ model `specs/OarbankSeat.tla` with its weakened variants, a protection soak with workloads mixed with
-jobs and services, and an end-to-end test (`tests/rust/test_agent_workloads.py`) in which a synthetic workload whose
-daemon calls `setsid` and forks twice is assigned, paused and held by protection rules, survives an agent restart by
-adoption and is unassigned. Cross-platform builds are checked for Linux and Windows; the Linux cgroup and Windows Job
-Object paths run in CI on those systems.
+Built in core 2.10 and SDK 1.6:
+
+- **SDK**: the `[[workloads]]` manifest model and rule 23, the `workload.report` verb, the workload protocol in the
+  spec and schemas, `oarbank_sdk.workload.Supervisor` (the shim between the agent and a third-party daemon: control
+  document, cooperative pause and throttle, `status`, reports), a conformance suite, `examples/workload` and
+  docs/workloads.md.
+- **Coordinator**: assignments, seats, fenced leases, per-holder secrets, status and reports, the three operations,
+  the `workload_withdrawn` alert, S26 and the widened S16 in the invariant checker, `/api/v1/workloads` and its logs
+  route, the console's module tab and node card, and `oarbank workload`.
+- **Agent**: running, supervising and adopting workloads, the containers in the table above, boot-clock leases,
+  health, logs, events and reports, the ladder's actions, delegated processes (macOS through the person's session
+  helper), the watchdog's lease guard, and `oarbank-agent stop-workloads` (the launcher's remove runs it).
+- **Protection**: the workload ladder and the delegation ladder (`oarbank-protection/src/workloads.rs`), memory
+  victims that include workloads, and the delegation rule syntax with its per-OS refusals.
+
+Verified by unit and property tests (the ladders, the lease on a virtual boot clock, the backoff, the coordinator's seat
+protocol as a Hypothesis state machine), the TLA+ model with its variants (specs/README.md), a day-long protection
+soak with workloads beside jobs and services, the agent's tests with a synthetic daemon that calls `setsid` and forks
+twice (adopted, paused, stopped; nothing outside the workload tracked), and an end-to-end test
+(`tests/rust/test_agent_workloads.py`) in which that daemon is assigned, receives its secret, is paused and then held
+past its pause tolerance by a protection rule, survives an agent restart by adoption, is held by an evict rule and is
+unassigned. Linux and Windows builds are checked (`cargo check --tests`); their cgroup and Job Object paths run on those
+systems in CI, not on the development Mac.
+
+Not in this release, or limited:
+
+- **Container workloads** (deferred, see the decisions).
+- **Windows delegated processes** are matched by trusted path only (no Authenticode check yet), and the session-helper
+  relay that acts on another session's processes exists on macOS and Linux only; on Windows the agent acts on
+  delegated processes of its own session.
+- **Stopping a delegated process** is not offered: delegation allows `pause` and `lower` only.
+- **Linux lowering** of a delegated process cannot always be undone by an unprivileged agent (raising a nice value back
+  needs `CAP_SYS_NICE`); the agent restores what it can and journals the rest.
+- **Listeners**: a workload that declares listeners gets its endpoint channel and `listener_lookup` in the agent, but
+  serving inbound traffic is the inbound listener's work (inbound-listeners.md); such a workload is not adopted across
+  agent restarts.
+- **GPU duty** (`gpu_duty` in the control document) is read by the SDK's supervisor but not yet written by the agent;
+  the GPU duty throttle adds it.
+- The end-to-end test sets `OARBANK_TEST_IGNORE_OS_MEMORY_PRESSURE` on its agent, a test-only switch that ignores the
+  OS-wide memory-pressure level (the memory floors still apply), because the shared test host's pressure is not the
+  test's.
