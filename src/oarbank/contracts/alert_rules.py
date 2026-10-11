@@ -39,6 +39,8 @@ POLICY: dict[str, dict] = {
                               "runbook": "Fleet work measurably slowed a protected process: consider strict_yield on that node or a tighter rule."},
     "release_awaiting_owner": {"severity": "P3", "pending_s": 300,
                                "runbook": "A release waits for the owner's signature, so its nodes get nothing new (an enrolled node gets no first release and runs no module). On the machine that holds the owner key run the command the alert names: `oarbank release sign <release> --promote` for a platform's release, `oarbank release sign <release>` for a canary or pinned node's own. `oarbank release list` shows every waiting release. The alert clears once the release is signed and current, or a newer build replaces it."},
+    "workload_withdrawn": {"severity": "P3", "pending_s": 0,
+                           "runbook": "A workload failed again and again on the node and was withdrawn: read its last error and log tail (the module's Workloads tab, `oarbank workload logs`), fix the cause (a secret, a setting, the module), then `oarbank workload restart` it. The alert clears once it runs again."},
     "invariant": {"severity": "P5", "pending_s": 0,
                   "runbook": "A safety invariant failed: the condition is latched. Read the message on the Verify page; resolving needs a note."},
     "audit_copy_failed": {"severity": "P3", "pending_s": 0,

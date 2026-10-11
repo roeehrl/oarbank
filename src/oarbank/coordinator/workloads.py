@@ -258,8 +258,20 @@ def observe(db: DB, node: dict, body: dict) -> dict | None:
             module, name = r["key"].split("/", 1)
             seat, fence = r.get("seat_id"), int(r.get("fence") or 0)
             running = bool(r.get("running"))
+            prev = db.one("SELECT report_json FROM workload_status WHERE module=? AND workload=? AND node_id=?",
+                          (module, name, nid))
+            was_withdrawn = bool((jl(prev["report_json"], {}) or {}).get("withdrawn")) if prev else False
             db.x("INSERT OR REPLACE INTO workload_status VALUES(?,?,?,?,?,?,?,?)",
                  (module, name, nid, int(running), seat, fence, json.dumps(r)[:20000], now))
+            rule = f"workload_withdrawn:{module}/{name}"
+            if r.get("withdrawn") and not was_withdrawn:
+                from .core import _alert
+                tail = (r.get("log_tail") or "")[-600:]
+                _alert(db, rule, f"node:{nid}", f"{module}/{name} on {node.get('hostname') or nid} was withdrawn after "
+                       f"{r.get('failures')} failures: {r.get('error') or 'no error given'}" + (f"\n{tail}" if tail else ""))
+            elif running and was_withdrawn:
+                db.x("UPDATE alerts SET state='resolved', resolved_at=?, resolved_how='runs again' WHERE rule=? AND "
+                     "subject=? AND state IN ('open','pending')", (now, rule, f"node:{nid}"))
             if seat and not running and r.get("release"):
                 s = db.one("SELECT node_id, fence FROM workload_seats WHERE seat_id=?", (seat,))
                 if s and s["node_id"] == nid and (s["fence"] or 0) == fence:

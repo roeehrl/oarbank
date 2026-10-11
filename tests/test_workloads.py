@@ -177,3 +177,15 @@ def test_report_events_are_stored_once_acknowledged_and_delivered_to_the_module(
     assert len(docs) == 2, docs
     audit = db.one("SELECT * FROM audit WHERE operation='workload.report'")
     assert audit and audit["outcome"] == "ok"
+
+
+def test_a_withdrawn_workload_opens_an_alert_that_clears_when_it_runs_again(db):
+    a = node(db, "mini")
+    set_key(db, a)
+    assign(db, a)
+    beat(db, a, [{"key": "workload/worker", "running": False, "withdrawn": True, "failures": 5, "error": "exited 1",
+                  "log_tail": "boom"}])
+    al = db.one("SELECT * FROM alerts WHERE rule='workload_withdrawn:workload/worker'")
+    assert al and al["state"] == "open" and "exited 1" in al["detail"] and "boom" in al["detail"]
+    beat(db, a, [{"key": "workload/worker", "running": True, "withdrawn": False}])
+    assert db.one("SELECT state FROM alerts WHERE alert_id=?", (al["alert_id"],))["state"] == "resolved"
