@@ -9,7 +9,7 @@ has the catalogue it fetched.
 """
 from collections.abc import Callable
 
-from . import checkpoints, folders, nodepolicy, nodeservices, platforms, tools
+from . import agentbuilds, checkpoints, folders, nodepolicy, nodeservices, platforms, tools
 from . import config as C
 from .db import jl
 
@@ -92,7 +92,8 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
     return {
         "node": {"node_id": n["node_id"], "hostname": n["hostname"], "platform": platforms.node_platform(n),
                  "lifecycle": n["lifecycle"], "desired_state": n["desired_state"], "online": bool(hb and now - hb < C.OFFLINE_AFTER),
-                 "agent_version": n.get("agent_version"), "quarantine_reason": n.get("quarantine_reason")},
+                 "agent_version": n.get("agent_version"), "agent_behind": agentbuilds.behind(n),
+                 "quarantine_reason": n.get("quarantine_reason")},
         "modules": {m: {"state": st.get("state"), "reason": st.get("reason")} for m, st in sorted(mods.items())},
         "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),
         "services": nodeservices.rows(n), "services_at": n.get("services_at"), "folders": folder_grants(r, n),

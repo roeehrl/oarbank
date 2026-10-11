@@ -863,11 +863,14 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return readiness.all_modules(db)
 
     @app.get("/api/v1/modules/{name}/readiness")
-    def api_module_readiness(name: str, actor=Depends(who)):
+    def api_module_readiness(name: str, version: str | None = None, actor=Depends(who)):
+        """One module's checklist: of its current version, or of an installed `version` (`?version=` or name@version)."""
         from . import readiness
-        r = readiness.module(db, name)
+        name, _, at = name.partition("@")
+        version = version or at or None
+        r = readiness.module(db, name, version=version)
         if r is None:
-            raise core.ApiError(404, "not_found", f"no module {name} is installed")
+            raise core.ApiError(404, "not_found", f"no module {name}{'@' + version if version else ''} is installed")
         return r
 
     @app.get("/api/v1/modules/{name}/secrets")

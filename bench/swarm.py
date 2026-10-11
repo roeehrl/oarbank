@@ -237,8 +237,9 @@ def admin_setup(admin: httpx.Client) -> str:
     import tempfile
     import uuid
     from oarbank_sdk import bundle as B
-    out, _ = B.build(TOY, Path(tempfile.mkdtemp()) / "toy.mfb")
-    sha = admin.post("/api/v1/modules/bundles", content=out.read_bytes(), timeout=60).json()["sha256"]
+    with tempfile.TemporaryDirectory(prefix="bundle-") as td:
+        out, _ = B.build(TOY, Path(td) / "toy.mfb")
+        sha = admin.post("/api/v1/modules/bundles", content=out.read_bytes(), timeout=60).json()["sha256"]
     plan = admin.post("/api/v1/ops/modules.install", json={"params": {"sha256": sha}, "dry_run": True}, timeout=60).json()["plan"]
     admin.post("/api/v1/ops/modules.install", json={"plan_id": plan["plan_id"], "reason": "swarm setup"},
              headers={"idempotency-key": str(uuid.uuid4())}, timeout=120).raise_for_status()
@@ -857,10 +858,21 @@ def console_viewer(port: int, stop: threading.Event, samples: list):
 
 
 def run(cfg: Cfg, log=print) -> dict:
-    tmp = None
-    if not cfg.home:
-        tmp = tempfile.mkdtemp(prefix="oarbankd-swarm-")
-        cfg.home = tmp
+    """One swarm run. Without cfg.home it runs in a scratch home, removed when the run ends however it ends (unless
+    cfg.keep_home)."""
+    if cfg.home:
+        return _run(cfg, log)
+    tmp = cfg.home = tempfile.mkdtemp(prefix="oarbankd-swarm-")
+    try:
+        return _run(cfg, log)
+    finally:
+        if cfg.keep_home:
+            log(f"kept the swarm home: {tmp}")
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run(cfg: Cfg, log) -> dict:
     home = Path(cfg.home)
     fd = Coordinator(home, cfg.agent_port, cfg.admin_port, cfg.sqlite_sync)
     nprocs = cfg.procs if cfg.procs else min(8, max(1, math.ceil(cfg.agents / 60)))   # >~100 agents/proc starves the client loop
@@ -1040,8 +1052,6 @@ def run(cfg: Cfg, log=print) -> dict:
             res["coordinator_log_tail"] = [l for l in lines if not l.startswith("INFO")][-60:]
         except OSError:
             pass
-    if tmp and not cfg.keep_home:
-        shutil.rmtree(tmp, ignore_errors=True)
     return res
 
 

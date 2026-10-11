@@ -12,7 +12,11 @@ case "$ARCH" in arm64) PLATFORM=darwin-arm64 ;; x86_64) PLATFORM=darwin-amd64 ;;
 ARCHIVE="${1:-$REPO/dist/oarbank-coordinator-$VERSION-$PLATFORM.tar.gz}"
 OUT="$REPO/dist"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/oarbank-coordinator-pkg.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# the tools' own scratch (swiftc's driver leaves a TemporaryDirectory.* behind in the temp directory) goes in a directory
+# removed with $WORK; not inside $WORK, whose paths the package must never name (check-package.py --build-path)
+TOOLTMP="$(mktemp -d "${TMPDIR:-/tmp}/oarbank-coordinator-pkg-tmp.XXXXXX")"
+trap 'rm -rf "$WORK"; rm -rf "$TOOLTMP"' EXIT
+export TMPDIR="$TOOLTMP"
 APP="$WORK/root/Applications/Oarbank Coordinator.app"
 ROOT="$APP/Contents/Resources/coordinator"
 mkdir -p "$ROOT" "$APP/Contents/MacOS" "$OUT"

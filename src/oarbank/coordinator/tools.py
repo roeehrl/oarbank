@@ -31,6 +31,7 @@ import time
 
 from oarbank_sdk import toolversion as tv
 
+from . import agentbuilds
 from .db import jl
 
 KINDS = ("jdk", "python", "executable")
@@ -400,6 +401,16 @@ def resolve(insts: list[dict], req: dict, native: str, pin: str | None = None) -
     return out("not_found", detail=f"no {tid} found on this node")
 
 
+def unreported_why(node: dict) -> str:
+    """Why a node has no tool report: its agent predates host tools (it never sends one: update it), or it has not
+    connected since it could."""
+    v = node.get("agent_version")
+    if agentbuilds.older(v, agentbuilds.HOST_TOOLS_SINCE):
+        return (f"the node's agent {v} is older than {agentbuilds.HOST_TOOLS_SINCE} and does not report host tools; "
+                f"update the node to this coordinator's release and it reports them when it connects")
+    return "the node's agent reports its tools after it connects"
+
+
 def resolve_for(r, node: dict, module: str, req: dict, defs: dict | None = None) -> dict:
     """resolve() for one node and module: its report, the path set where it inherits one, an unknown tool id, a node
     that has not reported yet."""
@@ -411,7 +422,7 @@ def resolve_for(r, node: dict, module: str, req: dict, defs: dict | None = None)
     rep = report(node)
     if not rep:
         return {"status": "not_found", "code": "TOOL_NOT_FOUND", "installation": None, "source": None, "unreported": True,
-                "detail": f"{req['id']} not reported yet (the node's agent reports its tools after it connects)"}
+                "detail": f"{req['id']} not reported yet ({unreported_why(node)})"}
     o = node_override(r, node, req["id"], module)
     res = resolve(installations(node, req["id"]), req, native_arch(node), o["path"] if o else None)
     if o:
@@ -495,6 +506,10 @@ def fixes(r, node: dict, module: str, req: dict, res: dict, defs: dict | None = 
     out = []
     if res.get("unknown") or not d:
         return [{"label": f"Define {req['id']} in Settings → Tools", "href": f"/settings?tool={req['id']}#tools"}]
+    if res.get("unreported") and agentbuilds.older(node.get("agent_version"), agentbuilds.HOST_TOOLS_SINCE):
+        # the node may well have the tool: its agent cannot say; installing or re-detecting changes nothing until it updates
+        return [{"label": f"Update {node.get('hostname') or node.get('node_id')}'s agent", "href": "/agent",
+                 "then": "the updated agent reports the tools it finds when it connects"}]
     facts = jl(node.get("facts_json"), {}) or {}
     cmd = install_command(d["kind"], req, os_, (facts.get("platform") or {}).get("distro"))
     if res["status"] in ("not_found", "version_unmet") and cmd:
@@ -545,7 +560,9 @@ def node_view(r, node: dict, defs: dict | None = None) -> dict:
         if rows:
             mods[name] = rows
     overrides = node_values(r, node.get("node_id"))
-    return {"reported": bool(rep), "detected_at": rep.get("detected_at"), "native_arch": native_arch(node),
+    return {"reported": bool(rep), "unreported_why": None if rep else unreported_why(node),
+            "found_any": any(installations(node, tid) for tid in defs),
+            "detected_at": rep.get("detected_at"), "native_arch": native_arch(node),
             "redetect": redetect_state(node),
             "tools": {tid: installations(node, tid) for tid in defs}, "extra": sorted(set(rep.get("tools") or {}) - set(defs)),
             "modules": mods, "overrides": overrides, "definitions": defs}
@@ -577,7 +594,8 @@ def module_matrix(r, module: str, nodes: list[dict], defs: dict | None = None) -
 def resolution(r, module: str, manifest=None, nodes: list[dict] | None = None) -> list[dict]:
     """Per tool request of a module version (default: its current version), how many of `nodes` (default: every node
     that is not retired) resolve it and why the others do not (the readiness checklist's host tools step):
-    [{request, need, unknown, ok: [hosts], failed: [(host, reason with its fix, code)]}]."""
+    [{request, need, unknown, ok: [hosts], failed: [(host, reason with its fix, code)], old_agents: [hosts whose agent
+    predates host tools]}]."""
     defs = definitions(r)
     if manifest is None:
         manifest = _module_manifests(r, module=module).get(module) or {}
@@ -585,13 +603,16 @@ def resolution(r, module: str, manifest=None, nodes: list[dict] | None = None) -
         nodes = r.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
     out = []
     for req in requests(manifest):
-        row = {"request": req, "need": need_text(req), "unknown": req["id"] not in defs, "ok": [], "failed": []}
+        row = {"request": req, "need": need_text(req), "unknown": req["id"] not in defs, "ok": [], "failed": [],
+               "old_agents": []}
         for n in nodes:
             res = resolve_for(r, n, module, req, defs)
             host = n.get("hostname") or n["node_id"]
             if res["status"] == "ok":
                 row["ok"].append(host)
                 continue
+            if res.get("unreported") and agentbuilds.older(n.get("agent_version"), agentbuilds.HOST_TOOLS_SINCE):
+                row["old_agents"].append(host)
             fx = fixes(r, n, module, req, res, defs)
             cmd = next((f["command"] for f in fx if f.get("label", "").startswith("Install")), None)
             words = {"not_found": "not found", "version_unmet": "", "refused": "refused: "}[res["status"]]
