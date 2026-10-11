@@ -1152,6 +1152,7 @@ impl ServiceManager {
     }
 
     /// The listening sockets `listen_fd` listeners pass to their service's next `start` (the hub keeps them open).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn listen_fds(&self) -> ListenFds {
         self.listen_fds.clone()
     }

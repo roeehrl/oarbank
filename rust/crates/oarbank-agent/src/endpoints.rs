@@ -356,7 +356,6 @@ pub fn into_async(end: End) -> std::io::Result<AgentStream> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::FromRawHandle;
         let h = end.into_raw();
         unsafe { tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(h as _) }
     }

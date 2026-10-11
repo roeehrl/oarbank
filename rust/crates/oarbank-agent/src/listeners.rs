@@ -345,6 +345,7 @@ pub struct Rt {
     pub external_ip: Mutex<Option<IpAddr>>,
     pub allow_local_probes: bool,
     pub lookup: Lookup,
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub listen_path: Option<PathBuf>,
 }
 

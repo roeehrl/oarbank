@@ -536,6 +536,25 @@ impl Helper {
                 self.allow(&container_sid(name)?, port, Owner::of_client(pipe)?)?;
                 Ok(json!({"ok": true}))
             }
+            // inbound listeners (docs/design/inbound-listeners.md): a Defender Firewall rule for the agent's own binary
+            // (beside the helper) and one port, added when a listener opens, so a first listen never raises a prompt
+            Some(op @ ("firewall_allow" | "firewall_remove")) => {
+                let port = req["port"].as_u64().filter(|p| (1024..=65535).contains(p)).context("no port in 1024-65535")? as u16;
+                let agent = std::env::current_exe()?.with_file_name("oarbank-agent.exe");
+                let name = format!("name=Oarbank listener {port}");
+                let args: Vec<String> = if op == "firewall_allow" {
+                    let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", &name]).output();
+                    vec!["advfirewall".into(), "firewall".into(), "add".into(), "rule".into(), name, "dir=in".into(), "action=allow".into(),
+                         format!("program={}", agent.display()), "protocol=TCP".into(), format!("localport={port}")]
+                } else {
+                    vec!["advfirewall".into(), "firewall".into(), "delete".into(), "rule".into(), name]
+                };
+                let out = std::process::Command::new("netsh").args(&args).output()?;
+                if !out.status.success() && op == "firewall_allow" {
+                    bail!("netsh: {}", String::from_utf8_lossy(&out.stdout).trim());
+                }
+                Ok(json!({"ok": true}))
+            }
             other => bail!("unknown op {other:?}"),
         }
     }

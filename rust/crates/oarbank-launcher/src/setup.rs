@@ -317,6 +317,21 @@ pub fn remove(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
         svc.push("--dry-run".into());
     }
     crate::service(&crate::Home(home.clone()), &svc)?;
+    // router port mappings of inbound listeners: the stopped agent released them; whatever its journal still holds
+    // (a crash, a router that did not answer) is deleted now, its own mappings only (docs/design/inbound-listeners.md)
+    {
+        let agent = crate::Home(home.clone()).current_bin();
+        if (agent.exists() && home.join("state").join("portmaps.json").exists()) || st.dry {
+            st.run(&format!("{} --home {} portmap release-all", agent.display(), home.display()), || {
+                let out = std::process::Command::new(&agent).arg("--home").arg(&home).args(["portmap", "release-all"]).output()?;
+                if !out.status.success() {
+                    eprintln!("portmap release-all: some router mappings stay until their lease runs out: {}",
+                              String::from_utf8_lossy(&out.stdout).trim());
+                }
+                Ok(())
+            })?;
+        }
+    }
     // Windows: the agent's WSL containers session and its storage (up to the session's disk cap) go with the node; its
     // images are a cache, never the node's identity (docs/design/windows-containers.md, "Packaging")
     if cfg!(windows) {
