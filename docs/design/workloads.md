@@ -100,8 +100,9 @@ Two tables (`coordinator/workloads.py`):
 ```sql
 workload_assignments(module, workload, node_id, desired, assigned_at, assigned_by, placed_by, restart_seq,
                      unassigned_at, version)          -- one row per (module, workload, node); unassigning keeps the row
-workload_seats(seat_id, module, workload, node_id, fence, lease_until, granted_at, released_at,
-               reported_running, reported_fence, reported_at)
+workload_seats(seat_id, module, workload, node_id, fence, lease_until, granted_at, released_at)
+workload_status(module, workload, node_id, running, seat_id, fence, report_json, at)   -- each node's latest report
+workload_reports(module, workload, node_id, seq, t, seat_id, fence, data_json, state, error, received_at)
 ```
 
 - **Assign** (`workloads.assign`, T2, admin, preview): `{module, workload, node}` for `seat = "node"`, or `{module,
@@ -119,9 +120,11 @@ workload_seats(seat_id, module, workload, node_id, fence, lease_until, granted_a
 - **Lease.** At every hello and heartbeat of node N, for each of its assignments that is runnable: if the seat is free,
   held by N, or its lease ended more than the grace (60 s) ago, it is granted (or renewed) to N: a new holder raises
   the fence by one; `lease_until = now + 1800`. Otherwise N gets no lease (`WORKLOAD_SEAT_ELSEWHERE`).
-- **Release.** A report from the holder that the workload is not running, carrying the seat's current fence, frees the
-  seat at once; a report with an older fence is ignored. So a seat moves without waiting for the lease when the old node
-  confirms.
+- **Release.** A report from the holder that the workload is not running **and gives the seat up** (`release: true`:
+  the agent was told to stop it, its lease lapsed there, it was withdrawn or cannot run there), carrying the seat's
+  current fence, frees the seat at once; a report with an older fence, or without `release`, is ignored. So a seat moves
+  without waiting for the lease when the old node confirms. (Freeing on any stop report from a holder that is no longer
+  assigned is unsafe: the TLA+ model's finding F1, below.)
 - **Directive** (every hello and heartbeat reply): `workloads: [{key, module, workload, desired, seat_id, fence,
   lease_s, restart_seq, reason}]`, one entry per assignment of the node. `desired` is `running` only for a runnable
   assignment with its lease (or no identity); otherwise `stopped` with the reason code. `lease_s` is the lease's end
@@ -198,14 +201,23 @@ workload's observations reach the module's own records without a scheduled job (
 | Listening | refused by the sandbox (no bind rule): a workload never listens; it serves listeners through its endpoint channel | refused (seccomp) | refused (no server capability) |
 
 **macOS sandbox identity.** macOS has no kernel container an unprivileged agent can use, and a process can leave its
-process group, but it cannot drop the Seatbelt profile it inherited. Each workload's profile is the only one that grants
-reading its private directory. While a workload runs, every tick, the agent lists the processes of its own account
-outside every registered container and asks `sandbox_check(pid, NULL)` (sandboxed at all),
-`sandbox_check(pid, "file-read-data", <private dir>/control.json)` (allowed) and `sandbox_check(pid, "file-read-data",
-<home>/state/workloads)` (denied: a broadly permissive profile would allow it). A process that answers so runs with that
-workload's profile: it is recorded as a member (its pid and start time) and every action on the workload reaches it
-through the spawn registry, which checks the start time before each signal. A member found after its workload's
-leader has ended is killed: nothing of an ended run outlives it.
+process group, but it cannot drop the Seatbelt profile it inherited. Each workload's profile is the only one that
+grants reading its private directory. While a workload runs, every tick, the agent lists the processes of its own
+account outside every registered container and takes one as the workload's member only when all of these hold:
+
+1. it is sandboxed (`sandbox_check(pid, NULL)`) and was born after the run's leader;
+2. its sandbox lets it read the workload's control document (`<private>/control.json`), and does **not** let it read
+   `<private>.canary`, an existing file beside the private directory that no profile of a module grants;
+3. its sandbox lets it write the run's events file, and does **not** let it write the control document.
+
+The canary is a sibling, and exists, on purpose: a first version compared with a path elsewhere that did not exist,
+and the end-to-end test caught system services of the account (Safari's safe-browsing service, a GPU helper of an
+Electron app, a context store agent) whose profiles read every existing file of the user's temporary directory, so they
+passed; protection's pause reached them for 8 s before the resume (journaled `actuation` records, all resumed, none
+killed). With the sibling canary and the write checks, no process of the account but the workload's own answers so
+(checked against every process of a loaded workstation, about 1,100), and the spawn registry refuses a member born
+before its container's leader. A tracked member's pid and start time go into the run's record; every action on the
+workload reaches it through the registry, which checks the start time before each signal.
 
 Upfront check (the design's phase 0 spike b): `sandbox_check` answers for another account's process from an
 unprivileged account. Tested on macOS 27.0.1: from a user account it answered for all 168 processes of root and the
@@ -270,16 +282,20 @@ signal and scheduling change goes through the spawn registry (`actuation` record
 ### Delegated external processes
 
 With the node setting `delegated_processes` on, an owner rule with `delegate = {actions = [...]}` names processes that
-protection may treat as pausable, lowerable fleet work. Its matcher must be one a module cannot spoof: macOS
-`team_id` with `signing_id` (or a designated requirement), Windows `publisher` with an exact `path`, Linux an exact
-`path` whose file and parent directories are owned by root and writable by no one else (checked at every match). A
+protection may treat as pausable, lowerable fleet work. Its matcher must be one a module cannot spoof, refused per OS
+otherwise (protection.md): macOS a code-signing identity (`requirement`, or `team_id` with `identifier`); Linux and
+Windows `path_prefix` naming one executable's exact path, trusted at every match (Linux: the file and every directory
+above it owned by root and writable by no one else; Windows: under Program Files or the Windows folder; Authenticode
+publishers are not read by the protection crate, so they are not offered). An unreadable fact never delegates. A
 delegate rule has no other action; `actions` is a subset of `pause` and `lower` (`stop` is refused in this version).
-Each matched process is admitted to the spawn registry as a `delegated` member (its pid and start time and the rule),
-and signalled or lowered one process at a time, never by group. A delegated tree paused for the pause ceiling (10 min)
-is resumed and lowered instead (`DELEGATE_PAUSE_LIMIT`), since it may not be stopped. A system install's agent cannot
-signal the person's processes; their session helper does it on the agent's request (the helper checks the process is its
-own and still has the start time named, and acts only with `pause`, `resume`, `lower` and `restore`). The setting off,
-or the helper absent, the rule only reports (`PROTECTION_CONFIG_ERROR` names why).
+Each matched process is acted on one at a time, never by group, through the spawn registry (`signal_delegated`,
+`set_background_delegated`: its start time checked first, journaled with the rule as `delegated`). A delegated tree
+paused for the pause ceiling (10 min) is resumed and lowered instead (`DELEGATE_PAUSE_LIMIT`), since it may not be
+stopped. A system install's agent cannot signal the person's processes: when its own action is refused, the person's
+session helper does it on the agent's request (`SessionHub::act`, on the helper's connection; the helper checks the
+process still has the start time named and acts only with `pause`, `resume`, `lower` and `restore`), journaled
+`via: session_helper`. With the setting off delegate rules match nothing (the setting's change is journaled). On
+stopping, the agent resumes and restores everything it paused or lowered.
 
 S16 becomes: **the agent never signals or reschedules a process outside its spawn registry (its attempts, services and
 workloads, a workload's tracked members) or the owner's delegations.**
@@ -288,7 +304,8 @@ workloads, a workload's tracked members) or the owner's delegations.**
 
 | Failure | Behaviour |
 |---|---|
-| The daemon crash-loops | backoff with full jitter; withdrawn after `max_failures`; alert `workload_withdrawn` with the last error and log tail; `workloads.restart` lifts it |
+| The daemon crash-loops | backoff with full jitter; withdrawn after `max_failures` (it gives its seat up); alert `workload_withdrawn` with the last error and log tail, cleared when it runs again; `workloads.restart` lifts it |
+| The agent dies and does not come back | its watchdog (`reap-runners`, which ends a dead agent's runners) then guards the leases: each workload the dead agent's records name is ended when its lease runs out, unless a newer agent adopted it (adoption rewrites the record) |
 | The daemon daemonizes itself | the leader stays (the SDK supervisor shim keeps the daemon in the foreground); a grandchild that leaves the group is tracked (macOS) or stays in the cgroup or job; if the leader exits, the run ends and everything else is killed; the conformance suite fails a workload that leaves its process group |
 | Agent restart | adopted when the lease runs on the boot clock and the leader is the recorded process; listener-serving workloads restart |
 | Coordinator outage | workloads keep running until their lease ends (30 min); identity `none` keeps running |
@@ -332,6 +349,32 @@ above, and `DELEGATE_PAUSE`, `DELEGATE_RESUME`, `DELEGATE_LOWER`, `DELEGATE_REST
 - `oarbank workload list [--node N] [--module M]`, `oarbank workload assign <module>/<workload> (--node N | --count C)`,
   `oarbank workload unassign <module>/<workload> --node N`, `oarbank workload restart <module>/<workload> --node N`,
   `oarbank workload logs <module>/<workload> --node N [--follow]`.
+
+## The TLA+ model (`specs/OarbankSeat.tla`)
+
+One seat and two nodes; a global discrete clock (lease length L, grace G); the coordinator's durable holder, fence
+and lease end and the owner's assignments (assign and unassign at any time, two nodes at once included); requests and
+replies in a bag with arbitrary delay and loss; an agent that sends a heartbeat while an earlier one is still in flight
+(impatient), crashes and restarts with adoption, a machine that sleeps (time passes, the node takes no step) or
+reboots (the workload dies), a coordinator restart (in-flight messages lost). The agent's lease ends at the request's
+send time plus `lease_s`; time cannot pass a running workload's lease end on an awake node (it acts in time); a node
+whose agent is down gets it back before the lease ends unless `AgentDownPastLease`.
+
+Properties: **AtMostOneRunning** (no two nodes run the seat at once; S26), **RunningHasLease**, **FenceMonotonic**,
+and, under bounded faults and a timely network, **EventuallyRuns** (a node that stays assigned runs) and
+**SeatReGranted** (a seat its holder gave up reaches another assigned node). Weakened variants, each of which TLC
+shows violating AtMostOneRunning: (a) freeing on any release report whatever its fence; (b) the agent applying a late
+reply to a request it gave up on, after its lease lapsed; (c) re-granting before the lease and grace end without a
+release; (d) the lease measured from the reply's receipt instead of the request's sending; (e) adopting a workload
+without its lease; (f) a lease clock that stops while the machine sleeps. Witness configurations show that a seat
+moves after an expiry, moves early on a fenced release, and that a restart adopts.
+
+Two findings changed the design. **F1**: freeing a seat on a stop report *without* `release` from a holder that is no
+longer assigned is unsafe (a stale stop report frees a seat its sender runs again after a reboot); the coordinator now
+frees only on `release` with the current fence, and the agent sends `release` whenever it was told to stop (the model's
+alternative, a fence per run, also passes: `OarbankSeat_fence_per_run`). **An agent down past its lease** leaves a
+lasting workload running after the seat moved; the dead agent's watchdog now ends recorded workloads at their leases'
+end. `./run_tlc.sh OarbankSeat` checks every configuration (`QUICK=1` skips the unbounded-fault one).
 
 ## Invariants
 

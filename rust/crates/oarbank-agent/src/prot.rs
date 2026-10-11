@@ -81,7 +81,10 @@ impl Protection {
         }
         self.ctrl.set_delegation_allowed(policy["delegated_processes"].as_bool().unwrap_or(false));
         let m = host::memory();
-        let mut mem = P::MemorySignals::new(m.ram_gb, m.used_gb, m.pressure);
+        // end-to-end tests on a shared, loaded host: the OS's own pressure level is not theirs to judge (the floors the
+        // test sets still apply); never set by an installed agent
+        let pressure = if std::env::var_os("OARBANK_TEST_IGNORE_OS_MEMORY_PRESSURE").is_some() { 0 } else { m.pressure };
+        let mut mem = P::MemorySignals::new(m.ram_gb, m.used_gb, pressure);
         mem.swap_used_gb = m.swap_used_gb;
         let mut inputs = P::TickInputs::new(now, mem);
         let mut inputs_services = vec![];
