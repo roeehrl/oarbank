@@ -36,6 +36,9 @@ proved in one layer means the same thing in every other.
 | S24 | every listener and router mapping a node reports belongs to an approved grant (the module version the node runs requests that inbound listener, its grants approved by digest), an assignment (the node's statement lists it) and the statement the node applied (docs/design/inbound-listeners.md) |
 | S25 | for a rule marked `immediate`, a phase the agent's event path saw begin is paused first by the event path, within 100 ms of the source event (from the decision journal; docs/design/gpu-cotenancy.md) |
 | S28 | the GPU duty budget a node journals never exceeds the certified ceiling it journals with it, and every fleet unit the duty governor holds or stops for exceeding (or for not being able to check) its `gpu_duty` is paused within the S18 window, or has ended (from the decision journal; the budget's S19 form, its ceiling and the compliance check in the agent's property tests, a day-long soak and `specs/OarbankGpuDuty.tla`; docs/design/gpu-cotenancy.md) |
+| S29 | no ring of a fleet rollout has more nodes between `draining` and `confirming` (or `staged` with `go`) than its `max_unavailable` (docs/design/fleet-updates.md; TLA+ `specs/OarbankRollout.tla` `CapRespected`) |
+| S30 | no node is assigned or reports a fleet release newer than its coordinator, and no node of a later ring started before every earlier ring finished and baked (`NoNodeAheadOfCoordinator`, `RingOrder`) |
+| S31 | every node update slot (`go`) was granted while the node was eligible: online, inside its update window, not held, not pinned to another version (from the rollout journal) |
 | L1 | liveness: under bounded faults, every job reaches done, cancelled or quarantined |
 | I1 | integrity: a node never convicted of nondeterminism is never quarantined by a dispute |
 | I2 | integrity: once a node is convicted, no canonical result it produced survives |
