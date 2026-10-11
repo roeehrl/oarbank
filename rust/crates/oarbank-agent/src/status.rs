@@ -58,6 +58,19 @@ impl Status {
         self.write();
     }
 
+    /// Set one field (null: remove it), leaving the state; written only when it changed.
+    pub fn put(&mut self, key: &str, v: Value) {
+        if self.doc.get(key).unwrap_or(&Value::Null) == &v {
+            return;
+        }
+        if v.is_null() {
+            self.doc.remove(key);
+        } else {
+            self.doc.insert(key.into(), v);
+        }
+        self.write();
+    }
+
     /// An error with its stable code and message, staying in `state` (`error`, or `offline` for a lost session).
     pub fn fail(&mut self, state: &str, code: &str, message: &str, fields: Value) {
         self.doc.insert("error".into(), json!({"code": code, "message": message}));

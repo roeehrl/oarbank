@@ -6,8 +6,6 @@
 
 use crate::config::Trust;
 use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::Value;
 
 pub const IDENTITY_TYPE: &str = "oarbank.coordinator-identity/v1";
@@ -22,11 +20,9 @@ pub struct Proof {
     pub ca_next_spki_sha256: Option<String>,
 }
 
+/// Ed25519 over `msg` (oarbank-core's owner.rs, shared with the node update runner).
 pub fn verify_ed25519(pub_b64: &str, msg: &[u8], sig_b64: &str) -> Result<()> {
-    let pk: [u8; 32] = B64.decode(pub_b64)?.try_into().map_err(|_| anyhow::anyhow!("an Ed25519 key is 32 bytes"))?;
-    let sig: [u8; 64] = B64.decode(sig_b64)?.try_into().map_err(|_| anyhow::anyhow!("an Ed25519 signature is 64 bytes"))?;
-    VerifyingKey::from_bytes(&pk)?.verify_strict(msg, &Signature::from_bytes(&sig))?;
-    Ok(())
+    Ok(oarbank_core::owner::verify_ed25519(pub_b64, msg, sig_b64)?)
 }
 
 pub fn new_nonce() -> String {
@@ -88,6 +84,7 @@ pub fn pins(trust: &Trust) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
     use ed25519_dalek::{Signer, SigningKey};
 
     fn answer(sk: &SigningKey, doc: Value) -> Value {

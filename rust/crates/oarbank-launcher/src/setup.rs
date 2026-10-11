@@ -39,7 +39,7 @@ fn user_data() -> Result<PathBuf> {
     })
 }
 
-fn system_data() -> PathBuf {
+pub(crate) fn system_data() -> PathBuf {
     if cfg!(windows) {
         return std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData")).join("Oarbank");
     }

@@ -75,8 +75,16 @@ The agent writes `status/node.json` beside its home (and a `joined` marker file 
 {"format": 1, "state": "unjoined|checking|joining|pending|joined|connected|error",
  "coordinator": "https://host:7443", "fingerprint": "9f2c41ab…", "node_id": "n_…", "name": "build-07",
  "enrollment_id": "enr_…", "user_code": "WDJB-MJHT", "key_fingerprint": "sha256:…", "code_expires_at": 1790000000,
- "managed_by": "Example Corp", "error": {"code": "E_TLS_PIN_MISMATCH", "message": "…"}, "updated_at": 1790000000}
+ "managed_by": "Example Corp", "error": {"code": "E_TLS_PIN_MISMATCH", "message": "…"},
+ "update": {"state": "draining|installing|confirming|done|rolled_back|failed|…", "version": "2.10.0", "error": null,
+            "at": 1790000000},
+ "updated_at": 1790000000}
 ```
+
+`update` is there while a whole-package update has something to say (docs/design/fleet-updates.md, D62): its state
+as the agent reports it, `version` the release it goes to (on `rolled_back`, `failed` and `refused`: the version the
+node is back on), the runner's reason and when. The menu bar and tray show "Updating to <version>…" from `draining` to
+`confirming`, and "Update failed: back on <version>" for a day after a rollback.
 
 A service started without a coordinator and without a code waits (`unjoined`) and looks every 5 s for a staged code
 (`state/join-code`) and for managed policy. A staged code is redeemed with backoff until it expires; a code the

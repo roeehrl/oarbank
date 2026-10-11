@@ -75,6 +75,11 @@ struct NodeStatus {
     var managedBy: String?
     var errorMessage: String?
     var errorCode: String?
+    /// A whole-package update (the status document's `update`, docs/design/fleet-updates.md D62): its state, the version
+    /// it goes to (or is back on after a rollback) and when.
+    var updateState: String?
+    var updateVersion: String?
+    var updateAt: Double?
     var exists = false
 
     static let paths = [
@@ -96,6 +101,11 @@ struct NodeStatus {
         if let error = doc["error"] as? [String: Any] {
             status.errorMessage = error["message"] as? String
             status.errorCode = error["code"] as? String
+        }
+        if let update = doc["update"] as? [String: Any] {
+            status.updateState = update["state"] as? String
+            status.updateVersion = update["version"] as? String
+            status.updateAt = (update["at"] as? NSNumber)?.doubleValue
         }
         return status
     }
@@ -124,6 +134,18 @@ struct NodeStatus {
         switch state {
         case "pending": return userCode.map { "Approval code \($0)" }
         case "joined", "connected", "offline": return name.map { "This Mac: \($0)" }
+        default: return nil
+        }
+    }
+
+    /// "Updating to <v>…" while the node drains, installs and confirms; "Update failed: back on <v>" for a day after.
+    var updateLine: String? {
+        guard let state = updateState, let version = updateVersion else { return nil }
+        switch state {
+        case "draining", "installing", "confirming": return "Updating to \(version)…"
+        case "rolled_back", "failed":
+            let recent = updateAt.map { Date().timeIntervalSince1970 - $0 < 86400 } ?? false
+            return recent ? "Update failed: back on \(version)" : nil
         default: return nil
         }
     }

@@ -22,6 +22,8 @@
 //! in each person's session, started with that person's token and no window: the agent's system service, in session
 //! 0, cannot see a session's foreground window, last input or (another account's) command lines, and the session
 //! helper tells it. Only a LocalSystem service may start a process in another session (WTSQueryUserToken).
+//!
+//! And it starts the node update runner when the agent writes an update request into its spool (update.rs).
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -688,9 +690,12 @@ pub fn serve() -> Result<()> {
     // the agent binary installed beside this launcher (Program Files: administrators' only)
     let agent = std::env::current_exe()?.with_file_name("oarbank-agent.exe");
     let keeper = std::thread::spawn(move || keep_session_helpers(agent));
+    // the node update runner, started for a request in the agent's spool (update.rs; fleet-updates.md, D57)
+    let updates = std::thread::spawn(crate::update::watch_spool);
     let r = serve_requests();
     crate::stop_now();
     let _ = keeper.join();
+    let _ = updates.join();
     r
 }
 

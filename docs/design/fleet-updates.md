@@ -520,28 +520,46 @@ uses the agent listener and mTLS, like `/v1/agent/builds/{sha}`.
 The runner removes `request.json` when it has taken the request (journaled first). It ignores a request whose `id` it
 has already finished.
 
+When `result.json` says `installed` for its request, an agent of another version than the release exits 75, so the
+launcher starts the agent `current` now points at (the tarball format has nothing else that restarts it, and a package's
+own restart may come before `current` moved). An agent of the release the runner then rolls back exits 75 once, for the
+same reason.
+
 ### Node runner files
 
 - **`trust.json`:** `{"format": 1, "mode": "signed" | "unsigned", "fleet_id", "owner_version", "owner_keys": [b64…],
   "pinned_at", "pinned_by"}`. `unsigned` is only ever written by `update-trust --unsigned`.
 - **`journal.json`:** `{"format": 1, "committed_seq", "committed_release", "current": {sha256, release, format},
   "previous": {sha256, release, format} | null, "active": {"id", "release", "seq", "sha256", "format", "rollback",
-  "step": "verified|installing|installed|probation|committing|rolling_back", "deadline", "previous_agent"} | null}`.
+  "step": "verified|installing|installed|probation|committing|rolling_back", "deadline", "previous_agent"} | null,
+  "finished": [the latest finished request ids]}`. `active` also keeps the step's bookkeeping: `error`, `outcome`
+  (`rolled_back` after a failed probation, `failed` after a failed install), `restored` (the MSI transaction put the old
+  product back), `busy` and `retry_at` (1618 or a held lock), `reboot_pending`.
 - **`packages/<sha256>`:** two packages are kept.
+- **`available`:** `{"format": 1, "mode", "fleet_id", "owner_version", "pinned_at"}`, written with `trust.json`. The
+  state directory is 0711 and this file 0644, the one file the agent's account may read: it is how the agent knows the
+  trust is pinned (`install.updater`). Its absence means no updater.
 
 ### Commands
 
 ```
 oarbank-launcher update-run   [--agent-home P] [--state P] [--prefix P] [--probation-s N] [--once]
-oarbank-launcher update-trust (--from-agent | --unsigned | --keys K1,K2 [--fleet F]) [--agent-home P] [--state P]
+oarbank-launcher update-trust (--from-agent | --unsigned | --keys K1,K2 [--fleet F] [--owner-version N])
+                              [--agent-home P] [--state P]
 python -m oarbank.coordupdate run   [--home P] [--state P] [--programs P] [--probation-s N] [--once]
 python -m oarbank.coordupdate trust (--from-home | --unsigned) [--home P] [--state P]
 oarbankd --self-test --home <scratch>      (open, migrate, check invariants, exit 0/1; never listens)
 ```
 
 The defaults are the system paths above. `--prefix` is where the `tar` format installs (Linux tarball installs:
-`/opt/oarbank`). `--once` handles at most one request and exits, which the triggers use. Without it, the command
-watches the spool, which the tests use.
+`/opt/oarbank`); naming it also makes the runner treat the node as a tarball install, so `update-run` with explicit
+paths works unprivileged (the tests). `--once` handles at most one request and exits, which the triggers use. Without
+it, the command watches the spool, which the tests use. `--owner-version` is the explicitly pinned key set's version (1
+when not given), which the next rotation must follow.
+
+The agent finds the runner's marker at `<agent home>/../update/available`. Two environment variables let a test run the
+runner itself: `OARBANK_INSTALL_FORMAT` names the agent's install format (else detected), and
+`OARBANK_UPDATE_TRIGGER=external` says something other than a launchd, systemd or helper trigger runs `update-run`.
 
 ### Coordinator health and spool
 
