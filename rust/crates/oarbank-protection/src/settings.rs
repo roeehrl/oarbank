@@ -16,6 +16,9 @@ use crate::settings_table::DEFS;
 pub enum Section {
     Policy,
     Limits,
+    /// Keys the coordinator applies that a machine's managed policy may still set (`update_auto`, `update_hold`;
+    /// docs/design/fleet-updates.md): never in a directive, the agent only checks and reports them.
+    Coordinator,
 }
 
 /// What a value must be.
@@ -247,6 +250,20 @@ pub fn apply_managed(section: Section, applied: &Value, managed: &Map<String, Va
     (Value::Object(out), set, refused)
 }
 
+/// A machine's managed values of keys the coordinator applies ([`Section::Coordinator`]): checked and reported, never
+/// applied here (the coordinator folds them in, tighten-only). Returns (the keys set, the ones refused).
+pub fn report_managed(managed: &Map<String, Value>) -> (Vec<Managed>, Vec<Rejected>) {
+    let (mut set, mut refused) = (vec![], vec![]);
+    for (k, v) in managed {
+        let Some(d) = def(k).filter(|d| d.section == Section::Coordinator) else { continue };
+        match coerce_managed(d, v) {
+            Err(reason) => refused.push(Rejected { key: k.clone(), reason }),
+            Ok(m) => set.push(Managed { key: k.clone(), value: m, binding: true }),
+        }
+    }
+    (set, refused)
+}
+
 /// The managed keys no section knows, refused.
 pub fn unknown_managed(managed: &Map<String, Value>) -> Vec<Rejected> {
     managed.keys().filter(|k| def(k).is_none()).map(|k| Rejected { key: k.clone(), reason: NOT_MANAGEABLE.into() }).collect()
@@ -288,6 +305,23 @@ mod tests {
         assert!(coerce_managed(d("jobs"), &json!("1.5")).is_err());                 // not a whole number
         assert!(coerce_managed(d("jobs"), &json!(0)).is_err());                     // below the minimum
         assert!(coerce_managed(d("enforce"), &json!("strict")).is_err());
+    }
+
+    #[test]
+    fn the_coordinators_managed_keys_are_checked_and_reported_never_applied() {
+        let managed = json!({"update_auto": "off", "update_hold": {"reason": "lab machine", "until": null},
+                             "update_ring": "canary", "jobs": 2});
+        let m = managed.as_object().unwrap();
+        let (set, refused) = report_managed(m);
+        assert_eq!(set, vec![
+            Managed { key: "update_auto".into(), value: json!("off"), binding: true },
+            Managed { key: "update_hold".into(), value: json!({"reason": "lab machine", "until": null}), binding: true },
+        ]);
+        assert!(refused.is_empty());
+        // update_ring is no managed key of any section: refused once, as a key managed policy may not set
+        assert_eq!(unknown_managed(m), vec![Rejected { key: "update_ring".into(), reason: NOT_MANAGEABLE.into() }]);
+        assert_eq!(report_managed(json!({"update_auto": "sometimes"}).as_object().unwrap()).1.len(), 1);
+        assert!(defaults(Section::Policy).get("update_auto").is_none() && defaults(Section::Limits).get("update_hold").is_none());
     }
 
     #[test]

@@ -441,11 +441,14 @@ impl Agent {
     /// The settings in force: the coordinator's (`settings_base`) with this machine's managed settings laid over, each
     /// only tightening. (policy, limits, the managed keys, the managed keys refused.)
     fn with_managed(&self) -> (Value, Value, Vec<oarbank_protection::settings::Managed>, Vec<oarbank_protection::settings::Rejected>) {
-        use oarbank_protection::settings::{apply_managed, unknown_managed, Section};
+        use oarbank_protection::settings::{apply_managed, report_managed, unknown_managed, Section};
         let (policy, mut set, mut refused) = apply_managed(Section::Policy, &self.settings_base["policy"], &self.managed);
         let (limits, more_set, more_refused) = apply_managed(Section::Limits, &self.settings_base["limits"], &self.managed);
         set.extend(more_set);
         refused.extend(more_refused);
+        let (coord_set, coord_refused) = report_managed(&self.managed);       // the coordinator's keys: reported only
+        set.extend(coord_set);
+        refused.extend(coord_refused);
         refused.extend(unknown_managed(&self.managed));
         (policy, limits, set, refused)
     }

@@ -360,7 +360,9 @@ machine" layer, in the safe direction only.
 - **Which keys.** The registry's `managed` keys: `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` (higher is
   stricter), `mem_in_use_bound`, `screen_sharing_present`, `hard_limits` (on is stricter), `user_present_slots`,
   `max_slots`, `run_on_battery`, `inbound_listeners`, `workloads` and `delegated_processes` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
-  `staging_mbps`: lower) and `enforce` (hard is stricter). Anything else (`job_mem_gb`, a schedule, protection) is
+  `staging_mbps`: lower), `enforce` (hard is stricter), and two keys the coordinator applies, `update_auto` (towards
+  `off`) and `update_hold` (a hold), which the agent checks and reports but never applies itself (its settings table's
+  `Coordinator` section; [fleet-updates.md](fleet-updates.md)). Anything else (`job_mem_gb`, a schedule, protection) is
   refused and reported: protection already has its own tighten-only local file.
 - **Enforcement.** The agent applies each managed value only where it is stricter than what the coordinator sends (and
   over the table's defaults before the first heartbeat), re-reading the policy at most once a minute; a looser value
