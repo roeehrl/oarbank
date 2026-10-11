@@ -130,9 +130,7 @@ def test_no_update_while_a_move_is_on_or_after_a_hand_off(db, v, tmp_path):
 
 
 def test_no_update_without_a_ready_stored_build_for_this_platform(db, v, tmp_path):
-    with pytest.raises(coordself.UpdateError, match="no fleet release is stored"):
-        coordself.request(db, v, "test")
-    db.conn.executescript(FLEET_SCHEMA)
+    db.conn.executescript(FLEET_SCHEMA)          # a no-op where fleetupdates already made the tables
     with pytest.raises(coordself.UpdateError, match="not stored"):
         coordself.request(db, v, "test")
     with pytest.raises(coordself.UpdateError, match="is not newer"):
