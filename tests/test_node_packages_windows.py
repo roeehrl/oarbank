@@ -445,13 +445,13 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
     managed = {m["key"]: m for m in (re.search(r'key: "(?P<key>\w+)".*kind: Kind::(?P<kind>\w+).*min: (?P<min>None|Some\([\d.]+\))'
                                                r'.*choices: &\[(?P<choices>[^\]]*)\]', line).groupdict()
                                      for line in table.splitlines() if "managed: true" in line)}
-    assert len(managed) == 20
+    assert len(managed) == 22
     settings = {p.get("name"): p for p in every if p.get("key") == SETTINGS_KEY}
     assert set(settings) == set(managed)
     _, strings, _ = _strings()
     for key, m in managed.items():
         p = settings[key]
-        assert p.find("p:supportedOn", GP).get("ref") == ("SUPPORTED_Oarbank_2_10" if key in ("inbound_listeners", "workloads", "delegated_processes") else "SUPPORTED_Oarbank_2_9")
+        assert p.find("p:supportedOn", GP).get("ref") == ("SUPPORTED_Oarbank_2_10" if key in ("inbound_listeners", "workloads", "delegated_processes", "update_auto", "update_hold") else "SUPPORTED_Oarbank_2_9")
         assert "stricter" in strings[f"{key}_Help"] and "has no effect" in strings[f"{key}_Help"], key
         elements = p.findall("p:elements/*", GP)
         if m["kind"] == "Bool":
@@ -463,12 +463,13 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
         if m["kind"] == "Integer":
             assert tag == "decimal" and float(elements[0].get("minValue")) == float(m["min"][5:-1]), key
             assert int(elements[0].get("maxValue")) > int(elements[0].get("minValue"))
-        elif m["kind"] == "Number":
+        elif m["kind"] in ("Number", "Object"):      # "1.5"; a hold's reason (or its JSON object)
             assert tag == "text", key
         else:
             assert m["kind"] == "Choice" and tag == "enum", key
             values = [i.find("p:value/p:string", GP).text for i in elements[0].findall("p:item", GP)]
-            assert values == re.findall(r'"(\w+)"', m["choices"]) == ["soft", "hard"]
+            assert values == re.findall(r'"(\w+)"', m["choices"]) == {"enforce": ["soft", "hard"],
+                                                                        "update_auto": ["off", "notify", "on"]}[key]
 
 
 # MARK: the tray app

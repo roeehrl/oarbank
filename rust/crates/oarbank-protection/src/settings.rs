@@ -209,6 +209,12 @@ pub fn coerce_managed(d: &Def, v: &Value) -> Result<Value, String> {
             "false" | "0" | "no" => Value::Bool(false),
             _ => v.clone(),
         },
+        // a policy that can only hold text (a registry value, a profile string): a JSON object, or for a hold its reason
+        (Kind::Object, Value::String(s)) => match serde_json::from_str::<Value>(s.trim()) {
+            Ok(o @ Value::Object(_)) => o,
+            _ if d.key == "update_hold" && !s.trim().is_empty() => serde_json::json!({"reason": s.trim(), "until": null}),
+            _ => v.clone(),
+        },
         (Kind::Number | Kind::Integer, Value::String(s)) => {
             let t = s.trim();
             t.parse::<i64>().map(Value::from).ok()
@@ -321,6 +327,11 @@ mod tests {
         // update_ring is no managed key of any section: refused once, as a key managed policy may not set
         assert_eq!(unknown_managed(m), vec![Rejected { key: "update_ring".into(), reason: NOT_MANAGEABLE.into() }]);
         assert_eq!(report_managed(json!({"update_auto": "sometimes"}).as_object().unwrap()).1.len(), 1);
+        // a registry value or profile string holds the reason, or the whole object as JSON
+        let (set, _) = report_managed(json!({"update_hold": " lab machine "}).as_object().unwrap());
+        assert_eq!(set[0].value, json!({"reason": "lab machine", "until": null}));
+        let (set, _) = report_managed(json!({"update_hold": "{\"reason\": \"r\", \"until\": 5}"}).as_object().unwrap());
+        assert_eq!(set[0].value, json!({"reason": "r", "until": 5}));
         assert!(defaults(Section::Policy).get("update_auto").is_none() && defaults(Section::Limits).get("update_hold").is_none());
     }
 

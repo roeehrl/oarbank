@@ -261,6 +261,38 @@
         </enum>
       </elements>
     </policy>
+    <policy name="update_auto" class="Machine" displayName="$(string.update_auto)" explainText="$(string.update_auto_Help)"
+            presentation="$(presentation.update_auto)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_10" />
+      <elements>
+        <enum id="update_auto" valueName="update_auto" required="true">
+          <item displayName="$(string.update_auto_off)">
+            <value>
+              <string>off</string>
+            </value>
+          </item>
+          <item displayName="$(string.update_auto_notify)">
+            <value>
+              <string>notify</string>
+            </value>
+          </item>
+          <item displayName="$(string.update_auto_on)">
+            <value>
+              <string>on</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="update_hold" class="Machine" displayName="$(string.update_hold)" explainText="$(string.update_hold_Help)"
+            presentation="$(presentation.update_hold)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_10" />
+      <elements>
+        <text id="update_hold" valueName="update_hold" maxLength="500" required="true" />
+      </elements>
+    </policy>
     <policy name="vm_mem_gb" class="Machine" displayName="$(string.vm_mem_gb)" explainText="$(string.vm_mem_gb_Help)"
             presentation="$(presentation.vm_mem_gb)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
       <parentCategory ref="NodeSettings" />

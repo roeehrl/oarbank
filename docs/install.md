@@ -223,6 +223,8 @@ owner still lowers caps from the console. The keys and which way each tightens:
 | `cpu_cores`, `mem_gb`, `vm_mem_gb`, `disk_gb`, `staging_mbps` | number | lower |
 | `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` | number | higher |
 | `enforce` | `soft` or `hard` | hard |
+| `update_auto` | `off`, `notify` or `on` | off (the coordinator applies it: [fleet updates](design/fleet-updates.md)) |
+| `update_hold` | the hold's reason as text, or `{"reason", "until"}` | any hold |
 
 A looser value has no effect, a key not in the table is refused, and both show on the node's Settings tab ("Managed on
 this machine: off (applies)") and on **Settings → Applied drift**; `oarbank-agent policy` prints what the machine's

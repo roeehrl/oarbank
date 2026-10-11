@@ -107,6 +107,15 @@ This value can only make the coordinator's setting stricter on this computer, ne
       <string id="enforce_Help">Soft: stop admitting jobs over a cap and let running jobs finish. Hard: also hand back the youngest jobs to fit. Soft has no effect when the coordinator asks for hard.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="update_auto">Update automatically</string>
+      <string id="update_auto_Help">Off: a new fleet release never starts updating this computer by itself; the owner still starts a rollout by hand. Notify: the coordinator says a release is ready and waits for the owner. On has no effect when the coordinator's setting is stricter: a machine's policy can only make updates less automatic.
+</string>
+      <string id="update_auto_off">Off</string>
+      <string id="update_auto_notify">Notify</string>
+      <string id="update_auto_on">On</string>
+      <string id="update_hold">Hold updates</string>
+      <string id="update_hold_Help">Enabled: this computer takes no fleet update until this policy is removed. Type the reason (it shows on the console's Updates page), or a JSON object such as {"reason": "lab machine", "until": 1767225600}. A hold is always the stricter choice; disabling the policy has no effect on a hold the owner set.
+</string>
       <string id="enforce_soft">Soft</string>
       <string id="enforce_hard">Hard</string>
       <string id="vm_mem_gb">VM memory cap for services (GB)</string>
@@ -183,6 +192,14 @@ This value can only make the coordinator's setting stricter on this computer, ne
       </presentation>
       <presentation id="enforce">
         <dropdownList refId="enforce" noSort="true" defaultItem="1">Enforcement:</dropdownList>
+      </presentation>
+      <presentation id="update_auto">
+        <dropdownList refId="update_auto" noSort="true" defaultItem="1">Updates:</dropdownList>
+      </presentation>
+      <presentation id="update_hold">
+        <textBox refId="update_hold">
+          <label>Reason:</label>
+        </textBox>
       </presentation>
       <presentation id="vm_mem_gb">
         <textBox refId="vm_mem_gb">
