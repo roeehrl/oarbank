@@ -445,6 +445,7 @@ pub struct WorkloadManager {
     gpu_apis: Vec<String>,
     disabled_modules: BTreeSet<String>,
     limits: Value,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     last_scan: Option<Instant>,
 }
 
@@ -1019,6 +1020,7 @@ impl WorkloadManager {
         let mut sh = lock(&self.shared);
         for (k, w) in sh.w.iter_mut() {
             let Some(run) = w.run.as_mut() else { continue };
+            #[allow(unused_mut)]
             let mut u = procs::group_usage(run.leader);
             #[cfg(target_os = "macos")]
             for (pid, _) in &run.members {

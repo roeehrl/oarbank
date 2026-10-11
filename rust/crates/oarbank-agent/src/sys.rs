@@ -373,7 +373,8 @@ mod imp {
 
     /// Open a workload's job by name again (a new agent adopting it) and keep its handle for the leader `pid`.
     pub fn adopt_named(pid: i32, name: &str) -> bool {
-        use windows_sys::Win32::System::JobObjects::{OpenJobObjectW, JOB_OBJECT_ALL_ACCESS};
+        use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
+        const JOB_OBJECT_ALL_ACCESS: u32 = 0x001F_003F;            // STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3F
         let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let job = unsafe { OpenJobObjectW(JOB_OBJECT_ALL_ACCESS, 0, wide.as_ptr()) };
         if job.is_null() {
