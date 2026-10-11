@@ -7,3 +7,4 @@ specs/states/
 specs/*.bin
 dist/
 specs/out/
+specs/*_TTrace_*.tla
