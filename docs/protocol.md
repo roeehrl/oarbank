@@ -225,6 +225,8 @@ their process groups, deletes their workspaces, and does not report them.
 | `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
 | `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
 | `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
+| `listeners_disabled` | The inbound-listener kill switch for this node or the fleet: close every listener and remove every router mapping (see Inbound listeners). |
+| `listener_probes`, `dial_probes`, `listener_reachability`, `observed_addr`, `send_listener_talkers` | Dial-back probes to expect and to make, their outcomes, the node's public source address, and a request for the listeners' top client addresses (see Inbound listeners). |
 
 ## Work
 
@@ -412,10 +414,11 @@ nondeterminism takes the results resumed from its checkpoints with it.
 
 Every node-scope value that grants access on one node travels in that node's **statement**: canonical JSON
 `{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}}, "tools":
-[{"id", "module", "path"}], "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
+[{"id", "module", "path"}], "listeners": {"<module>/<listener>": {…}}, "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
 release signing the agent applies a statement only with a valid signature by the pinned release key (`oarbank node sign
 <node>`, operation `nodes.sign_statement`) and a seq above the last one it applied; in developer mode statements are
-unsigned. The agent keeps the applied statement in `state/folders.json`.
+unsigned. The agent keeps the applied statement in `state/folders.json`. `listeners` are the owner's inbound listeners on the node (see
+Inbound listeners); a statement without the key has none.
 
 ## Folders
 
@@ -626,6 +629,33 @@ A module's services, such as a VM, follow service protocol 1 (the SDK's spec/ser
   enforcement map; a module with an endpoint service is placed only there.
 - **Kill switch.** The services of a module in `modules_disabled` are disabled: stopped once no attempt uses them.
 - **Probes** provide capabilities, such as `java17`, on a period.
+
+## Inbound listeners
+
+docs/design/inbound-listeners.md is the full contract; in short:
+
+- **Facts** (hello): `"listeners": {"version": 1, "probe": true}`: the agent runs listeners and can dial back for
+  others.
+- **What the agent runs.** For each statement entry `<module>/<listener>`, a listener when the module version in its
+  release requests that `inbound` listener, an enabled endpoint service of the module lists it, `listeners_disabled`
+  is off, the policy's `inbound_listeners` is not false and the protection mode is not `strict_yield`; else a refusal
+  (`LISTENER_NOT_GRANTED`, `LISTENER_NO_TARGET`, `MODULE_DISABLED`, `LISTENERS_DISABLED`, `LISTENERS_FORBIDDEN`,
+  `LISTENER_STRICT_YIELD`, `LISTENER_HANDOVER_UNSUPPORTED`, `LISTENER_BIND_FAILED`).
+- **Heartbeat** (when the node has or had listeners): `listeners` (per key: state, bind and external addresses, the
+  announcement, the reachability result with the owner's text and fix, connection counters and refusals by reason,
+  `probe_wanted`, `statement_seq`), `portmaps` (every router mapping it holds: protocol, gateway, external and internal
+  address, lease, expiry, last verification, state, error), `network` (gateway, local addresses, the gateway's
+  external address, the observed address, which mapping protocols answer, the router's other mappings for this node,
+  the firewall), `probe_results` (dial-backs this node made), and `listener_talkers` once after
+  `send_listener_talkers`.
+- **Probes.** The coordinator schedules a dial-back when a report asks (`probe_wanted`) or on `listeners.probe`, at most
+  once a minute per listener: the target gets `listener_probes: [{probe_id, key, nonce, expires_at}]`, the prober
+  `dial_probes: [{probe_id, host, port, nonce}]`; the prober writes `OARBANK-PROBE/1 <probe_id>` and expects
+  `OARBANK-PROBE/1 OK <nonce>` (`SAME`: from the target's own network) and reports `probe_results: [{probe_id, ok,
+  detail, rtt_ms}]`; the target then gets `listener_reachability: {key: {state, at, via, detail}}`.
+- **Mappings** are journaled in `state/portmaps.json` before each request; `oarbank-agent portmap status|release-all`
+  read and empty it; the agent releases its mappings when it stops (also on SIGTERM), when the coordinator answers
+  `node_retired`, and the launcher's uninstall runs `portmap release-all`.
 
 ## Doctor
 
