@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import pytest  # noqa: E402
 
 from conftest import REPO, agent_env, install_module  # noqa: E402
-from procguard import SpawnTree  # noqa: E402
+from procguard import KILL, SpawnTree  # noqa: E402
 from test_agent_files import HOST, admit_next, db_rows, module_state, op, origin_cert  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
@@ -96,7 +96,7 @@ def finish(tree, procs, homes):
         try:
             p.wait(30)
         except subprocess.TimeoutExpired:
-            tree.signal(p.pid, signal.SIGKILL)
+            tree.signal(p.pid, KILL)
             p.wait(10)
     for h in homes:
         print(f"--- {h.name}\n" + (h.parent / f"{h.name}.log").read_text(errors="replace")[-3000:])

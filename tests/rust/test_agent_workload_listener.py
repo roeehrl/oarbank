@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, free_port, install_module  # noqa: E402
-from procguard import SpawnTree  # noqa: E402
+from procguard import KILL, SpawnTree  # noqa: E402
 from test_agent_listeners import Gateway, ask, listener  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
@@ -161,7 +161,7 @@ def test_a_public_listener_reaches_a_workload_through_the_relay(agent_bin, coord
             try:
                 p.wait(60)
             except subprocess.TimeoutExpired:
-                tree.signal(p.pid, signal.SIGKILL)
+                tree.signal(p.pid, KILL)
                 p.wait()
         subprocess.run([str(agent_bin), "--home", str(home), "stop-workloads"], capture_output=True)
         tree.__exit__(None, None, None)

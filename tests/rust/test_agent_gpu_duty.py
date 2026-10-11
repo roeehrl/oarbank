@@ -14,7 +14,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
-from procguard import SpawnTree  # noqa: E402
+from procguard import KILL, SpawnTree  # noqa: E402
 from test_agent_cotenancy import op  # noqa: E402
 from test_agent_jobs import node_modules  # noqa: E402
 from test_agent_session import wait  # noqa: E402
@@ -91,7 +91,7 @@ def test_a_cooperative_runner_holds_the_duty_the_agent_writes(agent_bin, coordin
         try:
             out += p.communicate(timeout=30)[0]
         except subprocess.TimeoutExpired:
-            tree.signal(p.pid, signal.SIGKILL)
+            tree.signal(p.pid, KILL)
             out += p.communicate(timeout=10)[0]
         trainer.wait(10)
         print(out[-4000:])

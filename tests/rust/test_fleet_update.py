@@ -42,6 +42,24 @@ def op(c, name, target=None, params=None, plan=False):
     return c.api("POST", f"/api/v1/ops/{name}", json={**body, "reason": "e2e"})
 
 
+def diagnose(home, state) -> str:
+    """What the node side shows when a step times out: the spool, the runner's result and journal, `current`, and the
+    agent processes running."""
+    lines = []
+    for f in (home / "updates" / "result.json", home / "updates" / "confirmed", home / "updates" / "request.json",
+              state / "journal.json", home / "state" / "upgrade.json"):
+        lines.append(f"{f}: {f.read_text(errors='replace')[:2000] if f.is_file() else '(none)'}")
+    try:
+        lines.append(f"current -> {pointer(home / 'current')}")
+    except OSError as e:
+        lines.append(f"current: {e}")
+    lines.append(f"spool: {sorted(p.name for p in (home / 'updates').iterdir()) if (home / 'updates').is_dir() else []}")
+    ps = ["tasklist", "/V", "/FI", "IMAGENAME eq oarbank-agent.exe"] if os.name == "nt" else ["ps", "-eo", "pid,stat,etime,args"]
+    out = subprocess.run(ps, capture_output=True, text=True).stdout
+    lines.append("processes:\n" + "\n".join(l for l in out.splitlines() if "oarbank" in l or "Image Name" in l))
+    return "\n".join(lines)
+
+
 def node(c):
     return next(iter(c.api("GET", "/api/v1/fleet")["nodes"]), None)
 
@@ -108,6 +126,9 @@ def test_a_rollout_updates_the_package_and_a_release_that_cannot_start_is_rolled
         assert result["state"] == "rolled_back" and result["release"] == "1.0.0-alpha.3"
         wait(lambda: any(r["version"] == "1.0.0-alpha.3" and r["state"] in ("halted", "rolling_back", "rolled_back")
                          for r in updates(coordinator)["history"]), timeout=60)
+    except AssertionError:
+        print(diagnose(home, state))
+        raise
     finally:
         out = ""
         for p in (agent, runner):

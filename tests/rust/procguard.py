@@ -31,6 +31,10 @@ def started(pid: int) -> str | None:
     return out or None
 
 
+
+# the hard stop: SIGKILL on POSIX; on Windows os.kill with SIGTERM is TerminateProcess, which is just as final
+KILL = getattr(_signal, "SIGKILL", _signal.SIGTERM)
+
 class SpawnTree:
     def __init__(self, root: int | None = None, period_s: float = 0.25):
         self.root = root or os.getpid()
