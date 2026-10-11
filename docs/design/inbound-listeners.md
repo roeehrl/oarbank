@@ -443,3 +443,65 @@ release-all` (deletes every journaled mapping; the launcher's uninstall step), `
 | SDK | manifest rules; the service helper receiving listener connections and announcements; the conformance kit's **listener** suite (it plays the agent: hands connections in, checks the service answers and still never listens) |
 | Coordinator | statement building and signing with listeners, the operations, probe scheduling, explain codes, S24 |
 | Real routers (manual) | listed under Implementation status |
+
+## Implementation status
+
+Built as designed in core 2.10 (agent, coordinator, console, CLI) and SDK 1.6 (manifest, schemas, `service_endpoint`,
+the conformance kit's listener suite, the reference module `publicecho`). Where the build adds to the design or
+departs from it:
+
+- **Checked before building.**
+  - *Accept on an inherited listening unix socket under Seatbelt* (needed for `listen_fd`): a service under the
+    deny-default module profile (profile 4) accepted connections on a listening unix socket the parent made and passed
+    down, and was refused its own unix and TCP listening sockets with `EPERM`. Linux seccomp refuses `listen`, not
+    `accept`. So `listen_fd` is built on macOS and Linux.
+  - *A first listen and the macOS Application Firewall* (in a throwaway macOS 26.4 VM, firewall on, downloaded signed
+    software not allowed, an ad hoc–signed agent): the first incoming connection to the agent, whether it runs as a
+    root launchd daemon or as a LaunchAgent in the console user's session, makes `socketfilterfw` prompt the console
+    user; every connection is held (clients time out) until someone answers, and later ones are not prompted for while
+    one prompt is open. `socketfilterfw --getappblocked` calls such an unlisted program "permitted". After
+    `oarbank-agent firewall allow` (`--add`, `--unblockapp`) connections reach the agent at once. Hence the package's
+    postinstall lists the agent as allowed when the firewall is on, and `firewall status` reads `--listapps`. Not
+    measured: a Developer ID–signed agent with "allow downloaded signed software" on (it should pass without a prompt),
+    and whether the rule follows the agent across self-updates by its signature (the firewall's log says it matches apps
+    by designated requirement).
+- **TLA+ findings applied** (`specs/README.md`, OarbankPortmap): after a network change the old mapping is released
+  before the port is asked for again, and a stable-port listener whose port is still held by this node's own mapping
+  from its previous address (which NAT-PMP, PCP and secure-mode UPnP routers let only that address delete) waits for
+  that lease to run out instead of reporting its own port taken (findings d, f); a UPnP lease about to run out is left
+  to expire rather than read back and deleted in two calls a router reboot could split (finding e); a mapping found
+  lost (epoch reset, failed read-back, expired lease) is requested again under the same journal entry, its port and
+  its nonce, and an entry is removed only on a delete's or a conflict's answer (finding g).
+- **The property tests** found three more, now fixed: a UPnP request whose answer was lost and then a request for
+  another port (a conflict walk) left the first mapping unjournaled, so `router_choice` no longer lets UPnP pick the
+  port (it walks from the wanted port, as `next_free` does) and a taken-over entry keeps its port; two listeners of one
+  node never ask for the same external port (a UPnP router lets one client overwrite its own mapping); NAT-PMP and PCP
+  leases are verified by refreshing them (as cheap as the epoch probe, and it re-creates a mapping a router lost too
+  soon after an answer for the epoch to show it).
+- **Network changes are polled**, every 5 s (netdev reads the routing table and interfaces in process), with a wake
+  detected by the wall clock running ahead of the monotonic one. OS change events (SCDynamicStore, rtnetlink,
+  `NotifyIpInterfaceChange`) would react sooner; the poll bounds the delay at 5 s plus a verification.
+- **SIGTERM** (a service manager stopping the agent) now releases the mappings before the agent ends as SIGTERM would;
+  before, the agent ended at once. Windows' service stop does not go through it: there the short leases and the next
+  start (or the uninstall's `portmap release-all`) clean up.
+- **IPv6 pinholes** over UPnP are deleted by their id while their lease runs: `WANIPv6FirewallControl` has no read-back
+  that names a pinhole's client, so a pinhole id a rebooted router gave to another device could in principle be
+  deleted; leases are at most an hour.
+- **No in-fleet relay** for unreachable nodes, and UDP listeners, as decided.
+- **Workloads** (D45) are a separate change: a listener is served by an endpoint service; `Manifest.listener_targets()`
+  in the SDK and the agent's `ServiceManager::listener_target` are the places a workload target joins.
+- **The core is still numbered 2.8** on this branch: the end-to-end test starts its coordinator as 2.10, and the release
+  commit raises the version.
+
+### What remains to verify on real routers
+
+None of this ran against a real router: every test talks to the fake gateways on loopback. On the owner's networks:
+
+1. A single NAT with UPnP on: map, verify, renew at half life, the router rebooted, Wi-Fi to Ethernet, sleep and wake,
+   `oarbank listener disable --all`, uninstall; the router's own page showing exactly the mappings the Network card
+   lists, and nothing left after uninstall.
+2. The same router with NAT-PMP or PCP if it offers them (epoch handling, announcements on UDP 5350).
+3. A double NAT: the doctor must say `DOUBLE_NAT` with the bridge-mode fix; a CGNAT line `CGNAT`.
+4. A dial-back between two sites (a node on each network): `REACHABLE`, and `SAME` from a node on the same LAN.
+5. IPv6: a pinhole by PCP or IGDv2 where the router offers one, `IPV6_PINHOLE_NEEDED` where it does not.
+6. The macOS firewall with a Developer ID–signed agent, and Windows Defender Firewall's rule from the helper.
