@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, Coordinator, agent_env, install_module  # noqa: E402
+from procguard import SpawnTree  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
 TOY = REPO / "vendor" / "oarbank-sdk" / "examples" / "toy"
@@ -116,29 +117,21 @@ def start_agent(agent_bin, coordinator, home):
                             stdout=log, stderr=subprocess.STDOUT)
 
 
-def stopped(p):
-    p.send_signal(signal.SIGTERM)
-    try:
-        p.wait(timeout=60)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait()
+def stopped(tree: SpawnTree, p):
+    """Stop a process the test started (the guard checks it is the test's own, by pid and start time)."""
+    if p.poll() is None:
+        tree.signal(p.pid, signal.SIGTERM)
+        try:
+            p.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            tree.signal(p.pid, signal.SIGKILL)
+            p.wait()
     return ""
 
 
 def row(c):
     rows = c.api("GET", "/api/v1/workloads")["workloads"]
     return rows[0] if rows else {}
-
-
-def alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
 
 
 def stat(pid: int) -> str:
@@ -154,6 +147,7 @@ def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigne
     planned(c, "protection.rules.update", "fleet", {"config": {"schema": 1, "node": {"mode": "fleet_first", "memory": floors}}})
     home = tmp_path / "agent"
     log, owner = [], None
+    tree = SpawnTree().__enter__()                       # every process this test starts, with its start time
     p = start_agent(agent_bin, c, home)
     try:
         pending = wait(lambda: [e for e in c.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"] or None)
@@ -170,6 +164,8 @@ def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigne
         run_dir = wait(lambda: next(iter(sorted(runs.glob("run-*/daemon.pid"))), None), timeout=60).parent
         daemon = int((run_dir / "daemon.pid").read_text())
         leader = r["report"]["pid"]
+        tree.add(daemon)
+        tree.add(leader)
         assert os.getpgid(daemon) != leader and os.getsid(daemon) != os.getsid(leader)
         import hashlib
         assert (run_dir / "secret.sha256").read_text() == hashlib.sha256(SECRET.encode()).hexdigest()
@@ -186,45 +182,50 @@ def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigne
         wait(lambda: stat(daemon).startswith("T") and stat(leader).startswith("T"), timeout=60)
         # past its pause tolerance (8 s) it is stopped and held: the daemon is gone with it
         wait(lambda: row(c)["state"] == "held", timeout=60)
-        wait(lambda: not alive(daemon), timeout=30)
+        wait(lambda: not tree.alive(daemon), timeout=30)
         assert row(c)["report"]["held_code"] == "WORKLOAD_PAUSE_TOLERANCE"
         # the owner's process ends: the hold ends and it runs again (a new run, a new daemon)
-        owner.kill()
-        owner.wait()
+        stopped(tree, owner)
         owner = None
         wait(lambda: row(c)["state"] == "running" and row(c)["report"].get("run", 0) >= 2, timeout=120)
         run_dir = wait(lambda: next(iter(sorted(runs.glob("run-*/daemon.pid"))), None), timeout=60).parent
         daemon = int((run_dir / "daemon.pid").read_text())
         leader = row(c)["report"]["pid"]
+        tree.add(daemon)
+        tree.add(leader)
         # the agent restarts: the workload keeps running and the new agent adopts it (the same leader and daemon)
-        log.append(stopped(p))
-        assert alive(leader) and alive(daemon), "a stopped agent leaves its workloads running"
+        log.append(stopped(tree, p))
+        assert tree.alive(leader) and tree.alive(daemon), "a stopped agent leaves its workloads running"
         p = start_agent(agent_bin, c, home)
         wait(lambda: row(c)["report"].get("adopted") and row(c)["report"].get("pid") == leader, timeout=120)
-        assert alive(daemon) and row(c)["fence"] == 1, row(c)
+        assert tree.alive(daemon) and row(c)["fence"] == 1, row(c)
         # an evict rule holds it while it lasts
         planned(c, "protection.rules.update", nid, {"config": {"schema": 1, "node": {
             "mode": "fleet_first", "memory": floors, "defaults": {"cooldown": {"base_s": 1, "max_s": 1}}}, "rule": [
             {"id": "e2e-evict", "match": {"argv_regex": tag}, "active_when": {"for_s": 0}, "evict": {}, "exit_after_s": 0}]}})
         owner = subprocess.Popen(["/bin/sh", "-c", "sleep 600; :", tag])
-        wait(lambda: row(c)["state"] == "held" and not alive(daemon) and not alive(leader), timeout=90)
-        owner.kill()
-        owner.wait()
+        wait(lambda: row(c)["state"] == "held" and not tree.alive(daemon) and not tree.alive(leader), timeout=90)
+        stopped(tree, owner)
         owner = None
         wait(lambda: row(c)["state"] == "running", timeout=120)
         leader = row(c)["report"]["pid"]
         run_dir = wait(lambda: next(iter(sorted(runs.glob("run-*/daemon.pid"))), None), timeout=60).parent
         daemon = int((run_dir / "daemon.pid").read_text())
+        tree.add(daemon)
+        tree.add(leader)
         # unassigned: everything of it ends, the seat is given back
         c.api("POST", "/api/v1/ops/workloads.unassign", json={"target": "toy/worker", "params": {"node": nid}, "reason": "e2e"})
-        wait(lambda: not alive(daemon) and not alive(leader), timeout=60)
+        wait(lambda: not tree.alive(daemon) and not tree.alive(leader), timeout=60)
         assert not (home / "state" / "workloads" / "toy.worker.json").exists()
         assert not (home / "run" / "workloads" / "toy" / "worker" / "secrets.json").exists()
+        # the guard: the agent acted on nothing but this test's own processes
+        assert tree.check_journal(home) > 0
     finally:
         if owner:
-            owner.kill()
-        log.append(stopped(p))
+            stopped(tree, owner)
+        log.append(stopped(tree, p))
         subprocess.run([str(agent_bin), "--home", str(home), "stop-workloads"], capture_output=True)
+        tree.__exit__(None, None, None)
         text = Path(f"{home}.log").read_text(encoding="utf-8", errors="replace") if Path(f"{home}.log").exists() else ""
         assert SECRET not in text, "the secret reached the agent's log"
         print(text[-6000:])
