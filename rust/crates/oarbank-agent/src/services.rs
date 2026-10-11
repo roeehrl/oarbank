@@ -101,6 +101,8 @@ struct ServiceDecl {
     gpu: bool,
     /// `gpu.apis_any` of a GPU service: offered and started only where the host provides one of them.
     apis_any: Vec<String>,
+    /// The inbound listeners whose connections it serves (docs/design/inbound-listeners.md).
+    listeners: Vec<String>,
 }
 
 fn secs(v: &Value, default: f64, min: f64) -> f64 {
@@ -148,6 +150,7 @@ impl ServiceDecl {
             endpoint: v["endpoint"].as_bool() == Some(true),
             gpu: v["gpu"]["use"].as_str().is_some_and(|u| u != "none"),
             apis_any: if v["gpu"]["use"].as_str().is_some_and(|u| u != "none") { strings(&v["gpu"]["apis_any"]) } else { vec![] },
+            listeners: if v["endpoint"].as_bool() == Some(true) { strings(&v["listeners"]) } else { vec![] },
         })
     }
 
@@ -202,6 +205,17 @@ struct ModCtx {
     /// `egress-allowlist`: the module's proxy, kept for as long as the module keeps the same allow list (a running
     /// service's sandbox names its port).
     proxy: Option<ProxySlot>,
+    /// What a listener service's `start` gets: the listening sockets of its `listen_fd` listeners (the listener hub's).
+    listen: ListenFds,
+}
+
+/// The listening unix sockets the listener hub made for `listen_fd` listeners, by service key: (listener, descriptor).
+/// The hub owns the sockets; a service's `start` inherits them.
+pub type ListenFds = Arc<Mutex<BTreeMap<String, Vec<(String, i64)>>>>;
+
+/// The file a listener service finds its listeners' announcements in (`OARBANK_LISTENERS_FILE`).
+pub fn listeners_file(data: &Path, service: &str) -> PathBuf {
+    data.join(format!("listeners-{service}.json"))
 }
 
 type ProxySlot = Arc<Mutex<Option<crate::proxy::Proxy>>>;
@@ -250,6 +264,8 @@ struct Exec {
     kind: &'static str,
     exec: Vec<Value>,
     registry: Option<Arc<SpawnRegistry>>,
+    /// A service serving inbound listeners (its start gets OARBANK_LISTENERS_FILE).
+    listeners: bool,
 }
 
 /// Whether a process container still has members.
@@ -389,6 +405,14 @@ impl Exec {
                     ("OARBANK_LIMITS_FILE".into(), c.limits_file.display().to_string())]);
         if let Some(ch) = channel {
             env.push((endpoints::CHANNEL_ENV.into(), ch.child_value()));
+            // a listener service: its announcements' file, and the listening sockets of its listen_fd listeners
+            let key = format!("{}/{}", c.module, self.name);
+            if self.listeners {
+                env.push(("OARBANK_LISTENERS_FILE".into(), listeners_file(&c.data, &self.name).display().to_string()));
+            }
+            for (name, fd) in lock(&c.listen).get(&key).cloned().unwrap_or_default() {
+                env.push((format!("OARBANK_LISTEN_FD_{}", name.to_ascii_uppercase()), format!("fd:{fd}")));
+            }
         }
         if let Some(p) = port {
             let url = format!("http://127.0.0.1:{p}");
@@ -415,6 +439,19 @@ impl Exec {
         }
         if let Some(ch) = channel {
             ch.prepare(&mut cmd);
+            #[cfg(unix)]
+            for (_, fd) in lock(&c.listen).get(&format!("{}/{}", c.module, self.name)).cloned().unwrap_or_default() {
+                use std::os::unix::process::CommandExt;
+                let fd = fd as i32;
+                unsafe {
+                    cmd.pre_exec(move || {
+                        if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
         }
         let mut child = match crate::sys::spawn_contained(&mut cmd, keep_group) {
             Ok(ch) => ch,
@@ -666,6 +703,15 @@ enum Job {
     Probe,
 }
 
+/// A listener's service, for the listener hub (`listener_target`).
+pub struct ListenerTarget {
+    pub key: String,
+    pub service: String,
+    pub data: PathBuf,
+    pub channel: Option<Arc<Channel>>,
+    pub why: Option<String>,
+}
+
 /// A running service for host protection: its process group, whether it uses a GPU, whether protection may stop it,
 /// and the pools it provides (the jobs reserving them are its users, released with it).
 pub struct ServiceView {
@@ -693,6 +739,8 @@ pub struct ServiceManager {
     reap_every: Duration,
     /// The GPU APIs the host provides (the agent's latest probe, gpuapi.rs).
     gpu_apis: Vec<String>,
+    /// The listener hub's listening sockets for `listen_fd` listeners, by service.
+    listen_fds: ListenFds,
 }
 
 /// The work left on services and probes a release no longer has (`configure`): an op still in flight on one, and the
@@ -716,7 +764,7 @@ impl ServiceManager {
         ServiceManager { layout, runtime, registry, manage: manage_services, node_id: String::new(), limits: json!({}),
                          modules: BTreeMap::new(), proxies: HashMap::new(), shared: SharedRef::default(),
                          last_live: BTreeSet::new(), fingerprint_every: Duration::from_secs(20),
-                         reap_every: Duration::from_secs(60), gpu_apis: vec![] }
+                         reap_every: Duration::from_secs(60), gpu_apis: vec![], listen_fds: ListenFds::default() }
     }
 
     /// The GPU APIs the host provides (a new probe): a service whose `gpu.apis_any` they no longer meet is withdrawn and
@@ -803,7 +851,7 @@ impl ServiceManager {
         Ok(ModCtx { module_id: entry["module_id"].as_str().unwrap_or(&name).to_string(), module: name, bundle, python, venv,
                     data, grants, tools_file, settings_file, limits_file, tool_paths, roots: self.runtime.roots.clone(),
                     node_id: self.node_id.clone(), net, gpu: entry["sandbox"]["devices"]["gpu"].as_str().is_some_and(|g| g != "none"),
-                    exec_rw: entry["sandbox"]["exec_writable"].as_bool() == Some(true), proxy })
+                    exec_rw: entry["sandbox"]["exec_writable"].as_bool() == Some(true), proxy, listen: self.listen_fds.clone() })
     }
 
     /// A new release or policy: (re)read services/probes from the release's module entries, honour disabled_services
@@ -868,7 +916,7 @@ impl ServiceManager {
             let stop = self.manage && (s.running || s.busy) && s.decl.lifecycle != Lifecycle::Manual;
             let Some(ctx) = old_modules.get(&s.module).filter(|_| stop || s.busy) else { continue };
             let x = Exec { ctx: ctx.clone(), name: s.decl.name.clone(), kind: "service", exec: s.decl.exec.clone(),
-                           registry: self.registry.clone() };
+                           registry: self.registry.clone(), listeners: !s.decl.listeners.is_empty() };
             let (sh, reg) = (self.shared.clone(), self.registry.clone());
             lock(&sh).dropped.insert(key.clone(), s);
             let k = key.clone();
@@ -982,17 +1030,17 @@ impl ServiceManager {
         let sh = self.shared.clone();
         let exec = {
             let g = lock(&sh);
-            let (module, name, kind, exec) = match &job {
+            let (module, name, kind, exec, listeners) = match &job {
                 Job::Probe => match g.probes.get(&key) {
-                    Some(p) => (p.module.clone(), p.decl.name.clone(), "probe", p.decl.exec.clone()),
+                    Some(p) => (p.module.clone(), p.decl.name.clone(), "probe", p.decl.exec.clone(), false),
                     None => return,
                 },
                 _ => match g.services.get(&key) {
-                    Some(s) => (s.module.clone(), s.decl.name.clone(), "service", s.decl.exec.clone()),
+                    Some(s) => (s.module.clone(), s.decl.name.clone(), "service", s.decl.exec.clone(), !s.decl.listeners.is_empty()),
                     None => return,
                 },
             };
-            self.modules.get(&module).map(|ctx| Exec { ctx: ctx.clone(), name, kind, exec, registry: self.registry.clone() })
+            self.modules.get(&module).map(|ctx| Exec { ctx: ctx.clone(), name, kind, exec, registry: self.registry.clone(), listeners })
         };
         let Some(x) = exec else {
             idle(&sh, &key);
@@ -1089,6 +1137,26 @@ impl ServiceManager {
         changed.bump();
     }
 
+    /// The listener hub's view of a listener's service: the module's service that lists `listener` (key), its endpoint
+    /// channel while it accepts connections, its module data directory (the listeners file), and why it is not
+    /// accepting (held by protection, disabled, down).
+    pub fn listener_target(&self, module: &str, listener: &str) -> Option<ListenerTarget> {
+        let sh = lock(&self.shared);
+        let (key, s) = sh.services.iter().find(|(_, s)| s.module == module && s.decl.listeners.iter().any(|l| l == listener))?;
+        let data = self.modules.get(module).map(|c| c.data.clone())?;
+        let accepting = !sh.halted && s.offered() && s.held.is_none() && s.running && s.ready
+            && s.channel.as_ref().is_some_and(|c| c.accepting());
+        let why = if s.disabled { Some("disabled") } else if s.held.is_some() { Some("held") } else if !s.running || !s.ready { Some("down") }
+                  else { None };
+        Some(ListenerTarget { key: key.clone(), service: s.decl.name.clone(), data,
+                              channel: if accepting { s.channel.clone() } else { None }, why: why.map(str::to_string) })
+    }
+
+    /// The listening sockets `listen_fd` listeners pass to their service's next `start` (the hub keeps them open).
+    pub fn listen_fds(&self) -> ListenFds {
+        self.listen_fds.clone()
+    }
+
     /// Running services as host protection sees them.
     pub fn fleet_view(&self) -> Vec<ServiceView> {
         lock(&self.shared).services.iter().filter(|(_, s)| s.running)
@@ -1163,7 +1231,8 @@ impl ServiceManager {
                 let sh = lock(&self.shared);
                 let s = &sh.services[&key];
                 self.modules.get(&s.module).map(|ctx| Exec { ctx: ctx.clone(), name: s.decl.name.clone(), kind: "service",
-                                                              exec: s.decl.exec.clone(), registry: self.registry.clone() })
+                                                              exec: s.decl.exec.clone(), registry: self.registry.clone(),
+                                                              listeners: !s.decl.listeners.is_empty() })
             };
             let Some(x) = x else { continue };
             let (sh, reg) = (self.shared.clone(), self.registry.clone());

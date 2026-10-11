@@ -187,6 +187,13 @@ mod os {
         pub fn raw(&self) -> HANDLE {
             self.h as HANDLE
         }
+
+        /// Give up ownership of the handle (the caller closes it).
+        pub fn into_raw(self) -> usize {
+            let h = self.h;
+            std::mem::forget(self);
+            h
+        }
     }
 
     impl Drop for End {
@@ -331,6 +338,29 @@ mod os {
 }
 
 pub use os::End;
+
+/// The agent's end of a listener connection as an async stream, for the relay.
+#[cfg(unix)]
+pub type AgentStream = tokio::net::UnixStream;
+#[cfg(windows)]
+pub type AgentStream = tokio::net::windows::named_pipe::NamedPipeServer;
+
+/// Hand an end to tokio (it must be in a runtime). POSIX: a unix stream socket; Windows: the overlapped server end
+/// of a pipe pair (`pair_with(true, _)`).
+pub fn into_async(end: End) -> std::io::Result<AgentStream> {
+    #[cfg(unix)]
+    {
+        let s = std::os::unix::net::UnixStream::from(end);
+        s.set_nonblocking(true)?;
+        tokio::net::UnixStream::from_std(s)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+        let h = end.into_raw();
+        unsafe { tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(h as _) }
+    }
+}
 
 /// The child's end of a channel or connector, until the child has it.
 pub struct ChildEnd {
@@ -477,6 +507,8 @@ pub struct Channel {
     next: AtomicU64,
     held: Held,
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The service's narrowing of each listener's clients (`listener_allow`): CIDRs, or absent for no narrowing.
+    allows: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl std::fmt::Debug for Channel {
@@ -493,7 +525,7 @@ impl Channel {
         let ch = Arc::new(Channel { service: service.into(), end, child: Mutex::new(Some(ChildEnd::new(child))),
                                     container: Container::default(), hello: Mutex::new(None), closed: AtomicBool::new(false),
                                     write: Mutex::new(()), next: AtomicU64::new(0), held: Held::default(),
-                                    reader: Mutex::new(None) });
+                                    reader: Mutex::new(None), allows: Mutex::new(HashMap::new()) });
         let c2 = ch.clone();
         let t = std::thread::Builder::new().name(format!("endpoint {service}")).spawn(move || {
             let mut lines = Lines::new(&c2.end);
@@ -511,6 +543,26 @@ impl Channel {
                     Some("accepted") => {
                         if let Some(n) = m["conn"].as_u64() {
                             c2.held.drop_one(n);
+                        }
+                    }
+                    // inbound listeners (docs/design/inbound-listeners.md): the service narrows who may connect; the
+                    // agent intersects it with the owner's list, so it can only ever narrow
+                    Some("listener_allow") => {
+                        if let Some(l) = m["listener"].as_str() {
+                            let mut a = lock(&c2.allows);
+                            match m["cidrs"].as_array() {
+                                None => {
+                                    a.remove(l);
+                                }
+                                Some(list) => {
+                                    let new = list.iter().filter_map(Value::as_str).map(str::to_string).take(65536);
+                                    let e = a.entry(l.to_string()).or_default();
+                                    if m["append"].as_bool() != Some(true) {
+                                        e.clear();
+                                    }
+                                    e.extend(new);
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -579,6 +631,44 @@ impl Channel {
             self.send(&json!({"op": "connection", "conn": n, "attempt": attempt, "handle": h}), None).map_err(unavailable)?;
             Ok((n, job))
         }
+    }
+
+    /// A connection a listener accepted, for the service: the service's end goes on the channel as `{"op":
+    /// "connection", "conn", "listener", "peer"}` (no attempt); the agent's end is returned, and the agent relays the
+    /// TCP connection's bytes through it.
+    pub fn hand_listener(&self, listener: &str, peer: &str) -> Result<End, Refusal> {
+        if !self.accepting() {
+            return Err(Refusal::new("service_unavailable", format!("{} is not accepting connections", self.service)));
+        }
+        let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let unavailable = |e: std::io::Error| Refusal::new("service_unavailable", format!("{}: {e}", self.service));
+        #[cfg(unix)]
+        {
+            let (ours, svc) = os::pair().map_err(unavailable)?;
+            self.send(&json!({"op": "connection", "conn": n, "listener": listener, "peer": peer}), Some(&svc)).map_err(unavailable)?;
+            self.held.keep(n, svc);
+            Ok(ours)
+        }
+        #[cfg(windows)]
+        {
+            let (ours, svc) = os::pair_with(true, false).map_err(unavailable)?;
+            let pid = lock(&self.hello).ok_or_else(|| Refusal::new("service_unavailable", "no hello"))?;
+            let h = os::place(svc, pid).map_err(unavailable)?;
+            self.send(&json!({"op": "connection", "conn": n, "listener": listener, "peer": peer, "handle": h}), None).map_err(unavailable)?;
+            Ok(ours)
+        }
+    }
+
+    /// Send the service a message of the agent's own (a listener announcement), if the channel is open.
+    pub fn notify(&self, v: &Value) {
+        if !self.closed.load(Ordering::SeqCst) {
+            let _ = self.send(v, None);
+        }
+    }
+
+    /// The service's narrowing of `listener` (None: none).
+    pub fn allow_list(&self, listener: &str) -> Option<Vec<String>> {
+        lock(&self.allows).get(listener).cloned()
     }
 
     /// The attempt is over: the service drops whatever it still holds of it.

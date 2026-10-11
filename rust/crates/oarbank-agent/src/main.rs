@@ -17,6 +17,7 @@ mod discover;
 mod doctor;
 mod endpoints;
 mod facts;
+mod firewall;
 mod folders;
 mod fsutil;
 mod gpuapi;
