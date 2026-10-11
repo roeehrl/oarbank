@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Model-check the specs under every config and compare each outcome with the expected one.
-# A config's spec is its name up to the first underscore: OarbankLease_liveness.cfg checks
-# OarbankLease.tla, OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla) under every config and compare
+# each outcome with the expected one. A config's spec is its name up to the first underscore: OarbankLease_liveness.cfg
+# checks OarbankLease.tla, OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
 #
 #   ./run_tlc.sh                 run every config
 #   ./run_tlc.sh a_nofence       run only the configs whose name contains "a_nofence"
@@ -80,6 +80,9 @@ CONFIGS=(
   "OarbankLease_module_faults                        ok"
   "OarbankLease_module_faults_liveness               ok"
   "OarbankLease_o_no_await_lease                     inv:ModuleFaultsNotCharged"
+  "OarbankFastPause                                  ok"
+  "OarbankFastPause_a_nofresh                        inv:FastPauseHolds"
+  "OarbankFastPause_b_unshared                       liveness"
 
   # OarbankPortmap.tla: the agent's port-mapping lifecycle (docs/design/inbound-listeners.md)
   "OarbankPortmap                                    ok"

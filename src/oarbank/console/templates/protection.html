@@ -65,6 +65,60 @@ also unions this with its local protection file, strictest wins.</p>
 <div class="card"><b>Live preview</b><div id="prot-preview" class="small" aria-live="polite"><p class="placeholder"><span class="spin" aria-hidden="true"></span>Computing the preview…</p></div></div>
 </div>
 
+<h2 id="cotenancy">Co-tenancy <span class="small mut">(what fleet work costs your protected processes, measured; gpu_jobs = {{ cot.gpu_jobs }})</span></h2>
+<div class="grid">
+<div class="card">
+  <b>Phases and sources</b>
+  <table class="small"><tr><th scope="col">source</th><th scope="col">state</th><th scope="col">read by</th><th scope="col">tags</th></tr>
+  {% for p in cot.phases %}<tr><td class="mono">{{ p.key }}{% if p.immediate %} <span class="chip acc" title="acts between ticks (S25)">immediate</span>{% endif %}</td>
+    <td>{% if not p.readable %}<span class="chip warn">unreadable: held as on</span>{% elif p.on %}<span class="chip warn">on</span>{% else %}<span class="chip">off</span>{% endif %}{% if p.since %} <span class="mut">{{ p.since | ago }}</span>{% endif %}</td>
+    <td>{{ {'agent': 'the agent', 'helper': "the person's session helper", 'exec': 'process trigger'}.get(p.reader, p.reader) }}</td>
+    <td>{% for t in p.tags %}<span class="chip">{{ t }}</span>{% endfor %}</td></tr>
+  {% else %}<tr><td colspan="4" class="mut">no during phases configured</td></tr>{% endfor %}
+  {% for p in cot.progress %}<tr><td class="mono">{{ p.rule }} <span class="mut">progress</span></td>
+    <td>{% if not p.readable %}<span class="chip warn">unreadable</span>{% elif p.rate is not none %}{{ '%.3f' | format(p.rate) }}/s{% else %}–{% endif %}</td>
+    <td>{{ {'agent': 'the agent', 'helper': "the person's session helper", 'exec': 'a probe'}.get(p.reader, p.reader) }}</td><td></td></tr>{% endfor %}
+  </table>
+  {% set lat = cot.event_latency or {} %}
+  <p class="small">Event path, source event to pause request: {% if lat.n %}p50 {{ lat.p50_ms }} ms · p99 {{ lat.p99_ms }} ms · max {{ lat.max_ms }} ms over {{ lat.n }}{% else %}<span class="mut">no immediate pause yet</span>{% endif %}</p>
+  {% if cot.gpu_budget %}<p class="small">GPU budget beside protected GPU work: {% if cot.gpu_budget.not_certified %}<span class="chip acc">0: not certified for {{ cot.gpu_budget.not_certified | join(', ') }}</span>{% else %}<b>gpu_duty {{ cot.gpu_budget.duty }}</b> for {{ cot.gpu_budget.jobs }} cooperative job{{ 's' if cot.gpu_budget.jobs != 1 }}{% endif %}</p>{% endif %}
+</div>
+<div class="card">
+  <b>Certificates</b>
+  <table class="small"><tr><th scope="col">rule</th><th scope="col">work</th><th scope="col">R (90 % interval)</th><th scope="col">until</th><th scope="col">state</th></tr>
+  {% for c in cot.certificates %}<tr><td class="mono">{{ c.rule }}</td><td class="mono">{{ c.work }}{% if c.duty is not none %} · duty {{ c.duty }}{% endif %}</td>
+    <td>{{ '%.1f' | format(c.r * 100) }} % ({{ '%.1f' | format(c.r_lo * 100) }}–{{ '%.1f' | format(c.r_hi * 100) }}), margin {{ '%.0f' | format(c.margin * 100) }} %</td>
+    <td class="mut">{{ c.valid_until | ago }}</td><td><span class="chip {{ 'ok' if c.status == 'valid' else 'warn' }}" title="{{ c.why }}">{{ c.status }}</span> <a href="/protection/ab/{{ c.run_id }}">run</a></td></tr>
+  {% else %}<tr><td colspan="5" class="mut">none: a harness run that shows no slowdown earns one (valid 14 days, or until the node or the protected program changes)</td></tr>{% endfor %}</table>
+  {% if cot.last_run %}<p class="small">Latest run <a class="mono" href="/protection/ab/{{ cot.last_run.run_id }}">{{ cot.last_run.run_id }}</a>: {{ cot.last_run.state }}{% if cot.last_run.decision %}, {{ cot.last_run.decision }}{% endif %}. {{ cot.last_run.summary }}</p>{% endif %}
+</div>
+<div class="card">
+  <b>Measure</b>
+  {% if cot.running %}<p class="small">Run <a class="mono" href="/protection/ab/{{ cot.running.run_id }}">{{ cot.running.run_id }}</a> is {{ cot.running.state }}.</p>
+    {{ m.op_form("protection.ab.abort", cot.running.run_id, "Abort the run") }}
+  {% elif not cot.rules %}<p class="small mut">A run measures a rule's own progress: give a rule <span class="mono">protect = {metric = "progress_rate", source = …}</span> first.</p>
+  {% else %}
+  {% call m.op_form("protection.ab.start", n.node_id, "Review a run…", cls="pri", inline=False) %}
+  <div class="kv small" style="margin:6px 0">
+    <label class="mut" for="ab-rule">rule</label><select id="ab-rule" name="p.rule">{% for r in cot.rules %}<option>{{ r }}</option>{% endfor %}</select>
+    <label class="mut" for="ab-work">work under test</label><input id="ab-work" name="p.work" value="gpu" size="14" title="gpu, cpu, all, a module, or module/workload">
+    <label class="mut" for="ab-duty">gpu_duty in ON windows</label><input id="ab-duty" name="p.duty" placeholder="none" size="6">
+    <label class="mut" for="ab-blocks">blocks</label><input id="ab-blocks" name="p.blocks" value="12" size="4">
+    <label class="mut" for="ab-window">window, washout (s)</label><span><input id="ab-window" name="p.window_s" value="300" size="5" aria-label="window seconds"> <input name="p.washout_s" value="60" size="4" aria-label="washout seconds"></span>
+    <label class="mut" for="ab-margin">margin</label><input id="ab-margin" name="p.margin" value="0.02" size="5">
+  </div>
+  <p class="small mut">T2: the fleet work under test runs beside the protected process in ON windows and is held in OFF windows,
+  in random order, until the margin is decided. Protection stays active; a collapse of the protected process aborts the run.</p>
+  {% endcall %}
+  {% call m.op_form("protection.ab.sweep", n.node_id, "Review a duty sweep…", inline=False) %}
+  <input type="hidden" name="p.rule" value="{{ cot.rules[0] }}"><input type="hidden" name="p.work" value="gpu">
+  <p class="small mut">Runs at gpu_duty 0.1, 0.2, 0.35, 0.5, … on rule <span class="mono">{{ cot.rules[0] }}</span>, stopping at the first level that is not
+  "no slowdown shown"; the highest passing level is this node's certified duty.</p>
+  {% endcall %}
+  {% endif %}
+</div>
+</div>
+
 <h2>Process picker <span class="small mut">(reported by the agent {{ processes_at | ago if processes_at else 'never' }}; refreshed when you preview)</span></h2>
 <table class="small"><tr><th class="num">pid</th><th>process</th><th>identity</th><th class="num">cpu</th><th class="num">GB</th><th>protected by</th><th><span class="sr-only">actions</span></th></tr>
 {% for p in picker %}<tr><td class="num">{{ p.pid }}</td><td class="mono" title="{{ p.path or 'path unreadable' }}">{{ p.name }}{% if p.argv is none %} <span class="mut">(arguments unreadable)</span>{% elif p.argv | length > 1 %} <span class="mut">{{ p.argv[1:] | join(' ') | truncate(60) }}</span>{% endif %}</td>

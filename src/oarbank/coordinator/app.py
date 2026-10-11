@@ -972,6 +972,31 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
             raise core.ApiError(404, "not_found", f"{n['hostname']} has no listener {key}")
         return {**{k: v for k, v in doc.items() if k != "listeners"}, "listener": row}
 
+    # ---------------- co-tenancy: harness runs and certificates (docs/design/gpu-cotenancy.md; `oarbank protection ab`)
+    @app.get("/api/v1/protection/ab/runs")
+    def api_ab_runs(node: str | None = None, limit: int = 50, actor=Depends(who)):
+        from . import cotenancy
+        try:
+            return {"runs": cotenancy.list_runs(db, node, max(1, min(limit, 500)))}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
+    @app.get("/api/v1/protection/ab/runs/{run_id}")
+    def api_ab_run(run_id: str, actor=Depends(who)):
+        from . import cotenancy
+        d = cotenancy.run_detail(db, run_id)
+        if d is None:
+            raise core.ApiError(404, "not_found", f"run {run_id}")
+        return d
+
+    @app.get("/api/v1/protection/certificates")
+    def api_certificates(node: str | None = None, actor=Depends(who)):
+        from . import cotenancy
+        try:
+            return {"certificates": cotenancy.list_certificates(db, node)}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
     @app.get("/api/v1/jobs/{jid}")
     def api_job(jid: int, actor=Depends(who)):
         """The job, its attempts, the checkpoint its next attempt resumes from, its results and its explain document."""

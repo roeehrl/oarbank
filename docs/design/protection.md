@@ -30,7 +30,9 @@ one node; modules can never declare or loosen it.
 ## Authority: only the fleet's own processes
 
 The agent signals, lowers or pauses only processes in its spawn registry (a pid plus its start time, or a descendant of
-one). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
+one). Ending its own runners when it stops, or those an agent that was killed left behind, goes by the agent's
+runner records, which hold the same identity (a pid and its start time) for every process of a runner
+([architecture.md](architecture.md), "Stopping the agent"). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
 one (S16). Unknown processes are never signalled; their memory always counts.
 
 ## Whose processes
@@ -99,7 +101,10 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
   the processes it matched that way (`unreadable`). Such a process takes part from its second sighting on (the next
   tick): an owner's process whose facts fail to read is nearly always one exiting between the listing and the read,
-  and on a busy machine those would otherwise switch every such rule on every few ticks. The console's process picker
+  and on a busy machine those would otherwise switch every such rule on every few ticks. Identity is read once per
+  process and program: an exec keeps the pid and start time, so a new path or short name reads the process again, and
+  the arguments of a process seen for the first time are read once more on its next sighting (a child listed between
+  its fork and its exec still carries its parent's arguments, and an argv rule would miss the app it becomes). The console's process picker
   writes the matcher from the processes a node reports, and its preview uses a Python matcher held equal to the
   agent's by shared test vectors (`fixtures/protection-match-vectors.json`).
 - **Trees:** `self`, `descendants` (pid and parent tracking) or `same_team` (helpers signed by the same team).
@@ -133,10 +138,22 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   jobs to background scheduling: macOS background QoS, low priority on the efficiency cores; on Linux a CPU quota of a
   tenth of a core on the job's cgroup, since the agent's cgroup and the owner's are scheduled apart and no class an
   unprivileged agent can set yields to the owner; on Windows the Job Object's idle priority class with EcoQoS; where it
-  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`, `cpu`, `gpu` or `io`), `protect` (keep a metric of the
+  cannot be done, Linux without a delegated cgroup, a pausable job is paused instead), `pause_fleet` (in scope `all`,
+  `cpu`, `gpu` or `io`; while the rule is active the node also takes none of the work it pauses: capacity's `paused`
+  names the scopes and the claim carries them, so the coordinator grants no job there that the rule would pause at
+  once and release after the longest pause, only to grant it to the same node again; explain shows such a job, or the
+  node, as `PROTECTION_ACTIVE`; `all` and `io` stop admission altogether, and `gpu`, `all` and `io` hold GPU jobs at 0
+  whatever `gpu_jobs` says), `protect` (keep a metric of the
   protected group within a target: `cpu_stall`, `ipc_ratio`, `gpu_share`, `pageins_rate`, or `progress_rate` read from
-  an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on.
-  `ignore` only removes processes from the heuristic triggers.
+  an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on:
+  events or a field of one event type in a JSONL file (the newest file of a glob), or a process trigger (`on_exec`);
+  `tags` label a phase for coordinator-side aggregation (`uplink`). A rule marked `immediate` has its phases act
+  between ticks ([gpu-cotenancy.md](gpu-cotenancy.md)). `ignore` only removes processes from the heuristic triggers.
+- **Owner sources** are watched, not polled (kqueue, inotify, a 250 ms poll on Windows), with a rotation- and
+  truncation-safe tail. `~` is the person's home: in a system install, sources in a person's home are read by that
+  person's session helper and relayed as counts and phase states, never contents. An unreadable progress source is a
+  violation and an unreadable phase counts as on; both are node conditions (`PROTECTION_SOURCE_UNREADABLE`,
+  `PROTECTION_SOURCE_NEEDS_HELPER`). Details and the case of nobody being logged in: [gpu-cotenancy.md](gpu-cotenancy.md).
 - **Precedence:** every active rule, the mode profile and the guards each yield a constraint; the combined constraint
   takes the minimum of every ceiling, the OR of every pause and lower, and reservations summed over distinct processes
   (a process matched twice is reserved once, at its largest reservation).
@@ -179,6 +196,7 @@ in_use      = available + fleet resident − margin          margin = soft_free_
 host_budget = min(reserve, in_use, cap.mem_gb − services)  (mem_binding: reserve | in_use | cap)
 mem_gb_free = host_budget − Σ running jobs' resources.mem_gb
 slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap.cpu_cores / threads, protection.slots)
+paused      = the pause_fleet scopes of the active rules (no work of theirs is granted; all or io: admit = false)
 ```
 
 - **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with
@@ -238,9 +256,13 @@ One pure decision function over signals, configuration and its own state, on the
   eviction (a paused job still holds its memory); GPU harm skips lowering (background QoS does not throttle the GPU).
   Evicting a job whose runner keeps portable checkpoints asks it for a checkpoint first (`{stop, checkpoint}` in its
   control document, within `runner.checkpoint_grace_s`), so the job resumes on any node instead of starting over.
-- **Measured harm:** while a `protect` rule is active in `moderate`, a pause probe stops the pausable fleet jobs for a
-  few seconds every ten minutes and compares the protected metric paused and running; windows with no fleet job running
-  are kept as free baselines.
+- **Measured harm:** while a `protect` rule is active in `moderate`, a pause probe stops the pausable CPU fleet jobs for
+  a few seconds every ten minutes and compares the protected metric paused and running; windows with no fleet job
+  running are kept as free baselines. GPU work is measured by the paired on/off harness instead (6 s is shorter than one
+  step of many GPU trainers), whose passing runs are co-tenancy certificates; the probe is suspended while a harness
+  run measures ([gpu-cotenancy.md](gpu-cotenancy.md)).
+- **GPU work beside a protected GPU group:** `gpu_jobs` = `never`, `when_no_gpu_protected` (default: paused while a
+  gating group is active), `certified` (cooperative GPU work runs at a valid certificate's `gpu_duty`, D50) or `always`.
 - **The growth gate:** the budget grows only on a validated signal: `progress_rate` for any group, or `ipc_ratio` for a
   group that is not GPU-bound. Otherwise it holds (`L1_HOLD_UNVALIDATED`). Implicit signals only veto.
 - **Implicit signals count only what the fleet adds.** The frontmost-app and owner-stall signals read `cpu_stall` over
@@ -284,6 +306,9 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | Implicit signal smoothing | weight 0.1 a sample (about 20 s) |
 | `protect` window | 20 s |
 | GPU fleet jobs | `when_no_gpu_protected` |
+| Owner source re-scan; Windows poll | 250 ms |
+| Harness | windows 300 s, washout 60 s, 12 blocks, pilot 3, margin 2 %, cap 8 h |
+| Certificate validity | 14 days (or until the hardware, OS major, agent or protected program changes) |
 | Eviction grace | the runner's `stop_grace_s`; `checkpoint_grace_s` when it checkpoints first |
 | Flapping alert (coordinator) | more than 12 lower or pause escalations per node-hour |
 | Probe-harm alert (coordinator) | a probe showing the protected process losing over 25 % |
@@ -299,6 +324,7 @@ measurements above.
 | S17 | Admitted declared memory plus measured footprint plus reservations never exceeds the host budget, and nothing is admitted while a memory floor is active. |
 | S18 | After a rule becomes active, the fleet meets its constraint within `enter_for_s` plus two samples (pause, lower, cap) or one L1 interval (reserve). |
 | S19 | Worse, stale or missing signals never yield a larger fleet allowance. |
+| S25 | For a rule marked `immediate`, a phase the event path saw begin is paused first by the event path, within 100 ms of the source event. |
 
-The coordinator checks S16 and S18 from the decision journals the agents ship in their heartbeats
+The coordinator checks S16, S18 and S25 from the decision journals the agents ship in their heartbeats
 (`protection_decisions`), shows them on the node's decision timeline, and alerts on flapping and probe harm.

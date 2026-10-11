@@ -107,6 +107,23 @@ pub fn refusals(config: &ProtectionConfig, os: Os) -> Vec<String> {
                 ));
             }
         }
+        if let Some(why) = os.no_signing() {
+            for (n, d) in r.during.iter().enumerate() {
+                let Some((em, _)) = &d.on_exec else { continue };
+                for (key, set) in [
+                    ("requirement", em.requirement.is_some()),
+                    ("team_id", em.team_id.is_some()),
+                    ("identifier", em.identifier.is_some()),
+                ] {
+                    if set {
+                        out.push(format!(
+                            "rule {id}: during[{n}].source.on_exec.match.{key} is a macOS code-signing identity, and \
+                             {why} (match on path_prefix, path_contains, name or argv_regex)"
+                        ));
+                    }
+                }
+            }
+        }
         if r.protect_metric() == Some("ipc_ratio") && os != Os::Darwin {
             out.push(format!(
                 "rule {id}: protect.metric = ipc_ratio needs per-process instruction and cycle counters, which \

@@ -17,6 +17,17 @@ use tracing::{info, warn};
 
 pub const VERSION: &str = crate::VERSION;
 
+/// How long a stopping agent gives its runners to stop, or to checkpoint first, before it kills them (each runner's
+/// own `stop_grace_s` or `checkpoint_grace_s` when shorter).
+pub const STOP_GRACE: Duration = Duration::from_secs(15);
+/// After that, how long it waits for the attempts' releases (and a last checkpoint's upload) to reach the coordinator.
+/// The two fit, with the services' stops, in the service managers' stop timeouts the launcher sets (60 s: launchd
+/// `ExitTimeOut`, systemd `TimeoutStopSec`, the Windows launcher's wait before it ends the agent).
+pub const STOP_REPORT: Duration = Duration::from_secs(10);
+/// The end reason of an attempt the agent releases because it is stopping (`AGENT_STOPPED`, no charge to the job or
+/// the node).
+pub const AGENT_STOP: &str = "agent_stop";
+
 /// An enrollment that cannot go on (the code was refused, the owner declined the machine): the agent goes back to
 /// waiting for a code. `.0` is the status error code.
 #[derive(Debug)]
@@ -347,12 +358,14 @@ impl Agent {
 
     pub async fn heartbeat(&mut self) -> Result<Value, ApiError> {
         self.seq += 1;
-        let (capacity, telemetry, journal, processes) = match self.prot.as_mut() {
-            Some(p) => (p.capacity.as_ref().map(|c| c.to_json()), p.telemetry.clone(), p.journal_out(), p.processes(&self.table)),
-            None => (None, json!({}), json!([]), None),
+        let (capacity, telemetry, journal, processes, ab_runs) = match self.prot.as_mut() {
+            Some(p) => (p.capacity.as_ref().map(|c| c.to_json()), p.telemetry.clone(), p.journal_out(), p.processes(&self.table),
+                        p.ab_report()),
+            None => (None, json!({}), json!([]), None, json!([])),
         };
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
+                              "ab_runs": ab_runs,
                               "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(), "tools": self.tools,
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
         if let Some(svc) = &self.services {
@@ -1075,9 +1088,12 @@ impl Agent {
         }
         let rel = self.release.clone().expect("checked");
         let cap = self.prot.as_ref().and_then(|p| p.capacity.as_ref());
+        // the work an active rule pauses: the coordinator grants none of it (it would be paused at once, released after
+        // the longest pause and granted here again)
         let body = json!({"free_cpu": cpu, "free_mem_gb": mem, "modules": self.offered, "release_id": rel.id,
                           "ready_datasets": staging::ready(&self.layout), "pool_jobs_only": cap.is_some_and(|c| c.pool_jobs_only),
-                          "gpu_jobs": cap.and_then(|c| c.gpu_jobs)});
+                          "gpu_jobs": cap.and_then(|c| c.gpu_jobs), "paused": cap.map(|c| c.paused.clone()).unwrap_or_default(),
+                          "paused_by": cap.and_then(|c| c.paused_by.clone())});
         let r = self.api().map_err(io_err)?.post("/v1/agent/claim", &body).await?;
         let received = std::time::Instant::now();
         let grants = r["grants"].as_array().cloned().unwrap_or_default();
@@ -1105,8 +1121,8 @@ impl Agent {
                 mem_gb: res["mem_gb"].as_f64().unwrap_or(1.0), gpu, pgid: None, stop: None, pause: false,
                 usage: Default::default(), log_bytes: 0, started_at: doctor::now(),
                 caps: runner["capabilities"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
-                bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None,
-                needs, wake: Default::default() });
+                bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None, gpu_duty: None,
+                needs, wake: Default::default(), stop_by: None });
             info!(attempt = aid, kind = g["kind"].as_str().unwrap_or(""), module = g["module"].as_str().unwrap_or(""), "granted");
             tokio::spawn(jobs::run(ctx.clone(), g.clone(), crate::clock::local_deadline(g, received)));
         }
@@ -1131,13 +1147,63 @@ impl Agent {
     /// services a release dropped, which the process's exit would cut short.
     pub async fn run(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
         let r = self.rounds(stop).await;
-        // the agent stops (or the node was retired): close the listeners and delete their router mappings
+        // however the rounds end (a stop, a fatal error, a rollback), no runner outlives the agent
+        self.stop_jobs().await;
+        // the agent stops (the graceful stop of SIGTERM, SIGHUP, SIGINT or the launcher's stop event) or the node was
+        // retired: close the listeners and delete their router mappings
         let n = self.listeners.shutdown().await;
         if n > 0 {
             info!(mappings = n, "router mappings released");
         }
         self.settle_services().await;
         r
+    }
+
+    /// The agent is ending: ask every runner to stop (a checkpointing one to checkpoint first) as a release does, kill
+    /// what has not stopped by STOP_GRACE, and release its attempt (`agent_stop`: requeued, no charge). A job a cancel or
+    /// revoke already ends keeps its own ending. Bounded, so the agent ends within its service manager's stop timeout.
+    pub async fn stop_jobs(&mut self) {
+        let deadline = std::time::Instant::now() + STOP_GRACE;
+        let n = {
+            let mut t = self.table.lock().unwrap();
+            for j in t.values_mut() {
+                j.stop_by = Some(deadline);
+                j.stop.get_or_insert_with(|| Stop::Release(AGENT_STOP.into()));
+                j.wake.notify_one();
+            }
+            t.len()
+        };
+        if n == 0 {
+            return;
+        }
+        info!(attempts = n, "stopping the running jobs: each runner is asked to stop (or checkpoint first) and its attempt released");
+        // a job protection froze could not act on the request: it runs again to stop
+        if let Some(p) = self.prot.as_mut() {
+            p.thaw_all(&self.table);
+        }
+        let until = deadline + STOP_REPORT;
+        while std::time::Instant::now() < until && !self.table.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // whatever is still here (its report hung, or it never got that far): its runner is killed and its attempt
+        // released here, briefly; the coordinator ends any it does not hear about at the next hello (agent_restart)
+        let left: Vec<(i64, Option<i32>, Option<Stop>)> = self.table.lock().unwrap().values()
+            .map(|j| (j.attempt_id, j.pgid, j.stop.clone())).collect();
+        for (aid, pgid, stop) in left {
+            if let Some(pg) = pgid {
+                crate::procs::signal_group(pg, crate::procs::Sig::Kill);
+            }
+            let reason = match stop {
+                Some(Stop::Release(r)) => r,
+                Some(Stop::Cancel) => "user_cancel".into(),
+                _ => continue,
+            };
+            warn!(attempt = aid, %reason, "still running when the agent stopped: killed");
+            if let Ok(api) = self.api() {
+                let _ = tokio::time::timeout(Duration::from_secs(2),
+                                             api.post(&format!("/v1/attempts/{aid}/release"), &json!({"reason": reason}))).await;
+            }
+        }
     }
 
     /// Wait for the stops of services a release no longer has (services.rs `Stops`).
@@ -1148,27 +1214,42 @@ impl Agent {
     }
 
     async fn rounds(&mut self, stop: tokio::sync::watch::Receiver<bool>) -> Result<i32> {
+        // runners an earlier agent left running (it was killed, or crashed): ended before this one takes work, so none
+        // runs twice and none holds the machine for an attempt the coordinator ends at hello (runners.rs)
+        #[cfg(unix)]
+        for line in crate::runners::reap(&self.layout, crate::runners::Whose::Ended) {
+            warn!("{line}");
+        }
         staging::sweep_partials(&self.layout);
         jobs::clear_workdirs(&self.layout);
         self.reap_containers().await;
         self.probe_gpu_apis().await;                // before any service is offered: a GPU service waits for it
         self.detect_tools().await;                  // hello reports them
         let mut backoff = Duration::from_secs(2);
+        let mut stopped = stop.clone();
         loop {
             if *stop.borrow() {
                 return Ok(0);
             }
             if !keys::have_cert(&self.layout) {
-                if let Err(e) = self.enroll(Duration::from_secs(10), None).await {
+                // waiting for the owner's approval holds no work: a stop ends it at once
+                let enrolled = tokio::select! {
+                    r = self.enroll(Duration::from_secs(10), None) => r,
+                    Ok(_) = stopped.wait_for(|s| *s) => return Ok(0),
+                };
+                if let Err(e) = enrolled {
                     if e.downcast_ref::<EnrollmentEnded>().is_some() {
                         return Err(e);                  // refused or declined: main goes back to waiting for a code
                     }
                     warn!(error = %e, "enrollment failed");
-                    tokio::time::sleep(backoff).await;
+                    if sleep_or_stop(&mut stopped, backoff).await {
+                        return Ok(0);
+                    }
                     backoff = (backoff * 2).min(Duration::from_secs(300));
                     continue;
                 }
             }
+            let mut ticks = stop.clone();
             let round = async {
                 self.connect().await.map_err(|e| ApiError::Http { status: 0, code: "identity".into(), detail: e.to_string(),
                                                                   retry_after: None, body: Box::default() })?;
@@ -1185,7 +1266,10 @@ impl Agent {
                     let until = std::time::Instant::now() + Duration::from_secs_f64(self.cfg.heartbeat_s);
                     while std::time::Instant::now() < until {
                         self.protect();
-                        tokio::time::sleep(Duration::from_secs(2).min(until.saturating_duration_since(std::time::Instant::now()))).await;
+                        // a stop request ends the wait at once
+                        if sleep_or_stop(&mut ticks, Duration::from_secs(2).min(until.saturating_duration_since(std::time::Instant::now()))).await {
+                            break;
+                        }
                     }
                     if *stop.borrow() {
                         return Ok::<i32, ApiError>(0);
@@ -1269,12 +1353,24 @@ impl Agent {
                         }
                     }
                     let wait = e.retry_after().unwrap_or(backoff);
-                    tokio::time::sleep(wait).await;
+                    if sleep_or_stop(&mut stopped, wait).await {
+                        return Ok(0);
+                    }
                     backoff = (backoff * 2).min(Duration::from_secs(120));
                 }
             }
         }
     }
+}
+
+/// Sleep for `d`, or less if a stop is requested meanwhile; true when the agent is to stop.
+async fn sleep_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>, d: Duration) -> bool {
+    // (a stop channel whose sender is gone never stops it: that branch is then disabled)
+    let stopped = tokio::select! {
+        Ok(_) = stop.wait_for(|s| *s) => true,
+        _ = tokio::time::sleep(d) => false,
+    };
+    stopped || *stop.borrow()
 }
 
 /// Oarbank's data: the agent's home, and the Oarbank directory it sits in by default (beside a coordinator's). No folder

@@ -1208,6 +1208,22 @@ def cmd_protection(a):
     them on a group first, then `oarbank settings promote protection.rules --group <group>` (the mode: oarbank node
     mode, or oarbank settings set protection.mode)."""
     ask = dict(reason=a.reason, yes=a.yes)
+    if a.action == "ab":
+        return cmd_protection_ab(a, ask)
+    if a.action == "certificates":
+        q = f"?node={a.node}" if a.node else ""
+        d = api("GET", f"/api/v1/protection/certificates{q}")
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        if not d["certificates"]:
+            print("no co-tenancy certificates (oarbank protection ab start|sweep <node> --rule <id> earns one)")
+        for c in d["certificates"]:
+            duty = f"duty {c['duty']}" if c.get("duty") is not None else "no duty"
+            print(f"{c['cert_id']}  {c['hostname'] or c['node_id']:<22} rule {c['rule']:<16} {c['work']:<10} {duty:<10} "
+                  f"R {c['r']:.3f} [{c['r_lo']:.3f}, {c['r_hi']:.3f}] margin {c['margin'] * 100:.0f} %  until "
+                  f"{_when(c['valid_until'])}  {c['status']}" + (f" ({c['why']})" if c.get("why") else ""))
+        return
     need = {"show": "<node>", "probe": "<node>", "set": "<node|fleet|group:G> <file>", "preview": "<node|fleet|group:G> <file>"}
     if a.action in need and (not a.node or need[a.action].count("<") == 2 and not a.value):
         sys.exit(f"oarbank protection {a.action} {need[a.action]}")
@@ -1223,6 +1239,70 @@ def cmd_protection(a):
     else:
         res = run_op("protection.probe_now", a.node, None, **ask)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
+
+
+def print_ab_run(d: dict) -> None:
+    """One harness run as `oarbank protection ab show` prints it: the decision in words, then the blocks."""
+    print(f"run {d['run_id']} on {d['hostname'] or d['node_id']}: rule {d['rule']}, work {d['work']}"
+          + (f", gpu_duty {d['duty']}" if d.get("duty") is not None else "") + f"; {d['state']}"
+          + (f", {d['decision']}" if d.get("decision") else ""))
+    print(f"  {d['summary']}")
+    rep = d.get("report") or {}
+    o = (d.get("outcome") or {})
+    if o.get("reason"):
+        print(f"  why: {o['reason']}")
+    if o.get("min_detectable") is not None:
+        print(f"  the pilot's spread lets the planned run detect a {o['min_detectable'] * 100:.1f} % slowdown (80 % power)")
+    for i, b in enumerate(rep.get("blocks") or [], 1):
+        ratio = b["on_rate"] / b["off_rate"] if b.get("off_rate") else float("nan")
+        print(f"  block {i:<3} {'ON first ' if b.get('on_first') else 'OFF first'}  on {b['on_rate']:.3f}/s  "
+              f"off {b['off_rate']:.3f}/s  ratio {ratio:.4f}")
+    for x in rep.get("excluded") or []:
+        print(f"  excluded {_when(x['start'])}: {x['reason']}")
+    if d.get("cert_id"):
+        print(f"  certificate {d['cert_id']}")
+
+
+def cmd_protection_ab(a, ask) -> None:
+    """oarbank protection ab start|status|show|abort|sweep: the paired on/off harness (docs/design/gpu-cotenancy.md)."""
+    sub, target = a.node, a.value
+    if sub not in ("start", "status", "show", "abort", "sweep"):
+        sys.exit("oarbank protection ab start|status|show|abort|sweep ...")
+    if sub in ("start", "sweep"):
+        if not target or not a.rule:
+            sys.exit(f"oarbank protection ab {sub} <node> --rule <id>")
+        params = {"rule": a.rule, "work": a.work, "duty": a.duty, "blocks": a.blocks, "window_s": a.window,
+                  "washout_s": a.washout, "margin": a.margin, "off": a.off, "max_hours": a.max_hours}
+        if sub == "sweep" and a.levels:
+            params["levels"] = [float(x) for x in a.levels.split(",")]
+        params = {k: v for k, v in params.items() if v is not None}
+        res = run_op(f"protection.ab.{sub}", target, params, **ask)
+        print(json.dumps((res or {}).get("result"), indent=1, default=str))
+        return
+    if sub == "abort":
+        if not target:
+            sys.exit("oarbank protection ab abort <run>")
+        res = run_op("protection.ab.abort", target, None, **ask)
+        print(json.dumps((res or {}).get("result"), indent=1, default=str))
+        return
+    if sub == "show":
+        if not target:
+            sys.exit("oarbank protection ab show <run>")
+        d = api("GET", f"/api/v1/protection/ab/runs/{target}")
+        print(json.dumps(d, indent=1, default=str)) if a.json else print_ab_run(d)
+        return
+    q = f"?node={target}" if target else ""
+    d = api("GET", f"/api/v1/protection/ab/runs{q}")
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    if not d["runs"]:
+        print("no harness runs")
+    for r in d["runs"]:
+        prog = f"{r['blocks_done']}/{r['target_blocks'] or '?'} blocks"
+        print(f"{r['run_id']}  {r['hostname'] or r['node_id']:<22} {r['rule']:<16} {r['work']:<10} "
+              f"{'duty ' + str(r['duty']) if r.get('duty') is not None else '':<10} {r['state']:<9} {prog:<12} "
+              f"{r['decision'] or ''}")
 
 
 def cmd_verify(a):
@@ -1715,10 +1795,23 @@ def parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("protection", help="protected-process rules on the settings chain: show (a node's effective "
                                            "rules and where each comes from), set / preview (a node's, the fleet's or "
                                            "a group's own section), probe (the mode: oarbank node mode)")
-    pr.add_argument("action", choices=["show", "set", "preview", "probe"])
-    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>")
-    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml)")
-    pr.add_argument("--json", action="store_true", help="show: as JSON")
+    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates"])
+    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>; "
+                                            "ab: start|status|show|abort|sweep; certificates: a node (all without)")
+    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml); "
+                                             "ab start|sweep|status: a node; ab show|abort: a run")
+    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates: as JSON")
+    pr.add_argument("--rule", help="ab start|sweep: the protected rule (its progress_rate source is what is measured)")
+    pr.add_argument("--work", help="ab start|sweep: the fleet work under test: gpu (default), cpu, all, <module>, "
+                                   "<module>/<workload>")
+    pr.add_argument("--duty", type=float, help="ab start: the gpu_duty the GPU work under test holds in ON windows")
+    pr.add_argument("--blocks", type=int, help="ab start|sweep: planned blocks (default 12)")
+    pr.add_argument("--window", type=float, help="ab start|sweep: window length in seconds (default 300)")
+    pr.add_argument("--washout", type=float, help="ab start|sweep: seconds discarded after each switch (default 60)")
+    pr.add_argument("--margin", type=float, help="ab start|sweep: the slowdown margin (default 0.02)")
+    pr.add_argument("--off", choices=["paused", "evicted"], help="ab start|sweep: how OFF holds the work (default paused)")
+    pr.add_argument("--max-hours", type=float, help="ab start|sweep: the run's cap (default 8)")
+    pr.add_argument("--levels", help="ab sweep: rising gpu_duty levels, comma-separated (default 0.1,0.2,0.35,0.5,...)")
     pr.add_argument("--reason")
     pr.add_argument("--yes", "-y", action="store_true")
     pr.set_defaults(fn=cmd_protection)

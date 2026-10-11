@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-99 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+102 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -128,6 +128,9 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 |---|---|---|---|---|---|---|---|---|
 | `protection.rules.update` — Set a scope's own protection section (a node, the fleet or a group): its rules, node section and mode; every scope's rules apply together on a node | T2 | required | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=protection.rules.update)<br>`POST /do/{op}` (op=protection.rules.update) | oarbank protection set <node> <file><br>oarbank protection set fleet <file><br>oarbank protection set group:<group> <file><br>oarbank protection preview <node> <file> |
 | `protection.probe_now` — Run a pause probe now | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.probe_now)<br>`POST /do/{op}` (op=protection.probe_now) | oarbank protection probe <nid> |
+| `protection.ab.start` — Start a paired on/off harness run on a node: fleet work under test runs beside a protected process in ON windows and is held in OFF windows until the margin is decided (D52) | T2 | required | yes | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.ab.start)<br>`POST /do/{op}` (op=protection.ab.start) | oarbank protection ab start <node> --rule <id> [--work <w>] [--duty <d>] [--blocks <n>] [--window <s>] [--washout <s>] [--margin <m>] [--off paused|evicted] [--max-hours <h>] |
+| `protection.ab.abort` — Abort a harness run (its work under test runs as protection allows again) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.ab.abort)<br>`POST /do/{op}` (op=protection.ab.abort) | oarbank protection ab abort <run> |
+| `protection.ab.sweep` — Search a node's certified GPU duty for a rule: harness runs at rising gpu_duty levels, stopping at the first that is not "no slowdown shown" | T2 | required | yes | operator | natural | – | `POST /api/v1/ops/{op}` (op=protection.ab.sweep)<br>`POST /do/{op}` (op=protection.ab.sweep) | oarbank protection ab sweep <node> --rule <id> [--work <w>] [--levels <list>] |
 
 ## alerts
 

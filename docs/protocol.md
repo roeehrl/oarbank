@@ -189,6 +189,21 @@ their process groups, deletes their workspaces, and does not report them.
   queries) show it.
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
   `journal_ack`, the highest seq it stored.
+- **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
+  block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
+  "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:
+  `{"rule", "readable", "reader", "rate"}`), `event_latency` (source event to pause request: `n`, `p50_ms`, `p99_ms`,
+  `max_ms`, `edges_ms`, `buckets`), `gpu_budget` (under `gpu_jobs = certified`: `{"duty", "rules", "jobs", "per_job"}`,
+  or `{"duty": 0, "not_certified": [...]}`) and `identities` (per rule, the protected program's identity a certificate
+  is bound to); `telemetry.cert_context` is what the node's certificates must match (`hardware`, `os_major`,
+  `agent_version`). The coordinator aggregates `phases` across nodes by tag (`protection.node_phases`,
+  `protection.any_phase_on`).
+- **`ab_runs`** is the current or last paired on/off harness run (at most one): `{"run_id", "rule", "work", "duty",
+  "state": "pilot|running|done|aborted", "started_at", "target_blocks", "blocks": [{"on_first", "on_rate",
+  "off_rate", "start", "end"}], "excluded": [{"start", "end", "reason"}], "current": {"arm": "on|off",
+  "window_elapsed_s", "on_first", "excluded_reason"}, "outcome": {"decision":
+  "no_slowdown|slowdown|inconclusive|refused|aborted", "reason", "analysis", "min_detectable", "ended_at"}, "identity",
+  "margin", "window_s", "washout_s", "off"}`. A run that ends `no_slowdown` earns a certificate.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
   at most 80, the agent's own jobs excluded. The agent sends it every 5 minutes, or on the next heartbeat
   after `send_processes`. `comm` is the kernel's short name (the Windows image name); a null `path` or `argv` could
@@ -220,6 +235,10 @@ their process groups, deletes their workspaces, and does not report them.
 | `revoke` | Another attempt won, or the module was disabled: kill silently, no report. |
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
+| `ab_run` | A harness run to start (`{"run_id", "rule", "work", "duty", "blocks", "window_s", "washout_s", "margin", "off", "pilot_blocks", "max_hours", "seed"}`, from `protection.ab.start` or `.sweep`); `null` when none. The agent starts each run id once, refuses one while another runs or for a rule without a `progress_rate` source (journaled `AB_REFUSED`). |
+| `ab_abort` | Run ids to abort (`protection.ab.abort`). |
+| `ab_ack` | The last run oarbankd stored as ended: the agent stops reporting it. |
+| `certificates` | The node's co-tenancy certificates in force: `[{"id", "rule", "work", "duty", "r", "r_lo", "r_hi", "margin", "run_id", "issued_at", "valid_until", "identity", "context"}]`. The agent checks each (expiry, `context` against its own, `identity` against the rule's live group) before `gpu_jobs = certified` uses it. |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
 | `modules_disabled` | Modules that must not run on this node: their effective `[module] enabled` is off here (for the fleet: the kill switch, `modules.disable`; or for a group the node is in, or the node itself). Every service of theirs is disabled on the node (stopped, never offered) until they are enabled again; the coordinator grants none of their work there. |
 | `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
@@ -233,7 +252,8 @@ their process groups, deletes their workspaces, and does not report them.
 `POST /v1/agent/claim`
 ```json
 {"free_cpu": 3, "free_mem_gb": 6.0, "modules": ["example", "toy"], "release_id": "r_…",
- "ready_datasets": ["tool:example-1.0", "scene:atrium", …], "pool_jobs_only": false, "gpu_jobs": null}
+ "ready_datasets": ["tool:example-1.0", "scene:atrium", …], "pool_jobs_only": false, "gpu_jobs": null,
+ "paused": [], "paused_by": null}
 ```
 oarbankd grants jobs:
 
@@ -253,6 +273,10 @@ oarbankd grants jobs:
 With `pool_jobs_only`, only jobs reserving pools are granted. `gpu_jobs` is how many more GPU jobs the node
 may run, with `null` meaning no limit. A GPU job is one whose module's `runner.gpu` is not `none`, or that reserves a pool
 of a service whose `gpu.use` is not `none`; it waits with `GPU_BLOCKED` while the node's live GPU jobs reach that number.
+`paused` is the work active host protection rules pause on the node (`pause_fleet` scopes: `all`, `cpu`, `gpu`, `io`) and
+`paused_by` the first such rule (`rule:<id>`): none of that work is granted there while they last (`PROTECTION_ACTIVE`;
+`all` and `io` every job, `gpu` GPU jobs, `cpu` the others), since a job granted now would be paused at once, released
+after the node's longest pause (`preempt_protection`, no charge) and granted to the same node again.
 
 → `{"grants": [Grant, …]}`, possibly empty. A **Grant** carries a SpecEnvelope:
 ```json
@@ -334,8 +358,10 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   - `artifact_missing`, `input_missing` and `input_mismatch`;
   - `pin_mismatch`: a bootstrap job's result is not exactly the module's pinned datasets. For a bootstrap job the host
     checks the pins instead of calling `result.evaluate`, and registers the datasets when the result is accepted.
-- `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel"}`;
-  a release without a reason is refused (400 `reason_required`). These are not failures.
+- `POST /v1/attempts/{id}/release` with `{"reason": "preempt_memory|preempt_protection|limit_mem|limit_cpu|limit_schedule|user_cancel|agent_stop"}`;
+  a release without a reason is refused (400 `reason_required`). These are not failures. `agent_stop`: the agent was
+  asked to stop (its service stopped or restarted) and stopped the runner first (docs/design/architecture.md,
+  "Stopping the agent").
 - `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient", "images"?: [{"set", "image"}]}`.
   `fault` comes from the runner's `failure.json`: `transient` is no failure at all (the attempt is released and
   the job retried), `host` implicates this node, `job` never trips its breaker. `doctor`, `mode_mismatch`, `oom` and
@@ -654,7 +680,7 @@ docs/design/inbound-listeners.md is the full contract; in short:
   `OARBANK-PROBE/1 OK <nonce>` (`SAME`: from the target's own network) and reports `probe_results: [{probe_id, ok,
   detail, rtt_ms}]`; the target then gets `listener_reachability: {key: {state, at, via, detail}}`.
 - **Mappings** are journaled in `state/portmaps.json` before each request; `oarbank-agent portmap status|release-all`
-  read and empty it; the agent releases its mappings when it stops (also on SIGTERM), when the coordinator answers
+  read and empty it; the agent releases its mappings when it stops (its graceful stop), when the coordinator answers
   `node_retired`, and the launcher's uninstall runs `portmap release-all`.
 
 ## Doctor
@@ -799,6 +825,12 @@ lowest wins:
   the node (the fleet's, a group's or the node's value, else the key's default; a key with neither is absent). A module
   appears only when it has such a value, and never sees another module's keys. The agent rewrites a module's file only
   when its content changes, through a temporary file and a rename; a bootstrap job gets `{}`.
+- **Session helpers** (a system install; docs/design/protection.md, "Whose processes") report one JSON line every two
+  seconds to the agent's local endpoint. The agent sends lines back: `{"v": 2, "watch": [{"key", "kind":
+  "progress|phase", "account", "rel", "spec"}]}`, the owner sources under the person's home the helper should read
+  (when the list changes and on each connection; `spec` is the source without its path). The helper's report then
+  carries `"sources": [{"key", "events", "epoch", "on", "readable", "event_t"}]` (counts and phase states, never file
+  contents), and it reports at once when a phase changes (docs/design/gpu-cotenancy.md).
 - **`protection`** is owner-set host protection (schema 1): the node's effective section, which the coordinator
   assembles from the settings chain (`protection.mode`, `protection.rules` from every scope together, `protection.node`;
   a rule the node's OS cannot run is left out). See docs/design/protection.md and docs/design/settings.md,
@@ -816,8 +848,10 @@ The agent computes `capacity` every tick and sends it in the heartbeat:
  "binding_limit": "auto|cap.jobs|cap.cpu_cores|cap.mem_gb|rule:<id>|guard:memory|thermal|battery|memory_in_use|user",
  "admit": true, "why": null, "pool_jobs_only": false, "gpu_jobs": null, "reserved_cpu": 0, "reserved_mem_gb": 6.1,
  "host_budget_gb": 14.5, "mem_binding": "reserve|in_use|cap", "mem_budget_reserve_gb": 44.0,
- "mem_budget_in_use_gb": 14.5, "mem_in_use_gb": 40.9, "mem_margin_gb": 8.68}
+ "mem_budget_in_use_gb": 14.5, "mem_in_use_gb": 40.9, "mem_margin_gb": 8.68, "paused": [], "paused_by": null}
 ```
+`paused` and `paused_by` are what the claim sends (see Work): a rule pausing `all` or `io` also stops admission
+(`admit` false, `why` and `binding_limit` the rule), one pausing `gpu` sets `gpu_jobs` to 0.
 `host_budget_gb` is the smaller of the reserve bound (RAM minus the OS and user reserves, the services' and protection's
 reservations) and the in-use bound (memory available now plus the fleet jobs' resident share of their reservations,
 minus the memory guard's soft floor and 1 GB), and of the owner's `mem_gb` cap; `mem_binding` names which.

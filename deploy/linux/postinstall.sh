@@ -3,9 +3,10 @@
 # variables"). The package installs; joining is `oarbank-node join`'s. Whatever happens here the package transaction
 # succeeds: a failure prints why and how to finish, and the script exits 0.
 #
-# Upgrade of a joined node (it holds agent.json): restart the service on the new launcher. The agent's own version is
-# the coordinator's to change (self-update), so setup, which installs the package's agent as the current one, does not
-# run.
+# Upgrade of a joined node (it holds agent.json): render the service's unit again with the new launcher's settings
+# (`oarbank-launcher service refresh`: a 2.8 unit has no TimeoutStopSec) and restart it on the new launcher. The
+# agent's own version is the coordinator's to change (self-update), so setup, which installs the package's agent as the
+# current one, does not run.
 #
 # Otherwise (a first install, or an upgrade of a node that never joined): install the system service, which waits for a
 # code (`sudo oarbank-node join` stages one later, or /etc/oarbank/policy.json names one). apt and dnf pass the caller's
@@ -29,7 +30,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 if [ -f /var/lib/oarbank/agent/agent.json ]; then
-    systemctl try-restart "$UNIT" 2>/dev/null || true
+    "$L" service refresh --system >/dev/null 2>&1 || systemctl try-restart "$UNIT" 2>/dev/null || true
     echo "Oarbank: upgraded; the service restarted on the new launcher"
     exit 0
 fi

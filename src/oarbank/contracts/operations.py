@@ -326,6 +326,22 @@ OPS: list[Operation] = [
     Operation(id="protection.probe_now", area="protection", summary="Run a pause probe now",
               tier="T0", category="modify", idempotency="natural", routes=OPR("protection.probe_now"),
               cli=["oarbank protection probe <nid>"], gui=CON("protection.probe_now")),
+    Operation(id="protection.ab.start", area="protection",
+              summary="Start a paired on/off harness run on a node: fleet work under test runs beside a protected process "
+                      "in ON windows and is held in OFF windows until the margin is decided (D52)",
+              tier="T2", preview=True, category="create", idempotency="natural", routes=OPR("protection.ab.start"),
+              cli=["oarbank protection ab start <node> --rule <id> [--work <w>] [--duty <d>] [--blocks <n>] "
+                   "[--window <s>] [--washout <s>] [--margin <m>] [--off paused|evicted] [--max-hours <h>]"],
+              gui=CON("protection.ab.start")),
+    Operation(id="protection.ab.abort", area="protection", summary="Abort a harness run (its work under test runs as "
+              "protection allows again)", tier="T0", category="modify", idempotency="natural",
+              routes=OPR("protection.ab.abort"), cli=["oarbank protection ab abort <run>"], gui=CON("protection.ab.abort")),
+    Operation(id="protection.ab.sweep", area="protection",
+              summary="Search a node's certified GPU duty for a rule: harness runs at rising gpu_duty levels, stopping at "
+                      "the first that is not \"no slowdown shown\"",
+              tier="T2", preview=True, category="create", idempotency="natural", routes=OPR("protection.ab.sweep"),
+              cli=["oarbank protection ab sweep <node> --rule <id> [--work <w>] [--levels <list>]"],
+              gui=CON("protection.ab.sweep")),
 
     # ------------------------------------------------------------------ alerts
     Operation(id="alerts.ack", area="alerts", summary="Acknowledge an alert (optionally: was it useful?)", tier="T0", category="modify",

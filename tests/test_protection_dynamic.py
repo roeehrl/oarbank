@@ -287,6 +287,45 @@ def test_only_gpu_jobs_count_against_the_gpu_ceiling(db, monkeypatch):
     assert len(core.claim(db, fresh(db, n1), {**body, "gpu_jobs": 1})["grants"]) == 1
 
 
+def test_work_a_rule_pauses_is_not_granted_back_to_the_paused_node(db):
+    """A job released because a pause outlasted the node's max_pause_s (preempt_protection, no charge) is pending again;
+    while the rule is active the node's claim names the work it pauses, so the job is not granted there again (it
+    would be paused at once and released again: attempts 2, 3, ... on the same node). Explain says which rule holds it."""
+    n1 = certify(db, enrolled_node(db, "mini")[1])
+    r = op(db, "mod.toy.queue_sums", idempotency_key=uuid.uuid4().hex, params={"ns": [10]})
+    cid = r["result"]["result"]["campaign_id"]
+    body = {"free_cpu": 4, "free_mem_gb": 8, "ready_datasets": READY}
+    (g,) = core.claim(db, fresh(db, n1), body)["grants"]
+    assert core.release(db, fresh(db, n1), g["attempt_id"], "preempt_protection")["ok"]
+    j = db.one("SELECT * FROM jobs WHERE campaign_id=?", (cid,))
+    assert j["state"] == "pending" and j["exec_failures"] == 0
+    paused = {**body, "paused": ["all"], "paused_by": "rule:render-app"}
+
+    def codes(b):
+        nv = core.node_view_for_claim(db, fresh(db, n1), {"toy"}, set(READY), 4, 8, b)
+        return [x.code for x in explain._job_on_node(db, db.one("SELECT * FROM jobs WHERE job_id=?", (j["job_id"],)), nv,
+                                                     time.time()) if x.outcome == "fail"]
+    assert core.claim(db, fresh(db, n1), paused)["grants"] == []
+    assert codes(paused) == ["PROTECTION_ACTIVE", "PROTECTION_ACTIVE"]          # the node admits nothing, the job is paused
+    # the coordinator's view of the node (its heartbeat's capacity) says the same in explain
+    core.heartbeat(db, fresh(db, n1), {"capacity": {"cpu_slots": 4, "mem_gb_free": 8, "admit": False, "why": "rule:render-app",
+                                                    "paused": ["all"], "paused_by": "rule:render-app"}})
+    doc = explain.job_doc(db, j["job_id"])
+    row = next(s for s in doc.summary if s.code == "PROTECTION_ACTIVE")
+    assert row.detail["text"].startswith("Rule render-app is active"), row
+    node = explain.node_doc(db, n1["node_id"])
+    assert node.headline.code == "PROTECTION_ACTIVE" and "render-app" in node.headline.text and "all" in node.headline.text
+    # a rule pausing GPU work keeps only GPU jobs off the node, one pausing CPU work only the others
+    assert codes({**body, "paused": ["gpu"], "paused_by": "rule:trainer"}) == []
+    assert codes({**body, "paused": ["cpu"], "paused_by": "rule:trainer"}) == ["PROTECTION_ACTIVE"]
+    db.x("UPDATE jobs SET resources_json=? WHERE job_id=?", (json.dumps({"cpu": 1, "mem_gb": 1, "gpu": True}), j["job_id"]))
+    assert codes({**body, "paused": ["cpu"], "paused_by": "rule:trainer"}) == []
+    assert codes({**body, "paused": ["gpu"], "paused_by": "rule:trainer"}) == ["PROTECTION_ACTIVE"]
+    assert core.claim(db, fresh(db, n1), {**body, "paused": ["gpu"], "paused_by": "rule:trainer"})["grants"] == []
+    # the rule clears: the job comes back to the node
+    assert len(core.claim(db, fresh(db, n1), {**body, "paused": []})["grants"]) == 1
+
+
 def _journal(db, node, recs):
     core.heartbeat(db, fresh(db, node), {"journal": [{"seq": i + 1, **r} for i, r in enumerate(recs)]})
 

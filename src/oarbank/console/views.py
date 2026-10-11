@@ -320,7 +320,9 @@ REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#nod
                 "tools.define": ("/settings#tools", "/settings"),
                 "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
-                "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings")}
+                "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings"),
+                "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
+                "protection.ab.abort": ("/protection/ab/{run_id}", "/")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 
@@ -709,7 +711,50 @@ def protection_page(r, nid: str, now: float) -> dict | None:
             "own_mode": (st["own"].get("node") or {}).get("mode"),
             "picker": picker, "processes_at": n.get("processes_at"), "prot": tel.get("protection") or {},
             "timeline": timeline(r, nid, now), "mode": cfg["node"]["mode"],
-            "os_note": os_note(n.get("os")), "runtime": protection.runtime_conditions(tel)}
+            "os_note": os_note(n.get("os")), "runtime": protection.runtime_conditions(tel),
+            "cot": cotenancy_card(r, n, cfg)}
+
+
+def cotenancy_card(r, n: dict, cfg: dict) -> dict:
+    """The protection page's Co-tenancy card (docs/design/gpu-cotenancy.md): the GPU budget under gpu_jobs =
+    certified, each phase and progress source as the agent reads it, the event path's latency, the certificates, the
+    latest harness run, and the rules a run can measure (those with a progress_rate source)."""
+    from ..coordinator import cotenancy
+    card = cotenancy.node_card(r, n)
+    card["rules"] = [x["id"] for x in cfg.get("rule") or []
+                     if (x.get("protect") or {}).get("metric") == "progress_rate" and (x.get("protect") or {}).get("source")]
+    card["running"] = cotenancy.active_run(r, n["node_id"])
+    card["gpu_jobs"] = (cfg.get("node") or {}).get("gpu_jobs") or "when_no_gpu_protected"
+    return card
+
+
+def ab_run_page(r, run_id: str) -> dict | None:
+    """A harness run (the Harness page): its blocks as a paired dot plot (OFF and ON rate per block, joined), the
+    interval against the margin, the decision in words, and the excluded blocks with why."""
+    from ..coordinator import cotenancy
+    d = cotenancy.run_detail(r, run_id)
+    if d is None:
+        return None
+    rep = d.get("report") or {}
+    blocks = rep.get("blocks") or []
+    rates = [x for b in blocks for x in (b.get("on_rate") or 0, b.get("off_rate") or 0)] or [1.0]
+    hi = max(rates) * 1.1 or 1.0
+    w, h, pad = 640, 220, 30
+    step = (w - 2 * pad) / max(1, len(blocks))
+    y = lambda v: h - pad - (h - 2 * pad) * (v / hi)
+    plot = [{"x": round(pad + step * (i + 0.5), 1), "on": round(y(b["on_rate"]), 1), "off": round(y(b["off_rate"]), 1),
+             "ratio": round(b["on_rate"] / b["off_rate"], 4) if b.get("off_rate") else None, "on_first": b.get("on_first"),
+             "on_rate": round(b["on_rate"], 4), "off_rate": round(b["off_rate"], 4)} for i, b in enumerate(blocks)]
+    a = (d.get("outcome") or {}).get("analysis") or {}
+    band = None
+    if a.get("n", 0) >= 2:
+        lo, hi_r, m = a.get("r_lo") or 0, a.get("r_hi") or 0, a.get("margin") or 0.02
+        span = max(1.2 * max(abs(1 - lo), abs(hi_r - 1), m), 0.01)
+        sx = lambda v: round(pad + (w - 2 * pad) * ((v - (1 - span)) / (2 * span)), 1)
+        band = {"lo": sx(lo), "hi": sx(hi_r), "r": sx(a.get("r") or 1), "one": sx(1.0), "margin": sx(1 - m),
+                "left": f"{(1 - span) * 100:.1f} %", "right": f"{(1 + span) * 100:.1f} %"}
+    return {"d": d, "plot": plot, "plot_w": w, "plot_h": h, "band": band, "excluded": rep.get("excluded") or [],
+            "current": rep.get("current"), "spec": d.get("spec") or {}}
 
 
 def os_note(os: str | None) -> str | None:

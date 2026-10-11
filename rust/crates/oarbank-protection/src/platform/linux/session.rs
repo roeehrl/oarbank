@@ -107,6 +107,7 @@ impl Collector {
             gpu_busy,
             gpu_unknown,
             usage: vec![],
+            sources: vec![],
         }
     }
 }

@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 99 operations, 2 explain kinds, 135 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 102 operations, 2 explain kinds, 147 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -72,6 +72,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `releases.pin_key` | T3 | yes | `oarbank release keygen` | yes |
 | `protection.rules.update` | T2 | yes | `oarbank protection set <node> <file>`<br>`oarbank protection set fleet <file>`<br>`oarbank protection set group:<group> <file>`<br>`oarbank protection preview <node> <file>` | yes |
 | `protection.probe_now` | T0 | yes | `oarbank protection probe <nid>` | yes |
+| `protection.ab.start` | T2 | yes | `oarbank protection ab start <node> --rule <id> [--work <w>] [--duty <d>] [--blocks <n>] [--window <s>] [--washout <s>] [--margin <m>] [--off paused|evicted] [--max-hours <h>]` | yes |
+| `protection.ab.abort` | T0 | yes | `oarbank protection ab abort <run>` | yes |
+| `protection.ab.sweep` | T2 | yes | `oarbank protection ab sweep <node> --rule <id> [--work <w>] [--levels <list>]` | yes |
 | `alerts.ack` | T0 | yes | `oarbank alerts ack <id> [--useful|--noise]` | yes |
 | `alerts.snooze` | T0 | yes | `oarbank alerts snooze <id> --minutes N` | yes |
 | `alerts.resolve` | T0 | yes | `oarbank alerts resolve <id> [--useful|--noise]` | yes |
@@ -151,4 +154,6 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `PORT_TAKEN` | `listeners.configure` |
 | `NO_MAPPING_PROTOCOL` | `listeners.configure` |
 | `MAPPED_UNREACHABLE` | `listeners.probe` |
+| `GPU_NOT_CERTIFIED` | `protection.ab.sweep` |
+| `AB_STARTED` | `protection.ab.abort` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

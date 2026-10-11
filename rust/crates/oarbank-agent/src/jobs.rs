@@ -49,10 +49,16 @@ pub struct JobState {
     pub bandwidth: Option<String>,
     /// Cooperative throttle: the thread ceiling protection set (written into control.json).
     pub threads: Option<i64>,
+    /// Cooperative throttle: the GPU duty protection set (`gpu_duty` in control.json: a harness run's level, or a
+    /// co-tenancy certificate's under `gpu_jobs = certified`).
+    pub gpu_duty: Option<f64>,
     /// Pools the job reserves or needs (services start on demand for them; the job uses the services providing them).
     pub needs: Vec<String>,
     /// Wakes the job's monitor when `stop`, `pause` or `threads` change, so control.json follows at once.
     pub wake: Arc<Notify>,
+    /// The agent is stopping (agent.rs `stop_jobs`): the runner is killed at this instant at the latest, whatever its
+    /// own grace, so the agent ends within its service manager's stop timeout.
+    pub stop_by: Option<Instant>,
 }
 
 /// Whether the job runs a stage the release marks `bootstrap` (spec/sandbox.md, "Bootstrap jobs"): taken from the
@@ -498,6 +504,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     if let Some(r) = &ctx.registry {
         r.register(pid, Some(aid), None);                 // only registered groups may ever be signalled (S16)
     }
+    // what a later agent (or this one's watchdog) needs to end the runner should this agent die without stopping it
+    #[cfg(unix)]
+    let mut record = crate::runners::Record::create(&ctx.layout, aid, pid);
     {
         let mut t = ctx.table.lock().unwrap();
         if let Some(j) = t.get_mut(&aid) {
@@ -521,6 +530,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         if let Some(f) = fault {
             warn!(attempt = aid, "{f}; killed");
             procs::signal_group(pid, procs::Sig::Kill);
+            #[cfg(unix)]
+            if let Some(r) = record.take() {
+                r.remove();
+            }
             bail!("the runner did not come up sandboxed");
         }
     }
@@ -534,6 +547,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     let mut stopping: Option<(Stop, Instant, f64)> = None;
     let mut paused = false;
     let mut threads: Option<i64> = None;
+    let mut gpu_duty: Option<f64> = None;
     let mut log_sent = 0u64;
     let holdback = secrets.iter().map(|(_, v)| v.as_str().unwrap_or("").len() as u64).max().unwrap_or(0);
     let mut escaped: Option<String> = None;
@@ -550,7 +564,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         }
         let usage = procs::group_usage(pid);
         let log_len = std::fs::metadata(ws.join(".runner.log")).map(|m| m.len()).unwrap_or(0);
-        let (stop, want_pause, want_threads) = {
+        #[cfg(unix)]
+        if let Some(r) = record.as_mut() {
+            r.track();
+        }
+        let (stop, want_pause, want_threads, want_duty, stop_by) = {
             let mut t = ctx.table.lock().unwrap();
             let j = t.get_mut(&aid);
             match j {
@@ -563,9 +581,9 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                             j.phase = p;
                         }
                     }
-                    (j.stop.clone(), j.pause, j.threads)
+                    (j.stop.clone(), j.pause, j.threads, j.gpu_duty, j.stop_by)
                 }
-                None => (Some(Stop::Revoke), false, None),
+                None => (Some(Stop::Revoke), false, None, None, None),
             }
         };
         // a value split across two chunks would escape redaction: hold back as many bytes as the longest secret
@@ -579,11 +597,15 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                 }
             }
         }
-        if want_pause != paused || want_threads != threads {
+        if want_pause != paused || want_threads != threads || want_duty != gpu_duty {
             let mut doc = json!({"pause": want_pause, "reason": "protection"});
             if let Some(t) = want_threads {
                 doc["threads"] = json!(t);
             }
+            if let Some(d) = want_duty {
+                doc["gpu_duty"] = json!(d);
+            }
+            gpu_duty = want_duty;
             control.write(doc)?;
             if want_pause != paused {
                 set_phase(&ctx.table, aid, if want_pause { "paused" } else { "running" });
@@ -612,8 +634,10 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                     stopping = Some((s, Instant::now(), grace));
                 }
             }
-        } else if let Some((_, at, g)) = &stopping {
-            if at.elapsed() > Duration::from_secs_f64(*g) {
+        }
+        if let Some((_, at, g)) = &stopping {
+            // its grace is over, or the agent is stopping and cannot wait for it any longer
+            if at.elapsed() > Duration::from_secs_f64(*g) || stop_by.is_some_and(|d| Instant::now() >= d) {
                 procs::signal_group(pid, procs::Sig::Kill);
             }
         }
@@ -626,6 +650,11 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     };
     let oom = crate::sys::oom(pid);
     procs::signal_group(pid, procs::Sig::Kill);                     // nothing outlives its attempt
+    #[cfg(unix)]
+    if let Some(r) = record.take() {
+        r.remove();                                                 // its processes are gone: nothing to reap
+    }
+    let stop_by = ctx.table.lock().unwrap().get(&aid).and_then(|j| j.stop_by);
     // the runner is gone: the last checkpoint it wrote (always taken when it answers the request) is uploaded before
     // the attempt ends, so the job's next attempt finds it; a finished job needs none
     if let Some(c) = ck.as_mut() {
@@ -635,7 +664,17 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
             uploads.step(ctx, aid, c, asked_checkpoint, ws);
             if uploads.busy() {
                 set_phase(&ctx.table, aid, "checkpointing");
-                uploads.finish(ctx, aid, c, ws).await;
+                match stop_by {
+                    // the agent is stopping: the upload gets what is left of its stop budget
+                    Some(d) => {
+                        let until = tokio::time::Instant::from_std(d + crate::agent::STOP_REPORT);
+                        if tokio::time::timeout_at(until, uploads.finish(ctx, aid, c, ws)).await.is_err() {
+                            warn!(attempt = aid, "the agent is stopping: the last checkpoint's upload was cut short");
+                            uploads.abort();
+                        }
+                    }
+                    None => uploads.finish(ctx, aid, c, ws).await,
+                }
             }
         }
         c.clean();

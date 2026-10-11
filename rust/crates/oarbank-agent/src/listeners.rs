@@ -631,21 +631,6 @@ fn bind(at: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
 
 // MARK: the hub
 
-/// The running mapping task, for a release on SIGTERM (a service manager stopping the agent): the process ends at once
-/// otherwise, and only the short leases would clean up after it.
-static MAPPER: std::sync::OnceLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<MapCmd>>>> = std::sync::OnceLock::new();
-
-/// The agent is being terminated: delete this node's router mappings (at most `limit`), then return.
-pub async fn release_on_terminate(limit: Duration) -> usize {
-    let tx = MAPPER.get().and_then(|m| lock(m).take());
-    let Some(tx) = tx else { return 0 };
-    let (done, wait) = tokio::sync::oneshot::channel();
-    if tx.send(MapCmd::ReleaseAll(done)).is_err() {
-        return 0;
-    }
-    tokio::time::timeout(limit, wait).await.ok().and_then(|r| r.ok()).unwrap_or(0)
-}
-
 enum MapCmd {
     Wants(Vec<Want>),
     Network(NetSnapshot),
@@ -799,7 +784,6 @@ impl Hub {
             }
         });
         self.map_tx = Some(tx.clone());
-        *lock(MAPPER.get_or_init(Mutex::default)) = Some(tx.clone());
         // NAT-PMP announcements (UDP 5350): the router's new external address, or its restart
         if let Some(at) = self.env.announce {
             tokio::spawn(async move {

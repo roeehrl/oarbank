@@ -1,6 +1,6 @@
 # Inbound listeners: a module accepts connections from the internet
 
-Status: built in **core 2.10** and **oarbank-sdk 1.6** (PLAN D47, D48, D49; invariant S24). See Implementation status
+Status: built in **core 2.10** and **oarbank-sdk 1.7** (PLAN D47, D48, D49; invariant S24). See Implementation status
 at the end for what the build adds to the design and what remains to verify on real routers.
 
 ## The problem
@@ -446,7 +446,7 @@ release-all` (deletes every journaled mapping; the launcher's uninstall step), `
 
 ## Implementation status
 
-Built as designed in core 2.10 (agent, coordinator, console, CLI) and SDK 1.6 (manifest, schemas, `service_endpoint`,
+Built as designed in core 2.10 (agent, coordinator, console, CLI) and SDK 1.7 (manifest, schemas, `service_endpoint`,
 the conformance kit's listener suite, the reference module `publicecho`). Where the build adds to the design or
 departs from it:
 
@@ -481,17 +481,16 @@ departs from it:
 - **Network changes are polled**, every 5 s (netdev reads the routing table and interfaces in process), with a wake
   detected by the wall clock running ahead of the monotonic one. OS change events (SCDynamicStore, rtnetlink,
   `NotifyIpInterfaceChange`) would react sooner; the poll bounds the delay at 5 s plus a verification.
-- **SIGTERM** (a service manager stopping the agent) now releases the mappings before the agent ends as SIGTERM would;
-  before, the agent ended at once. Windows' service stop does not go through it: there the short leases and the next
-  start (or the uninstall's `portmap release-all`) clean up.
+- **Stopping the agent** goes through its one graceful stop (SIGTERM, SIGHUP or SIGINT on macOS and Linux, the
+  launcher's stop event or a console close on Windows): after its runners are stopped, the listeners close and the
+  router mappings are deleted. An agent that is killed outright leaves them to their short leases, the next start, or
+  the uninstall's `portmap release-all`.
 - **IPv6 pinholes** over UPnP are deleted by their id while their lease runs: `WANIPv6FirewallControl` has no read-back
   that names a pinhole's client, so a pinhole id a rebooted router gave to another device could in principle be
   deleted; leases are at most an hour.
 - **No in-fleet relay** for unreachable nodes, and UDP listeners, as decided.
 - **Workloads** (D45) are a separate change: a listener is served by an endpoint service; `Manifest.listener_targets()`
   in the SDK and the agent's `ServiceManager::listener_target` are the places a workload target joins.
-- **The core is still numbered 2.8** on this branch: the end-to-end test starts its coordinator as 2.10, and the release
-  commit raises the version.
 
 ### What remains to verify on real routers
 

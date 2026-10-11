@@ -215,7 +215,7 @@ with a line per step:
 journal says `rolled-back` with the error. Nothing of the old home is changed before step 6, so a rollback cannot lose
 data. Running the migration again after a rollback starts over; after `done` it is a no-op.
 
-**What the owner of tnt-studio experiences** (one per-user coordinator, logged in, double-clicking the 2.9.0 pkg):
+**What an owner experiences** (one per-user coordinator, logged in, double-clicking the 2.9.0 pkg):
 Installer asks for an administrator password as for any pkg; the postinstall exports the three keys in the person's
 session, stops the LaunchAgents, clones the 211 MB home in a moment, starts the two daemons, verifies them and removes
 the LaunchAgents. Agents reconnect within their retry interval (the same address, port and TLS identity); jobs keep

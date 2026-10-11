@@ -59,6 +59,8 @@ class NodeView:
     pool_jobs_only: bool = False
     gpu_cap: int | None = None        # the agent's gpu_jobs ceiling (None: not limited)
     gpu_use: int = 0                  # live GPU attempts on the node
+    paused: frozenset = frozenset()   # the work active protection rules pause there (all, cpu, gpu, io): none of it is granted
+    paused_by: str | None = None      # the first such rule (rule:<id>)
     excluded: dict = field(default_factory=dict)   # {module: reason}: platform, OS version, tools, sandbox, agent (modsandbox)
     excluded_why: dict = field(default_factory=dict)   # {module: the module's own words}: requires.unsupported.runner
     capabilities: dict = field(default_factory=dict)   # {module: node_capabilities(node, module)} for the offered modules
@@ -193,8 +195,23 @@ def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
         lambda: R("a module certified, certifying or runner-ready", _no_module_code(nv), bool(nv.serving),
                   sorted(nv.serving), "non-empty", "admission"),
         lambda: R("jobs cap", "USER_CAP_BINDING", nv.max_new > 0, nv.live, nv.limits.get("jobs"), "admission"),
+        lambda: R("no rule pauses every job", "PROTECTION_ACTIVE", not pauses_all(nv.paused), sorted(nv.paused),
+                  nv.paused_by, "admission"),
     ]
     return _run(checks, first_fail)
+
+
+def pauses_all(paused) -> bool:
+    """A protection rule pauses every fleet job on the node (`pause_fleet` scope `all` or `io`)."""
+    return bool({"all", "io"} & set(paused or ()))
+
+
+def paused_here(paused, gpu: bool) -> bool:
+    """A protection rule active on the node pauses this job (docs/design/protection.md, "Rules"): every job for `all`
+    and `io`, a GPU job for `gpu`, any other for `cpu`. Granting it would only see it paused, released after the longest
+    pause and granted to the same node again."""
+    p = set(paused or ())
+    return pauses_all(p) or ("gpu" in p if gpu else "cpu" in p)
 
 
 def retry_max(job: dict, platform: str | None) -> int:
@@ -333,6 +350,8 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
         lambda: R("datasets registered", "DATASETS_NOT_REGISTERED", not pl["unregistered"], pl["unregistered"], "[]"),
         lambda: R("datasets staged", "DATASETS_NOT_STAGED", set(datasets or []) <= nv.ready,
                   sorted(set(datasets or []) - nv.ready), "[]"),
+        lambda: R("not paused by host protection", "PROTECTION_ACTIVE", not paused_here(nv.paused, gpu), sorted(nv.paused),
+                  nv.paused_by),
         lambda: R(f"cpu({need_cpu:g}) <= free", "INSUFFICIENT_CPU", need_cpu <= nv.free_cpu, nv.free_cpu, need_cpu),
         lambda: R(f"mem_gb({need_mem:g}) <= free", "INSUFFICIENT_MEM", need_mem <= nv.free_mem, nv.free_mem, need_mem),
         pool_checks,

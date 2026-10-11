@@ -172,6 +172,20 @@ CODES: list[ReasonCode] = [
       "instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow",
       "P4"),
     C("PROTECTION_SOURCE_ERROR", "protection", "The process table cannot be read: {error}", "P3"),
+    C("PROTECTION_SOURCE_UNREADABLE", "protection", "Rule {rule}: source {source} cannot be read by the agent; protection "
+      "holds fleet work back until it reads", "P3"),
+    C("PROTECTION_SOURCE_NEEDS_HELPER", "protection", "Rule {rule}: source {source} is in a person's home and no session "
+      "helper reports it (nobody logged in?); protection holds fleet work back", "P3"),
+    C("PROTECTION_PHASE_ON", "protection", "A phase of rule {rule} began ({via})"),
+    C("PROTECTION_PHASE_OFF", "protection", "A phase of rule {rule} ended ({via})"),
+    C("GPU_NOT_CERTIFIED", "protection", "gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet "
+      "GPU work waits", "P4", remedies=["protection.ab.sweep"]),
+    C("AB_STARTED", "protection", "Harness run {run_id} started on rule {rule} ({work})", remedies=["protection.ab.abort"]),
+    C("AB_ON", "protection", "Harness run {run_id}: the work under test runs (an ON window)"),
+    C("AB_OFF", "protection", "Harness run {run_id}: the work under test is held (an OFF window)", node=False, job=False),
+    C("AB_IDLE", "protection", "Harness run {run_id} ended: its work runs as protection allows"),
+    C("AB_FINISHED", "protection", "Harness run {run_id} ended: {decision} ({why})"),
+    C("AB_REFUSED", "protection", "Harness run {run_id} refused by the node: {why}", "P4"),
 
     # ---------------------------------------------------------------- how an attempt ended
     C("OK", "attempt_end", "Completed", wire=["ok"], node=False, job=False),
@@ -182,6 +196,8 @@ CODES: list[ReasonCode] = [
     C("TIMEOUT", "attempt_end", "Hit the {timeout_s} s limit", wire=["timeout"], node=True, job=True),
     C("LEASE_EXPIRED", "attempt_end", "Lease expired (no heartbeat for {seconds} s)", wire=["lease_expired"], node=True, job=False),
     C("AGENT_RESTARTED", "attempt_end", "The agent restarted without the attempt", wire=["agent_restart"], node=False, job=False),
+    C("AGENT_STOPPED", "attempt_end", "The agent on the node was stopped (its service stopped or restarted); released and "
+      "requeued", wire=["agent_stop"], node=False, job=False),
     C("RELEASE_INVALID", "attempt_end", "Granted under a release the node no longer runs", wire=["release_invalid"], node=False, job=False),
     C("STALE_GENERATION", "attempt_end", "The job was requeued after this attempt was granted", wire=["stale_generation"],
       node=False, job=False),

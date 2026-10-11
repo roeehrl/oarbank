@@ -111,6 +111,17 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `PROTECTION_NO_LOWERING` | This node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable jobs are paused instead | P3 | – | – | – |
 | `PROTECTION_NO_IPC_COUNTERS` | Rule {rule} protects ipc_ratio, but this node's processes have no instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow | P4 | – | – | – |
 | `PROTECTION_SOURCE_ERROR` | The process table cannot be read: {error} | P3 | – | – | – |
+| `PROTECTION_SOURCE_UNREADABLE` | Rule {rule}: source {source} cannot be read by the agent; protection holds fleet work back until it reads | P3 | – | – | – |
+| `PROTECTION_SOURCE_NEEDS_HELPER` | Rule {rule}: source {source} is in a person's home and no session helper reports it (nobody logged in?); protection holds fleet work back | P3 | – | – | – |
+| `PROTECTION_PHASE_ON` | A phase of rule {rule} began ({via}) | P1 | – | – | – |
+| `PROTECTION_PHASE_OFF` | A phase of rule {rule} ended ({via}) | P1 | – | – | – |
+| `GPU_NOT_CERTIFIED` | gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet GPU work waits | P4 | – | `protection.ab.sweep` | – |
+| `AB_STARTED` | Harness run {run_id} started on rule {rule} ({work}) | P1 | – | `protection.ab.abort` | – |
+| `AB_ON` | Harness run {run_id}: the work under test runs (an ON window) | P1 | – | – | – |
+| `AB_OFF` | Harness run {run_id}: the work under test is held (an OFF window) | P1 | no / no | – | – |
+| `AB_IDLE` | Harness run {run_id} ended: its work runs as protection allows | P1 | – | – | – |
+| `AB_FINISHED` | Harness run {run_id} ended: {decision} ({why}) | P1 | – | – | – |
+| `AB_REFUSED` | Harness run {run_id} refused by the node: {why} | P4 | – | – | – |
 
 ## attempt_end
 
@@ -124,6 +135,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `TIMEOUT` | Hit the {timeout_s} s limit | P1 | yes / yes | – | `timeout` |
 | `LEASE_EXPIRED` | Lease expired (no heartbeat for {seconds} s) | P1 | yes / no | – | `lease_expired` |
 | `AGENT_RESTARTED` | The agent restarted without the attempt | P1 | no / no | – | `agent_restart` |
+| `AGENT_STOPPED` | The agent on the node was stopped (its service stopped or restarted); released and requeued | P1 | no / no | – | `agent_stop` |
 | `RELEASE_INVALID` | Granted under a release the node no longer runs | P1 | no / no | – | `release_invalid` |
 | `STALE_GENERATION` | The job was requeued after this attempt was granted | P1 | no / no | – | `stale_generation` |
 | `LOST_RACE` | Another attempt finished first | P1 | no / no | – | `lost_race` |
