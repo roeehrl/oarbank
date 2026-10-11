@@ -106,7 +106,7 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
     run_op(db, "nodes.pause", nid)
     db.x("INSERT INTO module_images(module,digest,image,set_name,key_sha256,first_run_at,node_id,attempt_id) VALUES(?,?,?,?,?,?,?,?)",
          ("relay", "cd" * 32, "ghcr.io/example/relay@sha256:" + "cd" * 32, "scorers", "ef" * 32, 0, nid, 1))
-    pages = ["/", "/agent", "/coordinator", f"/nodes/{nid}", f"/nodes/{nid}/protection", "/campaigns", f"/campaigns/{cid}", "/jobs", f"/jobs/{job}",
+    pages = ["/", "/agent", "/updates", "/coordinator", f"/nodes/{nid}", f"/nodes/{nid}/protection", "/campaigns", f"/campaigns/{cid}", "/jobs", f"/jobs/{job}",
              "/events", "/audit", "/settings", "/verify", "/modules", "/modules/relay", "/modules/toy", "/m/relay/scores", "/modules/reel", "/m/reel/data",
              f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health", "/datasets", "/datasets/upload"]
     files = []

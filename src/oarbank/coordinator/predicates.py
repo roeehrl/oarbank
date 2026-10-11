@@ -75,6 +75,7 @@ class NodeView:
     campaign_rules: object = None     # (campaign_id) -> {key: value}: what a running campaign holds its jobs to here
     site: dict | None = None          # sites.claim_view: the node's site, its uplink hold and network-heavy jobs running
     release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
+    agent_min: str | None = None      # the oldest agent this coordinator serves (its fleet release's agent_min, D61)
 
     @property
     def certified(self) -> set:
@@ -190,6 +191,8 @@ def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
         lambda: R("lifecycle = ready", {"quarantined": "NODE_QUARANTINED", "retired": "NODE_RETIRED"}.get(n["lifecycle"])
                   or ("RELEASE_PENDING" if n["lifecycle"] == "ready" else release_code(nv)),
                   n["lifecycle"] == "ready", n["lifecycle"], "ready", "admission"),
+        lambda: R(f"agent >= {nv.agent_min}", "AGENT_TOO_OLD", not agent_too_old(n.get("agent_version"), nv.agent_min),
+                  n.get("agent_version"), nv.agent_min, "admission"),
         lambda: R("release current", "RELEASE_PENDING" if n["release_id"] == nv.current_release else release_code(nv),
                   n["release_id"] == nv.current_release, n["release_id"], nv.current_release, "admission"),
         lambda: R("free cpu > 0", "INSUFFICIENT_CPU", nv.free_cpu > 0, nv.free_cpu, "> 0", "admission"),
@@ -200,6 +203,13 @@ def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
                   nv.paused_by, "admission"),
     ]
     return _run(checks, first_fail)
+
+
+def agent_too_old(have: str | None, agent_min: str | None) -> bool:
+    """D61: a node whose agent is older than the coordinator's agent_min is refused work until it updates (an unknown
+    version is not called older)."""
+    from .fleetupdates import newer
+    return bool(agent_min) and newer(agent_min, have)
 
 
 def pauses_all(paused) -> bool:

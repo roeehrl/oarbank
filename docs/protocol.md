@@ -642,6 +642,50 @@ canary on chosen nodes (`agent.upload`, `agent.canary`, `agent.promote`, `agent.
 - **Promotion** is refused until every canary node reports running the canary build and has heartbeated in
   the last 120 s. In signing mode canary and promotion need a signed build.
 
+## Fleet updates
+
+A fleet release moves a node's whole package (launcher, helpers, apps, runtime and agent) through the node's root
+update runner, and the coordinator before any node ([design/fleet-updates.md](design/fleet-updates.md); D56–D62,
+S29–S31). While a node has a `node_update` directive, the agent-only `agent_update` above is `null` for it; a node
+without an update runner keeps agent-only self-update.
+
+- **Release.** `oarbank-fleet-<version>.json` names every artifact of a version (`role` node, agent or coordinator;
+  `platform`; `format` pkg, msi, deb, rpm, tar or binary; `sha256`; `size`) with `seq`, `agent_min`, `stops` and
+  `expires`. Its text travels verbatim: everyone hashes those bytes. In signing mode the owner's statement
+  `{"type":"oarbank.fleet-release/v1","version","seq","manifest_sha256","signed_at"}` (sorted keys, `(",", ":")`
+  separators, Ed25519, base64) is checked against the owner key set. The coordinator imports a release from a
+  directory, from files staged through `POST /api/v1/updates/uploads`, or from `update_source`
+  (`<source>/download/v<version>/<asset>`). It checks each artifact's sha256 and size and keeps only the platforms its
+  nodes and itself run.
+- **Report.** hello and heartbeat carry `install: {format, scope, updater, why}` (how the agent was installed and
+  whether the runner's trigger and trust are in place) and `node_update: {state, release, seq, error, at}`. States:
+  `idle`, `unsupported`, `staging`, `staged`, `draining`, `deferred`, `installing`, `confirming`, `done`, `failed`,
+  `rolled_back`, `refused`.
+- **Directive.** While a node's target differs from the version it runs, every reply carries
+  `node_update: {release, seq, go, rollback, drain_timeout_s, artifact: {name, format, sha256, size, url}, manifest,
+  signature | null, owner_anchors | null}`; `null` otherwise. The target is the node's pin (`update_pin`), else none
+  while it is held (`update_hold`), else the governing rollout's release once the node's ring started (or, after the
+  rollout is done, to catch up), else what it runs. It is never newer than the coordinator's own version, and a
+  `stops` version the node has not reached comes first. `owner_anchors` relays the owner key set for the runner's
+  rotation rule.
+- **Artifact.** `GET /v1/updates/artifacts/{sha256}` (agent listener, mTLS) serves only the artifact of the node's
+  current directive (404 otherwise).
+- **Agent.** It stages (downloads under a site transfer lease, checks size, sha256, the manifest's entry for its
+  platform and format, and the signature) and reports `staged`. On `go` it drains: no new claims; running attempts
+  finish. Past `drain_timeout_s` it reports `deferred` and claims again. Drained, it writes its spool request for the
+  runner and reports `installing`; the new agent confirms after its first hello and heartbeat (`confirming`), then
+  `done`. If the runner rolled back, the old agent reports `rolled_back`. A `failed` seq is not retried until the
+  coordinator issues another.
+- **Rollout.** The coordinator first (ring 0: a snapshot, a self-test, the root coordinator runner, probation), then the
+  rings `canary`, `early` and `broad` (`update_ring`). Within a ring at most `max_unavailable` nodes are staged with `go`
+  or between draining and confirming (S29). `go` goes only to a node that is online (heartbeat within 120 s), inside its
+  `update_window`, not held, not pinned elsewhere, with no protected phase on and no workload seat due for renewal (S31;
+  each grant is journaled with these facts). A ring's next starts when it finished and baked: its bake time passed and
+  every node it updated heartbeated 10 times on the new release, healthy (S30). Failures above a ring's budget (0 for
+  canary, 1 after) halt the rollout and, with `auto_rollback`, send the nodes it moved back through the same directive
+  (`rollback: true`). A rollout does not start, nor start a ring, while more than a third of the fleet is unhealthy. A
+  node older than the coordinator's `agent_min` is refused work (`AGENT_TOO_OLD`) until it updates.
+
 ## Coordinator self-update
 
 The coordinator updates itself from a stored fleet release ([fleet-updates.md](design/fleet-updates.md), D58). Two

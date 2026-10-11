@@ -86,6 +86,60 @@ def _port_range(v):
     return f"{a}-{b}"
 
 
+def _until(v, where: str):
+    """An expiry: Unix seconds, an ISO 8601 time (UTC when it names no zone), or none."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
+        return float(v)
+    if isinstance(v, str) and v.strip():
+        import datetime as dt
+        try:
+            t = dt.datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise SettingError("bad_value", f"{where}.until: {v!r} is not a time (ISO 8601 or Unix seconds)")
+        return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).timestamp()
+    raise SettingError("bad_value", f"{where}.until: a time (ISO 8601 or Unix seconds), or none")
+
+
+def _reason(v: dict, where: str) -> str:
+    r = v.get("reason")
+    if not isinstance(r, str) or not r.strip() or len(r) > 300:
+        raise SettingError("bad_value", f"{where}.reason: say why (at most 300 characters)")
+    return r.strip()
+
+
+def _hold(v):
+    """update_hold: {reason, until} (until: an expiry, or none), or none."""
+    if v is None:
+        return None
+    if not isinstance(v, dict) or set(v) - {"reason", "until"}:
+        raise SettingError("bad_value", "update_hold: {reason, until}, or none")
+    return {"reason": _reason(v, "update_hold"), "until": _until(v.get("until"), "update_hold")}
+
+
+VERSION = r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]{1,40})?$"
+
+
+def _pin(v):
+    """update_pin: {version, reason, until}, or none."""
+    if v is None:
+        return None
+    if not isinstance(v, dict) or set(v) - {"version", "reason", "until"}:
+        raise SettingError("bad_value", "update_pin: {version, reason, until}, or none")
+    if not isinstance(v.get("version"), str) or not re.fullmatch(VERSION, v["version"].strip()):
+        raise SettingError("bad_value", "update_pin.version: a release version such as 2.10.0")
+    return {"version": v["version"].strip(), "reason": _reason(v, "update_pin"), "until": _until(v.get("until"), "update_pin")}
+
+
+def _source(v):
+    """update_source: an http(s) or file URL."""
+    v = _check(REGISTRY["update_source"].schema, v, "update_source")
+    if not re.fullmatch(r"(https?://[^\s/$.?#][^\s]*|file:///?[^\s]+)", v):
+        raise SettingError("bad_value", f"update_source: {v!r} is not an http(s) or file URL")
+    return v.rstrip("/")
+
+
 def _https_or_none(v):
     """listener_probe_endpoint: an https:// URL, or none."""
     v = _check(REGISTRY["listener_probe_endpoint"].schema, v, "listener_probe_endpoint")
@@ -115,8 +169,9 @@ SECTIONS = {
     "protection": ("Protection", "How fleet work yields to the owner's own programs. Protected-process rules from every "
                                  "scope apply together; they are edited on the protection pages."),
     "network": ("Network", "Inbound listeners and how they are checked from outside (docs/design/inbound-listeners.md)."),
+    "updates": ("Updates", "How new Oarbank releases reach the coordinator and the nodes (docs/design/fleet-updates.md)."),
 }
-NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection", "network")
+NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection", "network", "updates")
 FLEET_SECTIONS = ("notifications", "access", "verification")
 # the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
 MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
@@ -252,6 +307,38 @@ SETTINGS = (
             "the fleet's (the higher applies).",
             {"type": "number", "minimum": 0, "maximum": 1}, default=0.03, scopes=("fleet",), merge="max",
             applies="coordinator", section="verification", lockable=False, qualifier="optional", campaign=True),
+    # ---------------------------------------------------------------- fleet updates (docs/design/fleet-updates.md, D60)
+    Setting("update_auto", "Update automatically",
+            "on: a newly imported signed release starts a rollout by itself (inside each node's window); notify: the "
+            "coordinator says it is ready and the owner starts it; off: neither (it can still be started by hand).",
+            {"type": "string", "enum": ["off", "notify", "on"]}, default="notify", applies="coordinator", section="updates",
+            order=("on", "notify", "off"), tighten="higher", managed=True),
+    Setting("update_ring", "Update ring",
+            "Which ring of a rollout updates this node: canary first, then early, then broad.",
+            {"type": "string", "enum": ["canary", "early", "broad"]}, default="broad", scopes=("group", "node"),
+            applies="coordinator", section="updates"),
+    Setting("update_window", "Update window",
+            "Updates install only inside this window (local time on the node); none: any time.",
+            {"type": ["object", "null"], "x-kind": "schedule"}, default=None, applies="coordinator", section="updates"),
+    Setting("update_hold", "Update hold",
+            "Held: the node takes no update until the hold is lifted or expires ({reason, until}).",
+            {"type": ["object", "null"]}, default=None, scopes=("group", "node"), applies="coordinator",
+            section="updates", tighten="higher", managed=True, lockable=False, writer="updates.hold",
+            validator=lambda v: _hold(v)),
+    Setting("update_pin", "Update pin",
+            "The node stays on (or moves to) this release whatever rollouts do, until the pin is lifted or expires "
+            "({version, reason, until}).", {"type": ["object", "null"]}, default=None, scopes=("node",),
+            applies="coordinator", section="updates", lockable=False, writer="updates.pin", validator=lambda v: _pin(v)),
+    Setting("update_source", "Release source",
+            "Where `oarbank update fetch` and the periodic check download fleet releases from: a GitHub releases page, "
+            "or any http(s) or file URL laid out the same way (<source>/download/v<version>/<asset>).",
+            {"type": "string", "maxLength": 2048}, default="https://github.com/roeehrl/oarbank/releases", scopes=("fleet",),
+            applies="coordinator", section="updates", lockable=False, validator=lambda v: _source(v),
+            examples=("https://github.com/roeehrl/oarbank/releases",)),
+    Setting("update_check_h", "Check for releases every",
+            "Hours between checks of the release source for a newer release (0: never).",
+            {"type": "number", "minimum": 0}, default=6, unit="h", scopes=("fleet",), applies="coordinator",
+            section="updates", lockable=False),
     # ---------------------------------------------------------------- written by their own operations
     Setting("folder_registry", "Folders", "A folder id mapped to its access and a path on each node.", {"type": "object"},
             default={}, scopes=("fleet",), applies="coordinator", lockable=False, writer="settings.folders.update",
@@ -455,7 +542,9 @@ def _strictness(d: Setting, v):
     bound, is the loosest of all)."""
     if v is None:
         return float("-inf")
-    if d.order:
+    if isinstance(v, dict):
+        x = 1                                    # a key whose value is an object or none (a hold): set is stricter
+    elif d.order:
         x = d.order.index(v) if v in d.order else -1
     elif isinstance(v, bool):
         x = int(v)

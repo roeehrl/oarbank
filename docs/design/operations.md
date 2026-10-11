@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-111 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+124 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -127,6 +127,24 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `agent.promote` — Make the canary agent build current on every node of its platform (default: every platform with a canary) | T2 | required | yes | admin | declarative | agent.rollback | `POST /api/v1/ops/{op}` (op=agent.promote)<br>`POST /do/{op}` (op=agent.promote) | oarbank agent promote [--platform <os-arch>] |
 | `agent.rollback` — Abandon the agent canary, or flip current back to the previous build | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=agent.rollback)<br>`POST /do/{op}` (op=agent.rollback) | oarbank agent rollback [--platform <os-arch>] |
 | `agent.sign` — Attach an offline signature to an agent build (signing builds only) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=agent.sign)<br>`POST /do/{op}` (op=agent.sign) | oarbank agent sign <build> |
+
+## updates
+
+| Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
+|---|---|---|---|---|---|---|---|---|
+| `updates.import` — Import a fleet release: its manifest and the artifacts this fleet needs, each checked against its sha256 and size (installs nothing) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=updates.import)<br>`POST /api/v1/updates/uploads`<br>`POST /do/{op}` (op=updates.import) | oarbank update import <dir> |
+| `updates.fetch` — Download a fleet release from the release source (update_source) and import it | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=updates.fetch)<br>`POST /do/{op}` (op=updates.fetch) | oarbank update fetch <version> |
+| `updates.sign` — Attach the owner's signature to a fleet release (made offline with the owner key) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=updates.sign)<br>`POST /do/{op}` (op=updates.sign) | oarbank update sign <version> |
+| `updates.start` — Update the fleet to a release: the coordinator first, then the canary, early and broad rings under their caps, bake gates and failure budgets | T2 | required | yes | admin | natural | updates.rollback | `POST /api/v1/ops/{op}` (op=updates.start)<br>`POST /do/{op}` (op=updates.start) | oarbank update start <version> [--fast]<br>oarbank update plan <version><br>oarbank update coordinator <version> |
+| `updates.pause` — Pause a rollout: no new node is told to install; installs under way finish | T1 | prompted | – | operator | declarative | updates.resume | `POST /api/v1/ops/{op}` (op=updates.pause)<br>`POST /do/{op}` (op=updates.pause) | oarbank update pause |
+| `updates.resume` — Resume a paused or halted rollout | T1 | prompted | – | admin | declarative | updates.pause | `POST /api/v1/ops/{op}` (op=updates.resume)<br>`POST /do/{op}` (op=updates.resume) | oarbank update resume |
+| `updates.halt` — Halt a rollout: nothing new starts until it is resumed or rolled back | T1 | prompted | – | operator | declarative | updates.resume | `POST /api/v1/ops/{op}` (op=updates.halt)<br>`POST /do/{op}` (op=updates.halt) | oarbank update halt |
+| `updates.rollback` — Roll a rollout back: every node it moved reinstalls the release it ran | T2 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=updates.rollback)<br>`POST /do/{op}` (op=updates.rollback) | oarbank update rollback |
+| `updates.skip` — Leave a node out of the current rollout (it frees its slot) | T1 | prompted | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=updates.skip)<br>`POST /do/{op}` (op=updates.skip) | oarbank update skip <node> |
+| `updates.hold` — Hold a node's updates, with a reason and an optional expiry (update_hold) | T1 | prompted | – | operator | declarative | updates.unhold | `POST /api/v1/ops/{op}` (op=updates.hold)<br>`POST /do/{op}` (op=updates.hold) | oarbank update hold <node> --reason <why> [--until <time>] |
+| `updates.unhold` — Lift a node's update hold; it rejoins the rollout | T1 | prompted | – | operator | declarative | updates.hold | `POST /api/v1/ops/{op}` (op=updates.unhold)<br>`POST /do/{op}` (op=updates.unhold) | oarbank update unhold <node> |
+| `updates.pin` — Pin a node to a release, with a reason and an optional expiry (update_pin) | T1 | prompted | – | admin | declarative | updates.unpin | `POST /api/v1/ops/{op}` (op=updates.pin)<br>`POST /do/{op}` (op=updates.pin) | oarbank update pin <node> <version> --reason <why> [--until <time>] |
+| `updates.unpin` — Lift a node's update pin; it follows rollouts again | T1 | prompted | – | operator | declarative | updates.pin | `POST /api/v1/ops/{op}` (op=updates.unpin)<br>`POST /do/{op}` (op=updates.unpin) | oarbank update unpin <node> |
 
 ## protection
 

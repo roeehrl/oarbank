@@ -327,7 +327,7 @@ REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#nod
                 "workloads.restart": ("/modules/{module}/workloads", "/modules"),
                 "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
                 "protection.ab.abort": ("/protection/ab/{run_id}", "/"),
-                "sites.update": ("/sites", "/sites")}
+                "sites.update": ("/sites", "/sites"), "updates.start": ("/updates", "/updates")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 
