@@ -186,7 +186,7 @@ for row in "${CONFIGS[@]}"; do
     got="ok"
   elif inv=$(grep -oE "Invariant [A-Za-z0-9_]+ is violated" "$log" | head -1) && [ -n "$inv" ]; then
     got="inv:$(echo "$inv" | awk '{print $2}')"
-  elif grep -q "Temporal properties were violated" "$log"; then
+  elif grep -qE "Temporal propert(ies were|y [A-Za-z0-9_]+ was) violated" "$log"; then   # TLC 2.19; newer TLC
     got="liveness"
   else
     got="error"
