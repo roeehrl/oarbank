@@ -10,6 +10,7 @@ not sign: the keys live with the owner, not on the coordinator.
 |---|---|---|---|
 | A release (the module composition for one platform) | release id, bundle sha256, a rising seq | the release key | `oarbank release sign <release> [--promote]` |
 | An agent build | the binary's sha256, version, platforms, a rising seq | the release key | `oarbank agent sign <build>` |
+| A fleet release (`oarbank-fleet-<v>.json`: every package, agent and coordinator build of a version) | the manifest's sha256, version, its seq | an owner key | `oarbank update sign <version>` |
 | A coordinator build (what a move installs) | the archive's sha256, version, platform, a rising seq | an owner key | `oarbank coordinator-build sign <build>` |
 | A coordinator move | both coordinators, the next epoch, the time lock | both coordinators and an owner key | `oarbank coordinator sign --owner-key <key>` |
 | The owner key set (primary, offline backup, rescue locations) | the keys and a rising version | every new key and one current key | `oarbank owner set --key <primary> --backup-key <backup>` |
@@ -79,6 +80,36 @@ The signature checks are always compiled into the agent; there is no unsigned bu
 are not required, and a move can install the coordinator's own checkout. Nodes that never pinned a key accept
 unsigned work. A node that already pinned keys keeps refusing unsigned work until the owner signs
 `oarbank owner disable`, which tells it to unpin them. Use developer mode only for a fleet you are building on.
+
+## Fleet releases
+
+A fleet update ([design/fleet-updates.md](design/fleet-updates.md), D56) installs whole packages on every node and
+updates the coordinator itself, so it asks more of the signatures than an agent build: the owner's says this fleet
+should run the release, the vendor's that the release exists, and both sign one hash, the manifest's.
+
+1. **CI writes the manifest.** `scripts/fleet-manifest.py <version> dist` lists every asset of the release (node
+   packages per OS, architecture and format, the agent binaries, the coordinator builds) with its sha256, size,
+   platform, format and role, plus the release's `seq` (major×10000 + minor×100 + patch), `agent_min` and `stops`.
+   It is canonical JSON (sorted keys, no whitespace, ASCII, no trailing newline), so nobody re-serializes it: every
+   party hashes the same bytes. The `fleet-manifest` job of `ci.yml` attaches `oarbank-fleet-<version>.json` to the
+   release's artifacts; publish it with the release's other files.
+2. **The vendor lists it** as a TUF target, on the machine that holds the vendor keys:
+   `scripts/tuf_vendor.py add KEYS REPO oarbank-fleet-<version>.json dist/oarbank-fleet-<version>.json`, then
+   `scripts/tuf_vendor.py timestamp KEYS REPO` and publish the metadata. Agents and update runners built with the
+   vendor root accept a manifest only when the vendor's targets name it with exactly its length and sha256. Owners
+   mirror the metadata as for agent builds (`oarbank vendor-metadata upload <repo>`).
+3. **The owner signs it** after importing the release (`oarbank update fetch <version>` or `oarbank update import
+   <dir>`): `oarbank update sign <version>`, with the owner key on that machine (the Updates page shows the command
+   while a release waits for it). The statement is `{"type": "oarbank.fleet-release/v1", "version", "seq",
+   "manifest_sha256", "signed_at"}`, signed like every other owner statement. A release is **ready** only once it is
+   signed; `update_auto = on` needs signed releases too.
+
+Each node's update runner checks the manifest and its signature again, on its own copy of the package, against the
+owner keys root pinned on that machine (`<system data>/update/trust.json`, pinned by an administrator's package
+install), and refuses a `seq` below the last release it committed unless it is rolling back to the package it kept.
+A test fleet without owner keys pins `oarbank-launcher update-trust --unsigned` explicitly, on each node. Where the
+build pins one, the package's own signature is checked too: the Developer ID Installer team on macOS
+(`pkgutil --check-signature`) and the Authenticode subject on Windows.
 
 ## Vendor update trust (TUF)
 

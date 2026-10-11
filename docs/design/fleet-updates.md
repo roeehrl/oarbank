@@ -130,7 +130,7 @@ It is canonical JSON (keys sorted, no insignificant whitespace), so its bytes ar
 - **`stops`** are versions a node older than them must pass through (D61).
 - **`agent_min`** is the oldest agent this coordinator version still serves.
 - **`expires`**, when set, makes a manifest uninstallable after that time (freeze protection).
-- **Signatures.** The owner's statement is `{"type": "oarbank-fleet-release-signature", "manifest_sha256", "version",
+- **Signatures.** The owner's statement is `{"type": "oarbank.fleet-release/v1", "manifest_sha256", "version",
   "seq", "signed_at"}`, signed with Ed25519 like the other owner statements (`signing.py`) and checked against the
   owner key set (`owner.keys`). The vendor's is a TUF target named `oarbank-fleet-<version>.json` with the manifest's
   length and sha256.
@@ -246,7 +246,8 @@ Steps, each journaled:
 - **First pin:** at an administrator's install of a package that has one, `oarbank-launcher update-trust --from-agent`
   in postinstall or the MSI custom action. It copies the owner anchors the agent pinned (D35's trust on first use)
   while the administrator is present.
-- **Explicit pin:** `sudo oarbank-launcher update-trust` shows the coordinator's anchors' fingerprint for confirmation.
+- **Explicit pin:** `sudo oarbank-launcher update-trust --from-agent` on a node that joined after its package was
+  installed, or `--keys` with the fingerprints the console shows.
 - **Rotation:** `owner_anchors` statements the agent relays in the request. Like the agent's own rule, the version must
   be +1 and the statement signed by a key of the old set and every new key.
 
@@ -624,7 +625,7 @@ node runs the new version confirmed or the previous one).
   - **Windows:** the MSI major upgrade and downgrade through `update-run` (msi.yml).
   - **macOS:** an unsigned pkg upgrade through `update-run` on the macOS runner (sudo), with the team pin off.
 - **Regression.** The agent-only self-update suite still passes. A node without an updater keeps self-updating its
-  agent, and the 2.9 postinstall rules still hold for a manual install.
+  agent. A manual package install now also makes the package's agent current: the package is the unit (D57).
 
 ## Owner-verified (needs the owner's machines)
 

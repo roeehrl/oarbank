@@ -1,0 +1,30 @@
+# The node's update runner (PLAN D57; docs/design/fleet-updates.md, "The update runner"): `oarbank-launcher update-run`
+# as root, one request at most, in a unit of its own. It installs the package (dpkg -i, rpm -U), whose postinstall
+# restarts the agent's service (dev.codonic.oarbank.agent.service). Nothing ties this unit to that one (no PartOf,
+# BindsTo, Requires or Conflicts), so restarting, stopping or try-restarting the agent never stops the runner, and the
+# runner is never in the agent's cgroup. Started by its .path unit on the agent's request, and at boot, so a runner
+# interrupted mid-update (a power loss) resumes from its journal in /var/lib/oarbank/update. The package's scripts
+# never start it: the runner running dpkg would wait on itself.
+#
+# Logs: journalctl -u dev.codonic.oarbank.agent.update.service, and the runner's own in /var/lib/oarbank/update/logs.
+[Unit]
+Description=Oarbank update runner
+After=local-fs.target
+# The path unit starts this again for as long as a request exists: a runner that exits without taking the request (one
+# it cannot read) would be started over and over. systemd's own limit, made explicit: after 5 starts in 10 minutes the
+# path unit stops with unit-start-limit-hit, until the next boot or package install (whose postinstall resets it).
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/oarbank/oarbank-launcher update-run --once
+# an install with its probation (600 s) and a wait for the dpkg lock (20 min) fit inside; a stop is covered by the
+# runner's journal
+TimeoutStartSec=45min
+# the unit ends when update-run returns, and what it ran (dpkg, rpm) ran in the foreground: nothing of it is left to kill
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -212,6 +212,24 @@ def test_container_support_is_a_task_registered_by_the_msi_cancelled_by_rollback
     assert order["CancelContainers"] < order["RemoveNode"] < order["RemoveFiles"]
 
 
+def test_update_trust_is_pinned_after_setup_on_every_install_and_never_fails_it():
+    # docs/design/fleet-updates.md, "Trust": the owner anchors the agent pinned become root's update trust while an
+    # administrator installs; nothing else in the MSI serves the update runner (the elevated helper starts it)
+    pkg = _pkg()
+    assert _set(pkg, "PinUpdateTrust").get("Value") == f"{LAUNCHER} update-trust --from-agent"
+    assert _set(pkg, "PinUpdateTrust").get("Before") == "PinUpdateTrust"
+    ca = _ca(pkg, "PinUpdateTrust")
+    assert (ca.get("BinaryRef"), ca.get("DllEntry"), ca.get("Execute"), ca.get("Impersonate"), ca.get("Return")) == \
+        ("Wix4UtilCA_$(sys.BUILDARCHSHORT)", "WixQuietExec", "deferred", "no", "ignore")
+    steps = _steps(pkg)
+    cond = steps["PinUpdateTrust"].get("Condition")
+    assert _holds(cond, {}) and _holds(cond, {"WIX_UPGRADE_DETECTED": True}) and _holds(cond, {"Installed": True})
+    assert not _holds(cond, {"Installed": True, "REMOVE": "ALL"})
+    order = _order(steps)
+    for setup in ("SetupWithFile", "SetupWithCode", "SetupWithUrl", "SetupWaiting"):
+        assert order[setup] < order["PinUpdateTrust"], setup
+
+
 def test_the_launcher_owns_the_task_and_the_agent_never_installs_inside_another_installation():
     rs = SUPPORT_RS.read_text(encoding="utf-8")
     # the task's events name this package's product

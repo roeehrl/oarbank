@@ -323,6 +323,14 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
 - **The launcher owns `current`.** Versions live side by side in `versions/<v>/`; a staged build is checked (sha256,
   signature, platform header, version marker), started on trial, and kept only when it confirms within three starts
   and 600 s, else the launcher flips back and records why. A symlink on Unix, a pointer file on Windows.
+- **Fleet updates move whole packages** ([fleet-updates.md](fleet-updates.md), D56–D62): one manifest per release
+  (`oarbank-fleet-<v>.json`, written by CI, signed by the owner and listed by the vendor's TUF targets) names every
+  package and build by hash. The coordinator updates itself first (a database snapshot, a root runner, health-checked
+  probation, automatic restore), then rolls the nodes out in rings under `max_unavailable` and bake gates. On a node,
+  the agent only downloads, verifies and drains; a root **update runner** that the package installs (`oarbank-launcher
+  update-run`: a launchd job, a systemd path unit, or the elevated helper on Windows) verifies its own copy against
+  root's trust, installs it with the OS's installer and rolls back unless the new agent confirms. Agent-only updates
+  (above) remain for nodes without a runner.
 
 ## Containers
 
