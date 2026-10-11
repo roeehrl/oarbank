@@ -3,6 +3,7 @@ classified by its name, the canonical bytes that are signed, seq, stops and agen
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -202,8 +203,10 @@ def test_ci_updates_each_os_package_through_the_runner():
     assert "scripts/ci-fleet-update-macos.sh" in mac and "OARBANK_INSTALLER_IDENTITY" not in fleet
     msi = (REPO / ".github/workflows/msi.yml").read_text(encoding="utf-8")
     assert "scripts/ci-fleet-update-windows.ps1 -First dist/oarbank-agent-2.5.900-windows-x64.msi" in msi
+    # the Linux and macOS runners' scripts parse (on a POSIX host: Windows' `bash` is WSL's, which cannot read the path)
     for script in ("ci-fleet-update-linux.sh", "ci-fleet-update-macos.sh"):
-        assert subprocess.run(["bash", "-n", str(REPO / "scripts" / script)]).returncode == 0, script
+        if os.name == "posix":
+            assert subprocess.run(["bash", "-n", str(REPO / "scripts" / script)]).returncode == 0, script
     linux = (REPO / "scripts/ci-fleet-update-linux.sh").read_text(encoding="utf-8")
     for needle in ("debian:stable", "fedora:latest", '"$L" update-trust --unsigned',
                    '"$L" update-run --once --probation-s 5', "step unconfirmed no \"$pkg2\" rolled_back \"$v1\""):
