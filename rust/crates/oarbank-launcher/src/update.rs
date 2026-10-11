@@ -235,6 +235,13 @@ impl Installer for OsInstaller {
                 else { InstallOutcome::Failed { error: format!("installer failed: {tail}"), restored: false } }
             }
             "msi" => {
+                // this release's package is installed already (its agent, which only the MSI writes, is the release):
+                // nothing to install. Running the same MSI again from another path is a repair, and Windows
+                // Installer's secure repair refuses a package whose source moved (1603)
+                if package_agent("msi").and_then(|a| std::fs::read(a).ok())
+                    .is_some_and(|d| crate::marker(&d, b"oarbank-agent-version:").as_deref() == Some(release)) {
+                    return InstallOutcome::Installed { reboot_pending: false };
+                }
                 let log = self.log("msiexec", release);
                 let code = Command::new("msiexec").arg("/i").arg(package).args(["/qn", "/norestart", "/L*v"]).arg(&log).status()
                     .ok().and_then(|s| s.code());

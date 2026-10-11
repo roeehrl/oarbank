@@ -671,6 +671,9 @@ Built as designed, with these refinements found while building it:
   thread with its own connection.
 - **Managed policy.** `update_auto` and `update_hold` are in the agent's settings table as a `Coordinator` section: the
   agent checks and reports them, and the coordinator applies them.
+- **An MSI already installed is not run again.** When the package's own agent is already the release, the runner records
+  it as installed. Running the same MSI from another path would be a repair, which Windows Installer's secure repair
+  refuses (1603).
 - **Windows.** After a coordinator self-update on Windows, a later manual MSI install keeps the `current` junction on the
   self-updated build. The MSI's uninstall snapshot does not include the scheduled task.
 
