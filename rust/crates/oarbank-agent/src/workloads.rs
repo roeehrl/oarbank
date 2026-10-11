@@ -813,6 +813,13 @@ impl WorkloadManager {
                     ended.push((k.clone(), r, why));
                     continue;
                 }
+                // a renewed lease reaches the run (and its record)
+                if w.want.seat == run.seat && w.want.fence == run.fence {
+                    run.deadline = match (run.deadline, w.want.deadline) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
+                }
                 // the lease ran out on the boot clock: stopped, and the seat goes back
                 if w.decl.per_node && run.deadline.is_none_or(|d| d <= now_boot) && w.phase == Phase::Running {
                     info!(workload = %k, "its seat lease ran out: stopping it");
@@ -821,13 +828,6 @@ impl WorkloadManager {
                     w.want.reason = Some("WORKLOAD_SEAT_LEASE_EXPIRED".into());
                     stops.push((k.clone(), "WORKLOAD_SEAT_LEASE_EXPIRED"));
                     continue;
-                }
-                // a renewed lease reaches the run (and its record)
-                if w.want.seat == run.seat && w.want.fence == run.fence {
-                    run.deadline = match (run.deadline, w.want.deadline) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    };
                 }
                 if let Some(h) = w.decl.health {
                     if w.phase == Phase::Running && !w.health.busy && w.health.last.is_none_or(|t| t.elapsed() >= h.0) {
@@ -1923,5 +1923,212 @@ mod tests {
         let mut st2 = EventsSt::default();
         read_events(&p, &mut st2, false);
         assert!(st2.queue.is_empty());
+    }
+
+    /// A fake release with one module, `mod`, whose workload `w` is the synthetic double-forking daemon.
+    #[cfg(unix)]
+    struct Fx {
+        root: PathBuf,
+        release: Release,
+        _tmp: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl Fx {
+        fn new(tag: &str, workload: Value) -> Fx {
+            let tmp = crate::scratch(&format!("wl-{tag}"));
+            let root = std::fs::canonicalize(tmp.path()).unwrap();
+            let dir = root.join("releases/r_test");
+            let bundle = dir.join("modules/mod");
+            std::fs::create_dir_all(&bundle).unwrap();
+            let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workloads/wl.sh");
+            std::fs::copy(&src, bundle.join("wl.sh")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bundle.join("wl.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            let entry = json!({"name": "mod", "module_id": "dev.test.mod", "bundle": "modules/mod", "workloads": [workload],
+                               "sandbox": {"contract": 1, "net": {"mode": "none"}, "tools": [], "devices": {"gpu": "none"},
+                                           "exec_writable": false}});
+            let release = Release { id: "r_test".into(), dir, modules: vec![entry], tools: Value::Null };
+            Fx { root, release, _tmp: tmp }
+        }
+
+        fn layout(&self) -> Layout {
+            let l = Layout::new(self.root.join("home"));
+            l.ensure().unwrap();
+            l
+        }
+
+        fn manager(&self, registry: Option<Arc<SpawnRegistry>>) -> WorkloadManager {
+            let rt = Runtime { python: PathBuf::from("/usr/bin/python3"), uv: None, site_dirs: vec![], roots: vec![], host_provided: None };
+            let mut m = WorkloadManager::new(self.layout(), rt, registry);
+            m.adopt(Some(&self.release));
+            m.configure(&self.release, &json!({}), Some("node-1"), &[]);
+            m
+        }
+
+        fn run_file(&self, name: &str) -> Option<String> {
+            let base = self.root.join("home/modules-data/mod/workloads/w");
+            std::fs::read_dir(&base).ok()?.flatten().find(|e| e.file_name().to_string_lossy().starts_with("run-"))
+                .and_then(|e| std::fs::read_to_string(e.path().join(name)).ok())
+        }
+    }
+
+    #[cfg(unix)]
+    fn until(secs: f64, mut f: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs_f64(secs);
+        while Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        f()
+    }
+
+    #[cfg(unix)]
+    fn state(pid: i32) -> String {
+        let o = std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// The whole life of a workload on this OS, through the agent's own code: started sandboxed in its container when
+    /// the directives want it; its daemon, which calls setsid and forks twice, still belongs to it (macOS: tracked by its
+    /// sandbox identity; Linux: its cgroup); a protection pause freezes the daemon too; the sandbox refuses to let it
+    /// listen; a new agent adopts it (the same leader, the daemon found again); unassigned, everything of it ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_double_forking_workload_is_contained_paused_adopted_and_stopped() {
+        #[cfg(target_os = "linux")]
+        if crate::cgroup::root().is_none() {
+            assert!(!crate::cgroup::required_in_tests(), "no delegated cgroup, and OARBANK_TEST_CGROUPS=required");
+            eprintln!("skipped: no delegated cgroup (workloads are not offered here)");
+            return;
+        }
+        let fx = Fx::new("life", json!({"name": "w", "exec": ["{bundle}/wl.sh"], "control": ["freeze_ok"],
+                                         "pause_tolerance_s": 60, "stop_timeout_s": 2, "health": {"period_s": 1}}));
+        let reg = crate::prot::Protection::new(&fx.layout(), false).registry.clone();
+        let mut m = fx.manager(Some(reg.clone()));
+        let want = json!([{"key": "mod/w", "desired": "running", "restart_seq": 0}]);
+        m.set_wanted(&want, boot::now_s());
+        assert!(until(60.0, || {
+            m.tick();
+            fx.run_file("daemon.pid").is_some() && !m.running().is_empty()
+        }), "never started: {}", m.report());
+        let daemon: i32 = fx.run_file("daemon.pid").unwrap().trim().parse().unwrap();
+        let leader = m.report()[0]["pid"].as_i64().unwrap() as i32;
+        assert_ne!(unsafe { libc::getpgid(daemon) }, leader, "the daemon left the leader's group");
+        // it is the workload's: in its fleet pids (macOS once the scan finds it)
+        assert!(until(20.0, || {
+            m.tick();
+            m.fleet_pids().contains(&daemon)
+        }), "the daemon was not tracked: {}", m.report());
+        assert!(fx.run_file("listen.txt").unwrap_or_default().starts_with("refused"), "{:?}", fx.run_file("listen.txt"));
+        // protection pauses it: the leader and the daemon are frozen; resumed, both run again
+        let mut plans = BTreeMap::new();
+        plans.insert("mod/w".to_string(), WorkloadAction { admit: true, paused: true, ..Default::default() });
+        m.apply(&plans);
+        assert!(until(10.0, || state(daemon).starts_with('T') && state(leader).starts_with('T')),
+                "not frozen: daemon {} leader {}", state(daemon), state(leader));
+        plans.insert("mod/w".to_string(), WorkloadAction { admit: true, ..Default::default() });
+        m.apply(&plans);
+        assert!(until(10.0, || !state(daemon).starts_with('T')));
+        // the health check answers
+        assert!(until(20.0, || {
+            m.tick();
+            m.report()[0]["health"] == "healthy"
+        }), "{}", m.report());
+        // a new agent: the old one's manager goes, the workload stays and is adopted with its daemon
+        drop(m);
+        assert!(crate::sys::group_alive(leader));
+        let mut m2 = fx.manager(Some(reg.clone()));
+        let r = m2.report();
+        assert_eq!((r[0]["pid"].as_i64(), r[0]["adopted"].as_bool()), (Some(leader as i64), Some(true)), "{r}");
+        m2.set_wanted(&want, boot::now_s());
+        assert!(until(20.0, || {
+            m2.tick();
+            m2.fleet_pids().contains(&daemon)
+        }), "the adopted workload's daemon was not found again");
+        // unassigned: everything of it ends
+        m2.set_wanted(&json!([]), boot::now_s());
+        assert!(until(30.0, || {
+            m2.tick();
+            // the leader was this test's child (the first manager's): reap it, as init does for an agent that is gone
+            unsafe { libc::waitpid(leader, std::ptr::null_mut(), libc::WNOHANG) };
+            m2.running().is_empty() && !crate::sys::group_alive(leader) && procs::start_time_us(daemon).is_none()
+                && m2.report()[0]["state"] == "stopped"
+        }), "still running: leader {} daemon {}: {}", crate::sys::group_alive(leader), procs::start_time_us(daemon).is_some(),
+            m2.report());
+        assert!(!record_path(&fx.layout(), "mod/w").exists(), "its record goes with it");
+        assert!(!fx.root.join("home/run/workloads/mod/w/secrets.json").exists());
+    }
+
+    /// A per-node identity: the workload waits for its secrets for its seat and fence, runs with them in an owner-only
+    /// file, and stops when its lease runs out on the boot clock (the report then gives the seat back); a renewal keeps
+    /// it running.
+    #[cfg(unix)]
+    #[test]
+    fn a_seat_lease_gates_the_run_and_its_end_stops_it() {
+        #[cfg(target_os = "linux")]
+        if crate::cgroup::root().is_none() {
+            return;
+        }
+        let fx = Fx::new("lease", json!({"name": "w", "exec": ["{bundle}/wl.sh"], "identity": "per_node",
+                                          "secrets": ["key"], "stop_timeout_s": 2}));
+        let mut m = fx.manager(None);
+        let want = |lease: f64| json!([{"key": "mod/w", "desired": "running", "seat_id": "s_1", "fence": 3, "lease_s": lease}]);
+        m.set_wanted(&want(6.0), boot::now_s());
+        m.tick();
+        assert!(m.running().is_empty(), "no secrets yet");
+        assert_eq!(m.needs_secrets(), vec![("mod/w".to_string(), Some("s_1".to_string()), 3)]);
+        let mut sec = Map::new();
+        sec.insert("key".into(), json!("value-one"));
+        m.provide_secrets("mod/w", Some("s_1".into()), 3, Ok(sec));
+        assert!(until(30.0, || {
+            m.tick();
+            !m.running().is_empty()
+        }));
+        let secrets = fx.root.join("home/run/workloads/mod/w/secrets.json");
+        assert_eq!(std::fs::read_to_string(&secrets).unwrap(), r#"{"key":"value-one"}"#);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&secrets).unwrap().permissions().mode() & 0o777, 0o600);
+        // renewed: still running past the first lease's end
+        std::thread::sleep(Duration::from_secs(4));
+        m.set_wanted(&want(6.0), boot::now_s());
+        std::thread::sleep(Duration::from_secs(3));
+        m.tick();
+        assert!(!m.running().is_empty(), "a renewal keeps it running");
+        // not renewed: stopped at the end, the seat given back with its fence, the secrets gone
+        assert!(until(20.0, || {
+            m.tick();
+            m.report()[0]["state"] == "stopped"
+        }), "{}", m.report());
+        let r = m.report();
+        assert_eq!((r[0]["release"].as_bool(), r[0]["fence"].as_i64(), r[0]["reason"].as_str()),
+                   (Some(true), Some(3), Some("WORKLOAD_SEAT_LEASE_EXPIRED")), "{r}");
+        assert!(!secrets.exists());
+    }
+
+    /// A workload that keeps exiting backs off and is withdrawn after max_failures; a restart operation lifts it.
+    #[cfg(unix)]
+    #[test]
+    fn a_crash_loop_backs_off_then_withdraws_until_a_restart() {
+        #[cfg(target_os = "linux")]
+        if crate::cgroup::root().is_none() {
+            return;
+        }
+        let fx = Fx::new("crash", json!({"name": "w", "exec": ["/usr/bin/false"],
+                                          "restart": {"backoff_initial_s": 0.2, "backoff_max_s": 0.4, "max_failures": 3, "jitter": "none"}}));
+        let mut m = fx.manager(None);
+        m.set_wanted(&json!([{"key": "mod/w", "desired": "running", "restart_seq": 0}]), boot::now_s());
+        assert!(until(60.0, || {
+            m.tick();
+            m.report()[0]["withdrawn"] == true
+        }), "{}", m.report());
+        let r = m.report();
+        assert_eq!((r[0]["failures"].as_u64(), r[0]["state"].as_str(), r[0]["release"].as_bool()), (Some(3), Some("withdrawn"), Some(true)));
+        assert!(r[0]["error"].as_str().unwrap_or("").contains("exited"), "{r}");
+        m.set_wanted(&json!([{"key": "mod/w", "desired": "running", "restart_seq": 1}]), boot::now_s());
+        let r = m.report();
+        assert_eq!((r[0]["withdrawn"].as_bool(), r[0]["failures"].as_u64()), (Some(false), Some(0)));
     }
 }
