@@ -434,10 +434,11 @@ impl SpawnRegistry {
     /// identity, docs/design/workloads.md). The container must be registered and live, and the member must still have
     /// the start time the caller saw; journaled either way, with the member's pid and the workload.
     pub fn signal_member(&self, container: i32, pid: i32, start_us: u64, sig: Signal, reason: &str) -> Result<(), Refusal> {
+        // a member is born after its container's leader: an older process is never one (a recycled pid, a mistake)
         let checked = self.verify(container).and_then(|m| match self.actuator.start_time(pid) {
             None => Err(Refusal::Gone(pid)),
             Some(s) if s != start_us => Err(Refusal::IdentityChanged(pid)),
-            Some(_) if m.workload.is_none() => Err(Refusal::NotRegistered(container)),
+            Some(_) if m.workload.is_none() || start_us < m.start_us => Err(Refusal::NotRegistered(pid)),
             Some(_) => Ok(m),
         });
         match checked {
@@ -460,10 +461,11 @@ impl SpawnRegistry {
     /// Lower or restore one member of a registered workload container that left its group (as `signal_member`).
     pub fn set_background_member(&self, container: i32, pid: i32, start_us: u64, on: bool, reason: &str) -> Result<(), Refusal> {
         let policy = if on { "background" } else { "default" };
+        // a member is born after its container's leader: an older process is never one (a recycled pid, a mistake)
         let checked = self.verify(container).and_then(|m| match self.actuator.start_time(pid) {
             None => Err(Refusal::Gone(pid)),
             Some(s) if s != start_us => Err(Refusal::IdentityChanged(pid)),
-            Some(_) if m.workload.is_none() => Err(Refusal::NotRegistered(container)),
+            Some(_) if m.workload.is_none() || start_us < m.start_us => Err(Refusal::NotRegistered(pid)),
             Some(_) => Ok(m),
         });
         match checked {

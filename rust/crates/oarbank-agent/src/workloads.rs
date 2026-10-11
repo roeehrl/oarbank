@@ -466,10 +466,21 @@ fn private_dir(layout: &Layout, decl: &Decl) -> PathBuf {
     layout.run().join("workloads").join(&decl.module).join(&decl.name)
 }
 
-/// A path no module's sandbox profile grants, and a broadly permissive profile would: the denied half of the identity
-/// check.
-fn canary(layout: &Layout) -> PathBuf {
-    layout.state().join("workloads")
+/// A file beside the workload's private directory that no module's profile grants (a sibling, so any profile that
+/// grants reading that whole area grants it too): the denied half of the identity check. It must exist: some
+/// profiles allow reading existing files of an area and deny the rest.
+fn canary_of(private: &Path) -> PathBuf {
+    let mut p = private.as_os_str().to_owned();
+    p.push(".canary");
+    PathBuf::from(p)
+}
+
+/// Make the canary beside a private directory (idempotent).
+fn ensure_canary(private: &Path) {
+    let c = canary_of(private);
+    if !c.exists() {
+        let _ = std::fs::write(&c, b"not granted to any module process\n");
+    }
 }
 
 /// Whether this node can contain a workload (macOS: always; Linux: with a delegated cgroup; Windows: Job Objects).
@@ -945,35 +956,36 @@ impl WorkloadManager {
                 return;
             }
             self.last_scan = Some(Instant::now());
-            let markers: Vec<(String, std::ffi::CString, i32)> = lock(&self.shared).w.iter()
+            let c = |p: PathBuf| std::ffi::CString::new(p.display().to_string()).ok();
+            let markers: Vec<Marker> = lock(&self.shared).w.iter()
                 .filter_map(|(k, w)| w.run.as_ref().map(|r| (k.clone(), r)))
-                .filter_map(|(k, r)| std::ffi::CString::new(r.private.join("control.json").display().to_string()).ok()
-                    .map(|c| (k, c, r.leader)))
+                .filter_map(|(k, r)| {
+                    ensure_canary(&r.private);
+                    Some(Marker { key: k, leader: r.leader, born: r.start_us, control: c(r.private.join("control.json"))?,
+                                  canary: c(canary_of(&r.private))?, events: c(r.run_dir.join("events.ndjson"))? })
+                })
                 .collect();
             if markers.is_empty() {
                 return;
             }
-            let Ok(canary) = std::ffi::CString::new(canary(&self.layout).join("canary").display().to_string()) else { return };
             let me = std::process::id() as i32;
+            // the agent's own containers (jobs, services, workloads, health checks) are accounted for already
+            let known: BTreeSet<i32> = self.registry.as_ref().map(|r| r.all().iter().map(|m| m.pid).collect()).unwrap_or_default();
             let mut found: Vec<(String, i32, u64)> = vec![];
             for pid in own_pids() {
                 if pid == me || pid <= 1 {
                     continue;
                 }
                 let pgid = unsafe { libc::getpgid(pid) };
-                if markers.iter().any(|(_, _, leader)| *leader == pgid) {
-                    continue;                                     // in its group: a member already
+                if markers.iter().any(|m| m.leader == pgid) || known.contains(&pgid) {
+                    continue;                                     // in a container of the agent's: accounted for
                 }
-                if !crate::seatbelt::is_sandboxed(pid as u32) || crate::seatbelt::allows_read(pid as u32, &canary) != Some(false) {
+                let Some(born) = procs::start_time_us(pid) else { continue };
+                if !crate::seatbelt::is_sandboxed(pid as u32) {
                     continue;
                 }
-                for (k, marker, _) in &markers {
-                    if crate::seatbelt::allows_read(pid as u32, marker) == Some(true) {
-                        if let Some(s) = procs::start_time_us(pid) {
-                            found.push((k.clone(), pid, s));
-                        }
-                        break;
-                    }
+                if let Some(m) = markers.iter().find(|m| runs_with_profile(pid as u32, born, m)) {
+                    found.push((m.key.clone(), pid, born));
                 }
             }
             let mut sh = lock(&self.shared);
@@ -1439,6 +1451,7 @@ fn start_inner(e: &Env, ctx: &Ctx, decl: &Decl, want: &Want, secrets: &Map<Strin
     let key = decl.key();
     let private = private_dir(&e.layout, decl);
     crate::fsutil::private_dir(&private).map_err(|x| format!("private directory: {x}"))?;
+    ensure_canary(&private);
     let _ = std::fs::remove_file(private.join("secrets.json"));
     let (tools_file, settings_file, tool_paths) = grant_files(&private, &ctx.entry, &ctx.settings, &ctx.tool_grants)
         .map_err(|x| format!("grants: {x}"))?;
@@ -1809,6 +1822,32 @@ fn status_op(e: &Env, ctx: &Ctx, decl: &Decl, private: &Path, run_dir: &Path, se
     Ok((doc["healthy"].as_bool() == Some(true), doc["detail"].as_str().unwrap_or("").chars().take(300).collect()))
 }
 
+/// What tells one workload's processes from every other process of the agent's account (macOS).
+#[cfg(target_os = "macos")]
+struct Marker {
+    key: String,
+    leader: i32,
+    /// The leader's start time: a process of the run was born after it.
+    born: u64,
+    control: std::ffi::CString,
+    canary: std::ffi::CString,
+    events: std::ffi::CString,
+}
+
+/// Whether a sandboxed process runs with this workload's own profile: born after the run's leader, allowed to read the
+/// workload's control document but not the canary beside its private directory (a profile that grants that whole
+/// area, as some system services' do, grants both), allowed to write the run's events file but not the control
+/// document. Only the workload's generated profile answers all four so.
+#[cfg(target_os = "macos")]
+fn runs_with_profile(pid: u32, born: u64, m: &Marker) -> bool {
+    use crate::seatbelt::{allows_read, allows_write};
+    born >= m.born
+        && allows_read(pid, &m.control) == Some(true)
+        && allows_read(pid, &m.canary) == Some(false)
+        && allows_write(pid, &m.events) == Some(true)
+        && allows_write(pid, &m.control) == Some(false)
+}
+
 /// macOS: the processes of the agent's account.
 #[cfg(target_os = "macos")]
 fn own_pids() -> Vec<i32> {
@@ -2062,6 +2101,20 @@ mod tests {
             m.fleet_pids().contains(&daemon)
         }), "the daemon was not tracked: {}", m.report());
         assert!(fx.run_file("listen.txt").unwrap_or_default().starts_with("refused"), "{:?}", fx.run_file("listen.txt"));
+        // nothing but the workload's own processes is ever taken for a member (every other process of this account,
+        // sandboxed apps and system services among them, fails the identity check)
+        for _ in 0..5 {
+            m.tick();
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let sh = lock(&m.shared);
+        for (p, _) in &sh.w["mod/w"].run.as_ref().unwrap().members {
+            let o = std::process::Command::new("/bin/ps").args(["-o", "command=", "-p", &p.to_string()]).output().unwrap();
+            let cmd = String::from_utf8_lossy(&o.stdout).to_string();
+            assert!(*p == daemon || cmd.contains("perl") || cmd.contains("wl.sh") || cmd.trim().is_empty(),
+                    "a process that is not the workload's was tracked: {p} {cmd}");
+        }
+        drop(sh);
         // protection pauses it: the leader and the daemon are frozen; resumed, both run again
         let mut plans = BTreeMap::new();
         plans.insert("mod/w".to_string(), WorkloadAction { admit: true, paused: true, ..Default::default() });

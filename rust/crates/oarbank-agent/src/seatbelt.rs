@@ -67,7 +67,15 @@ const SANDBOX_CHECK_NO_REPORT: libc::c_int = 0x4000_0000;
 /// Whether the sandbox of process `pid` lets it read `path` (None: the check could not be made). Works for any
 /// process the caller may see, another account's included (docs/design/workloads.md, upfront check b).
 pub fn allows_read(pid: u32, path: &CStr) -> Option<bool> {
-    let op = c"file-read-data";
+    allows(pid, c"file-read-data", path)
+}
+
+/// Whether the sandbox of process `pid` lets it write `path`.
+pub fn allows_write(pid: u32, path: &CStr) -> Option<bool> {
+    allows(pid, c"file-write-data", path)
+}
+
+fn allows(pid: u32, op: &CStr, path: &CStr) -> Option<bool> {
     let r = unsafe { sandbox_check(pid as libc::pid_t, op.as_ptr(), SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, path.as_ptr()) };
     match r {
         0 => Some(true),
