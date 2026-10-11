@@ -70,6 +70,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     """The agent API, served on the mTLS listener: a node is its client certificate (D29)."""
     app = FastAPI(title="oarbankd agent API", docs_url=None, redoc_url=None)
     app.state.puller = puller
+    started_at = clock.now()
 
     @app.exception_handler(core.ApiError)
     async def _h(request, e):
@@ -102,7 +103,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
         except (DBBusy, sqlite3.OperationalError) as e:      # middleware errors never reach the exception handlers
             return JSONResponse({"error": "busy", "detail": str(e)}, status_code=503, headers={"Retry-After": "2"})
         p = request.url.path
-        open_paths = ("/v1/identity", "/v1/coordinator/", "/v1/move/", "/healthz")
+        open_paths = ("/v1/identity", "/v1/coordinator/", "/v1/move/", "/healthz", "/v1/health")
         if frozen and request.method in ("POST", "PUT") and not p.startswith(open_paths):
             resp = JSONResponse({"error": "coordinator_moving", "detail": "frozen for a coordinator move; retry shortly"},
                                 status_code=503, headers={"Retry-After": "5"})
@@ -377,6 +378,12 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     @app.get("/healthz")
     def healthz():
         return {"ok": True, "t": clock.now()}
+
+    @app.get("/v1/health")
+    def health():
+        """No authentication: the coordinator update runner's probation reads it (fleet-updates.md, D58)."""
+        from . import coordself
+        return coordself.health(db, started_at)
 
     return app
 
@@ -1334,8 +1341,11 @@ def _check_invariants(db: DB):
 
 def background(db: DB, stop: threading.Event):
     last_disc = last_ckpt = last_audit = last_inv = last_views = 0.0
+    from . import coordself
     while not stop.is_set():
         try:
+            coordself.tick(db)                          # GET /v1/health `ticking`
+            coordself.observe_result(db)                # a self-update's outcome, and leases held while one runs
             coordmove.driver_tick(db)
             if not coordmove.serving(db):               # frozen for a move, a standby, or handed off: no writes
                 stop.wait(2)

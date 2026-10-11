@@ -30,13 +30,34 @@ def main():
                     help="with --standby: move an existing home aside first (a reverse move back to this machine)")
     ap.add_argument("--service", action="store_true",
                     help="run as a Windows service (the service control manager starts it so: platform/service.py)")
+    ap.add_argument("--self-test", action="store_true",
+                    help="open the home's database (running every migration), check its integrity and invariants, print a "
+                         "JSON summary and exit 0 or 1; never listens (a coordinator update's check: fleet-updates.md, D58)")
+    ap.add_argument("--home", help="with --self-test: the home to check (default OARBANKD_HOME)")
     a = ap.parse_args()
+    if a.self_test:
+        return self_test(a.home)
+    if a.home:
+        ap.error("--home is for --self-test (the service's home is OARBANKD_HOME)")
     if a.service:
         if sys.platform != "win32":
             ap.error("--service is for the Windows service control manager; launchd and systemd run oarbankd as it is")
         from ..platform import service
         return service.run(lambda: run(a), stop_servers)
     return run(a)
+
+
+def self_test(home: str | None) -> int:
+    import json
+    from pathlib import Path
+    if home:
+        os.environ["OARBANKD_HOME"] = str(Path(home).resolve())
+        C.HOME = Path(os.environ["OARBANKD_HOME"])
+        C.DB_PATH = C.HOME / "oarbank.sqlite3"
+    from . import coordself
+    out = coordself.self_test(C.HOME)
+    print(json.dumps(out, sort_keys=True))
+    return 0 if out["ok"] else 1
 
 
 _SERVERS: list = []           # the uvicorn servers of this process, for a stop from the service manager
@@ -75,6 +96,8 @@ def run(a):
     from . import hostinfo
     hostinfo.refresh(db)
     completed_move = movepull.finish_install(db, C.HOME)
+    from . import coordself
+    coordself.observe_result(db)              # a self-update's outcome (fleet-updates.md, D58)
     puller = None
     if not completed_move and (a.standby or mstate.get("phase") in ("paired", "seeding", "seeded", "ready", "promoting")):
         if identity.role(db) == "active" and not db.one("SELECT COUNT(*) n FROM nodes")["n"]:
@@ -145,4 +168,4 @@ def run(a):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
