@@ -523,6 +523,14 @@ impl Spool {
         Ok(Some(out))
     }
 
+    /// The request is taken (the agent may have withdrawn it meanwhile).
+    fn remove_request(&self) -> Result<(), Halt> {
+        match std::fs::remove_file(self.request()) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+            _ => Ok(()),
+        }
+    }
+
     /// The agent's result document, as the runner last wrote it.
     pub fn read_result(&self) -> Option<Value> {
         serde_json::from_slice(&std::fs::read(self.result()).ok()?).ok()
@@ -653,7 +661,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
         if let Some(a) = &j.active {
             // taken and journaled, but the runner stopped before it removed the request
             if std::fs::read(self.spool.request()).ok().and_then(|b| Request::id_of(&b)).as_deref() == Some(a.id.as_str()) {
-                std::fs::remove_file(self.spool.request()).map_err(io)?;
+                self.spool.remove_request()?;
             }
             return self.drive(&mut j);
         }
@@ -668,7 +676,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
         };
         let id = Request::id_of(&raw);
         if let Some(id) = id.as_ref().filter(|id| j.finished.contains(id)) {
-            std::fs::remove_file(self.spool.request()).map_err(io)?;
+            self.spool.remove_request()?;
             return Ok(Ran::Ignored(id.clone()));
         }
         match self.verify(&raw, &j) {
@@ -680,7 +688,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
                     j.finish(id);
                     self.spool.write_journal(&j)?;
                 }
-                std::fs::remove_file(self.spool.request()).map_err(io)?;
+                self.spool.remove_request()?;
                 Ok(Ran::Finished { id: id.unwrap_or_default(), state: "refused".into() })
             }
             Ok(v) => {
@@ -693,7 +701,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
                                          previous_agent: self.installer.current_agent(), error: None, outcome: None,
                                          restored: false, busy: 0, retry_at: None, reboot_pending: false });
                 self.save(&j, "verified")?;
-                std::fs::remove_file(self.spool.request()).map_err(io)?;
+                self.spool.remove_request()?;
                 self.drive(&mut j)
             }
         }
