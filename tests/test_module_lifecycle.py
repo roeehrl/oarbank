@@ -3,7 +3,6 @@ install (verified, nothing enabled), enable, canary on some nodes (their own rel
 new digest; judged by that version's process), promote, rollback, the kill switch, pins, uninstall, and
 the install refusals."""
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,12 +11,12 @@ from oarbank.coordinator import core, modcalls, modstore, ops, releases
 from oarbank_sdk import bundle as B
 
 from helpers import (CAPACITY, sign_in, DOCTOR_OK, FACTS, PARAMS, READY, RELAY_DIR, SCENES, certify, create_study,
-                     enrolled_node, fresh, golden_result, make_db, relay_result)
+                     enrolled_node, fresh, golden_result, make_db, relay_result, scratch)
 
 
 def relay_version(version: str, tweak: str = "", fields_type: str | None = None) -> Path:
     """A copy of the relay fixture at another version (a different digest)."""
-    d = Path(tempfile.mkdtemp()) / "relay"
+    d = scratch() / "relay"
     shutil.copytree(RELAY_DIR, d, ignore=shutil.ignore_patterns("__pycache__", "dist"))
     m = (d / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "1.0.0"', f'version = "{version}"')
     if fields_type:
@@ -30,7 +29,7 @@ def relay_version(version: str, tweak: str = "", fields_type: str | None = None)
 
 
 def bundle_of(src: Path) -> Path:
-    out, _ = B.build(src, Path(tempfile.mkdtemp()) / "m.mfb")
+    out, _ = B.build(src, scratch() / "m.mfb")
     return out
 
 
@@ -268,7 +267,7 @@ def test_a_node_with_an_unrelated_digest_change_keeps_its_certification(db):
     """Certification is keyed by each module's digest: a new toy version re-certifies toy only."""
     n = certify(db, enrolled_node(db)[1])
     relay_before = state(db, n)
-    toy = Path(tempfile.mkdtemp()) / "toy"
+    toy = scratch() / "toy"
     from helpers import TOY_DIR
     shutil.copytree(TOY_DIR, toy, ignore=shutil.ignore_patterns("__pycache__", "dist"))
     (toy / "oarbank-module.toml").write_text((toy / "oarbank-module.toml").read_text(encoding="utf-8").replace('version = "0.1.0"', 'version = "0.2.0"'))

@@ -2,6 +2,8 @@
 `toy`, and `relay`, the core suite's fixture module in tests/fixtures/modules, a two-stage render-and-score parameter
 search), scene datasets, a composed release and certified nodes. The core itself ships no module."""
 import json
+import os
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -38,13 +40,27 @@ DOCTOR_OK = {"modules": {"relay": {"health": "healthy", "checks": []}, "toy": {"
 _BUNDLES: dict = {}
 
 
+def scratch(prefix: str = "") -> Path:
+    """A fresh directory that lasts the test session, for helpers called where no tmp_path is at hand (removed with the
+    run's temp directory, tests/tmpguard.py)."""
+    import tmpguard
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=tmpguard.suite_dir()))
+
+
 def bundle(src: Path) -> Path:
     """Each fixture module's bundle, built once per test session."""
     if src not in _BUNDLES:
         from oarbank_sdk import bundle as B
-        out, _ = B.build(src, Path(tempfile.mkdtemp(prefix="bundle-")) / f"{src.name}.mfb")
+        out, _ = B.build(src, scratch("bundle-") / f"{src.name}.mfb")
         _BUNDLES[src] = out
     return _BUNDLES[src]
+
+
+def apple_tool(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    """An Apple toolchain command (xcrun swiftc, xcrun swift) with its scratch in a directory removed when it returns:
+    swiftc's driver leaves a TemporaryDirectory.* behind in the temp directory on every run."""
+    with tempfile.TemporaryDirectory(prefix="xcrun-") as td:
+        return subprocess.run(cmd, env={**os.environ, **kw.pop("env", {}), "TMPDIR": td}, **kw)
 
 
 def install(db: DB, src: Path, enable: bool = True) -> dict:
