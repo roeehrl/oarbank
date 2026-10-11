@@ -400,6 +400,17 @@ def resolve(insts: list[dict], req: dict, native: str, pin: str | None = None) -
     return out("not_found", detail=f"no {tid} found on this node")
 
 
+def unreported_why(node: dict) -> str:
+    """Why a node has no tool report: its agent predates host tools (it never sends one: update it), or it has not
+    connected since it could."""
+    from . import agentbuilds
+    v = node.get("agent_version")
+    if agentbuilds.older(v, agentbuilds.HOST_TOOLS_SINCE):
+        return (f"the node's agent {v} is older than {agentbuilds.HOST_TOOLS_SINCE} and does not report host tools; "
+                f"update the node to this coordinator's release and it reports them when it connects")
+    return "the node's agent reports its tools after it connects"
+
+
 def resolve_for(r, node: dict, module: str, req: dict, defs: dict | None = None) -> dict:
     """resolve() for one node and module: its report, the path set where it inherits one, an unknown tool id, a node
     that has not reported yet."""
@@ -411,7 +422,7 @@ def resolve_for(r, node: dict, module: str, req: dict, defs: dict | None = None)
     rep = report(node)
     if not rep:
         return {"status": "not_found", "code": "TOOL_NOT_FOUND", "installation": None, "source": None, "unreported": True,
-                "detail": f"{req['id']} not reported yet (the node's agent reports its tools after it connects)"}
+                "detail": f"{req['id']} not reported yet ({unreported_why(node)})"}
     o = node_override(r, node, req["id"], module)
     res = resolve(installations(node, req["id"]), req, native_arch(node), o["path"] if o else None)
     if o:
@@ -545,7 +556,9 @@ def node_view(r, node: dict, defs: dict | None = None) -> dict:
         if rows:
             mods[name] = rows
     overrides = node_values(r, node.get("node_id"))
-    return {"reported": bool(rep), "detected_at": rep.get("detected_at"), "native_arch": native_arch(node),
+    return {"reported": bool(rep), "unreported_why": None if rep else unreported_why(node),
+            "found_any": any(installations(node, tid) for tid in defs),
+            "detected_at": rep.get("detected_at"), "native_arch": native_arch(node),
             "redetect": redetect_state(node),
             "tools": {tid: installations(node, tid) for tid in defs}, "extra": sorted(set(rep.get("tools") or {}) - set(defs)),
             "modules": mods, "overrides": overrides, "definitions": defs}

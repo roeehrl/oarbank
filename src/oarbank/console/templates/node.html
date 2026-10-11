@@ -94,11 +94,12 @@
 
 {# coordinator/tools.py node_view: what the node found, each module's resolution per tool request, and the paths set here #}
 {% set T = d.tools %}
-<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported yet){% endif %}</span></h2>
+<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported){% endif %}</span></h2>
 <div class="card wide">
   <div class="row"><span class="small mut">The node finds its tools itself, verifies each (a JDK by its <span class="mono">release</span> file) and
     reports it; a module gets the one installation that satisfies what it asks for.</span><span class="sp"></span>
     {{ m.op_form("tools.detect", n.node_id, "Re-detect") }}</div>
+  {% if not T.reported %}<p class="small" role="status"><span class="chip warn">not reported</span> {{ T.unreported_why }}</p>{% endif %}
   {% if T.redetect %}<p class="small" role="status"><span class="chip {{ 'ok' if T.redetect.state == 'done' else 'warn' }}">{{ T.redetect.text }}</span> <span class="mut">asked {{ T.redetect.requested_at | ago }}</span></p>{% endif %}
   <table class="small"><caption class="sr-only">Installations this node found</caption>
   <tr><th>tool</th><th>path</th><th>version</th><th>arch</th><th>vendor</th><th>found by</th><th>status</th></tr>
@@ -106,7 +107,7 @@
     <td class="nowrap">{{ i.version or '?' }}</td><td class="nowrap">{{ i.arch or '?' }}</td><td>{{ i.vendor or '' }}</td>
     <td class="nowrap">{{ {'detected': 'built-in search', 'search': 'fleet search path', 'override': 'path set here', 'local-hint': 'on this machine'}.get(i.source, i.source) }}</td>
     <td><span class="chip {{ 'ok' if i.status == 'ok' else 'bad' }}">{{ i.status }}</span></td></tr>{% endfor %}
-  {% else %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported yet: the agent reports its tools after it connects' }}</td></tr>{% endfor %}
+  {% endfor %}{% if not T.found_any %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported' }}</td></tr>{% endif %}
   </table>
   <h3 class="small">What each module gets here</h3>
   <table class="small"><caption class="sr-only">Each module's host tool requests on this node</caption>
