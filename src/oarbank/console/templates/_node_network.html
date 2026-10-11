@@ -1,0 +1,84 @@
+{# The node page's Network card (docs/design/inbound-listeners.md): each inbound listener with where it is reachable, its
+   router mapping, the agent's result with its owner text and fix (as the agent words them), its connections, Check now
+   (listeners.probe), the owner's entry (listeners.configure / listeners.remove), the router mappings the agent holds and
+   the other mappings the router reports for this machine, and the kill switch (listeners.disable / listeners.resume).
+   `d.listeners` is coordinator/listeners.py node_doc; `listener_choices` the listeners this node's modules request. #}
+{% import "_macros.html" as m with context %}
+{% set L = d.listeners %}
+{% set back = "/nodes/" ~ n.node_id ~ "#network" %}
+<h2 id="network">Network <span class="small mut">{% if L.reported_at %}(reported {{ L.reported_at | ago }}){% elif L.supported %}(no listener reported){% else %}(this agent does not support inbound listeners){% endif %}</span></h2>
+<div class="card wide">
+  <div class="row">
+    <span class="small">{% if L.disabled.fleet %}<span class="chip bad">listeners disabled for the fleet</span>
+      {% elif L.disabled.node %}<span class="chip bad">listeners disabled on this node</span>
+      {% else %}<span class="chip ok">listeners allowed</span>{% endif %}
+      {% if L.statement_seq %}<span class="mut">statement seq {{ L.statement_seq }} · {{ 'signed' if L.statement_signed else 'unsigned' }}</span>{% endif %}</span>
+    <span class="sp"></span>
+    {% if L.disabled.node %}{{ m.op_form("listeners.resume", n.node_id, "Resume listeners", confirm="Allow listeners on " ~ n.hostname ~ " again?", return_to=back) }}
+    {% else %}{{ m.op_form("listeners.disable", n.node_id, "Disable listeners", cls="danger", return_to=back) }}{% endif %}
+  </div>
+  {% set net = L.network %}
+  {% if net %}<div class="kv small" style="margin-top:6px">
+    <span class="mut">gateway</span><span class="mono">{{ net.gateway or '?' }}{% if net.local %} · this machine {{ net.local }}{% endif %}{% if net.local_v6 %} · {{ net.local_v6 }}{% endif %}</span>
+    <span class="mut">public address</span><span class="mono">{{ net.gateway_external or 'not reported by the router' }}{% if L.observed_addr %} · seen by the coordinator as {{ L.observed_addr }}{% endif %}{% if net.observed %} · STUN {{ net.observed }}{% endif %}</span>
+    {% if net.protocols %}<span class="mut">mapping protocols</span><span>{% for p, v in net.protocols | dictsort %}{{ p }} {{ v if v not in (true, false) else ('yes' if v else 'no') }}{{ ' · ' if not loop.last }}{% endfor %}</span>{% endif %}
+    {% if net.firewall %}<span class="mut">firewall</span><span>{{ net.firewall.kind or '?' }} {{ 'on' if net.firewall.enabled else 'off' }}{% if net.firewall.enabled %}, {{ 'allows the agent' if net.firewall.agent_allowed else 'does not allow the agent' }}{% endif %}</span>{% endif %}
+  </div>{% endif %}
+
+  <table class="small"><caption class="sr-only">Inbound listeners on this node</caption>
+  <tr><th>listener</th><th>state</th><th>reachable at</th><th>mapping</th><th>result</th><th>connections</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for x in L.listeners %}<tr>
+    <td class="mono nowrap"><a href="/nodes/{{ n.node_id }}?listener={{ x.key | urlencode }}#network">{{ x.key }}</a>
+      {% if x.configured is not none and x.statement is none %}<div class="mut small">assigned, not in the statement (no approved grant)</div>{% endif %}</td>
+    <td><span class="chip {{ 'ok' if x.state == 'listening' else ('bad' if x.state == 'refused' else 'warn') }}">{{ x.state or 'not reported' }}</span>
+      {% if x.refused %}<div class="mono small">{{ x.refused }}</div>{% endif %}{% if x.detail %}<div class="small">{{ x.detail }}</div>{% endif %}</td>
+    <td class="mono">{{ x.external or '–' }}{% if x.external_v6 %}<div>{{ x.external_v6 }}</div>{% endif %}{% if x.bind %}<div class="mut">local {{ x.bind }}</div>{% endif %}</td>
+    <td>{% for pm in x.portmaps %}<div>{{ pm.protocol or '?' }} {{ pm.family or '' }}{% if pm.lease_s %} · lease {{ pm.lease_s | secs }}{% endif %}{% if pm.verified_at %} · verified {{ pm.verified_at | ago }}{% endif %}{% if pm.permanent %} · permanent{% endif %}{% if pm.error %} · <b>{{ pm.error }}</b>{% endif %}</div>{% else %}<span class="mut">none</span>{% endfor %}</td>
+    <td>{% if x.result %}<span class="chip {{ 'warn' if x.fix else 'ok' }}">{{ x.result }}</span>{% for f in x.flags %} <span class="chip">{{ f }}</span>{% endfor %}
+      {% if x.text %}<div>{{ x.text }}</div>{% endif %}{% if x.fix %}<div><b>Fix:</b> {{ x.fix }}</div>{% endif %}{% endif %}
+      {% if x.probe and x.probe.state %}<div class="mut">checked from outside: {{ x.probe.state }}{% if x.probe.via %} via {{ x.probe.via }}{% endif %}{% if x.probe.at %} {{ x.probe.at | ago }}{% endif %}{% if x.probe.detail %} ({{ x.probe.detail }}){% endif %}</div>{% endif %}
+      {% if x.probe and x.probe.pending %}<div class="mut" role="status">a check from outside is running</div>{% endif %}</td>
+    <td class="nowrap">{% if x.conns.accepted is not none %}{{ x.conns.open or 0 }} open · {{ x.conns.accepted or 0 }} accepted
+      {% set ref = x.conns.refused | dictsort | selectattr(1) | list %}{% if ref %}<div class="mut">refused: {% for k, v in ref %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}{% else %}–{% endif %}</td>
+    <td class="actions">{% if x.external %}{{ m.op_form("listeners.probe", n.node_id, "Check now", params={"key": x.key}, return_to=back) }}{% endif %}
+      {% if x.configured is not none %}{{ m.op_form("listeners.remove", n.node_id, "Remove", cls="danger", params={"key": x.key}, confirm="Remove " ~ x.key ~ " from " ~ n.hostname ~ "? Its router mapping goes once the node applies the new statement.", return_to=back) }}{% endif %}</td>
+  </tr>
+  {% if listener_focus == x.key %}<tr><td colspan="7">
+    <b>Top client addresses (24 h)</b>
+    {% if x.talkers %}<table class="small"><caption class="sr-only">Top client addresses of {{ x.key }}</caption>
+      <tr><th>address</th><th>connections</th><th>refused</th><th>last</th></tr>
+      {% for t in x.talkers %}<tr><td class="mono">{{ t.addr }}</td><td>{{ t.conns or 0 }}</td><td>{{ t.refused or 0 }}</td><td>{{ t.last | ago if t.last else '' }}</td></tr>{% endfor %}</table>
+    {% else %}<p class="small mut" role="status">Asked for: the node sends them with its next heartbeat. Reload this page in a few seconds.</p>{% endif %}
+  </td></tr>{% endif %}
+  {% else %}<tr><td colspan="7" class="mut">no listener is assigned to or reported by this node</td></tr>{% endfor %}
+  </table>
+
+  <h3 class="small">Router mappings</h3>
+  <table class="small"><caption class="sr-only">Router mappings for this machine</caption>
+  <tr><th>listener</th><th>protocol</th><th>external</th><th>internal</th><th>gateway</th><th>expires</th><th>state</th></tr>
+  {% for pm in L.portmaps %}<tr><td class="mono">{{ pm.key }}</td><td>{{ pm.protocol }} {{ pm.family or '' }}</td><td class="mono">{{ pm.external or '?' }}</td>
+    <td class="mono">{{ pm.internal or '?' }}</td><td class="mono">{{ pm.gateway or '?' }}</td>
+    <td>{% if pm.permanent %}permanent{% elif pm.expires_at %}until {{ pm.expires_at | ts }}{% endif %}</td><td>{{ pm.state or '' }}{% if pm.error %} <b>{{ pm.error }}</b>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="7" class="mut">the agent holds no router mapping</td></tr>{% endfor %}
+  {% for rm in L.router_mappings if not rm.ours %}<tr><td class="mut">not Oarbank's</td><td>{{ rm.protocol }}</td><td class="mono">{{ rm.external_port }}</td>
+    <td class="mono">{{ rm.internal }}</td><td colspan="2">{{ rm.description or '' }}</td><td class="mut">the agent never touches it</td></tr>{% endfor %}
+  </table>
+
+  <details class="small"><summary>Assign or change a listener…</summary>
+  {% call m.op_form("listeners.configure", n.node_id, "Review…", inline=False, return_to=back) %}
+    <label>listener <input name="key" class="mono" required list="listener-keys-{{ n.node_id }}" placeholder="module/listener"></label>
+    <datalist id="listener-keys-{{ n.node_id }}">{% for c in listener_choices or [] %}<option value="{{ c.key }}">{% if c.port_hint %}port {{ c.port_hint }} wanted, {% endif %}{{ c.port_policy }}{% if c.handover == 'listen_fd' %}, listening socket (not on Windows){% endif %}</option>{% endfor %}</datalist>
+    <label>external port <input name="external_port" inputmode="numeric" class="mono" placeholder="the module's wanted port"></label>
+    <label>fallback <input name="fallback" class="mono" placeholder="refuse | next_free:9000-9015 | router_choice"></label>
+    <label>mapping <select name="mapping"><option value="">auto (default)</option>{% for v in ['pcp', 'natpmp', 'upnp', 'manual', 'none'] %}<option>{{ v }}</option>{% endfor %}</select></label>
+    <label>IPv6 <select name="ipv6"><option value="">auto (default)</option><option>off</option></select></label>
+    <label>bind <input name="bind" class="mono" placeholder="default_route"></label>
+    <label>internal port <input name="internal_port" inputmode="numeric" class="mono" placeholder="from the node's listener port range"></label>
+    <fieldset><legend>Lower the module's limits (empty: the module's)</legend>
+      {% for k in ['max_conns', 'max_conns_per_ip', 'new_conns_per_ip_per_s', 'idle_timeout_s', 'max_bytes_per_s'] %}<label class="mono">{{ k }} <input name="limit.{{ k }}" inputmode="decimal"></label>{% endfor %}
+    </fieldset>
+    <label>allowed client addresses (CIDRs; empty: everyone) <textarea name="allow" rows="2" class="mono" style="width:100%" placeholder="198.51.100.0/24"></textarea></label>
+    <span class="mut">Empty fields take their default. The entry goes into the node's statement; in signing mode sign it
+      (oarbank node sign {{ n.hostname }}) before the node applies it.</span>
+  {% endcall %}</details>
+</div>

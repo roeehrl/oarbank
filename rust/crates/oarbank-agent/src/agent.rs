@@ -110,6 +110,8 @@ pub struct Agent {
     pub managed_by: Option<String>,
     /// When the managed policy was last read: at most once a minute, since a read runs plutil or reg.
     managed_read: Option<std::time::Instant>,
+    /// Inbound listeners and their router mappings (listeners.rs).
+    pub listeners: crate::listeners::Hub,
 }
 
 /// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
@@ -143,6 +145,7 @@ impl Agent {
         };
         cfg.save(&layout.config())?;
         let release = release::current(&layout);
+        let layout_home = layout.home.clone();
         let signing = Signing { pinned_key: cfg.release_pubkey.clone(), release_seq: cfg.release_seq, agent_seq: cfg.agent_seq };
         let mut a = Agent { node_id: cfg.node_id.clone(), cfg, api: None, boot_id: identity::new_nonce(), seq: 0,
                    directives: initial_directives(), hooks: Box::new(NoHooks), runtime: None, release, doctor: None, signing,
@@ -155,7 +158,8 @@ impl Agent {
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
             services_halted: false, coord_install: Default::default(), status: Default::default(), layout,
             tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null,
-            settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None };
+            settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None,
+            listeners: crate::listeners::Hub::new(Layout::new(layout_home.clone()), crate::listeners::Env::from_env()) };
         a.refresh_managed();                    // the defaults the agent starts from are tightened, too
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
@@ -342,6 +346,7 @@ impl Agent {
                               "ready_datasets": staging::ready(&self.layout), "tools": self.tools,
                               "live_attempts": self.table.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
+        body["facts"]["listeners"] = crate::listeners::Hub::facts();   // inbound listeners, and a dial-back prober
         merge(&mut body, self.hooks.hello_extra());
         merge(&mut body, self.update.report());
         merge(&mut body, self.trust_report());
@@ -369,6 +374,7 @@ impl Agent {
         if !self.settings_report.is_null() {
             body["settings"] = self.settings_report.clone();
         }
+        merge(&mut body, self.listeners.report());                      // `listeners`, `portmaps`, `network`, `probe_results`
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
         merge(&mut body, self.update.report());
@@ -540,6 +546,8 @@ impl Agent {
         self.hooks.on_directives(d);
         self.directives = d.clone();
         self.sync_services();
+        // after the services: a listen_fd listener's socket must exist before its service's first start
+        self.listeners.configure(self.release.as_ref(), &self.folders, d, self.services.clone(), self.node_id.as_deref());
     }
 
     /// Create the service manager with the first release; reconfigure it on a new release or policy, and hand it
@@ -948,6 +956,7 @@ impl Agent {
 
     /// One protection tick: sample, decide, actuate, recompute capacity.
     pub fn protect(&mut self) {
+        self.listeners.tick();
         if self.facts.is_null() {
             self.facts = facts::collect(&self.layout.home);
         }
@@ -1140,6 +1149,12 @@ impl Agent {
         let r = self.rounds(stop).await;
         // however the rounds end (a stop, a fatal error, a rollback), no runner outlives the agent
         self.stop_jobs().await;
+        // the agent stops (the graceful stop of SIGTERM, SIGHUP, SIGINT or the launcher's stop event) or the node was
+        // retired: close the listeners and delete their router mappings
+        let n = self.listeners.shutdown().await;
+        if n > 0 {
+            info!(mappings = n, "router mappings released");
+        }
         self.settle_services().await;
         r
     }

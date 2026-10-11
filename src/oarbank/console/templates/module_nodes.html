@@ -33,4 +33,19 @@ a time: an empty path resets the row to inherited.</p>
     {% for f in r.fixes %}{% if f.command and not f.op %}<div><span class="mut">{{ f.label }}:</span> <code class="small">{{ f.command }}</code></div>{% elif f.href %}<div><a href="{{ f.href }}">{{ f.label }}</a></div>{% endif %}{% endfor %}{% endif %}</td>
 </tr>{% else %}<tr><td colspan="6" class="mut">{{ 'no node runs a platform it supports yet' if matrix and matrix.requests else 'it asks for no host tools' }}</td></tr>{% endfor %}
 </table></div>
+{% if man.sandbox.net.inbound %}{# inbound listeners per node (coordinator/listeners.py module_rows) #}
+<h2 id="listeners">Inbound listeners on each node</h2>
+<p class="small mut">It asks to accept connections from the internet on {% for x in man.sandbox.net.inbound %}<span class="mono">{{ x.name }}</span>{% if x.port_hint %} (port {{ x.port_hint }}, {{ x.port_policy }}){% endif %}{{ ', ' if not loop.last }}{% endfor %}.
+A listener opens only on nodes the owner assigns it to (the node page's Network card), once the node applies its statement.</p>
+<div class="card wide">
+<table class="small"><caption class="sr-only">Inbound listeners of {{ name }} on each node</caption>
+<tr><th>node</th><th>listener</th><th>state</th><th>external address</th><th>reachability</th></tr>
+{% for r in listener_rows %}<tr><td class="nowrap"><a href="/nodes/{{ r.node_id }}#network">{{ r.hostname or r.node_id }}</a>{% if not r.online %} <span class="mut">offline</span>{% endif %}</td>
+  <td class="mono">{{ r.key }}</td>
+  <td><span class="chip {{ 'ok' if r.state == 'listening' else ('warn' if r.state in ('held', None) else 'bad') }}">{{ r.state or ('assigned, not reported yet' if r.statement else 'not in the statement') }}</span>{% if r.refused %} <span class="mono">{{ r.refused }}</span>{% endif %}</td>
+  <td class="mono">{{ r.external or '–' }}</td>
+  <td>{% if r.result %}<span class="chip {{ 'ok' if r.result == 'REACHABLE' else 'warn' }}">{{ r.result }}</span> {{ r.text or '' }}{% else %}<span class="mut">not checked yet</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">no node is assigned one of its listeners</td></tr>{% endfor %}
+</table></div>
+{% endif %}
 {% endblock %}

@@ -142,6 +142,8 @@
   {% endcall %}</details>
 </div>
 
+{% include "_node_network.html" %}
+
 <h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
 {% set P = n.protection or {} %}{% set T = n.tel.protection or {} %}
 <div class="card">

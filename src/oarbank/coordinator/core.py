@@ -302,7 +302,14 @@ def _node_directives(db: DB, node: dict) -> dict:
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
             # harness runs and co-tenancy certificates (docs/design/gpu-cotenancy.md)
             **cotenancy.directives(db, node),
-            **coordmove.directives(db), **owner.directives(db)}
+            **coordmove.directives(db), **owner.directives(db),
+            # inbound listeners: the kill switch, dial-back probes, reachability, the observed address (listeners.py)
+            **_listener_directives(db, node)}
+
+
+def _listener_directives(db: DB, node: dict) -> dict:
+    from . import listeners
+    return listeners.directives(db, node)
 
 
 def _renew_within() -> float:
@@ -401,7 +408,7 @@ def _observe_tools(db: DB, node: dict, body: dict):
         db.x("UPDATE nodes SET tools_json=? WHERE node_id=?", (text, node["node_id"]))
 
 
-def heartbeat(db: DB, node: dict, body: dict) -> dict:
+def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
     t = now()
     nid = node["node_id"]
     tel, cap = body.get("telemetry") or {}, body.get("capacity") or {}
@@ -448,6 +455,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             rep = {"services": [x for x in body["services"][:200] if isinstance(x, dict)],
                    "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
             db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps(rep), t, nid))
+        _observe_listeners(db, node, body, peer_ip)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
@@ -470,6 +478,13 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
     if ack is not None:
         d["journal_ack"] = ack
     return d
+
+
+def _observe_listeners(db: DB, node: dict, body: dict, peer_ip: str):
+    """Inbound listeners (docs/design/inbound-listeners.md, "Protocol"): the agent's listeners, router mappings, network
+    view, probe results and top talkers, and the node's public source address (listeners.ingest)."""
+    from . import listeners
+    listeners.ingest(db, node, body, peer_ip)
 
 
 def _ingest_journal(db: DB, node_id: str, records: list) -> int | None:
@@ -1861,7 +1876,8 @@ def reap(db: DB):
             _alert(db, "node_offline", n["node_id"], f"{n['hostname']} offline for {int((t - hb) / 60)} min")
         elif hb and t - hb < C.OFFLINE_AFTER:
             _resolve_alert(db, "node_offline", n["node_id"])
-    from . import alerting, protection
+    from . import alerting, listeners, protection
+    listeners.tick(db, t)               # probes expire, statements follow module and grant changes, talkers age out
     protection.check_alerts(db, t)
     releases.note_awaiting(db)          # releases waiting for the owner's signature (a key pinned, a node gone, ...)
     alerting.promote_pending(db, t)

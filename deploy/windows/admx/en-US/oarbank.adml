@@ -8,6 +8,7 @@
     <stringTable>
       <string id="SUPPORTED_Oarbank_2_8">Oarbank agent 2.8 or later</string>
       <string id="SUPPORTED_Oarbank_2_9">Oarbank agent 2.9 or later</string>
+      <string id="SUPPORTED_Oarbank_2_10">Oarbank agent 2.10 or later</string>
       <string id="Codonic">Codonic</string>
       <string id="Oarbank">Oarbank</string>
       <string id="Node">Node</string>
@@ -68,6 +69,10 @@ This value can only make the coordinator's setting stricter on this computer, ne
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="run_on_battery">Run jobs on battery</string>
       <string id="run_on_battery_Help">Disabled: a laptop on battery power takes no new jobs. Enabled has no effect: the coordinator's setting applies.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="inbound_listeners">Inbound listeners</string>
+      <string id="inbound_listeners_Help">Disabled: no module listener accepts connections from the internet on this computer, and every router port mapping Oarbank made is removed. Enabled has no effect: the coordinator's setting applies.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="max_slots">Most jobs at once (slots)</string>

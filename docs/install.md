@@ -216,7 +216,7 @@ owner still lowers caps from the console. The keys and which way each tightens:
 
 | Key | Type | Stricter |
 |---|---|---|
-| `run_on_battery` | boolean | off |
+| `run_on_battery`, `inbound_listeners` | boolean | off |
 | `screen_sharing_present`, `mem_in_use_bound`, `hard_limits` | boolean | on |
 | `user_present_slots`, `max_slots`, `jobs`, `vm_cpus` | integer | lower |
 | `cpu_cores`, `mem_gb`, `vm_mem_gb`, `disk_gb`, `staging_mbps` | number | lower |
@@ -322,6 +322,40 @@ each node's **Host tools** section show what was found, what each module gets an
   in the agent's environment to search only the fleet's paths, your hints and paths set for the node.
 - `oarbank tools` lists the definitions and what every node found; `oarbank tools --module <name>` prints a module's
   node-by-node matrix with the fixes.
+
+### Accepting connections from the internet (inbound listeners)
+
+Some modules serve the internet: a peer-to-peer node that publishes its address, a public endpoint. Such a module
+declares an inbound listener; nothing listens anywhere until you put the listener on a node
+([design/inbound-listeners.md](design/inbound-listeners.md)):
+
+1. **Approve** the module's grants: the listener shows as "accepts connections from the internet on nodes the owner
+   assigns", with its limits.
+2. **Assign it to a node**: the node page's **Network** card, or `oarbank listener set <node> <module>/<listener>
+   [--external-port 9000] [--fallback refuse|next_free:9000-9015|router_choice] [--mapping auto|pcp|natpmp|upnp|manual|none]
+   [--limit max_conns=64] [--allow 198.51.100.0/24]`. With release signing, sign the node's statement (`oarbank node
+   sign <node>`) before the node applies it.
+3. **Watch it come up**: the node maps the port on your router by itself (PCP, NAT-PMP or UPnP; turn one of them on in
+   the router's settings if it has none), another of your nodes on a different network checks it from outside, and the
+   Network card (`oarbank listener show <node> <key>`) says what happened in plain words with the fix:
+   - **No automatic mapping**: turn on UPnP or NAT-PMP on the router, or forward the TCP port to the node's address
+     and internal port (both shown) by hand and set the listener's mapping to `manual`; then set `--internal-port` so
+     the forward never moves.
+   - **Behind two routers** (the provider's modem and your own): put the modem in bridge mode, forward the port on
+     both, or run the module on a node that is reachable.
+   - **Carrier-grade NAT** (the provider shares one public address): ask the provider for a public IPv4 address, use
+     IPv6 if the module accepts it, or run it elsewhere.
+   - **The firewall blocks it**: allow the agent (`sudo oarbank-agent firewall allow`, run by the installer on Macs
+     whose Application Firewall is on; on Linux with `--port <p>` for each listener port).
+   - **Not checked yet**: no node on another network to dial back from. Add one, or run `oarbank-agent probe-endpoint`
+     behind HTTPS on a machine elsewhere and set `listener_probe_endpoint` (Settings, Network). A public STUN server is
+     used only if you set `listener_stun_server`.
+4. **Everything the router holds for Oarbank** is on the Network card and in `oarbank listener mappings`; the agent
+   deletes its mappings when the listener goes, when it stops and when Oarbank is uninstalled, and never touches a
+   mapping it did not make. `oarbank listener disable --all` closes every listener and removes every mapping at once.
+
+A managed policy can forbid listeners on a machine (`inbound_listeners = false`). Internal ports come from
+`listener_port_range` (default 41000-41999).
 
 ## Updating
 

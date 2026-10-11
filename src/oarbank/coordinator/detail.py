@@ -103,7 +103,15 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os"),
                               n["node_id"], sources),
         # its effective settings with their source and applied state (settings/views.py)
-        "settings": SV.effective_doc(r, n["node_id"])}
+        "settings": SV.effective_doc(r, n["node_id"]),
+        # inbound listeners: each with the owner's entry, the agent's report and the latest probe; router mappings, the
+        # network view and reachability (listeners.py, docs/design/inbound-listeners.md)
+        "listeners": _listeners(r, n, now)}
+
+
+def _listeners(r, n: dict, now: float) -> dict:
+    from . import listeners
+    return listeners.node_doc(r, n, now=now)
 
 
 def job(r, jid: int) -> dict | None:

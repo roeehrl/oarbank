@@ -46,6 +46,11 @@ The keys, by section:
 - **Jobs**: `threads_per_job`, `max_slots`; advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
   advanced `vm_mem_gb`, `vm_cpus`, `disk_gb`, `staging_mbps`.
+- **Network** ([inbound-listeners.md](inbound-listeners.md)): `inbound_listeners` (off: no listener opens and every
+  router mapping is removed; managed, off is stricter), advanced `listener_port_range` (the internal ports listeners
+  bind, default `41000-41999`); fleet only, both null by default so no third party is contacted:
+  `listener_probe_endpoint` (an `https://` URL of the owner's `oarbank-agent probe-endpoint`) and `listener_stun_server`
+  (`host:port`). All four travel to agents in the policy.
 - **Notifications** (fleet only): `ntfy.url`, `ntfy.click_base`. The ntfy token is not a setting: it is a core secret
   in the encrypted secrets store (write-only, shown as a fingerprint; `settings.secrets.set` / `clear`).
 - **Access** (fleet only): `console_hosts`, a typed list of host names (an optional `:port`).
@@ -350,7 +355,7 @@ machine" layer, in the safe direction only.
   `/etc/oarbank/policy.json`), keyed by the settings' raw keys ([install.md](../install.md), "MDM").
 - **Which keys.** The registry's `managed` keys: `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` (higher is
   stricter), `mem_in_use_bound`, `screen_sharing_present`, `hard_limits` (on is stricter), `user_present_slots`,
-  `max_slots`, `run_on_battery` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
+  `max_slots`, `run_on_battery`, `inbound_listeners` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
   `staging_mbps`: lower) and `enforce` (hard is stricter). Anything else (`job_mem_gb`, a schedule, protection) is
   refused and reported: protection already has its own tighten-only local file.
 - **Enforcement.** The agent applies each managed value only where it is stricter than what the coordinator sends (and
