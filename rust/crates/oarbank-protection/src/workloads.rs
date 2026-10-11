@@ -53,6 +53,8 @@ pub struct FleetWorkloadView {
     pub hard_cap: bool,
     /// `gpu.use` is not none.
     pub gpu: bool,
+    /// The processes of its container: whose GPU time the duty governor checks against its `gpu_duty` (D50).
+    pub pids: Vec<i32>,
 }
 
 impl FleetWorkloadView {

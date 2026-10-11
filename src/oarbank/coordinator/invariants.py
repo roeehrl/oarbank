@@ -45,11 +45,15 @@ Safety (must hold after every committed transaction):
       100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
       the source event)
   S26 at most one node runs a seat of a per-node workload identity at a time (workloads.py; TLA+ OarbankSeat)
+  S28 the GPU duty budget a node journals never exceeds the certified ceiling it journals with it, and every fleet unit
+      (a job or a workload) the duty governor holds or stops for exceeding (or for not being able to check) its gpu_duty
+      is paused (a workload: paused or held by its ladder) within the S18 window, or has ended (from the decision journal; docs/design/gpu-cotenancy.md, "The duty governor")
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
 import bisect
 import json
+import time
 
 from oarbank_sdk import platform as pf
 
@@ -363,6 +367,55 @@ def s25_immediate_phases_pause_at_once(db: DB, since: float = 0.0):
     return out
 
 
+S28_EVICT_S = 60.0      # a unit the governor stops has ended within a minute (its runner's stop grace and a heartbeat)
+
+
+def s28_gpu_duty_within_ceiling_and_enforced(db: DB, since: float = 0.0, now: float | None = None):
+    """S28: every `gpu_duty` record (the governor's budget steps) has a duty at most its ceiling; every
+    GPU_DUTY_EXCEEDED or GPU_DUTY_UNVERIFIED record whose action is `paused` names an attempt that an `attempt_paused`
+    record of the same node covers within the S18 window (or that ended by then), and one whose action is `evicted` an
+    attempt that is no longer live a minute later."""
+    t_now = time.time() if now is None else now
+    out = []
+    for r in db.q("SELECT node_id, seq, t, record_json FROM protection_decisions WHERE kind='gpu_duty' AND t>=?", (since,)):
+        rec = json.loads(r["record_json"] or "{}")
+        d, c = rec.get("duty"), rec.get("ceiling")
+        if d is not None and c is not None and float(d) > float(c) + 1e-9:
+            out.append(f"S28 node {r['node_id']} journal #{r['seq']}: GPU duty budget {d} above the certified ceiling {c}")
+    for r in db.q("SELECT node_id, seq, t, reason, record_json FROM protection_decisions WHERE kind='gpu_compliance' "
+                  "AND t>=?", (since,)):
+        rec = json.loads(r["record_json"] or "{}")
+        aid, action, t0 = rec.get("attempt"), rec.get("action"), r["t"] or 0
+        if rec.get("workload"):
+            # a workload: its ladder pauses it (workload_paused) or stops and holds it (workload_held), naming its key
+            kinds = ("workload_paused", "workload_held") if action == "paused" else ("workload_held",)
+            acts = db.q(f"SELECT record_json FROM protection_decisions WHERE node_id=? AND kind IN ({','.join('?' * len(kinds))}) "
+                        "AND t>=? AND t<=?", (r["node_id"], *kinds, t0 - 1, t0 + S18_WINDOW_S))
+            if not any(json.loads(x["record_json"] or "{}").get("workload") == rec["workload"] for x in acts) \
+                    and t_now - t0 > S18_WINDOW_S:
+                what = "paused" if action == "paused" else "stopped"
+                out.append(f"S28 node {r['node_id']} journal #{r['seq']}: {r['reason']} {what} workload {rec['workload']}, "
+                           f"but its ladder did not within {S18_WINDOW_S:.0f} s")
+            continue
+        if aid is None:
+            continue
+        att = db.one("SELECT state, ended_at FROM attempts WHERE attempt_id=?", (aid,))
+        ended = att is not None and att["ended_at"] is not None
+        if action == "paused":
+            if ended and (att["ended_at"] or 0) <= t0 + S18_WINDOW_S:
+                continue
+            pauses = db.q("SELECT record_json FROM protection_decisions WHERE node_id=? AND kind='attempt_paused' "
+                          "AND t>=? AND t<=?", (r["node_id"], t0 - 1, t0 + S18_WINDOW_S))
+            if not any(aid in (json.loads(p["record_json"] or "{}").get("attempts") or []) for p in pauses) \
+                    and t_now - t0 > S18_WINDOW_S:
+                out.append(f"S28 node {r['node_id']} journal #{r['seq']}: {r['reason']} held attempt {aid}, but no pause "
+                           f"of it followed within {S18_WINDOW_S:.0f} s")
+        elif action == "evicted" and att is not None and att["state"] == "live" and t_now - t0 > S28_EVICT_S:
+            out.append(f"S28 node {r['node_id']} journal #{r['seq']}: {r['reason']} stopped attempt {aid}, which is still "
+                       f"live {t_now - t0:.0f} s later")
+    return out
+
+
 def s20_units_stay_in_their_class(db: DB):
     bound = {r["unit"]: r for r in db.q("SELECT unit, parent, mix, class FROM placement_bindings")}
 
@@ -468,7 +521,8 @@ SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_gener
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
           s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s24_listeners_granted_and_assigned,
-          s25_immediate_phases_pause_at_once, s26_single_seat]
+          s25_immediate_phases_pause_at_once, s26_single_seat,
+          s28_gpu_duty_within_ceiling_and_enforced]
 
 
 def check_all(db: DB) -> list[str]:

@@ -223,6 +223,19 @@ CODES: list[ReasonCode] = [
     C("AB_IDLE", "protection", "Harness run {run_id} ended: its work runs as protection allows"),
     C("AB_FINISHED", "protection", "Harness run {run_id} ended: {decision} ({why})"),
     C("AB_REFUSED", "protection", "Harness run {run_id} refused by the node: {why}", "P4"),
+    # the GPU duty governor (D50, docs/design/gpu-cotenancy.md "The duty governor")
+    C("GPU_DUTY_START", "protection", "GPU duty budget {duty} beside the protected GPU work (certified ceiling {ceiling}): "
+      "{why}"),
+    C("GPU_DUTY_BASELINE", "protection", "Fleet GPU work held for a minute to measure the protected program without it "
+      "({why})"),
+    C("GPU_DUTY_GROW", "protection", "GPU duty budget grown to {duty} after a clean minute (certified ceiling {ceiling})"),
+    C("GPU_DUTY_HALVE", "protection", "GPU duty budget halved to {duty}: the protected program slowed to its target"),
+    C("GPU_DUTY_TAKE_BACK", "protection", "GPU duty budget taken back to 0: {why}", "P3"),
+    C("GPU_DUTY_CLAMP", "protection", "GPU duty budget lowered to the certified ceiling {ceiling}"),
+    C("GPU_DUTY_EXCEEDED", "protection", "{unit} kept the GPU {measured} busy against a gpu_duty of {duty} for three "
+      "samples: {action} (the third time within an hour stops it, and it gets no duty for an hour)", "P3"),
+    C("GPU_DUTY_UNVERIFIED", "protection", "The GPU time of {unit} cannot be read, so its gpu_duty cannot be checked: "
+      "{action}", "P4"),
 
     # ---------------------------------------------------------------- how an attempt ended
     C("OK", "attempt_end", "Completed", wire=["ok"], node=False, job=False),

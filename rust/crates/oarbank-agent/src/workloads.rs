@@ -1043,6 +1043,15 @@ impl WorkloadManager {
                 cooperative_throttle: w.decl.coop_throttle,
                 hard_cap,
                 gpu: w.decl.gpu,
+                // its container's processes: whose GPU time the duty governor checks (D50)
+                pids: w.run.as_ref().map(|run| {
+                    let mut p = vec![run.leader];
+                    p.extend(procs::group_pids(run.leader));
+                    p.extend(run.members.iter().map(|m| m.0));
+                    p.sort_unstable();
+                    p.dedup();
+                    p
+                }).unwrap_or_default(),
             }).collect()
     }
 

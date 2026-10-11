@@ -1,7 +1,7 @@
-# Co-tenancy: measuring harm, event-driven sources and certificates
+# Co-tenancy: measuring harm, event-driven sources, certificates and the GPU duty
 
 Fleet work runs beside the owner's own processes, and host protection ([protection.md](protection.md)) keeps it from
-harming them. This document covers three pieces that make that measurable and fast (PLAN D50, D51, D52):
+harming them. This document covers the pieces that make that measurable and fast (PLAN D50 to D54):
 
 - **Event-driven owner sources** (D51): the owner's progress and phase sources are watched, not polled, so a phase
   such as an upload is seen within milliseconds; rules marked `immediate` pause fleet work between ticks; sources in
@@ -11,10 +11,13 @@ harming them. This document covers three pieces that make that measurable and fa
 - **Co-tenancy certificates** (D52, gating D50): a run that shows no slowdown becomes a certificate for one node, rule
   and fleet configuration; `gpu_jobs = "certified"` lets cooperative GPU work run beside a protected GPU group only up
   to a certificate's duty level.
+- **The duty governor** (D50): under a certificate, an AIMD budget on the protected program's own progress decides how
+  much of the GPU cooperative fleet work may use, and a compliance check against each process's measured GPU time
+  pauses, then stops, work that does not hold its duty.
+- **The reference GPU module** (D53): `examples/llmserve` in the SDK, language-model batches on MLX or llama.cpp that
+  hold their duty; and no multi-node gang scheduling (D54).
 
-The GPU duty controller that grows and shrinks the duty under a certificate (AIMD on the protected progress rate, the
-compliance check against measured GPU time) is the next step of D50; this release holds certified work at the
-certificate's level. Nothing here names a particular program: protected programs are owner rules.
+Nothing here names a particular program: protected programs are owner rules.
 
 ## Owner sources (D51)
 
@@ -204,10 +207,11 @@ certificates in force with every heartbeat reply (`certificates`); the agent che
 certificate it cannot validate counts as none.
 
 `gpu_jobs` gains `certified` (between `always` and `when_no_gpu_protected` in the strictest-wins union). Beside a
-protected group that holds GPU work back through the GPU gate (a `protect.metric = gpu_share` group using the GPU),
-cooperative GPU work (runners that declare `cooperative_throttle`) runs at `gpu_duty = D / n`, where `D` is the
-smallest certified duty among the gating rules and `n` the cooperative GPU jobs; work that cannot throttle stays
-paused, and no new GPU work is admitted beyond what runs. Without a valid certificate for every gating rule it behaves
+protected group that holds GPU work back through the GPU gate (a group using the GPU, more than 5 % of its GPU time,
+whose rule protects `gpu_share` or `progress_rate`), cooperative GPU work (runners that declare `cooperative_throttle`)
+runs at `gpu_duty = D / n`, where `D` is the duty governor's budget (below), never above the smallest certified duty
+among the gating rules, and `n` the cooperative GPU jobs it trusts; work that cannot throttle stays paused, and no new
+GPU work is admitted beyond what runs. Without a valid certificate for every gating rule it behaves
 as `when_no_gpu_protected` and journals `GPU_NOT_CERTIFIED` (a node condition, with the sweep as the remedy). An
 owner's explicit pause of GPU work, a rule's or a phase's `pause_fleet` with scope `gpu`, `all` or `io`, always binds:
 it pauses the work and admits no GPU job (capacity `paused`, `paused_by`), certificate or not; a certificate lifts only
@@ -215,9 +219,141 @@ the gate. Such a rule also counts as gating, so the GPU budget shows it as not c
 it.
 `certified` is opt-in per node (owner decision 14).
 
-**For the duty controller (the next step of D50).** `ProtectionController::certified_duty(rule, now)` is the ceiling;
-the dynamic step receives each job's `gpu_duty` through `DynJob::gpu_duty`, and `ThrottleDoc::gpu_duty` carries it to
-the control document, so an AIMD loop below the ceiling only replaces how `D` is chosen.
+A rule that protects `progress_rate` gates GPU work as a `gpu_share` rule does once its group uses the GPU (2.10;
+before, only `gpu_share` rules did, so a GPU trainer protected by its progress let fleet GPU work run beside it under
+`when_no_gpu_protected`, against D3d). The certificate a gated node needs is therefore the one the harness earns on
+that same rule.
+
+## The duty governor (D50)
+
+`oarbank-protection/src/gpu_duty.rs`, run by the controller every tick while `gpu_jobs = certified` and a gating group
+is active; a pure function of its inputs and its state, like the dynamic controller. The ceiling is
+`ProtectionController::certified_duty` (the smallest among the gating rules); each job's share reaches its control
+document through `DynJob::gpu_duty` and `ThrottleDoc::gpu_duty`.
+
+**The budget `D`.** An AIMD loop on the gating rules' `progress_rate`, the only signal validated for GPU-bound groups
+(protection.md, "Why the growth gate exists"):
+
+| When | What |
+|---|---|
+| The gate begins, every gating rule with a progress source has a baseline under 30 min old | `D` = the ceiling (feed-forward, as the CPU budget starts at the full allowance: the certificate measured that level harmless); a gate that went away less than 10 min ago resumes at its last `D` (no windup) |
+| The gate begins and some rule has no fresh baseline | a **baseline window**: `D` = 0 for 60 s (the first 20 s discarded as washout), then the start level |
+| Every 60 s (an interval) | per rule the interval's mean progress rate against its baseline: harm = `1 − rate/baseline`, pressure = harm ÷ the rule's `max_slowdown` (default 0.05). Pressure over 2: `D` = 0 and a 5-min lockout. Pressure at or over 1: `D` halves (30 s lockout). Pressure under 0.5 in every rule, every sample of the interval readable and the memory guard clear, the lockout over: `D` grows by 0.05, never above the ceiling. Otherwise it holds |
+| Any tick | a progress source that cannot be read: `D` = 0 at once (fail-safe; it grows back once it reads). The memory guard: `D` = 0 and a 5-min lockout. A **collapse**, the rate over the last 30 s under half the baseline while GPU work runs: `D` = 0 and a 5-min lockout |
+| The ceiling falls (a new certificate, one expired) | `D` falls to it at once |
+| The baseline is 30 min old while GPU work runs | another baseline window, then back to `D` |
+| `D` under 0.02 | 0: no cooperative work is exempt from the gate, so it is paused like any GPU work |
+
+The baseline is the rule's progress rate while no fleet GPU work ran (after the 20 s washout): baseline windows and
+natural ones (the budget at 0, the gate holding, no GPU work there), averaged with the previous baseline. A gating rule
+without a progress source (a `gpu_share` rule) has no harm signal: `D` starts at the ceiling and stays where it is,
+never growing (S19's growth gate: nothing validates growth). In a baseline window or at `D` = 0 there is nothing to
+harm: such an interval is clean when its samples were readable.
+
+**S19 for `D`:** a missing, stale, unreadable or worse signal never raises it; it rises only at an interval's end
+whose every sample was clean, or at a start. **S18's GPU form:** the budget meets a falling ceiling, an emergency and
+an unreadable source on the tick that sees them; a halving waits for the interval (the rule's own `pause_fleet`, if
+any, still acts within `enter_for_s` + 2 samples).
+
+**Each unit's duty and the compliance check.** Units are the GPU jobs and the running GPU workloads: a unit is an id
+(an attempt, or a workload's fleet id), a key (a job's module, a workload's `module/workload`), whether it declares
+`cooperative_throttle`, whether it can be paused (a workload: `freeze_ok` or `cooperative_pause` with a tolerance above
+0), and its processes' GPU busy fraction (a job's process group; a workload's container: its leader, its group and
+the members the agent tracks). A workload's duty reaches its plan (`WorkloadAction.gpu_duty`), which the agent writes
+into its control document; its hold is a pause through its ladder (paused up to its tolerance, then held), its stop
+the ladder's stop and hold. Every sample (2 s) the governor reads each unit's GPU busy fraction from the per-process
+GPU time the meter reads (macOS AGX `accumulatedGPUTime`, Linux DRM `fdinfo` or NVML, Windows GPU Engine counters),
+summed over all processes of its container.
+
+- A unit is judged from the second sample after it was given a duty (its duty may reach it a sample late), and only on
+  samples it ran through with a duty (a paused unit is not judged). Allowed: the larger of its last two duties, plus
+  0.1.
+- Over that for three consecutive samples: the unit is **held** for 60 s (no duty: the gate pauses it), journaled
+  `GPU_DUTY_EXCEEDED` (`kind: gpu_compliance`, `action: paused`). The third hold of the same `module/name` within an
+  hour **stops** it (released, `preempt_protection`; `action: evicted`), and that key gets no duty for an hour: its
+  work waits beside protected GPU work like work that cannot throttle. A unit that cannot be paused is stopped at its
+  first excess.
+- A unit whose GPU time cannot be read for three samples (unknown on this platform, or a process the meter cannot
+  see) is held the same way, `GPU_DUTY_UNVERIFIED`: a duty nobody can check is not granted. On a node whose meter reads
+  no per-process GPU time, `certified` therefore runs no GPU work: the fail-safe answer.
+- The remaining budget is split among the units it trusts: `D / n` each, to 1/1000, never above the ceiling.
+
+While a harness run measures GPU work (`work` is not `cpu`), the governor stands down (state `harness`): GPU work not
+under test waits beside the protected group, so the run measures only the work under test.
+
+**What the agent reports.** `telemetry.protection.gpu_budget`: `duty` (`D`), `ceiling`, `rules`, `jobs` (units given a
+duty), `per_job`, `state` (`measuring`, `running`, `held` at 0, `locked` after a take-back, `harness`, `not_certified`,
+`idle`), `lockout_s`, `baseline` (per rule: `rate`, `age_s`, the last interval's `pressure`), `units` (per unit: `id`,
+`unit` (its key), `workload` (true for a workload), `duty`, `measured`, `state`: `ok`, `waiting`, `held` with `why` `exceeded` or `unverified` and `for_s`, `distrusted`,
+`cannot_throttle`, `evicted`) and `distrusted` (`unit`, `for_s`). Budget steps are journaled `kind: gpu_duty`
+(`GPU_DUTY_START`, `GPU_DUTY_BASELINE`, `GPU_DUTY_GROW`, `GPU_DUTY_HALVE`, `GPU_DUTY_TAKE_BACK`, `GPU_DUTY_CLAMP`, each
+with `duty`, `ceiling` and `why`), compliance as above.
+
+**S28** (new): the budget a node journals never exceeds the ceiling journaled with it, every unit the governor holds is
+paused within the S18 window (or ended), and every unit it stops is gone a minute later; for a workload the
+compliance record names its key (`workload`), and its ladder's `workload_paused` or `workload_held` must follow
+within the window. The coordinator checks it from
+the decision journal (`invariants.s28_gpu_duty_within_ceiling_and_enforced`); the agent's property tests, a day-long
+virtual-time soak and `specs/OarbankGpuDuty.tla` check the rest.
+
+**Defaults** (judgement, to be tuned with the harness on each Mac class): interval 60 s, step 0.05, halving at the
+target, take-back at twice the target or a collapse under half the baseline over 30 s, lockouts 5 min and 30 s,
+baseline window 60 s with 20 s washout, every 30 min, resume memory 10 min, compliance slack 0.1, three samples, hold
+60 s, three holds in an hour, distrust one hour, minimum duty 0.02.
+
+### What the runner does
+
+A runner holds its duty with the SDK's governor, `oarbank_sdk.duty.Duty` (SDK `spec/runner-protocol.md`, "Holding a
+GPU duty"): it times each unit of GPU work to the end of the GPU's work and idles `b·(1−d)/d` after it, applies a
+newer control document while it idles, holds at duty 0, says how much shorter units should be (`scale()`), and reports
+what it held as `gpu_duty` metric events. The conformance kit's duty specs give a `cooperative_throttle` runner a duty
+mid-run and measure it holding it (its GPU time on macOS, its CPU time for a CPU stand-in backend).
+
+### Why not throttle from outside
+
+On Apple Silicon no public interface lets a third party prefer one process's GPU work or cut another's: Metal has no
+queue priority, the GPU's firmware schedules, and a submitted command buffer runs to its end. Freeze cycling (SIGSTOP
+on and off) is not used: in-flight command buffers finish anyway, the cycle the agent can hold is about 100 ms at best,
+and its effect would need its own certificate. On NVIDIA, MPS thread percentages are fixed when a client starts. So the
+duty is cooperative and verified, and work that cannot cooperate only ever pauses or stops.
+
+### An owner-run experiment: `PRIO_DARWIN_GPU`
+
+xnu has a private `setpriority(PRIO_DARWIN_GPU, pid, PRIO_DARWIN_GPU_DENY | _ALLOW)` that switches a process's GPU
+access off and on, nothing in between. Oarbank does not use it (D3c allows private signals only to restrict, and this
+one may make the target's command buffers fail, which most programs treat as fatal). Whether it is worth anything is a
+measurement for the owner, in a window they free for it, against fleet work they choose and never against a protected
+program:
+
+```sh
+python3 bench/prio_darwin_gpu.py --seconds 20 --i-understand -- <command that runs GPU work, e.g. an llmserve job>
+```
+
+The script starts the command itself (it signals nothing it did not start), lets it run, denies it the GPU, allows it
+again, and reports for each phase the child's GPU time growth (from the driver's counters, as the agent reads them),
+whether `setpriority` was permitted, and whether the child survived. Unverified until an owner runs it: whether an
+unprivileged process may set it on its own child, whether denied work fails or waits, and whether access comes back.
+Its result decides whether a later release offers it as an opt-in last resort for work that cannot cooperate.
+
+## The reference GPU module (D53)
+
+[`examples/llmserve`](../../vendor/oarbank-sdk/examples/llmserve) in the SDK (an SDK example rather than a module in a
+repository of its own, so the SDK's CI conforms it on every platform): a `batch` stage that runs prompts through MLX
+(macOS on Apple Silicon) or llama.cpp (Metal, CUDA, Vulkan or the CPU) in its runner, with each generation step one
+unit under `oarbank_sdk.duty`, MLX's memory limit set and nothing wired; and a deterministic `selftest` stage (a pure
+Python stand-in model, integer arithmetic only) whose golden certifies the module on every node and whose CPU units
+let the conformance kit's duty spec run on a machine without a GPU or a model. It bundles no model and depends on
+neither backend: an owner installs one and puts a model under the module's data directory (SDK `docs/gpu-duty.md`).
+It is the harness's first real GPU test subject: a sweep of its work against a protected program on each Mac class
+gives the first GPU co-tenancy certificates.
+
+## No gang scheduling (D54)
+
+Multi-node jobs (all-or-nothing placement of cooperating processes, a rendezvous, a shared failure domain) are not
+built: distributed inference across Macs pays only when a model does not fit on one machine, and a gang ties every
+member's protection to the slowest owner. Independent per-node work earns more per unit of engineering on this fleet.
+Revisit only for a ranked workload that needs more than one node's memory, starting with a module-level design (a
+workload with `seat = "fleet"` and a module-run rendezvous) before any coordinator change.
 
 ## Operations, console and CLI
 
@@ -237,7 +373,12 @@ the control document, so an AIMD loop below the ceiling only replaces how `D` is
 - **CLI:** `oarbank protection ab start <node> --rule <id> [--work gpu|cpu|all|<module>|<module>/<workload>] [--duty
   0.3] [--blocks 12] [--window 300] [--washout 60] [--margin 0.02] [--off paused|evicted] [--max-hours 8]`,
   `oarbank protection ab status [<node>]`, `oarbank protection ab show|abort <run>`, `oarbank protection ab sweep <node>
-  --rule <id> [--levels 0.1,0.2,0.35]`, `oarbank protection certificates [<node>]`.
+  --rule <id> [--levels 0.1,0.2,0.35]`, `oarbank protection certificates [<node>]`, `oarbank protection duty [<node>]`
+  (the governor: budget against the ceiling, state, baselines, each unit's asked and measured duty and state, the
+  units it does not trust, the last day's steps and compliance actions; `GET /api/v1/protection/duty[?node=]`).
+- **GPU duty card** on the protection page (with `gpu_jobs = certified` and a gating group): the same, with the node
+  conditions `GPU_DUTY_EXCEEDED` (a module not trusted for an hour) and `GPU_DUTY_UNVERIFIED` (units whose GPU time
+  cannot be read).
 
 ## Running the first measurement against a real protected program
 
@@ -250,7 +391,9 @@ Only in a window the owner frees for it, started by hand:
    at the defaults.
 4. GPU co-tenancy, only with fleet GPU work whose runner declares `cooperative_throttle`: `oarbank protection ab sweep
    <node> --rule <id>`. Each level is a run; a slowdown stops the sweep at once and the guard aborts a collapse.
-5. To use a certificate, set the node's `gpu_jobs = "certified"`.
+5. To use a certificate, set the node's `gpu_jobs = "certified"`. The governor measures a baseline for a minute, then
+   runs cooperative GPU work at the certified duty and moves it with the program's progress; `oarbank protection duty
+   <node>` shows it.
 
 ## Failure modes
 
@@ -264,6 +407,10 @@ Only in a window the owner frees for it, started by hand:
 | The agent restarts mid-run | the run is aborted at the next hello |
 | Certificate stale (OS update, new hardware, agent or program build) | `certified` behaves as `when_no_gpu_protected` until a new run passes |
 | Thermal throttling during ON windows | counted as harm, by design |
+| A runner ignores its `gpu_duty` | held after three samples over duty + 0.1, stopped on the third hold in an hour, its module distrusted for an hour |
+| The node cannot read a unit's GPU time | the unit is held (`GPU_DUTY_UNVERIFIED`): no unverifiable duty |
+| The protected program makes no progress at all (no baseline) | the baseline window gives up after four windows: `D` stays at 0, grows back a step at a time and measures again once GPU work runs |
+| The gate flaps (the program's GPU use dips) | the budget resumes at its last level within 10 min, never at the ceiling |
 
 ## Security
 
@@ -284,4 +431,7 @@ certificate can already set `gpu_jobs = "always"`; the node's local protection f
 | Agent | the fast pause freezing a real process between ticks and the tick keeping it (`prot.rs`, macOS) |
 | Coordinator | runs, reports, certificates and their validity, sweeps, aborts, conditions, S25, per-site aggregation (`tests/test_cotenancy.py`) |
 | End to end | a real agent and oarbankd with a synthetic protected process: phases with tags, a harness run to its decision (`tests/rust/test_agent_cotenancy.py`) |
-| TLA+ | `OarbankFastPause.tla`: the agent's rules hold; each weakened variant fails |
+| TLA+ | `OarbankFastPause.tla`: the agent's rules hold; each weakened variant fails. `OarbankGpuDuty.tla`: the budget stays within the ceiling and grows only after a clean interval, excess is held, a unit that never holds its duty is stopped; each weakened variant (no clamp, growth on an unclean interval, no hold, strikes reset) fails |
+| Duty governor | AIMD steps, baselines, take-backs, the ceiling, resume memory, S19 for `D` over random signals, compliance holds and stops, unverified units (`tests/gpu_duty.rs`); a 24-hour virtual-time soak with a contention plant, certificates, guards, unreadable sources and honest, lying and unmeasurable jobs (`tests/gpu_duty_soak.rs`) |
+| Duty, coordinator | the duty view and the card's units, the conditions, S28, the API and `oarbank protection duty` (`tests/test_gpu_duty.py`) |
+| Duty, SDK | the governor's share of time, new duties while idle, duty 0, stops while idle, `scale()`, reports (`tests/test_duty.py`); llmserve conforms with its duty spec, and a runner that does not hold its duty is caught (`tests/test_conformance.py`) |

@@ -1259,6 +1259,8 @@ def cmd_protection(a):
     ask = dict(reason=a.reason, yes=a.yes)
     if a.action == "ab":
         return cmd_protection_ab(a, ask)
+    if a.action == "duty":
+        return cmd_protection_duty(a)
     if a.action == "certificates":
         q = f"?node={a.node}" if a.node else ""
         d = api("GET", f"/api/v1/protection/certificates{q}")
@@ -1288,6 +1290,46 @@ def cmd_protection(a):
     else:
         res = run_op("protection.probe_now", a.node, None, **ask)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
+
+
+def cmd_protection_duty(a) -> None:
+    """oarbank protection duty [<node>]: the GPU duty governor (D50) on each node that has one, or on <node>: the budget
+    against the certified ceiling, each GPU unit's requested and measured duty and compliance state, and recent steps."""
+    q = f"?node={a.node}" if a.node else ""
+    d = api("GET", f"/api/v1/protection/duty{q}")
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    if not d["nodes"]:
+        print("no node reports a GPU duty budget (it needs gpu_jobs = certified and a protected group using the GPU)")
+    for n in d["nodes"]:
+        name = n["hostname"] or n["node_id"]
+        if n["not_certified"]:
+            print(f"{name}: not certified for {', '.join(n['not_certified'])}: GPU work waits "
+                  "(oarbank protection ab sweep <node> --rule <id>)")
+            continue
+        if n["state"] is None:
+            print(f"{name}: no GPU duty budget (gpu_jobs is not certified, or no protected group is using the GPU)")
+            continue
+        lock = f", locked {n['lockout_s']:.0f} s" if n.get("lockout_s") else ""
+        print(f"{name}: gpu_duty budget {n['duty']} of ceiling {n['ceiling']} ({n['state']}{lock}) beside "
+              f"{', '.join(n['rules']) or '-'}; {n['jobs'] or 0} unit(s) at {n['per_job']} each")
+        for rule, b in sorted((n.get("baseline") or {}).items()):
+            rate = f"{b['rate']}/s, {b['age_s']:.0f} s old" if b.get("rate") is not None else "not measured yet"
+            press = f", last pressure {b['pressure']}" if b.get("pressure") is not None else ""
+            print(f"  baseline {rule}: {rate}{press}")
+        for u in n["units"]:
+            what = f"{u.get('module') or '?'}/{u.get('stage') or '?'} " + ("workload" if u.get("workload") else
+                                                                          f"attempt {u['attempt_id']}")
+            why = f" ({u['why']}, {u.get('for_s', 0):.0f} s left)" if u.get("why") else ""
+            print(f"  {what:<44} duty {u.get('duty') if u.get('duty') is not None else '-':<6} measured "
+                  f"{u.get('measured') if u.get('measured') is not None else '-':<6} {u['state']}{why}")
+        for x in n["distrusted"]:
+            print(f"  not trusted: {x['unit']} for {x['for_s'] / 60:.0f} min more")
+        for e in n["events"][:10]:
+            detail = e.get("why") or (f"{e.get('unit')} measured {e.get('measured')} against {e.get('duty')}: "
+                                      f"{e.get('action')}" if e.get("unit") else "")
+            print(f"  {_when(e['t'])}  {e['reason']:<20} duty {e.get('duty', '-')}  {detail}")
 
 
 def print_ab_run(d: dict) -> None:
@@ -1844,12 +1886,12 @@ def parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("protection", help="protected-process rules on the settings chain: show (a node's effective "
                                            "rules and where each comes from), set / preview (a node's, the fleet's or "
                                            "a group's own section), probe (the mode: oarbank node mode)")
-    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates"])
+    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates", "duty"])
     pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>; "
-                                            "ab: start|status|show|abort|sweep; certificates: a node (all without)")
+                                            "ab: start|status|show|abort|sweep; certificates, duty: a node (all without)")
     pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml); "
                                              "ab start|sweep|status: a node; ab show|abort: a run")
-    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates: as JSON")
+    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates, duty: as JSON")
     pr.add_argument("--rule", help="ab start|sweep: the protected rule (its progress_rate source is what is measured)")
     pr.add_argument("--work", help="ab start|sweep: the fleet work under test: gpu (default), cpu, all, <module>, "
                                    "<module>/<workload>")

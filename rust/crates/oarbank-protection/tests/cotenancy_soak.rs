@@ -4,8 +4,9 @@
 //! another. Checked every tick:
 //!
 //! - a phase on (or a trigger's process running) while its rule is armed pauses every pausable job in its scope;
-//! - under `gpu_jobs = certified`, a GPU job runs beside the protected GPU program only with a valid certificate and
-//!   only if it honours `gpu_duty`, at no more than the certified duty, and no GPU work is admitted beyond what runs;
+//! - under `gpu_jobs = certified`, a GPU job runs beside the protected GPU program only with a valid certificate for
+//!   every gating rule and only if it honours `gpu_duty`, at no more than the certified duty (the duty governor's
+//!   budget stays under the ceiling), and no GPU work is admitted beyond what runs;
 //! - in a harness run's OFF window every pausable job under test is paused, and every run ends with a decision within
 //!   its cap.
 
@@ -150,13 +151,14 @@ fn twelve_hours_of_co_tenancy() {
         }
         // certificates: issued for the current program, expiring, or for an old build
         if rng.chance(0.001) {
+            // both rules gate GPU work (a GPU-bound progress_rate group gates, D50), so each needs its own
             if let Some(id) = ctl.identity("gate") {
                 let stale = rng.chance(0.3);
-                certs = vec![Certificate {
-                    id: "c".into(), rule: "gate".into(), work: "gpu".into(), duty: Some(rng.uniform(0.1, 0.6)), r: 1.0,
-                    r_lo: 0.99, r_hi: 1.01, margin: 0.02, run_id: "r".into(), issued_at: t,
+                certs = ["gate", "trainer"].iter().map(|rule| Certificate {
+                    id: format!("c-{rule}"), rule: rule.to_string(), work: "gpu".into(), duty: Some(rng.uniform(0.1, 0.6)),
+                    r: 1.0, r_lo: 0.99, r_hi: 1.01, margin: 0.02, run_id: "r".into(), issued_at: t,
                     valid_until: t + rng.uniform(600.0, 7200.0) + 1.79e9,
-                    identity: if stale { "0000000000000000".into() } else { id.to_string() }, context: ctx.clone() }];
+                    identity: if stale { "0000000000000000".into() } else { id.to_string() }, context: ctx.clone() }).collect();
                 ctl.set_certificates(certs.clone(), ctx.clone());
             }
         }
@@ -199,7 +201,10 @@ fn twelve_hours_of_co_tenancy() {
         let gone: Vec<i64> = r.evictions.iter().map(|e| e.attempt_id).collect();
         // certified GPU co-tenancy (the gate holds once GPU time has been read twice)
         if t > 2.0 {
-            let duty = ctl.certified_duty("gate", now);
+            let duty = match (ctl.certified_duty("gate", now), ctl.certified_duty("trainer", now)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                _ => None,
+            };
             // (a GPU job that can be neither paused nor frozen is lowered, as under when_no_gpu_protected)
             for j in jobs.iter().filter(|j| j.gpu && !j.pausable && duty.is_none() && ctl.harness().is_none_or(|h| h.finished())) {
                 assert!(r.lowered.contains(&j.attempt_id) || gone.contains(&j.attempt_id), "t {t}: unpausable GPU job not lowered");
@@ -216,7 +221,7 @@ fn twelve_hours_of_co_tenancy() {
                     ctl.harness().map(|h| (h.state, h.arm(), h.spec.work.clone()))));
                 certified_ran += 1;
                 if let Some(doc) = r.throttle.get(&j.attempt_id) {
-                    assert!(doc.gpu_duty.unwrap_or(1.0) <= d + 1e-9, "t {t}: duty above the certificate");
+                    assert!(doc.gpu_duty.unwrap_or(1.0) <= d + 1e-9, "t {t}: duty above the certificate: {doc:?} (ceiling {d})");
                 }
             }
             if ctl.harness().is_none_or(|h| h.finished()) && !ended_now {

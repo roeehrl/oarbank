@@ -161,11 +161,16 @@ impl Protection {
             let mut pids = HashSet::new();
             let mut views = vec![];
             for j in t.values() {
+                let mut members = vec![];
                 if let Some(pg) = j.pgid {
-                    pids.extend(procs::group_pids(pg));
-                    pids.insert(pg);
+                    members = procs::group_pids(pg).into_iter().collect::<Vec<i32>>();
+                    if !members.contains(&pg) {
+                        members.push(pg);
+                    }
+                    pids.extend(members.iter().copied());
                 }
                 let mut v = P::FleetJobView::new(j.attempt_id, j.pgid, j.usage.footprint_gb, j.started_at, j.mem_gb);
+                v.pids = members;                       // whose GPU time the duty governor checks (D50)
                 // paused by a freeze, or at its safe points through control.json
                 v.pausable = j.caps.iter().any(|c| c == "freeze_ok" || c == "cooperative_pause");
                 v.cooperative = j.caps.iter().any(|c| c == "cooperative_pause" || c == "cooperative_throttle");

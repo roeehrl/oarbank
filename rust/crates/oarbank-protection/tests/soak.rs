@@ -352,7 +352,7 @@ fn a_day_of_workloads_beside_jobs_and_services() {
     let mut wl: Vec<FleetWorkloadView> = (0..4).map(|i| FleetWorkloadView {
         key: format!("m/w{i}"), running: true, footprint_gb: 1.0 + i as f64, started_at: 1.0, cpu_cores: 2.0,
         pause_tolerance_s: [0.0, 10.0, 30.0, 60.0][i], pausable: i > 0, cooperative_throttle: i % 2 == 0,
-        hard_cap: true, gpu: i == 3 }).collect();
+        hard_cap: true, gpu: i == 3, pids: vec![] }).collect();
     let (mut trainer, mut backup) = (false, false);
     let mut paused_since: BTreeMap<String, f64> = BTreeMap::new();
     let (mut holds, mut pauses) = (0, 0);

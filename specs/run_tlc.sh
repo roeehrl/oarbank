@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla) under every config and compare
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla, OarbankGpuDuty.tla) under every config and compare
 # each outcome with the expected one. A config's spec is its name up to the first underscore: OarbankLease_liveness.cfg
 # checks OarbankLease.tla, OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
 #
@@ -102,6 +102,14 @@ CONFIGS=(
   "OarbankPortmap_e_readback_race                    inv:NoForeignDelete"
   "OarbankPortmap_f_keyed_delete                     inv:AtMostOneExternalPortPerListener"
   "OarbankPortmap_g_epoch_forgets_entry              inv:AtMostOneExternalPortPerListener"
+
+  # OarbankGpuDuty.tla: the GPU duty governor (docs/design/gpu-cotenancy.md)
+  "OarbankGpuDuty                                    ok"
+  "OarbankGpuDuty_liveness                           ok"
+  "OarbankGpuDuty_a_noclamp                          inv:DutyWithinCeiling"
+  "OarbankGpuDuty_b_grow_unclean                     inv:NoGrowthOnUnclean"
+  "OarbankGpuDuty_c_nohold                           inv:ExcessBounded"
+  "OarbankGpuDuty_d_strikes_reset                    liveness"
 )
 # OarbankSeat (docs/design/workloads.md, D46)
 CONFIGS+=(
