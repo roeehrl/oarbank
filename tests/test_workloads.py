@@ -189,3 +189,98 @@ def test_a_withdrawn_workload_opens_an_alert_that_clears_when_it_runs_again(db):
     assert al and al["state"] == "open" and "exited 1" in al["detail"] and "boom" in al["detail"]
     beat(db, a, [{"key": "workload/worker", "running": True, "withdrawn": False}])
     assert db.one("SELECT state FROM alerts WHERE alert_id=?", (al["alert_id"],))["state"] == "resolved"
+
+
+# ------------------------------------------------------------------ the seat protocol as a state machine (Hypothesis)
+
+from hypothesis import HealthCheck, settings as hsettings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule  # noqa: E402
+
+
+class SeatMachine(RuleBasedStateMachine):
+    """Three nodes given one key (one seat) against the real coordinator: the owner assigns and unassigns at random,
+    agents heartbeat (or go quiet), the clock moves, the coordinator restarts. Each agent is modelled as the real one
+    behaves: it runs while its directive says `running` and its lease (send time + lease_s) runs, stops at the lease's
+    end or when told to, and reports the stop with `release`. After every step at most one node runs the seat (S26 from
+    the reports, and the model's own view)."""
+
+    @initialize()
+    def setup(self):
+        import tempfile
+        clock.set_fake(1_900_000_000.0)
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        modstore.CORE_VERSION, self._core = "2.10.0", modstore.CORE_VERSION
+        self.db = make_db(tmp / "oarbank.sqlite3", modules=())
+        install(self.db, identity_module(tmp))
+        modcalls.use(self.db)
+        releases.sync(self.db)
+        self.nodes = [node(self.db, n) for n in ("a", "b", "c")]
+        for n in self.nodes:
+            set_key(self.db, n)
+        self.agent = [{"running": False, "fence": 0, "seat": None, "deadline": 0.0, "release": False} for _ in self.nodes]
+
+    def teardown(self):
+        clock.set_fake(None)
+        modstore.CORE_VERSION = self._core
+        modcalls.close_host(self.db)
+        self.db.conn.close()
+        self.tmp.cleanup()
+
+    def tick_agents(self):
+        now = clock.now()
+        for a in self.agent:
+            if a["running"] and now >= a["deadline"]:
+                a.update(running=False, release=True)          # the lease ran out on the node
+
+    @rule(i=st.integers(0, 2))
+    def assign(self, i):
+        n = self.nodes[i]
+        if not W._assigned(self.db, "workload", "worker", n["node_id"]):
+            W.assign(self.db, "workload", "worker", n["node_id"], "test")
+
+    @rule(i=st.integers(0, 2))
+    def unassign(self, i):
+        n = self.nodes[i]
+        if W._assigned(self.db, "workload", "worker", n["node_id"]):
+            W.unassign(self.db, "workload", "worker", n["node_id"], "test")
+
+    @rule(i=st.integers(0, 2), lost_reply=st.booleans())
+    def heartbeat(self, i, lost_reply):
+        self.tick_agents()
+        a, n = self.agent[i], self.nodes[i]
+        sent = clock.now()
+        rep = [{"key": "workload/worker", "running": a["running"], "seat_id": a["seat"], "fence": a["fence"],
+                "release": a["release"] and not a["running"]}]
+        d = core.heartbeat(self.db, fresh(self.db, n), {"attempts": [], "ready_datasets": [], "workloads": rep})
+        if lost_reply:
+            return                                           # the coordinator acted; the agent never saw the reply
+        e = next((x for x in d["workloads"] if x["key"] == "workload/worker"), None)
+        if e and e["desired"] == "running":
+            deadline = sent + e["lease_s"]
+            if a["running"] and (e["seat_id"], e["fence"]) != (a["seat"], a["fence"]):
+                a.update(running=False, release=True)         # another seat or fence: stop first
+            elif deadline > clock.now():
+                a.update(running=True, seat=e["seat_id"], fence=e["fence"], deadline=max(deadline, a["deadline"]),
+                         release=False)
+        elif a["running"] or e is None or e["desired"] != "running":
+            if a["running"]:
+                a.update(running=False)
+            a["release"] = True
+
+    @rule(dt=st.sampled_from([1.0, 30.0, 300.0, W.LEASE_S / 2, W.LEASE_S + W.GRACE_S + 1]))
+    def advance(self, dt):
+        clock.set_fake(clock.now() + dt)
+        self.tick_agents()
+
+    @invariant()
+    def at_most_one_runs(self):
+        running = [i for i, a in enumerate(self.agent) if a["running"]]
+        assert len(running) <= 1, (running, self.agent)
+        assert W.s26_single_seat(self.db) == []
+
+
+SeatMachine.TestCase.settings = hsettings(max_examples=20, stateful_step_count=40, deadline=None,
+                                          suppress_health_check=list(HealthCheck))
+test_seat_protocol_state_machine = SeatMachine.TestCase
