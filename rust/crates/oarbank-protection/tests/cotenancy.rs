@@ -418,3 +418,39 @@ fn immediate_phases_and_process_triggers_apply_on_the_tick() {
     assert_eq!((ph[0].on, ph[0].reader.as_str(), ph[0].tags.clone()), (true, "exec", vec!["uplink".to_string()]));
     let _ = BTreeSet::<i64>::new();
 }
+
+/// An immediate phase and capacity's `paused`/`paused_by`: while the phase pauses a scope the node admits none of that
+/// work (`all`: nothing; `gpu`: no GPU job), the binding names the phase's rule, and an explicit owner pause of GPU work
+/// binds even under `gpu_jobs = certified` with a valid certificate (a certificate lifts only the GPU gate).
+#[test]
+fn an_immediate_phase_pauses_admission_too_and_a_certificate_never_lifts_an_owner_pause() {
+    let cap = |r: &ProtectionTickResult| {
+        let mut i = CapacityInputs::new(64.0, 12, 4, Policy::default(), Limits::uncapped());
+        i.constraint = r.constraint.clone();
+        CapacityModel::compute(&i)
+    };
+    for (scope, admit) in [("all", false), ("gpu", true)] {
+        let host = Shared::default();
+        host.0.lock().unwrap().procs = vec![raw(7, "/opt/trainer/bin/train")];
+        let src = Sources::default();
+        let mut ctl = ProtectionController::new(None, Host { processes: Box::new(host.clone()), meter: Box::new(host.clone()),
+                                                           sources: Box::new(src.clone()), os: None });
+        ctl.apply(Some(&json!({"schema": 1, "node": {"mode": "fleet_first", "gpu_jobs": "certified"},
+            "rule": [{"id": "trainer", "match": {"path_prefix": "/opt/trainer/"}, "active_when": "present", "enter_for_s": 30,
+                      "immediate": true,
+                      "during": [{"source": {"jsonl": "/x", "enter": "a", "exit": "b"}, "pause_fleet": {"scope": scope}}]}]})),
+                  &LocalProtection::Absent);
+        let jobs = vec![gpu_job(1, true)];
+        let r = ctl.tick(&inputs(0.0, jobs.clone()));
+        assert!(cap(&r).admit && r.paused.is_empty(), "{scope}: phase off");
+        let id = ctl.identity("trainer").unwrap().to_string();
+        let ctx = CertContext { hardware: "h".into(), os_major: "o".into(), agent_version: "a".into() };
+        ctl.set_certificates(vec![cert(&id, 0.5, 1e12)], ctx.clone());
+        src.0.lock().unwrap().1.insert("trainer#0".into(), true);
+        let r = ctl.tick(&inputs(2.0, jobs.clone()));
+        let c = cap(&r);
+        assert_eq!((c.admit, c.gpu_jobs, c.paused.clone(), c.paused_by.as_deref()),
+                   (admit, Some(0), vec![scope.to_string()], Some("rule:trainer/during")), "{scope}");
+        assert!(r.paused.contains(&1), "{scope}: the phase pauses the certified GPU job too");
+    }
+}

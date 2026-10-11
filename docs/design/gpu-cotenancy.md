@@ -203,12 +203,16 @@ restart keeps it, a new build at another path or signed differently changes it).
 certificates in force with every heartbeat reply (`certificates`); the agent checks each itself, never looser, and a
 certificate it cannot validate counts as none.
 
-`gpu_jobs` gains `certified` (between `always` and `when_no_gpu_protected` in the strictest-wins union). Beside the
-groups that gate GPU work (a `pause_fleet` scope gpu or all, a `protect.metric = gpu_share` group using the GPU),
+`gpu_jobs` gains `certified` (between `always` and `when_no_gpu_protected` in the strictest-wins union). Beside a
+protected group that holds GPU work back through the GPU gate (a `protect.metric = gpu_share` group using the GPU),
 cooperative GPU work (runners that declare `cooperative_throttle`) runs at `gpu_duty = D / n`, where `D` is the
 smallest certified duty among the gating rules and `n` the cooperative GPU jobs; work that cannot throttle stays
 paused, and no new GPU work is admitted beyond what runs. Without a valid certificate for every gating rule it behaves
-as `when_no_gpu_protected` and journals `GPU_NOT_CERTIFIED` (a node condition, with the sweep as the remedy).
+as `when_no_gpu_protected` and journals `GPU_NOT_CERTIFIED` (a node condition, with the sweep as the remedy). An
+owner's explicit pause of GPU work, a rule's or a phase's `pause_fleet` with scope `gpu`, `all` or `io`, always binds:
+it pauses the work and admits no GPU job (capacity `paused`, `paused_by`), certificate or not; a certificate lifts only
+the gate. Such a rule also counts as gating, so the GPU budget shows it as not certified unless a certificate covers
+it.
 `certified` is opt-in per node (owner decision 14).
 
 **For the duty controller (the next step of D50).** `ProtectionController::certified_duty(rule, now)` is the ceiling;

@@ -777,6 +777,63 @@ mod e2e {
         drop(a);
     }
 
+    /// The event path and the agent's graceful stop: a job the fast path froze is thawed by the stop (a frozen process
+    /// cannot act on its stop request), its fast-pause record goes with it, and a phase that begins again while the
+    /// agent stops never freezes a job that is stopping.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_graceful_stop_thaws_a_fast_pause_and_is_never_refrozen() {
+        let tmp = crate::scratch("prot-fast-stop");
+        let l = Layout::new(tmp.path().to_path_buf());
+        l.ensure().unwrap();
+        let mut p = Protection::new(&l, false);
+        let a = job();
+        let pa = a.0.id() as i32;
+        assert!(p.registry.register(pa, Some(1), None));
+        let table = Table::default();
+        table.lock().unwrap().insert(1, state(1, pa, &["freeze_ok"]));
+        let marker = "4444.5";
+        let _owner = Owner(Command::new("sleep").arg(marker).spawn().unwrap());
+        let src = tmp.path().join("phase.jsonl");
+        std::fs::write(&src, "{\"event\": \"idle\"}\n").unwrap();
+        let rule = json!({"id": "owner", "match": {"argv_regex": "4444\\.5"}, "active_when": {"for_s": 0}, "immediate": true,
+                          "during": [{"source": {"jsonl": src.to_string_lossy(), "enter": "upload", "exit": "done"},
+                                      "pause_fleet": {}}]});
+        let d = json!({"desired_state": "active", "limits": {}, "policy": {"protection": {"node": {"mode": "fleet_first"}, "rule": [rule]}}});
+        let facts = json!({"cpu": {"logical": 4}});
+        p.tick(&d, &table, &facts);
+        std::thread::sleep(Duration::from_millis(600));
+        let append = |line: &str| {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&src).unwrap().write_all(line.as_bytes()).unwrap();
+        };
+        let wait_frozen = |p: &Protection, want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while p.frozen.lock().unwrap().contains(&1) != want && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            p.frozen.lock().unwrap().contains(&1) == want
+        };
+        append("{\"event\": \"upload\"}\n");
+        assert!(wait_frozen(&p, true), "the event path froze the job");
+        // the agent stops (Agent::stop_jobs): every job gets its stop, then protection thaws what it froze
+        {
+            let mut t = table.lock().unwrap();
+            let j = t.get_mut(&1).unwrap();
+            j.stop_by = Some(Instant::now() + Duration::from_secs(30));
+            j.stop = Some(crate::jobs::Stop::Release("agent_stop".into()));
+        }
+        p.thaw_all(&table);
+        assert!(p.frozen.lock().unwrap().is_empty() && p.fast_paused.lock().unwrap().is_empty());
+        assert!(cpu_over(pa, 1.0) > 0.2, "the thawed job runs to act on its stop");
+        // the phase ends and begins again while the agent stops: the stopping job is never frozen again
+        append("{\"event\": \"done\"}\n");
+        std::thread::sleep(Duration::from_millis(400));
+        append("{\"event\": \"upload\"}\n");
+        assert!(!wait_frozen(&p, true), "a stopping job was frozen again");
+        drop(a);
+    }
+
     /// macOS, a system install's view of a person's work: the agent's protection serving session helpers runs as
     /// another account (`nobody`, through passwordless sudo), with its home and the helpers' socket in a throwaway
     /// directory, and this account's session helper reports to it. What only this account may read (arguments, CPU
