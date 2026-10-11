@@ -123,6 +123,8 @@ def _reason_params(j: dict, r: predicates.PredicateResult, nv: predicates.NodeVi
         v.update(setting=r.required, have=r.observed)
     elif r.code == "PROTECTION_ACTIVE":
         v["rule"] = str(r.required or "?").removeprefix("rule:")
+    elif r.code in ("SITE_UPLINK_BUSY", "SITE_UPLINK_BUDGET") and nv.site:
+        v.update(site=nv.site["name"], why=nv.site["why"] or "?", running=r.observed, max=r.required)
     elif r.code == "RETRIES_EXHAUSTED":
         v.update(failures=j.get("exec_failures"), max_attempts=predicates.retry_max(j, n.get("platform")))
     return v

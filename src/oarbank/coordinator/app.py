@@ -237,6 +237,29 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     async def heartbeat(request: Request, node=Depends(node_dep)):
         return await run_in_threadpool(core.heartbeat, db, node, await request.json())
 
+    # ---------------- sites: transfer leases under the site's uplink budget (docs/design/sites.md)
+    @app.post("/v1/agent/uplink/lease")
+    async def uplink_lease(request: Request, node=Depends(node_dep)):
+        from . import sites
+        return await run_in_threadpool(sites.lease, db, node, await request.json())
+
+    @app.post("/v1/agent/uplink/renew")
+    async def uplink_renew(request: Request, node=Depends(node_dep)):
+        from . import sites
+        return await run_in_threadpool(sites.renew, db, node, await request.json())
+
+    @app.post("/v1/agent/uplink/release")
+    async def uplink_release(request: Request, node=Depends(node_dep)):
+        from . import sites
+        return await run_in_threadpool(sites.release, db, node, await request.json())
+
+    @app.post("/v1/agent/uplink/network")
+    async def uplink_network(request: Request, node=Depends(node_dep)):
+        """What the node observes of its network, and the public address it connects from (kept only as a keyed
+        fingerprint): the evidence site suggestions rest on."""
+        from . import sites
+        return await run_in_threadpool(sites.observe_network, db, node, await request.json(), peer(request))
+
     @app.post("/v1/agent/claim")
     async def claim(request: Request, node=Depends(node_dep)):
         return await run_in_threadpool(core.claim, db, node, await request.json())
@@ -949,6 +972,21 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         if d is None:
             raise core.ApiError(404, "not_found", f"node {nid}")
         return d
+
+    # ---------------- sites (docs/design/sites.md; `oarbank sites`)
+    @app.get("/api/v1/sites")
+    def api_sites(actor=Depends(who)):
+        """Every site with its budget and state, the suggestions, and the nodes at no site."""
+        from . import sites
+        return sites.listing(db)
+
+    @app.get("/api/v1/sites/{ref}")
+    def api_site(ref: str, actor=Depends(who)):
+        from . import sites
+        try:
+            return sites.detail(db, ref)
+        except sites.SiteError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
 
     # ---------------- co-tenancy: harness runs and certificates (docs/design/gpu-cotenancy.md; `oarbank protection ab`)
     @app.get("/api/v1/protection/ab/runs")

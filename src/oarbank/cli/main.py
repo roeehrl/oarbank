@@ -1127,6 +1127,94 @@ def cmd_groups(a):
     print(r.get("message") or json.dumps(r, indent=1, default=str))
 
 
+def _site_params(a) -> dict:
+    p = {}
+    for k, v in (("uplink_mbps", a.mbps), ("max_transfers", a.transfers), ("max_heavy_jobs", a.heavy_jobs),
+                 ("description", a.description), ("name", a.name if a.action == "update" else None)):
+        if v is not None:
+            p[k] = None if (k == "uplink_mbps" and v == 0) else v
+    return p
+
+
+def _print_site(s: dict, full: bool = False) -> None:
+    rate = f"{s['uplink_mbps']:g} Mbit/s ({s['lease_mbps']:g} each)" if s.get("uplink_mbps") else "no rate limit"
+    print(f"{s['name']} ({s['site_id']}): {', '.join(s['members']) or 'no members'}")
+    print(f"  budget: {s['max_transfers']} transfer(s), {s['max_heavy_jobs']} network-heavy job(s) at once, {rate}")
+    print(f"  now: {s['state']}" + ("" if s["hold"] else f" ({s['transfers']} transfer(s), {s['heavy_jobs']} network-heavy job(s) running)"))
+    for d, h in sorted((s.get("hint") or {}).items()):
+        print(f"  measured {d}: large transfers here reached {h['mbps']:g} Mbit/s ({h['n']})")
+    if full:
+        for m in s.get("member_rows") or []:
+            ph = ", ".join(f"{p['key']} {'on' if p.get('on') else ('unreadable' if p.get('readable') is False else 'off')}"
+                           for p in m["phases"]) or "no uplink phase"
+            up = m.get("uplink") or {}
+            print(f"    {m['hostname']}: {ph}; " + (f"{len(up.get('active') or [])} transfer(s)" + (f", held: {up['held']}" if up.get("held") else "")
+                                                   if m.get("reports_uplink") else "its agent does not report transfers"))
+        for x in s.get("leases") or []:
+            print(f"    lease {x['lease_id']}: {x['node']} {x['kind']} {x['dir']}" + (f" at {x['mbps']:g} Mbit/s" if x["mbps"] else ""))
+
+
+def cmd_sites(a):
+    """oarbank sites list|show|create|update|add|remove|delete|suggest|accept|dismiss (docs/design/sites.md)."""
+    if a.action in ("list", "suggest") or (a.action == "show" and not a.site):
+        d = api("GET", "/api/v1/sites")
+        if a.json:
+            print(json.dumps(d if a.action == "list" else d["suggestions"], indent=1, default=str))
+            return
+        if a.action == "list":
+            for s in d["sites"]:
+                _print_site(s)
+            if not d["sites"]:
+                print("no sites (oarbank sites suggest, oarbank sites create <name> --node N ...)")
+            if d["unplaced"]:
+                print("at no site: " + ", ".join(d["unplaced"]))
+        for g in d["suggestions"] if a.action == "suggest" or d["suggestions"] else []:
+            nodes = ", ".join(x["hostname"] + (f" (at {x['site']})" if x["site"] else "") for x in g["nodes"])
+            print(f"suggestion {g['key']}: {g['text']}: {nodes}")
+        if a.action == "suggest" and not d["suggestions"]:
+            print("nothing to suggest")
+        return
+    if a.action == "show":
+        d = api("GET", f"/api/v1/sites/{a.site}")
+        print(json.dumps(d, indent=1, default=str)) if a.json else _print_site(d, full=True)
+        return
+    if not a.site:
+        sys.exit(f"oarbank sites {a.action} needs {'a suggestion key' if a.action in ('accept', 'dismiss') else 'a site or node'}")
+    nodes = [x for n in (a.node or []) + list(a.nodes or []) for x in n.split(",") if x]
+    if a.action == "create":
+        res = run_op("sites.create", a.site, {**_site_params(a), "nodes": nodes}, a.reason, a.yes, preview=True)
+    elif a.action == "update":
+        params = _site_params(a)
+        if not params:
+            sys.exit("oarbank sites update <site> with what to change: --name, --mbps, --transfers, --heavy-jobs, --description")
+        res = run_op("sites.update", a.site, params, a.reason, a.yes, preview=True)
+    elif a.action == "add":
+        if not nodes:
+            sys.exit("oarbank sites add <site> <node> [<node> ...]")
+        res = run_op("sites.assign", a.site, {"nodes": nodes}, a.reason, a.yes, preview=True)
+    elif a.action == "remove":
+        res = run_op("sites.unassign", None, {"nodes": [a.site, *nodes]}, a.reason, a.yes, preview=True)
+    elif a.action == "delete":
+        res = run_op("sites.delete", a.site, {}, a.reason, a.yes, a.confirm)
+    elif a.action == "dismiss":
+        res = run_op("sites.dismiss", a.site, {}, a.reason, a.yes)
+    else:                                                  # accept
+        sug = next((g for g in api("GET", "/api/v1/sites")["suggestions"] if g["key"] == a.site), None)
+        if sug is None:
+            sys.exit(f"no suggestion {a.site} (oarbank sites suggest)")
+        ids = [x["node_id"] for x in sug["nodes"]]
+        if a.to_site or len(sug["sites"]) == 1 and not a.name:
+            res = run_op("sites.assign", a.to_site or sug["sites"][0], {"nodes": ids, "suggestion": sug["key"]}, a.reason,
+                         a.yes, preview=True)
+        else:
+            if not a.name:
+                sys.exit("oarbank sites accept <suggestion> --name <name> (a new site) or --site <site> (an existing one)")
+            res = run_op("sites.create", a.name, {**_site_params(a), "nodes": ids, "suggestion": sug["key"]}, a.reason,
+                         a.yes, preview=True)
+    r = (res or {}).get("result") or {}
+    print(r.get("message") or json.dumps(r, indent=1, default=str))
+
+
 def print_job(d: dict) -> None:
     """`oarbank job show`: the job page's facts (detail.job and its explain document, GET /api/v1/jobs/<id>)."""
     j = d["job"]
@@ -1669,6 +1757,25 @@ def parser() -> argparse.ArgumentParser:
     gr.add_argument("--confirm")
     gr.add_argument("--yes", "-y", action="store_true")
     gr.set_defaults(fn=cmd_groups)
+    si = sub.add_parser("sites", help="sites (nodes that share one internet line): list, show, create, update, add, remove, "
+                                      "delete; suggest (from what nodes observe of their network), accept, dismiss")
+    si.add_argument("action", choices=["list", "show", "create", "update", "add", "remove", "delete", "suggest", "accept",
+                                       "dismiss"])
+    si.add_argument("site", nargs="?", help="a site's id or name (create: its name; remove: a node; accept, dismiss: a "
+                                            "suggestion key)")
+    si.add_argument("nodes", nargs="*", help="add, remove: nodes (names or ids)")
+    si.add_argument("--node", action="append", help="create: a member (repeat or comma-separate)")
+    si.add_argument("--mbps", type=float, help="the rate the site's fleet transfers may use together, Mbit/s (0: no limit)")
+    si.add_argument("--transfers", type=int, help="bulk transfers at once (default 1)")
+    si.add_argument("--heavy-jobs", type=int, help="network-heavy jobs at once (default 1)")
+    si.add_argument("--name", help="update: a new name; accept: the new site's name")
+    si.add_argument("--site", dest="to_site", help="accept: add the suggestion's nodes to this existing site")
+    si.add_argument("--description")
+    si.add_argument("--json", action="store_true")
+    si.add_argument("--reason")
+    si.add_argument("--confirm")
+    si.add_argument("--yes", "-y", action="store_true")
+    si.set_defaults(fn=cmd_sites)
     jb = sub.add_parser("job", help="a job: show (attempts, checkpoint, results, why), retry, cancel")
     jb.add_argument("action", choices=["show", "retry", "cancel"])
     jb.add_argument("id")

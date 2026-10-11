@@ -1,0 +1,11 @@
+{# the node's site (docs/design/sites.md): coordinator/detail.py `site` #}
+{% set S = d.site %}
+<div class="card">
+  <b>Site</b> <a class="small" href="/sites">sites</a>
+  <div class="kv small" style="margin-top:6px">
+    {% if S and S.name %}<span class="mut">site</span><span><a href="/sites/{{ S.site_id }}">{{ S.name }}</a></span>
+    <span class="mut">now</span><span>{% if S.hold %}<b>{{ S.state }}</b>{% else %}free{% endif %}</span>
+    {% else %}<span class="mut">site</span><span>at no site: its transfers follow only its own caps</span>{% endif %}
+    {% if S and S.uplink %}<span class="mut">transfers</span><span>{{ (S.uplink.active or []) | length }} active{% if S.uplink.held %} · held: {{ S.uplink.held }}{% endif %}</span>{% endif %}
+  </div>
+</div>

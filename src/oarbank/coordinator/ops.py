@@ -2360,3 +2360,5 @@ def _register_catalogue():
 
 
 _register_catalogue()
+
+from . import sites_ops  # noqa: E402,F401  (the site operations register their handlers: docs/design/sites.md)

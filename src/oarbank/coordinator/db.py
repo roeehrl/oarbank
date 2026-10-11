@@ -243,6 +243,26 @@ CREATE TABLE IF NOT EXISTS protection_versions (
   node_id TEXT NOT NULL, version INT NOT NULL, config_json TEXT NOT NULL, config_hash TEXT, actor TEXT, reason TEXT,
   source TEXT, created_at REAL, PRIMARY KEY (node_id, version));
 
+-- Sites (D55, sites.py): nodes sharing one internet line, each node at one site at most, with the owner's uplink budget
+-- and the last computed hold (a protected process at the site in an `uplink` phase); transfer leases under the budget;
+-- large transfers' rates (the measured-capacity hint); keyed network fingerprints for suggestions (never an address)
+CREATE TABLE IF NOT EXISTS sites (
+  site_id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT,
+  uplink_mbps REAL, max_transfers INT NOT NULL DEFAULT 1, max_heavy_jobs INT NOT NULL DEFAULT 1,
+  hold_on INT NOT NULL DEFAULT 0, hold_since REAL, hold_why TEXT,
+  created_by TEXT, created_at REAL, updated_by TEXT, updated_at REAL);
+CREATE TABLE IF NOT EXISTS site_members (node_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, added_by TEXT, added_at REAL);
+CREATE INDEX IF NOT EXISTS site_members_site ON site_members(site_id);
+CREATE TABLE IF NOT EXISTS uplink_leases (
+  lease_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT, dir TEXT, bytes INT, mbps REAL,
+  granted_at REAL, renewed_at REAL, expires_at REAL, peak INT DEFAULT 1);   -- peak: most leases live at the site meanwhile
+CREATE INDEX IF NOT EXISTS uplink_leases_site ON uplink_leases(site_id);
+CREATE TABLE IF NOT EXISTS uplink_transfers (
+  site_id TEXT, node_id TEXT, kind TEXT, dir TEXT, bytes INT, seconds REAL, mbps REAL, solo INT, paced INT, at REAL);
+CREATE INDEX IF NOT EXISTS uplink_transfers_site ON uplink_transfers(site_id, at);
+CREATE TABLE IF NOT EXISTS node_net (node_id TEXT PRIMARY KEY, gateway_fp TEXT, public_fp TEXT, observed_at REAL);
+CREATE TABLE IF NOT EXISTS site_dismissed (key TEXT PRIMARY KEY, by TEXT, at REAL, why TEXT);
+
 CREATE TABLE IF NOT EXISTS alerts (
   alert_id INTEGER PRIMARY KEY, rule TEXT, subject TEXT, state TEXT, detail TEXT,
   opened_at REAL, resolved_at REAL, last_notified_at REAL,

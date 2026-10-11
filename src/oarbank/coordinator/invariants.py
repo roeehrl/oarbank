@@ -40,6 +40,8 @@ Safety (must hold after every committed transaction):
   S25 for a rule marked immediate, a phase the agent's event path saw begin is followed by its pause request within
       100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
       the source event)
+  S27 a site's live transfer leases never number more than its max_transfers, their rates never sum past its
+      uplink_mbps, and no lease is live while the site holds (a protected process there is in an uplink phase)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -422,13 +424,31 @@ def s23_resume_from_own_checkpoint(db: DB):
     return out
 
 
+def s27_site_uplink_budget(db: DB):
+    """S27 (docs/design/sites.md): the leases a site grants stay within its budget and none is live while it holds.
+    Leases past their expiry are dead (the agent stopped by its own clock before it) and do not count."""
+    from . import clock
+    t, out = clock.now(), []
+    for s in db.q("SELECT * FROM sites"):
+        rows = db.q("SELECT mbps FROM uplink_leases WHERE site_id=? AND expires_at>=?", (s["site_id"], t))
+        if len(rows) > s["max_transfers"]:
+            out.append(f"S27 site {s['name']}: {len(rows)} live transfer leases, budget {s['max_transfers']}")
+        total = sum(r["mbps"] or 0 for r in rows)
+        if s["uplink_mbps"] and total > s["uplink_mbps"] + 1e-6:
+            out.append(f"S27 site {s['name']}: leases pace at {total:g} Mbit/s together, budget {s['uplink_mbps']:g}")
+        if s["hold_on"] and rows:
+            out.append(f"S27 site {s['name']}: {len(rows)} live transfer lease(s) while it holds ({s['hold_why']})")
+    return out
+
+
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
           s5_no_live_on_settled, s6_accepted_iff_canonical, s7_live_on_ready_nodes, s8_live_module_certified,
           s9_attempt_bookkeeping, s10_failure_accounting, s11_hard_job_caps,
           s12_live_only_on_ready_inputs, s13_done_on_done_input, s14_canonical_module_verdict,
           s15_module_faults_not_charged, s16_actuation_only_on_spawned, s17_no_admission_under_memory_floor,
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
-          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s25_immediate_phases_pause_at_once]
+          s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s25_immediate_phases_pause_at_once,
+          s27_site_uplink_budget]
 
 
 def check_all(db: DB) -> list[str]:

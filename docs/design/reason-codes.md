@@ -47,6 +47,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `DISPUTE_PARTY` | This node is a party to the job's dispute; a third node must break the tie | P1 | – | – | `dispute_party` |
 | `DATASETS_NOT_REGISTERED` | Waiting for {missing} to be registered (a bootstrap job brings a module's pinned datasets) | P1 | – | – | – |
 | `DATASETS_NOT_STAGED` | The node has not staged {missing} yet | P1 | – | – | – |
+| `SITE_UPLINK_BUSY` | Network-heavy: site {site} holds such work while {why} | P1 | – | – | – |
+| `SITE_UPLINK_BUDGET` | Network-heavy: site {site} already runs {running} of its {max} network-heavy jobs | P1 | – | `sites.update` | – |
 
 ## node_admission
 
@@ -115,6 +117,10 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `AB_IDLE` | Harness run {run_id} ended: its work runs as protection allows | P1 | – | – | – |
 | `AB_FINISHED` | Harness run {run_id} ended: {decision} ({why}) | P1 | – | – | – |
 | `AB_REFUSED` | Harness run {run_id} refused by the node: {why} | P4 | – | – | – |
+| `TRANSFER_PAUSED` | A {kind} transfer paused: {why} | P1 | no / no | – | – |
+| `TRANSFER_RESUMED` | A {kind} transfer resumed after {paused_s} s | P1 | – | – | – |
+| `SITE_PAUSE` | Network-heavy attempts paused: their site is in an uplink phase | P1 | no / no | – | – |
+| `SITE_RESUME` | Network-heavy attempts resumed: their site's uplink phase ended | P1 | no / no | – | – |
 
 ## attempt_end
 
@@ -138,6 +144,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `OOM` | Killed for memory | P1 | no / yes | – | `oom` |
 | `SANDBOX_ESCAPE` | A process of the attempt ran outside the module sandbox; the attempt was killed | P1 | no / yes | – | `sandbox_escape` |
 | `PREEMPT_MEMORY` | Preempted by the memory guard | P1 | no / no | – | `preempt_memory` |
+| `PREEMPT_SITE` | Released: a network-heavy job that cannot pause, or paused too long, while its site was in an uplink phase; requeued | P1 | no / no | – | `preempt_site` |
 | `RELEASED_CAP_CPU` | Released: the CPU cap was lowered | P1 | no / no | – | `limit_cpu` |
 | `RELEASED_CAP_MEM` | Released: over its declared memory under a memory floor, or the memory cap was lowered | P1 | no / no | – | `limit_mem` |
 | `RELEASED_SCHEDULE` | Released: outside the owner's schedule | P1 | no / no | – | `limit_schedule` |

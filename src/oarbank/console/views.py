@@ -559,6 +559,29 @@ def groups_page(r) -> dict:
     return d
 
 
+def sites_page(r) -> dict:
+    """Sites (docs/design/sites.md): every site with its members, budget and state in words, the suggestions from what
+    nodes observe of their network, the nodes at no site (the new-site form's choices)."""
+    from ..coordinator import sites
+    d = sites.listing(r)
+    d["nodes"] = r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+    return d
+
+
+def site_page(r, ref: str) -> dict | None:
+    """One site: its members with their uplink phases and the agent's transfers, its budget, the leases in force,
+    recent transfers (the measured-capacity hint rests on them) and its holds."""
+    from ..coordinator import sites
+    try:
+        d = sites.detail(r, ref)
+    except sites.SiteError:
+        return None
+    here = {x["node_id"] for x in d["member_rows"]}
+    d["others"] = [n for n in r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+                   if n["node_id"] not in here]
+    return d
+
+
 def group_page(r, gid: str) -> dict | None:
     """One group: its rule and members (and why each is one), the edit form, its settings at group scope (locks,
     Promote to fleet), its own protection section, and its secrets' state."""
