@@ -30,7 +30,7 @@ class Operation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     id: str = Field(pattern=r"^[a-z]+(\.[a-z_]+)+$")
     area: Literal["fleet", "nodes", "jobs", "campaigns", "datasets", "modules", "releases", "agent", "coordinator",
-                  "protection", "alerts", "settings", "audit", "access"]
+                  "protection", "alerts", "settings", "audit", "access", "workloads"]
     summary: str
     tier: Tier
     escalates: str | None = Field(None, description="When the tier rises one level (besides bulk).")
@@ -421,9 +421,27 @@ OPS: list[Operation] = [
               tier="T2", preview=True, min_role="admin", category="modify", idempotency="declarative", versioned=True,
               gui=CON("settings.folders.update"), routes=OPR("settings.folders.update"),
               cli=["oarbank folders map <id> --access read|write --node <node>=<path>"]),
-    Operation(id="nodes.sign_statement", area="nodes", summary="Attach the owner's signature to a node's statement: its folders and added tool paths (signing mode)",
+    Operation(id="nodes.sign_statement", area="nodes", summary="Attach the owner's signature to a node's statement: its folders, added tool paths and listeners (signing mode)",
               tier="T1", min_role="admin", category="modify", idempotency="natural",
               routes=OPR("nodes.sign_statement"), cli=["oarbank node sign <node>"], gui=CON("nodes.sign_statement")),
+    # ------------------------------------------------------------------ inbound listeners (docs/design/inbound-listeners.md)
+    Operation(id="listeners.configure", area="nodes", summary="Assign a module's inbound listener to a node, or change its entry: external port, fallback, mapping, IPv6, bind, internal port, lowered limits, allowed addresses (the node statement; signing mode: oarbank node sign)",
+              tier="T2", preview=True, min_role="admin", category="modify", reverses="listeners.remove", idempotency="declarative",
+              routes=OPR("listeners.configure"), cli=["oarbank listener set <node> <key>"], gui=CON("listeners.configure")),
+    Operation(id="listeners.remove", area="nodes", summary="Remove a listener's entry from a node: the agent closes it and removes its router mapping once it applies the new statement",
+              tier="T1", min_role="admin", category="remove", idempotency="natural",
+              routes=OPR("listeners.remove"), cli=["oarbank listener remove <node> <key>"], gui=CON("listeners.remove")),
+    Operation(id="listeners.disable", area="nodes", summary="The listener kill switch for a node or the fleet: every listener closes and every router mapping is removed at the next heartbeat",
+              tier="T0", category="modify", reverses="listeners.resume", idempotency="declarative",
+              routes=OPR("listeners.disable"), cli=["oarbank listener disable --node <node>", "oarbank listener disable --all"],
+              gui=CON("listeners.disable")),
+    Operation(id="listeners.resume", area="nodes", summary="Lift the listener kill switch for a node or the fleet",
+              tier="T1", category="modify", reverses="listeners.disable", idempotency="declarative",
+              routes=OPR("listeners.resume"), cli=["oarbank listener resume --node <node>", "oarbank listener resume --all"],
+              gui=CON("listeners.resume")),
+    Operation(id="listeners.probe", area="nodes", summary="Check a listener from outside now: a fleet node on another network dials its external address (at most once a minute)",
+              tier="T0", category="modify", idempotency="natural",
+              routes=OPR("listeners.probe"), cli=["oarbank listener probe <node> <key>"], gui=CON("listeners.probe")),
     Operation(id="access.accounts.create", area="access", summary="Create a console account (a TOTP seed is shown once; a password is optional)",
               tier="T2", preview=True, min_role="admin", category="create", idempotency="natural",
               gui=CON("access.accounts.create"), routes=OPR("access.accounts.create"), cli=["oarbank account create <name>"]),
@@ -445,6 +463,22 @@ OPS: list[Operation] = [
     Operation(id="access.login_link", area="access", summary="Mint a one-time console sign-in link (valid 2 minutes)",
               tier="T1", min_role="admin", category="access", idempotency="natural",
               routes=OPR("access.login_link"), cli=["oarbank console login [--account <name>]"], gui=CON("access.login_link")),
+    # workloads (docs/design/workloads.md): the owner assigns a module's workload to nodes; seats and leases follow
+    Operation(id="workloads.assign", area="workloads",
+              summary="Assign a module's workload to a node (seat \"node\") or ask the coordinator to place a count of seats (seat \"fleet\"); the preview names each node, the secrets it receives, its seat, listeners and the protection rules there",
+              tier="T2", preview=True, min_role="admin", category="create", reverses="workloads.unassign", idempotency="natural",
+              routes=OPR("workloads.assign"), gui=CON("workloads.assign"),
+              cli=["oarbank workload assign <module>/<workload> --node N", "oarbank workload assign <module>/<workload> --count C"]),
+    Operation(id="workloads.unassign", area="workloads",
+              summary="Stop running a workload on a node; its seat goes back once the node reports it stopped",
+              tier="T1", min_role="operator", category="remove", reverses="workloads.assign", idempotency="natural",
+              routes=OPR("workloads.unassign"), gui=CON("workloads.unassign"),
+              cli=["oarbank workload unassign <module>/<workload> --node N"]),
+    Operation(id="workloads.restart", area="workloads",
+              summary="Restart a workload on a node (also lifts a withdrawal after repeated failures)",
+              tier="T1", min_role="operator", category="modify", idempotency="natural",
+              routes=OPR("workloads.restart"), gui=CON("workloads.restart"),
+              cli=["oarbank workload restart <module>/<workload> --node N"]),
     Operation(id="secrets.set", area="modules", summary="Set a module secret for the module, a node group or one node (write-only: the value is never shown, only a fingerprint)",
               tier="T1", min_role="admin", category="modify", reverses="secrets.clear", idempotency="declarative",
               routes=OPR("secrets.set"), cli=["oarbank secret set <module> <name> [--node N]", "oarbank secret set <module> <name> [--group G]"],
@@ -496,6 +530,7 @@ for _op in OPS:
 AGENT_ROUTES = {
     ("POST", "/v1/agent/enroll"), ("POST", "/v1/agent/hello"), ("POST", "/v1/agent/heartbeat"),
     ("POST", "/v1/agent/claim"), ("POST", "/v1/agent/cert"), ("POST", "/v1/attempts/{aid}/complete"), ("POST", "/v1/attempts/{aid}/release"),
+    ("POST", "/v1/agent/workloads/secrets"),
     ("POST", "/v1/attempts/{aid}/fail"), ("POST", "/v1/attempts/{aid}/log"), ("POST", "/v1/attempts/{aid}/checkpoint"),
     ("POST", "/v1/uploads/{digest}"), ("PATCH", "/v1/uploads/{digest}"),
     # the coordinator-move channel between the old coordinator and its standby target (coordinator-move.md):

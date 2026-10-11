@@ -520,7 +520,19 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         d["panels"] = await panels("node.detail.panel", request, actor,
                                    {"node": {"id": nid, "node_id": nid, "online": d["n"]["online"]}})
+        r = await coordinator_json("GET", f"/api/v1/workloads?node={nid}", actor)
+        d["workloads"] = (r.json() if r.status_code == 200 else {}).get("workloads") or []
+        d["listener_focus"] = await listener_focus(nid, request.query_params.get("listener"), actor)
         return render(request, "node.html", {**d, "actor": actor})
+
+    async def listener_focus(nid: str, key: str | None, actor: str) -> str | None:
+        """A listener's detail on the node page (?listener=<module>/<listener>): looking at it asks the node for its top
+        client addresses for 10 minutes (oarbankd's GET /api/v1/nodes/{node}/listeners/{key})."""
+        if not key:
+            return None
+        from urllib.parse import quote
+        await coordinator_json("GET", f"/api/v1/nodes/{quote(nid)}/listeners/{quote(key, safe='/')}", actor)
+        return key
 
     async def node_settings_ctx(nid: str, request: Request, errors: list | None = None, form=None):
         """The node's Settings tab; after a refused save, the refusals (an error summary per section, each beside its
@@ -921,7 +933,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         over = next((d for d in man.ui.pages if d.slot == "module.overview"), None)
         body = await render_module(name, over, request, actor, ctx_for(request)) if over else \
             '<p class="mut">This module declares no overview page.</p>'
-        rd = await coordinator_json("GET", f"/api/v1/modules/{name}/readiness", actor)
+        version = request.query_params.get("version")
+        rd = await coordinator_json("GET", f"/api/v1/modules/{name}/readiness"
+                                    + (f"?version={quote(version)}" if version else ""), actor)
         return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": "overview", "actor": actor,
                                                     "readiness": rd.json() if rd.status_code == 200 else None})
 
@@ -1071,6 +1085,21 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                                                         "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
                                                         "actor": actor})
 
+    @app.get("/modules/{name}/workloads", response_class=HTMLResponse)
+    async def module_workloads(name: str, request: Request):
+        """The module's workloads (docs/design/workloads.md): each one's assignments per node with seat, fence, lease,
+        state, last error and log tail, the protection actions on it, and Assign / Unassign / Restart."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        if man is None:
+            return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
+        r = await coordinator_json("GET", f"/api/v1/workloads?module={name}", actor)
+        rows = (r.json() if r.status_code == 200 else {}).get("workloads") or []
+        nodes = await drill(lambda rd: rd.q("SELECT node_id, hostname FROM nodes WHERE lifecycle='ready' ORDER BY hostname")) or []
+        return render(request, "module_workloads.html", {"name": name, "man": man, "tab": "workloads", "rows": rows,
+                                                          "nodes": nodes, "actor": actor})
+
     @app.get("/modules/{name}/nodes", response_class=HTMLResponse)
     async def module_nodes(name: str, request: Request):
         """The module's Nodes matrix (docs/design/host-tools.md): per node and host tool request, what the node found, the
@@ -1082,8 +1111,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
         r = await coordinator_json("GET", f"/api/v1/tools?module={name}", actor)
         doc = r.json() if r.status_code == 200 else None
+        from ..coordinator import listeners           # its inbound listeners per node (docs/design/inbound-listeners.md)
+        lrows = await drill(listeners.module_rows, name) if man.sandbox.net.inbound else []
         return render(request, "module_nodes.html", {"name": name, "man": man, "tab": "nodes", "actor": actor,
-                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200]})
+                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200],
+                                                      "listener_rows": lrows or []})
 
     @app.get("/modules/{name}/health", response_class=HTMLResponse)
     async def module_page(name: str, request: Request):

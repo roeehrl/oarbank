@@ -4,6 +4,21 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## 2.10.0 (unreleased)
+
+### What's new
+
+- **GPU duty governor** under `gpu_jobs = "certified"`: cooperative GPU work (jobs and workloads that declare
+  `cooperative_throttle`) runs beside a protected GPU program at a budget an AIMD loop sets on the program's own
+  progress, never above the co-tenancy certificate, and each unit's measured GPU time is checked against its
+  `gpu_duty`: a unit over its duty is paused, then stopped and not trusted for an hour
+  (`GPU_DUTY_EXCEEDED`, `GPU_DUTY_UNVERIFIED`). `oarbank protection duty [<node>]` and the protection page's GPU duty
+  card show the budget, its baseline and each unit's asked and measured duty. Invariant S28 checks it from the journal.
+- **A GPU-using `progress_rate` rule now holds GPU work back** like a `gpu_share` rule (D3d), except under
+  `gpu_jobs = always`.
+- **Module SDK:** `oarbank_sdk.duty` holds a runner's `gpu_duty`, the conformance kit's duty specs prove it, and
+  `examples/llmserve` runs language-model batches on MLX or llama.cpp that hold their duty.
+
 ## 2.9.0 (unreleased)
 
 Module SDK: **oarbank-sdk 1.6.0**. Read [What changes when you upgrade](#what-changes-when-you-upgrade) before you

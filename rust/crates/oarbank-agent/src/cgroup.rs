@@ -192,6 +192,16 @@ pub fn limit(pid: i32, cores: f64, mem_gb: f64) -> bool {
     ok
 }
 
+/// A CPU cap on the container (`cpu.max` of `c<leader>`: `cores` per 100 ms), or none (`max`).
+pub fn cpu_cap(pid: i32, cores: Option<f64>) -> bool {
+    let Some(p) = container(pid) else { return false };
+    let v = match cores.filter(|c| *c > 0.0) {
+        Some(c) => format!("{} 100000", (c * 100_000.0).round().max(1000.0) as u64),
+        None => "max 100000".into(),
+    };
+    std::fs::write(p.join("cpu.max"), v).is_ok()
+}
+
 /// The kernel's OOM killer ended a process of the container (`memory.events`).
 pub fn oom_killed(pid: i32) -> bool {
     let Some(p) = container(pid) else { return false };

@@ -19,6 +19,7 @@
     <definitions>
       <definition name="SUPPORTED_Oarbank_2_8" displayName="$(string.SUPPORTED_Oarbank_2_8)" />
       <definition name="SUPPORTED_Oarbank_2_9" displayName="$(string.SUPPORTED_Oarbank_2_9)" />
+      <definition name="SUPPORTED_Oarbank_2_10" displayName="$(string.SUPPORTED_Oarbank_2_10)" />
     </definitions>
   </supportedOn>
   <categories>
@@ -158,6 +159,39 @@
             key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="run_on_battery">
       <parentCategory ref="NodeSettings" />
       <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="workloads" class="Machine" displayName="$(string.workloads)" explainText="$(string.workloads_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="workloads">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_10" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="delegated_processes" class="Machine" displayName="$(string.delegated_processes)" explainText="$(string.delegated_processes_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="delegated_processes">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_10" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="inbound_listeners" class="Machine" displayName="$(string.inbound_listeners)" explainText="$(string.inbound_listeners_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="inbound_listeners">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_10" />
       <enabledValue>
         <decimal value="1" />
       </enabledValue>

@@ -20,6 +20,9 @@ pub struct DynJob {
     pub started_at: f64,
     /// The module's measured bandwidth class ("low" | "medium" | "high"); None = undeclared (medium).
     pub bandwidth: Option<String>,
+    /// Never paused by the pause probe: a workload (whose peers would time out) or a delegated process of the owner's
+    /// (docs/design/workloads.md).
+    pub probe_exempt: bool,
     /// The GPU duty this job should hold (`gpu_duty` in its control document): the harness's level for work under
     /// test, a certificate's for `gpu_jobs = certified` (D50). None: no duty asked.
     pub gpu_duty: Option<f64>,
@@ -228,6 +231,9 @@ pub struct DynamicController {
     last_pressure: HashMap<String, f64>,
     /// Implicit signals, smoothed per source.
     smoothed: HashMap<String, f64>,
+    /// The pause scopes of the last step (rules' and the dynamic layer's own, the probe excluded), for work that is not
+    /// running now: whether it would be paused if it ran (`would_pause`).
+    last_scopes: BTreeSet<ProtectionScope>,
 }
 
 impl Default for DynamicController {
@@ -265,6 +271,7 @@ impl Default for DynamicController {
             harm_gpu_only: false,
             last_pressure: HashMap::new(),
             smoothed: HashMap::new(),
+            last_scopes: BTreeSet::new(),
         }
     }
 }
@@ -272,6 +279,13 @@ impl Default for DynamicController {
 impl DynamicController {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the last step's pause scopes cover work of this kind (GPU or not): what keeps a workload that protection
+    /// stopped held, and one that is not running from starting (the probe never counts).
+    pub fn would_pause(&self, gpu: bool) -> bool {
+        let has = |s| self.last_scopes.contains(&s);
+        has(ProtectionScope::All) || has(ProtectionScope::Io) || if gpu { has(ProtectionScope::Gpu) } else { has(ProtectionScope::Cpu) }
     }
 
     /// The current L1 budget (None: no budget in force).
@@ -477,6 +491,11 @@ impl DynamicController {
             self.budget.unwrap_or(i.allocatable_cores) < i.allocatable_cores || worst > 1.0;
         let exempt = |j: &DynJob| bw_mode && j.bandwidth.as_deref() == Some("low");
 
+        let mut scopes_now = pause_scopes.clone();
+        if dyn_pause_cpu {
+            scopes_now.insert(ProtectionScope::Cpu);
+        }
+        self.last_scopes = scopes_now;
         // map scopes onto jobs: pause what is pausable, lower (E-cores) what is not
         for j in jobs {
             let mut scopes = pause_scopes.clone();
@@ -490,7 +509,7 @@ impl DynamicController {
                 || (has(ProtectionScope::Gpu) && j.gpu)
                 || (gpu_gate && j.gpu && !i.gpu_gate_exempt.contains(&j.attempt_id))
                 || i.harness_off.contains(&j.attempt_id)
-                || (o.probing && !j.gpu);
+                || (o.probing && !j.gpu && !j.probe_exempt);
             let lower_j = lower_all
                 || (dyn_lower && !exempt(j))
                 || (bw_mode && budget_shrunk && j.bandwidth.as_deref() == Some("high"));

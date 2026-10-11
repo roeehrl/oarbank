@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 97 operations, 2 explain kinds, 148 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 105 operations, 2 explain kinds, 182 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -93,6 +93,11 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `tools.detect` | T0 | yes | `oarbank tools detect <node>` | yes |
 | `settings.folders.update` | T2 | yes | `oarbank folders map <id> --access read|write --node <node>=<path>` | yes |
 | `nodes.sign_statement` | T1 | yes | `oarbank node sign <node>` | yes |
+| `listeners.configure` | T2 | yes | `oarbank listener set <node> <key>` | yes |
+| `listeners.remove` | T1 | yes | `oarbank listener remove <node> <key>` | yes |
+| `listeners.disable` | T0 | yes | `oarbank listener disable --node <node>`<br>`oarbank listener disable --all` | yes |
+| `listeners.resume` | T1 | yes | `oarbank listener resume --node <node>`<br>`oarbank listener resume --all` | yes |
+| `listeners.probe` | T0 | yes | `oarbank listener probe <node> <key>` | yes |
 | `access.accounts.create` | T2 | yes | `oarbank account create <name>` | yes |
 | `access.accounts.update` | T2 | yes | `oarbank op access.accounts.update` | yes |
 | `access.accounts.reset_totp` | T2 | yes | `oarbank op access.accounts.reset_totp` | yes |
@@ -100,6 +105,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `access.tokens.create` | T2 | yes | `oarbank token create` | yes |
 | `access.tokens.revoke` | T1 | yes | `oarbank op access.tokens.revoke` | yes |
 | `access.login_link` | T1 | yes | `oarbank console login [--account <name>]` | yes |
+| `workloads.assign` | T2 | yes | `oarbank workload assign <module>/<workload> --node N`<br>`oarbank workload assign <module>/<workload> --count C` | yes |
+| `workloads.unassign` | T1 | yes | `oarbank workload unassign <module>/<workload> --node N` | yes |
+| `workloads.restart` | T1 | yes | `oarbank workload restart <module>/<workload> --node N` | yes |
 | `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]`<br>`oarbank secret set <module> <name> [--group G]` | yes |
 | `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]`<br>`oarbank secret clear <module> <name> [--group G]` | yes |
 | `modules.cli_token` | T1 | yes | `oarbank cli <module> [args...]` | yes |
@@ -145,6 +153,17 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |
 | `NO_RELEASE` | `modules.install`, `modules.enable` |
 | `RELEASE_UNSIGNED` | `releases.attach_signature` |
+| `LISTENER_UNAVAILABLE` | `listeners.configure` |
+| `PORT_TAKEN` | `listeners.configure` |
+| `NO_MAPPING_PROTOCOL` | `listeners.configure` |
+| `MAPPED_UNREACHABLE` | `listeners.probe` |
+| `WORKLOAD_UNASSIGNED` | `workloads.assign` |
+| `WORKLOAD_SEAT_ELSEWHERE` | `workloads.unassign` |
+| `WORKLOAD_WITHDRAWN` | `workloads.restart` |
+| `WORKLOAD_SECRETS_NOT_SET` | `secrets.set` |
+| `WORKLOAD_IDENTITY_SHARED` | `secrets.set` |
+| `WORKLOAD_POLICY_OFF` | `settings.apply` |
+| `WORKLOAD_NODE_NOT_ACTIVE` | `nodes.resume` |
 | `GPU_NOT_CERTIFIED` | `protection.ab.sweep` |
 | `AB_STARTED` | `protection.ab.abort` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

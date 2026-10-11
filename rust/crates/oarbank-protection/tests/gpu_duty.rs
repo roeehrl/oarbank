@@ -586,3 +586,71 @@ fn the_governor_stands_down_while_a_harness_run_measures_gpu_work() {
     assert_eq!(tel.gpu_budget.unwrap()["state"], "harness");
     assert_eq!(ctl.duty.state(), "idle");
 }
+
+/// A cooperative GPU workload is a unit like a job: it shares the budget (its `gpu_duty` reaches its plan, which the
+/// agent writes into its control document), its container's GPU time is checked, and a workload that ignores its duty
+/// is paused through its ladder (journaled with its key) and, on the third excess within the hour, stopped and held.
+#[test]
+fn a_cooperative_gpu_workload_shares_the_budget_and_is_held_then_stopped_when_it_ignores_its_duty() {
+    let (mut ctl, host, journal) = trainer("certified");
+    let mut w = FleetWorkloadView::new("llm/serve");
+    w.gpu = true;
+    w.cooperative_throttle = true;
+    w.pausable = true;
+    w.pause_tolerance_s = 120.0;
+    w.started_at = 1.0;
+    w.pids = vec![900, 901];
+    let jobs = vec![job(1, true)];
+    let tick = |ctl: &mut ProtectionController, now: f64, w_busy: f64, j_duty: f64, wl: &FleetWorkloadView| {
+        {
+            let mut s = host.0.lock().unwrap();
+            *s.gpu.entry(7).or_insert(0.0) += 1.8e9;
+            *s.gpu.entry(901).or_insert(0.0) += w_busy * 2e9;     // the workload's child does its GPU work
+            *s.gpu.entry(701).or_insert(0.0) += j_duty * 2e9;
+        }
+        let mut i = TickInputs::new(now, MemorySignals::new(64.0, 20.0, 0));
+        i.jobs = jobs.clone();
+        i.workloads = vec![wl.clone()];
+        i.allocatable_cores = 8.0;
+        ctl.tick(&i)
+    };
+    tick(&mut ctl, 0.0, 0.0, 0.0, &w);
+    tick(&mut ctl, 2.0, 0.0, 0.0, &w);
+    let c = cert(&ctl, 0.6);
+    ctl.set_certificates(vec![c], CertContext { hardware: "h".into(), os_major: "o".into(), agent_version: "a".into() });
+    let mut t = 4.0;
+    let mut w_duty = None;
+    let (mut j_duty, mut wd) = (0.0, 0.0);
+    while t < 200.0 {
+        let r = tick(&mut ctl, t, wd, j_duty, &w);
+        w_duty = r.workloads.get("llm/serve").and_then(|p| p.gpu_duty);
+        wd = w_duty.unwrap_or(0.0);
+        if let Some(d) = r.throttle.get(&1).and_then(|d| d.gpu_duty) {
+            j_duty = d;
+        }
+        t += 2.0;
+    }
+    assert_eq!(w_duty, Some(0.3), "the workload and the job share the budget");
+    let last = tick(&mut ctl, t, wd, j_duty, &w);
+    let tel = ctl.telemetry(&last).gpu_budget.unwrap();
+    assert_eq!(tel["jobs"], 2);
+    assert!(tel["units"].as_array().unwrap().iter().any(|u| u["unit"] == "llm/serve" && u["workload"] == true), "{tel}");
+    // it starts ignoring its duty
+    let (mut paused, mut stopped, mut was_paused) = (false, false, false);
+    t += 2.0;
+    while t < 4000.0 && !stopped {
+        let r = tick(&mut ctl, t, if was_paused { 0.0 } else { 0.95 }, j_duty, &w);    // paused: no GPU time
+        let p = &r.workloads["llm/serve"];
+        was_paused = p.paused;
+        paused |= p.paused;
+        stopped = p.hold.is_some();
+        t += 2.0;
+    }
+    assert!(paused && stopped, "paused through the ladder, then stopped and held");
+    let recs = journal.pending(100_000);
+    let ex: Vec<_> = recs.iter().filter(|r| r.reason() == "GPU_DUTY_EXCEEDED").collect();
+    assert_eq!(ex.len(), 3);
+    let d = serde_json::to_value(ex[0]).unwrap();
+    assert_eq!((d["workload"].as_str(), d["attempt"].is_null()), (Some("llm/serve"), true), "{d}");
+    assert!(recs.iter().any(|r| r.reason() == "WORKLOAD_PAUSE"), "the ladder journals the pause");
+}

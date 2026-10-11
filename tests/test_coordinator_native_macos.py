@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import apple_tool
+
 REPO = Path(__file__).resolve().parents[1]
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='Unix activation helper')
@@ -50,7 +52,7 @@ def test_native_build_activation_is_dry_run_and_preserves_payload(tmp_path):
 @pytest.mark.skipif(sys.platform != 'darwin', reason='Apple toolchain')
 def test_application_launcher_compiles(tmp_path):
     # as scripts/package-coordinator-macos.sh builds it: with the menu bar model it shares with Oarbank Node.app
-    result = subprocess.run(['xcrun', 'swiftc', '-O', '-parse-as-library', '-target', f'{platform.machine()}-apple-macos15.0',
+    result = apple_tool(['xcrun', 'swiftc', '-O', '-parse-as-library', '-target', f'{platform.machine()}-apple-macos15.0',
         '-framework', 'AppKit', '-framework', 'ServiceManagement', str(REPO / 'deploy/macos/coordinator/Launcher.swift'),
         str(REPO / 'deploy/macos/shared/MenuBar.swift'), '-o', str(tmp_path / 'launcher')], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

@@ -255,9 +255,13 @@ whose every sample was clean, or at a start. **S18's GPU form:** the budget meet
 an unreadable source on the tick that sees them; a halving waits for the interval (the rule's own `pause_fleet`, if
 any, still acts within `enter_for_s` + 2 samples).
 
-**Each unit's duty and the compliance check.** Units are the GPU jobs (and, once workloads carry GPU work, workloads:
-a unit is an id, a `module/name` key, whether it declares `cooperative_throttle`, whether it can be paused, and its
-processes' GPU busy fraction). Every sample (2 s) the governor reads each unit's GPU busy fraction from the per-process
+**Each unit's duty and the compliance check.** Units are the GPU jobs and the running GPU workloads: a unit is an id
+(an attempt, or a workload's fleet id), a key (a job's module, a workload's `module/workload`), whether it declares
+`cooperative_throttle`, whether it can be paused (a workload: `freeze_ok` or `cooperative_pause` with a tolerance above
+0), and its processes' GPU busy fraction (a job's process group; a workload's container: its leader, its group and
+the members the agent tracks). A workload's duty reaches its plan (`WorkloadAction.gpu_duty`), which the agent writes
+into its control document; its hold is a pause through its ladder (paused up to its tolerance, then held), its stop
+the ladder's stop and hold. Every sample (2 s) the governor reads each unit's GPU busy fraction from the per-process
 GPU time the meter reads (macOS AGX `accumulatedGPUTime`, Linux DRM `fdinfo` or NVML, Windows GPU Engine counters),
 summed over all processes of its container.
 
@@ -280,13 +284,15 @@ under test waits beside the protected group, so the run measures only the work u
 **What the agent reports.** `telemetry.protection.gpu_budget`: `duty` (`D`), `ceiling`, `rules`, `jobs` (units given a
 duty), `per_job`, `state` (`measuring`, `running`, `held` at 0, `locked` after a take-back, `harness`, `not_certified`,
 `idle`), `lockout_s`, `baseline` (per rule: `rate`, `age_s`, the last interval's `pressure`), `units` (per unit: `id`,
-`duty`, `measured`, `state`: `ok`, `waiting`, `held` with `why` `exceeded` or `unverified` and `for_s`, `distrusted`,
+`unit` (its key), `workload` (true for a workload), `duty`, `measured`, `state`: `ok`, `waiting`, `held` with `why` `exceeded` or `unverified` and `for_s`, `distrusted`,
 `cannot_throttle`, `evicted`) and `distrusted` (`unit`, `for_s`). Budget steps are journaled `kind: gpu_duty`
 (`GPU_DUTY_START`, `GPU_DUTY_BASELINE`, `GPU_DUTY_GROW`, `GPU_DUTY_HALVE`, `GPU_DUTY_TAKE_BACK`, `GPU_DUTY_CLAMP`, each
 with `duty`, `ceiling` and `why`), compliance as above.
 
 **S28** (new): the budget a node journals never exceeds the ceiling journaled with it, every unit the governor holds is
-paused within the S18 window (or ended), and every unit it stops is gone a minute later. The coordinator checks it from
+paused within the S18 window (or ended), and every unit it stops is gone a minute later; for a workload the
+compliance record names its key (`workload`), and its ladder's `workload_paused` or `workload_held` must follow
+within the window. The coordinator checks it from
 the decision journal (`invariants.s28_gpu_duty_within_ceiling_and_enforced`); the agent's property tests, a day-long
 virtual-time soak and `specs/OarbankGpuDuty.tla` check the rest.
 

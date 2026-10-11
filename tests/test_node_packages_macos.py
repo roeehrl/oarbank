@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import apple_tool
+
 REPO = Path(__file__).resolve().parents[1]
 MACOS = REPO / "deploy" / "macos"
 POSTINSTALL = MACOS / "scripts" / "postinstall"
@@ -400,7 +402,7 @@ def test_the_rendered_glyphs_match_their_svgs(tmp_path):
     shutil.copy(REPO / "scripts/render-menu-bar-icons.swift", work / "scripts")
     for svg in (REPO / "deploy/icons").glob("*-symbolic.svg"):
         shutil.copy(svg, work / "deploy/icons")
-    r = subprocess.run(["xcrun", "swift", str(work / "scripts/render-menu-bar-icons.swift")], capture_output=True, text=True, timeout=300)
+    r = apple_tool(["xcrun", "swift", str(work / "scripts/render-menu-bar-icons.swift")], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     for png in (work / "deploy/icons").glob("*.png"):
         assert png.read_bytes() == (REPO / "deploy/icons" / png.name).read_bytes(), png.name
@@ -430,7 +432,7 @@ def swiftc(out: Path, *sources: Path, frameworks=("Security",)):
     cmd = ["xcrun", "swiftc", "-O", "-parse-as-library", "-target", f"{platform.machine()}-apple-macos15.0"]
     for f in frameworks:
         cmd += ["-framework", f]
-    result = subprocess.run([*cmd, *map(str, sources), "-o", str(out)], capture_output=True, text=True)
+    result = apple_tool([*cmd, *map(str, sources), "-o", str(out)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "warning:" not in result.stderr, result.stderr
     build = subprocess.run(["xcrun", "vtool", "-show-build", str(out)], capture_output=True, text=True, check=True)

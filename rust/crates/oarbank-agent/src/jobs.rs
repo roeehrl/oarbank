@@ -151,6 +151,15 @@ impl ControlFile {
         Ok(c)
     }
 
+    /// Take over the document in `dir` an earlier agent wrote for a process still running (a workload it adopts):
+    /// the next write continues its `seq`. The nudge is new, so only a SIGUSR1 (POSIX) reaches the process; on
+    /// Windows it reads the document on its own (workloads re-read it at least every 2 s).
+    pub fn resume(dir: &Path, leader: i32) -> std::io::Result<ControlFile> {
+        let seq = std::fs::read(dir.join("control.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["seq"].as_u64()).unwrap_or(0);
+        Ok(ControlFile { ws: dir.to_path_buf(), seq, nudge: crate::sys::Nudge::new()?, leader })
+    }
+
     /// The runner's command, after its environment is set: how the nudge reaches it.
     pub fn prepare(&self, cmd: &mut std::process::Command) {
         self.nudge.prepare(cmd);

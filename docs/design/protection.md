@@ -33,7 +33,13 @@ The agent signals, lowers or pauses only processes in its spawn registry (a pid 
 one). Ending its own runners when it stops, or those an agent that was killed left behind, goes by the agent's
 runner records, which hold the same identity (a pid and its start time) for every process of a runner
 ([architecture.md](architecture.md), "Stopping the agent"). The action vocabulary has no verb whose target is a protected process, and the schema no field that could name
-one (S16). Unknown processes are never signalled; their memory always counts.
+one (S16). Unknown processes are never signalled; their memory always counts. A workload's container leader is a
+member like a runner, and a workload's process that left its process group (macOS: found by its sandbox identity) is
+signalled one at a time, its start time checked first, as a member of that workload ([workloads.md](workloads.md)).
+The one widening is the owner's own: with the node setting `delegated_processes` on, an owner rule with `delegate`
+names processes of the owner's that protection may pause and lower (never stop), one at a time, each by its pid and
+start time, journaled with the rule (below, "Workloads and delegated processes"). S16 reads: the agent never signals
+or reschedules a process outside its spawn registry or the owner's delegations.
 
 ## Whose processes
 
@@ -77,6 +83,45 @@ reason, so they are requeued without a charge ([service-endpoints.md](service-en
 
 A stopped service is held down for as long as its cause lasts (`services_held` in the telemetry); each stop is journaled
 as `service_stopped` (`PROTECTION_SERVICE_STOP`).
+
+## Workloads and delegated processes
+
+A workload ([workloads.md](workloads.md)) is fleet work like a job: its processes are in the fleet's pids and its
+declared `resources` (cores and memory) count against capacity while it runs. It enters the dynamic controller with a
+stable id of its own, never as an attempt, and the pause probe never pauses it. Its ladder:
+
+1. it does not start while the combined constraint admits no work, or pauses work of its kind (a GPU workload while GPU
+   work may not run), or the memory guard is not clear;
+2. while the CPU budget (or a rule's core or thread cap) binds it is throttled: its share as the control document's
+   `threads` (`cooperative_throttle`) and, on Linux and Windows, as a hard CPU cap on its container;
+3. it is lowered as jobs are;
+4. it is paused where a job would be, only if it can be (`freeze_ok`: its container is frozen, its members outside the
+   group included; `cooperative_pause`: through the control document) and its `pause_tolerance_s` is above 0; one that
+   cannot be paused is lowered instead;
+5. paused continuously for its tolerance (or the pause ceiling), it is stopped and held while it would still be paused
+   (`WORKLOAD_PAUSE_TOLERANCE`); the memory guard's victim (by footprint, among jobs, yieldable services and workloads:
+   `MEMORY_HARD_FLOOR_WORKLOAD`) is held until the guard is clear; a rule's `evict` holds every workload while it lasts;
+   a GPU workload that cannot be paused is held while GPU work may not run. A hold is no failure: once the cause clears
+   it starts again after its `restart.backoff_initial_s`.
+
+Each change is journaled with the workload's key (`WORKLOAD_PAUSE`, `WORKLOAD_RESUME`, `WORKLOAD_LOWER`,
+`WORKLOAD_RESTORE`, `WORKLOAD_THROTTLE`, `WORKLOAD_HOLD`, `WORKLOAD_RELEASE`), and every signal goes through the
+registry (`actuation` records carry `workload`). While protection holds a workload paused its health check waits.
+
+**Delegated processes.** An owner rule `{"id": ..., "match": ..., "tree": ..., "delegate": {"actions": ["pause",
+"lower"]}}` carries no other action and protects nothing: the processes it names are the owner's own work that
+protection may treat as pausable, lowerable fleet work, with the node setting `delegated_processes` on (off by
+default; a machine's managed policy can force it off). Its matcher must be one a module cannot spoof, refused per OS
+otherwise: on macOS a code-signing identity (`requirement`, or `team_id` with `identifier`), on Linux and Windows
+`path_prefix` naming one executable's exact path, which must also be trusted at every match (Linux: the file and every
+directory above it owned by root and writable by no one else; Windows: under Program Files or the Windows folder). An
+unreadable fact never delegates a process. Delegated processes are left out of every other rule's group and of the
+owner's load; the dynamic layer pauses and lowers them as it does pausable jobs; one paused for the pause ceiling is
+resumed and lowered instead until the pause would end (`DELEGATE_PAUSE_LIMIT`), since it may not be stopped. The agent
+acts on one process at a time (`DELEGATE_PAUSE`, `DELEGATE_RESUME`, `DELEGATE_LOWER`, `DELEGATE_RESTORE`), its start time
+checked first, and resumes and restores everything it paused or lowered when it stops. A system install's agent
+cannot signal another account's processes: those actions fail and are journaled (the person's session helper relays
+them where it can; see workloads.md, Implementation status).
 
 ## Modes
 

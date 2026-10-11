@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-97 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+105 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -33,7 +33,12 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `nodes.confirm_identity` — Confirm that a node pinned this coordinator's identity key (compare the fingerprints once) | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=nodes.confirm_identity)<br>`POST /do/{op}` (op=nodes.confirm_identity) | oarbank node confirm-identity <node> |
 | `nodes.label` — Add or remove a node's labels (or several nodes'): a label can move nodes into or out of groups | T1 | prompted | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.label)<br>`POST /do/{op}` (op=nodes.label) | oarbank node label <node> <labels> [--remove] |
 | `tools.detect` — Ask a node's agent to detect its host tools again (Re-detect) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=tools.detect)<br>`POST /do/{op}` (op=tools.detect) | oarbank tools detect <node> |
-| `nodes.sign_statement` — Attach the owner's signature to a node's statement: its folders and added tool paths (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.sign_statement)<br>`POST /do/{op}` (op=nodes.sign_statement) | oarbank node sign <node> |
+| `nodes.sign_statement` — Attach the owner's signature to a node's statement: its folders, added tool paths and listeners (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.sign_statement)<br>`POST /do/{op}` (op=nodes.sign_statement) | oarbank node sign <node> |
+| `listeners.configure` — Assign a module's inbound listener to a node, or change its entry: external port, fallback, mapping, IPv6, bind, internal port, lowered limits, allowed addresses (the node statement; signing mode: oarbank node sign) | T2 | required | yes | admin | declarative | listeners.remove | `POST /api/v1/ops/{op}` (op=listeners.configure)<br>`POST /do/{op}` (op=listeners.configure) | oarbank listener set <node> <key> |
+| `listeners.remove` — Remove a listener's entry from a node: the agent closes it and removes its router mapping once it applies the new statement | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=listeners.remove)<br>`POST /do/{op}` (op=listeners.remove) | oarbank listener remove <node> <key> |
+| `listeners.disable` — The listener kill switch for a node or the fleet: every listener closes and every router mapping is removed at the next heartbeat | T0 | optional | – | operator | declarative | listeners.resume | `POST /api/v1/ops/{op}` (op=listeners.disable)<br>`POST /do/{op}` (op=listeners.disable) | oarbank listener disable --node <node><br>oarbank listener disable --all |
+| `listeners.resume` — Lift the listener kill switch for a node or the fleet | T1 | prompted | – | operator | declarative | listeners.disable | `POST /api/v1/ops/{op}` (op=listeners.resume)<br>`POST /do/{op}` (op=listeners.resume) | oarbank listener resume --node <node><br>oarbank listener resume --all |
+| `listeners.probe` — Check a listener from outside now: a fleet node on another network dials its external address (at most once a minute) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=listeners.probe)<br>`POST /do/{op}` (op=listeners.probe) | oarbank listener probe <node> <key> |
 
 ## jobs
 
@@ -165,6 +170,14 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `access.login_link` — Mint a one-time console sign-in link (valid 2 minutes) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=access.login_link)<br>`POST /do/{op}` (op=access.login_link) | oarbank console login [--account <name>] |
 | `access.passkeys.remove` — Remove a passkey from an account | T1 | prompted | – | viewer | natural | – | `POST /api/v1/ops/{op}` (op=access.passkeys.remove)<br>`POST /do/{op}` (op=access.passkeys.remove) | – |
 
+## workloads
+
+| Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
+|---|---|---|---|---|---|---|---|---|
+| `workloads.assign` — Assign a module's workload to a node (seat "node") or ask the coordinator to place a count of seats (seat "fleet"); the preview names each node, the secrets it receives, its seat, listeners and the protection rules there | T2 | required | yes | admin | natural | workloads.unassign | `POST /api/v1/ops/{op}` (op=workloads.assign)<br>`POST /do/{op}` (op=workloads.assign) | oarbank workload assign <module>/<workload> --node N<br>oarbank workload assign <module>/<workload> --count C |
+| `workloads.unassign` — Stop running a workload on a node; its seat goes back once the node reports it stopped | T1 | prompted | – | operator | natural | workloads.assign | `POST /api/v1/ops/{op}` (op=workloads.unassign)<br>`POST /do/{op}` (op=workloads.unassign) | oarbank workload unassign <module>/<workload> --node N |
+| `workloads.restart` — Restart a workload on a node (also lifts a withdrawal after repeated failures) | T1 | prompted | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=workloads.restart)<br>`POST /do/{op}` (op=workloads.restart) | oarbank workload restart <module>/<workload> --node N |
+
 ## audit
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
@@ -180,6 +193,7 @@ Machine-to-machine, authenticated by the node's client certificate and fenced by
 - `POST /v1/agent/enroll`
 - `POST /v1/agent/heartbeat`
 - `POST /v1/agent/hello`
+- `POST /v1/agent/workloads/secrets`
 - `POST /v1/attempts/{aid}/checkpoint`
 - `POST /v1/attempts/{aid}/complete`
 - `POST /v1/attempts/{aid}/fail`

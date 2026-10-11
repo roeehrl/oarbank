@@ -20,6 +20,15 @@ pub const USAGE: &str = "usage: oarbank-node join [--code-stdin | --code-file PA
        oarbank-node leave
        oarbank-node doctor [--json]";
 
+/// A directory removed when this is dropped: on every way out of its scope, an error or a panic included.
+struct RemovedOnDrop(PathBuf);
+
+impl Drop for RemovedOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A failure with its status code and exit code (node-enrollment.md, "Error codes").
 struct Fail {
     code: String,
@@ -641,6 +650,7 @@ fn policy_apply(explicit_home: Option<&Path>) -> Result<i32> {
     let r = match &code {
         Some(c) => {
             let dir = std::env::temp_dir().join(format!("oarbank-policy-{}", std::process::id()));
+            let _dir_goes = RemovedOnDrop(dir.clone());           // with the code in it, on every way out
             std::fs::create_dir_all(&dir)?;
             #[cfg(unix)]
             {
@@ -651,9 +661,7 @@ fn policy_apply(explicit_home: Option<&Path>) -> Result<i32> {
             std::fs::write(&f, c)?;
             let mut o2 = Opts { rest: o.rest.clone() };
             o2.rest.extend(["--code-file".into(), f.display().to_string()]);
-            let r = join(explicit_home, &o2, &mut out);
-            let _ = std::fs::remove_dir_all(&dir);
-            r
+            join(explicit_home, &o2, &mut out)
         }
         None => join(explicit_home, &o, &mut out),
     };

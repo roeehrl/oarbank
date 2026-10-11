@@ -28,6 +28,9 @@ use crate::sources::{NoOwnerSources, OwnerSources, Progress};
 use crate::support::{self, Os};
 use crate::table::{ProcessSource, ProcessSummaryRow, ProcessTable, UnsupportedProcessSource};
 use crate::telemetry::{ProgressReport, ProtectionTelemetry};
+use crate::workloads::{
+    DelegatedAction, DelegatedGroup, DelegationLadder, FleetWorkloadView, LadderInputs, WorkloadAction, WorkloadLadder,
+};
 
 /// One fleet job (a live attempt with a process group) as protection sees it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -118,6 +121,10 @@ pub struct ProtectionTickResult {
     /// Services to stop and hold down (yieldable ones only): the memory guard's victim, a rule's evict, GPU work
     /// that may not run.
     pub service_stops: Vec<ServiceStop>,
+    /// The plan for each workload (docs/design/workloads.md, "Protection on workloads"), by `module/workload`.
+    pub workloads: BTreeMap<String, WorkloadAction>,
+    /// What to do with each delegated tree of the owner's (only with `delegated_processes` on).
+    pub delegated: Vec<DelegatedAction>,
 }
 
 impl ProtectionTickResult {
@@ -139,6 +146,8 @@ pub struct TickInputs {
     pub jobs: Vec<FleetJobView>,
     /// Running module services (their processes are in `fleet_pids` too).
     pub services: Vec<FleetServiceView>,
+    /// Workloads that run or that protection holds down (a running one's processes are in `fleet_pids` too).
+    pub workloads: Vec<FleetWorkloadView>,
     /// Seconds since the last user input (0 while someone is present).
     pub user_idle_s: f64,
     /// perf + eff/2 cores; the dynamic budget's ceiling before reservations.
@@ -158,6 +167,7 @@ impl TickInputs {
             run_on_battery: false,
             jobs: vec![],
             services: vec![],
+            workloads: vec![],
             user_idle_s: 1e9,
             allocatable_cores: 0.0,
             lowering: true,
@@ -263,6 +273,16 @@ pub struct ProtectionController {
     last_inputs: Option<CachedInputs>,
     /// Services stopped on the last tick (journaled when that changes).
     last_service_stops: BTreeSet<String>,
+    workload_ladder: WorkloadLadder,
+    /// Workloads the memory guard chose as its victim this tick (from the evaluation to the dynamic layer).
+    workload_victims: BTreeSet<String>,
+    delegation_ladder: DelegationLadder,
+    /// The node's `delegated_processes` setting: delegations count only while it is on.
+    delegation_allowed: bool,
+    /// The owner's delegated trees as of this tick's process table.
+    delegated_groups: Vec<DelegatedGroup>,
+    /// Whether a delegation by path may name this executable (`workloads::path_trusted`; tests replace it).
+    pub path_trusted: fn(&str) -> bool,
     /// The paired on/off harness run (D52): the one running, or the last one until the coordinator has its result.
     harness: Option<Harness>,
     /// The arm the harness put the work under test in on the last tick (journaled when it changes).
@@ -357,6 +377,12 @@ impl ProtectionController {
             instruction_counters: BTreeMap::new(),
             last_inputs: None,
             last_service_stops: BTreeSet::new(),
+            workload_ladder: WorkloadLadder::new(),
+            workload_victims: BTreeSet::new(),
+            delegation_ladder: DelegationLadder::new(),
+            delegation_allowed: false,
+            delegated_groups: vec![],
+            path_trusted: crate::workloads::path_trusted,
             harness: None,
             last_arm: None,
             certificates: vec![],
@@ -370,6 +396,38 @@ impl ProtectionController {
             duty: DutyGovernor::new(),
             last_busy: None,
         }
+    }
+
+    /// The node's `delegated_processes` setting (off by default; a machine's managed policy can force it off).
+    pub fn set_delegation_allowed(&mut self, on: bool) {
+        if on != self.delegation_allowed {
+            self.journal("config_applied", "PROTECTION_CONFIG", None,
+                         obj([("delegated_processes", Value::from(on))]));
+        }
+        self.delegation_allowed = on;
+    }
+
+    /// The owner's delegated trees in this process table (none while the setting is off).
+    fn delegated_in(&self, procs: &[ProcessRecord]) -> Vec<DelegatedGroup> {
+        if !self.delegation_allowed {
+            return vec![];
+        }
+        let trusted = self.path_trusted;
+        self.config.delegations.iter().filter_map(|d| {
+            let exact = d.match_.path_prefix.clone().filter(|_| d.match_.requirement.is_none() && d.match_.identifier.is_none());
+            let g = matcher::strict_group(procs, &d.match_, d.tree, |p| match &exact {
+                Some(path) => p.path.as_deref() == Some(path.as_str()) && trusted(path),
+                None => true,
+            });
+            (!g.is_empty()).then(|| DelegatedGroup {
+                rule: d.id.clone(),
+                procs: g.iter().map(|p| (p.pid, p.start_us)).collect(),
+                footprint_gb: g.iter().map(|p| p.footprint_gb).sum(),
+                started_at: g.iter().map(|p| p.start_us as f64 / 1e6).fold(f64::INFINITY, f64::min),
+                pause: d.pause,
+                lower: d.lower,
+            })
+        }).collect()
     }
 
     // ------------------------------------------------------------------ the harness and certificates (D52, D50)
@@ -578,7 +636,11 @@ impl ProtectionController {
         let r =
             self.evaluate_with_metrics(i, &snap.procs, &snap.cpu_cores, front, gpu.as_ref(), None);
         let front = front.app().filter(|_| implicit_front);
-        let metrics = self.live_metrics(i.now, &snap.procs, &i.fleet_pids, front, gpu.as_ref());
+        // the owner's delegated trees (found by the evaluation) are fleet work: no owner load
+        let delegated: HashSet<i32> = self.delegated_groups.iter().flat_map(|g| g.procs.iter().map(|p| p.0)).collect();
+        let procs: Vec<ProcessRecord> = snap.procs.iter().filter(|p| !delegated.contains(&p.pid)).cloned().collect();
+        let fleet: HashSet<i32> = i.fleet_pids.union(&delegated).copied().collect();
+        let metrics = self.live_metrics(i.now, &procs, &fleet, front, gpu.as_ref());
         self.redo_dynamic(r, i, &metrics, front.is_some())
     }
 
@@ -629,6 +691,16 @@ impl ProtectionController {
         metrics: Option<&HashMap<String, GroupMetrics>>,
     ) -> ProtectionTickResult {
         let now = i.now;
+        // the owner's delegated trees are fleet work: no rule protects them
+        self.delegated_groups = self.delegated_in(procs);
+        let delegated: HashSet<i32> = self.delegated_groups.iter().flat_map(|g| g.procs.iter().map(|p| p.0)).collect();
+        let kept: Vec<ProcessRecord>;
+        let procs = if delegated.is_empty() {
+            procs
+        } else {
+            kept = procs.iter().filter(|p| !delegated.contains(&p.pid)).cloned().collect();
+            &kept[..]
+        };
         let ev = self
             .evaluator
             .evaluate(&self.config, procs, cpu_cores, front, gpu, now);
@@ -678,6 +750,8 @@ impl ProtectionController {
         let mut service_stops: Vec<ServiceStop> = vec![];
         // jobs and yieldable services compete as the memory guard's victim; a service stands as -(its index + 1)
         let yieldable: Vec<&FleetServiceView> = i.services.iter().filter(|s| s.yieldable).collect();
+        let running_workloads: Vec<&FleetWorkloadView> = i.workloads.iter().filter(|w| w.running).collect();
+        self.workload_victims.clear();
         let candidates: Vec<VictimCandidate> = i
             .jobs
             .iter()
@@ -691,6 +765,11 @@ impl ProtectionController {
                 footprint_gb: s.footprint_gb,
                 started_at: s.started_at,
             }))
+            .chain(running_workloads.iter().map(|w| VictimCandidate {
+                attempt_id: w.id(),
+                footprint_gb: w.footprint_gb,
+                started_at: w.started_at,
+            }))
             .collect();
         if evict_now {
             if let Some(victim) = MemoryGuard::victim(&candidates) {
@@ -698,7 +777,12 @@ impl ProtectionController {
                     ("why", Value::from(self.memory_guard.reason.as_str())),
                     ("free_pct", rounded(i.memory.free_pct(), 1)),
                 ];
-                let code = if victim < 0 {
+                let code = if crate::workloads::is_fleet_id(victim) {
+                    let w = running_workloads.iter().find(|w| w.id() == victim).expect("a candidate");
+                    self.workload_victims.insert(w.key.clone());
+                    detail.push(("workload", Value::from(w.key.as_str())));
+                    "MEMORY_HARD_FLOOR_WORKLOAD"
+                } else if victim < 0 {
                     let svc = yieldable[(-victim - 1) as usize];
                     stop_service(svc, "preempt_memory", &mut service_stops, &mut evictions);
                     detail.push(("service", Value::from(svc.key.as_str())));
@@ -794,6 +878,8 @@ impl ProtectionController {
             dynamic_reason: String::new(),
             budget_cores: None,
             service_stops,
+            workloads: BTreeMap::new(),
+            delegated: vec![],
         };
         match metrics {
             Some(m) => {
@@ -945,9 +1031,33 @@ impl ProtectionController {
                 footprint_gb: j.footprint_gb,
                 started_at: j.started_at,
                 bandwidth: j.bandwidth.clone(),
+                probe_exempt: false,
                 gpu_duty: None,
             })
             .collect();
+        // workloads and delegated trees: fleet work for the rungs, never probed (their own ladders decide the rest)
+        di.jobs.extend(i.workloads.iter().filter(|w| w.running).map(|w| DynJob {
+            attempt_id: w.id(),
+            pausable: w.can_pause(),
+            cooperative: false,
+            gpu: w.gpu,
+            footprint_gb: w.footprint_gb,
+            started_at: w.started_at,
+            bandwidth: None,
+            probe_exempt: true,
+            gpu_duty: None,
+        }));
+        di.jobs.extend(self.delegated_groups.iter().map(|g| DynJob {
+            attempt_id: g.id(),
+            pausable: g.pause,
+            cooperative: false,
+            gpu: false,
+            footprint_gb: g.footprint_gb,
+            started_at: g.started_at,
+            bandwidth: None,
+            probe_exempt: true,
+            gpu_duty: None,
+        }));
         let mut extra: Vec<ConstraintVector> = vec![];
         // rules whose GPU gate applies (gpu_jobs = certified asks each for a certificate)
         let mut gate_rules: Vec<String> = vec![];
@@ -1084,6 +1194,15 @@ impl ProtectionController {
                     busy: self.last_busy.as_ref().filter(|_| !pids.is_empty()).and_then(|g| g.group(pids.iter().copied())),
                 }
             })
+            // running workloads that use the GPU are units too: their key is `module/workload`, their processes the
+            // workload's container; a stop goes through the workload ladder
+            .chain(i.workloads.iter().filter(|w| w.running && w.gpu).map(|w| DutyUnit {
+                id: w.id(),
+                key: w.key.clone(),
+                cooperative: w.cooperative_throttle,
+                pausable: w.can_pause(),
+                busy: self.last_busy.as_ref().filter(|_| !w.pids.is_empty()).and_then(|g| g.group(w.pids.iter().copied())),
+            }))
             .collect();
         let dout = self.duty.step(&DutyInputs {
             now,
@@ -1259,14 +1378,64 @@ impl ProtectionController {
             .collect();
         let combined = CombinedConstraint::combine(&all);
         r.constraint = combined.clone();
-        r.lowered = out.lowered;
-        r.paused = out.paused;
+        let fleet = crate::workloads::is_fleet_id;
+        let (w_paused, a_paused): (BTreeSet<i64>, BTreeSet<i64>) = out.paused.iter().partition(|id| fleet(**id));
+        let (w_lowered, a_lowered): (BTreeSet<i64>, BTreeSet<i64>) = out.lowered.iter().partition(|id| fleet(**id));
+        // a workload's pause ceiling, or the duty governor's stop of one (the ladder stops and holds it)
+        let ceiling: BTreeSet<i64> =
+            out.evict.iter().map(|e| e.0).chain(duty_evict.iter().copied()).filter(|id| fleet(*id)).collect();
+        let paused_all: BTreeSet<i64> = out.paused.clone();
+        let n_jobs = di.jobs.len().max(1) as f64;
+        let budget_binds = out.budget_cores.is_some_and(|b| b < di.allocatable_cores);
+        let share = out.budget_cores.filter(|_| budget_binds).map(|b| (b / n_jobs).floor().max(1.0));
+        let threads = match (share.map(|s| s as i64), combined.threads) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let cpu_share = match (share, combined.cpu_cores.map(|c| (c / n_jobs).max(0.1))) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let (plans, wev) = self.workload_ladder.step(&LadderInputs {
+            now,
+            workloads: &i.workloads,
+            paused_ids: &w_paused,
+            lowered_ids: &w_lowered,
+            ceiling_ids: &ceiling,
+            memory_victims: &self.workload_victims,
+            evict_active: !combined.evict.is_empty(),
+            guard_clear: cache.guard_level == GuardLevel::Clear,
+            no_admit: combined.no_admit,
+            gpu_allowed: combined.gpu_jobs != Some(0),
+            would_pause_cpu: self.dynamic.would_pause(false),
+            would_pause_gpu: self.dynamic.would_pause(true),
+            threads,
+            cpu_share,
+        });
+        let (dacts, dev) = self.delegation_ladder.step(now, &self.delegated_groups, &w_paused, &w_lowered, &ceiling,
+                                                       self.dynamic.would_pause(false), self.config.max_pause_s);
+        for e in wev.iter().chain(dev.iter()) {
+            let d: Map<String, Value> = e.detail.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+            self.journal(e.kind, e.reason, None, d);
+        }
+        // each workload's GPU duty, as the dynamic inputs carried it (the certified share above)
+        let duty: BTreeMap<i64, f64> = di.jobs.iter().filter_map(|j| j.gpu_duty.map(|d| (j.attempt_id, d))).collect();
+        let mut plans = plans;
+        for w in &i.workloads {
+            if let Some(p) = plans.get_mut(&w.key) {
+                p.gpu_duty = duty.get(&w.id()).copied().filter(|_| w.cooperative_throttle && w.gpu);
+            }
+        }
+        r.workloads = plans;
+        r.delegated = dacts;
+        r.lowered = a_lowered;
+        r.paused = a_paused;
         r.throttle = out.throttle;
         r.probing = out.probing;
         r.rung = out.rung;
         r.dynamic_reason = out.reason.clone();
         r.budget_cores = out.budget_cores;
-        for (id, reason) in out.evict {
+        for (id, reason) in out.evict.into_iter().filter(|e| !fleet(e.0)) {
             if !r.evicts(id) {
                 r.evictions.push(Eviction {
                     attempt_id: id,
@@ -1274,12 +1443,12 @@ impl ProtectionController {
                 });
             }
         }
-        for id in harness_evict.into_iter().chain(duty_evict) {
+        for id in harness_evict.into_iter().chain(duty_evict.into_iter().filter(|id| !fleet(*id))) {
             if !r.evicts(id) {
                 r.evictions.push(Eviction { attempt_id: id, reason: "preempt_protection".into() });
             }
         }
-        self.duty.observe(&governed, &r.paused, now);
+        self.duty.observe(&governed, &paused_all, now);
         if arm_now != self.last_arm {
             if let Some((run, arm)) = &arm_now {
                 let reason = match arm {

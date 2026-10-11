@@ -94,11 +94,12 @@
 
 {# coordinator/tools.py node_view: what the node found, each module's resolution per tool request, and the paths set here #}
 {% set T = d.tools %}
-<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported yet){% endif %}</span></h2>
+<h2 id="tools">Host tools <span class="small mut">{% if T.reported %}(detected {{ T.detected_at | ago }}{% if T.native_arch %}, native {{ T.native_arch }}{% endif %}){% else %}(not reported){% endif %}</span></h2>
 <div class="card wide">
   <div class="row"><span class="small mut">The node finds its tools itself, verifies each (a JDK by its <span class="mono">release</span> file) and
     reports it; a module gets the one installation that satisfies what it asks for.</span><span class="sp"></span>
     {{ m.op_form("tools.detect", n.node_id, "Re-detect") }}</div>
+  {% if not T.reported %}<p class="small" role="status"><span class="chip warn">not reported</span> {{ T.unreported_why }}</p>{% endif %}
   {% if T.redetect %}<p class="small" role="status"><span class="chip {{ 'ok' if T.redetect.state == 'done' else 'warn' }}">{{ T.redetect.text }}</span> <span class="mut">asked {{ T.redetect.requested_at | ago }}</span></p>{% endif %}
   <table class="small"><caption class="sr-only">Installations this node found</caption>
   <tr><th>tool</th><th>path</th><th>version</th><th>arch</th><th>vendor</th><th>found by</th><th>status</th></tr>
@@ -106,7 +107,7 @@
     <td class="nowrap">{{ i.version or '?' }}</td><td class="nowrap">{{ i.arch or '?' }}</td><td>{{ i.vendor or '' }}</td>
     <td class="nowrap">{{ {'detected': 'built-in search', 'search': 'fleet search path', 'override': 'path set here', 'local-hint': 'on this machine'}.get(i.source, i.source) }}</td>
     <td><span class="chip {{ 'ok' if i.status == 'ok' else 'bad' }}">{{ i.status }}</span></td></tr>{% endfor %}
-  {% else %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported yet: the agent reports its tools after it connects' }}</td></tr>{% endfor %}
+  {% endfor %}{% if not T.found_any %}<tr><td colspan="7" class="mut">{{ 'nothing found' if T.reported else 'not reported' }}</td></tr>{% endif %}
   </table>
   <h3 class="small">What each module gets here</h3>
   <table class="small"><caption class="sr-only">Each module's host tool requests on this node</caption>
@@ -141,6 +142,8 @@
       the folder rules (no roots, homes, data or system directories) and the tool's detector.</span>
   {% endcall %}</details>
 </div>
+
+{% include "_node_network.html" %}
 
 <h2>Protection <span class="small mut">(owner-set)</span> <a class="small" href="/nodes/{{ n.node_id }}/protection">edit rules, mode, versions and timeline →</a></h2>
 {% set P = n.protection or {} %}{% set T = n.tel.protection or {} %}
@@ -193,6 +196,16 @@
 <td><span class="chip {{ 'ok' if sv.health == 'healthy' else ('bad' if sv.health == 'unhealthy' else '') }}">{{ sv.health or 'unknown' }}</span></td>
 <td><span class="chip {{ 'ok' if sv.state == 'ready' else ('acc' if sv.state == 'starting' else '') }}">{{ sv.state }}</span></td>
 <td>{{ sv.stopped_reason or '' }}{% if sv.gpu_api_missing %}: {{ sv.gpu_api_missing }}{% endif %}</td><td>{{ sv.users or 0 }}</td><td class="mono">{{ sv.error or '' }}</td></tr>{% endfor %}</table>
+{% endif %}
+{% if workloads %}
+<h2>Workloads</h2>
+<table class="small"><tr><th scope="col">workload</th><th scope="col">state</th><th scope="col">why</th><th scope="col">seat</th><th scope="col">lease left</th><th scope="col">protection</th><th scope="col">error</th></tr>
+{% for r in workloads %}{% set rep = r.report or {} %}<tr><td><a href="/modules/{{ r.module }}/workloads">{{ r.key }}</a></td>
+<td><span class="chip {{ 'ok' if r.state == 'running' else ('warn' if r.state in ('held', 'starting', 'stopping') else ('bad' if r.state == 'withdrawn' else '')) }}">{{ r.state }}</span></td>
+<td>{{ r.reason or '' }}</td><td class="mono">{{ r.seat_id or '-' }}{% if r.seat_id %} · fence {{ r.fence }}{% endif %}</td>
+<td>{% if rep.lease_left_s is not none %}{{ rep.lease_left_s | num(0) }} s{% endif %}</td>
+<td>{% if rep.held %}held ({{ rep.held }}){% elif rep.paused %}paused{% elif rep.lowered %}lowered{% elif rep.threads %}{{ rep.threads }} threads{% endif %}</td>
+<td class="mono">{{ rep.error or '' }}</td></tr>{% endfor %}</table>
 {% endif %}
 {% if n.doctor and n.doctor.modules %}
 <h2>Doctor</h2>

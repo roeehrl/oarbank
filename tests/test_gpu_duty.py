@@ -180,3 +180,24 @@ def test_the_prio_darwin_gpu_experiment_runs_only_by_hand_on_work_it_starts(monk
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: sp.CompletedProcess(a, 0, stdout=sample))
     assert mod.gpu_ns_by_pid() == {42: 2000.0, 7: 9.0}
     assert (mod.PRIO_DARWIN_GPU, mod.PRIO_DARWIN_GPU_ALLOW, mod.PRIO_DARWIN_GPU_DENY) == (5, 1, 2)
+
+
+def test_workloads_are_duty_units_in_the_view_and_in_s28(db, node):
+    """A workload unit is named by its key; S28 judges its hold or stop from its ladder's records."""
+    hb(db, node, telemetry={"protection": {"gpu_budget": budget(
+        [{"id": -(1 << 41), "unit": "dev.example.llm/serve", "workload": True, "duty": 0.2, "measured": 0.2, "state": "ok"}])}})
+    u = cotenancy.duty_view(db)[0]["units"][0]
+    assert (u["module"], u["stage"], u["attempt_id"]) == ("dev.example.llm", "serve", None)
+    t = time.time() - 100
+    held = lambda seq, at, action: {"t": at, "seq": seq, "kind": "gpu_compliance", "reason": "GPU_DUTY_EXCEEDED",
+                                    "attempt": None, "workload": "dev.example.llm/serve", "unit": "dev.example.llm/serve",
+                                    "measured": 0.9, "duty": 0.2, "action": action}
+    ladder = lambda seq, at, kind: {"t": at, "seq": seq, "kind": kind, "reason": "WORKLOAD_PAUSE",
+                                    "workload": "dev.example.llm/serve"}
+    hb(db, node, journal=[held(1, t, "paused"), ladder(2, t + 2, "workload_paused"),
+                          held(3, t + 30, "evicted"), ladder(4, t + 31, "workload_held")])
+    assert invariants.s28_gpu_duty_within_ceiling_and_enforced(db) == []
+    db.x("DELETE FROM protection_decisions WHERE node_id=?", (node["node_id"],))
+    hb(db, node, journal=[held(5, t + 40, "evicted")])
+    v = invariants.s28_gpu_duty_within_ceiling_and_enforced(db)
+    assert len(v) == 1 and "workload dev.example.llm/serve" in v[0] and "stopped" in v[0]

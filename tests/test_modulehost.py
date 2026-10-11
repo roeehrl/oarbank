@@ -119,6 +119,26 @@ def test_a_module_that_cannot_start_shows_what_it_said(tmp_path, mod_file):
         h.close()
 
 
+def test_a_failed_start_waits_for_the_stderr_its_reader_has_not_taken_in_yet(tmp_path, mod_file, monkeypatch):
+    """Under load the stderr reader may run after the handshake failed (the failure said only "ConnectionClosed"): the
+    host waits, bounded, for the reader to take in the rest before it reports."""
+    from oarbank.coordinator import modulehost
+    slow = modulehost._Proc._drain_stderr
+
+    def late(self):
+        time.sleep(0.5)                                # the reader thread gets the CPU only after the process is gone
+        slow(self)
+    monkeypatch.setattr(modulehost._Proc, "_drain_stderr", late)
+    argv = ["python", "-c", "import sys; sys.stderr.write('vault: cannot read its settings\\n'); sys.exit(1)"]
+    h = ModuleHost([confined_spec(tmp_path, mod_file.parent, argv)], home=None)
+    try:
+        with pytest.raises(ModuleUnavailable) as ei:
+            h.call("m", "params.check", {"params": {}})
+        assert "vault: cannot read its settings" in str(ei.value), str(ei.value)
+    finally:
+        h.close()
+
+
 def test_fault_fails_fast_and_restart_recovers(tmp_path, mod_file):
     h = ModuleHost([confined_spec(tmp_path, mod_file.parent, ["python", "-c", "import sys; sys.exit(1)"])], home=tmp_path)
     try:

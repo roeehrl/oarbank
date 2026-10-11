@@ -6,6 +6,7 @@ writes the duty into the job's control document and nudges it, and the runner's 
 real protected program, no GPU)."""
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -13,6 +14,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
+from procguard import SpawnTree  # noqa: E402
 from test_agent_cotenancy import op  # noqa: E402
 from test_agent_jobs import node_modules  # noqa: E402
 from test_agent_session import wait  # noqa: E402
@@ -36,6 +38,7 @@ def test_a_cooperative_runner_holds_the_duty_the_agent_writes(agent_bin, coordin
     data.mkdir()
     script = tmp_path / "trainer.py"
     script.write_text(TRAINER)
+    tree = SpawnTree().__enter__()                       # every process this test starts: the only ones it signals
     trainer = subprocess.Popen([sys.executable, str(script), str(data / "events-1.jsonl"), tag])
     home = tmp_path / "agent"
     p = subprocess.Popen([str(agent_bin), "--home", str(home), "run", "--coordinator", coordinator.url], env=agent_env(),
@@ -83,7 +86,14 @@ def test_a_cooperative_runner_holds_the_duty_the_agent_writes(agent_bin, coordin
         coordinator.api("POST", "/api/v1/ops/protection.ab.abort", json={"target": rid, "reason": "e2e"})
         assert coordinator.api("GET", f"/api/v1/campaigns/{cid}")["jobs"]["f"] == 0
     finally:
-        trainer.terminate()
-        p.terminate()
-        out += p.communicate(timeout=30)[0]
+        tree.signal(trainer.pid, signal.SIGTERM)
+        tree.signal(p.pid, signal.SIGTERM)
+        try:
+            out += p.communicate(timeout=30)[0]
+        except subprocess.TimeoutExpired:
+            tree.signal(p.pid, signal.SIGKILL)
+            out += p.communicate(timeout=10)[0]
+        trainer.wait(10)
         print(out[-4000:])
+        tree.check_journal(home)                         # every actuation the agent journaled was on the test's own tree
+        tree.__exit__(None, None, None)

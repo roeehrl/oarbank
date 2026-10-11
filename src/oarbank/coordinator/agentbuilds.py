@@ -27,6 +27,36 @@ from .db import DB, jl
 
 MAX_SIZE = 256 * 1024 * 1024
 VERSION_MARK = re.compile(rb"oarbank-agent-version:([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]{1,40})?)\x00")
+# the first agent release that detects and reports host tools (docs/design/host-tools.md); older agents never send them
+HOST_TOOLS_SINCE = "2.9.0"
+
+
+def _release(v) -> tuple | None:
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", str(v or ""))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def older(agent_version, than: str | None = None) -> bool:
+    """The node's agent is an older release than `than` (default: this coordinator's). An unknown version is not
+    called older: nothing says so."""
+    from .. import __version__
+    a, b = _release(agent_version), _release(than or __version__)
+    return bool(a and b and a < b)
+
+
+def behind(node: dict) -> dict | None:
+    """What the console says about a node whose agent is older than this coordinator: {version, coordinator, text},
+    or None when it is not (or its version is unknown)."""
+    from .. import __version__
+    v = node.get("agent_version")
+    if not older(v):
+        return None
+    return {"version": v, "coordinator": __version__,
+            "text": f"agent {v} is older than this coordinator ({__version__}): update the node: install the "
+                    f"{__version__} node package on it, or upload the {__version__} agent build on the Agent page and "
+                    f"enable it for its platform"}
+
+
 HEALTHY_WITHIN_S = 120                                          # a canary node must have heartbeated this recently
 
 MACHO_CPU = {0x0100000C: "arm64", 0x01000007: "amd64"}           # CPU_TYPE_ARM64, CPU_TYPE_X86_64
@@ -340,6 +370,7 @@ def view(db: DB) -> dict:
         a = assigned(db, n)
         out.append({**{k: n[k] for k in ("node_id", "hostname", "platform", "agent_version", "agent_build", "last_heartbeat_at")},
                     "assigned": a, "assigned_version": (by_sha.get(a) or {}).get("version"),
-                    "update": jl(n["agent_update_json"], {}) or {}, "up_to_date": a is None or n["agent_build"] == a})
+                    "update": jl(n["agent_update_json"], {}) or {}, "behind": behind(n),
+                    "up_to_date": (a is None or n["agent_build"] == a) and not (a is None and behind(n))})
     return {"builds": [{k: v for k, v in b.items() if k != "path"} for b in by_sha.values()], "channels": chs, "nodes": out,
             "readiness": {p: readiness(db, p) for p, ch in chs.items() if ch["canary"]}, "signing": C.RELEASE_SIGNING}

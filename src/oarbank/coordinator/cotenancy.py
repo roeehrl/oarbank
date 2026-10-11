@@ -380,6 +380,10 @@ def _units(db: DB, budget: dict) -> list[dict]:
     """The duty governor's units (`gpu_budget.units`, by attempt id) with the job, module and stage each one runs."""
     out = []
     for u in budget.get("units") or []:
+        if u.get("workload"):                            # a workload: its `module/workload` key names it
+            mod, _, name = str(u.get("unit") or "").partition("/")
+            out.append({**u, "attempt_id": None, "job_id": None, "module": mod, "stage": name, "attempt_state": None})
+            continue
         a = db.one("SELECT a.attempt_id, a.job_id, a.state, j.module, j.stage FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
                    "WHERE a.attempt_id=?", (u.get("id"),)) or {}
         out.append({**u, "attempt_id": u.get("id"), "job_id": a.get("job_id"), "module": a.get("module"),

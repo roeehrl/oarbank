@@ -120,6 +120,8 @@ struct UnitTrack {
     state: &'static str,
     /// Why it is held: `exceeded` (over its duty) or `unverified` (its GPU time could not be read).
     held_why: &'static str,
+    /// Its `module/name` key.
+    key: String,
 }
 
 /// The governor's tunables and state (docs/design/gpu-cotenancy.md, "Defaults").
@@ -473,6 +475,7 @@ impl DutyGovernor {
         for u in &i.units {
             let t = self.units.entry(u.id).or_default();
             t.last_busy = u.busy;
+            t.key.clone_from(&u.key);
             let judged = t.ran && t.duty_prev.is_some() && t.duty_prev2.is_some();
             if !judged {
                 t.over = 0;
@@ -487,8 +490,12 @@ impl DutyGovernor {
                 }
                 None => t.unverified += 1,
             }
-            let detail = |action: &str, t: &UnitTrack| json!({"attempt": u.id, "unit": u.key, "measured": u.busy.map(round3),
-                                                              "duty": t.duty_prev.map(round3), "action": action});
+            // a job names its attempt; a workload (a fleet id) its key, which its ladder's records name too
+            let workload = crate::workloads::is_fleet_id(u.id);
+            let detail = |action: &str, t: &UnitTrack| json!({
+                "attempt": if workload { Value::Null } else { json!(u.id) },
+                "workload": if workload { json!(u.key) } else { Value::Null },
+                "unit": u.key, "measured": u.busy.map(round3), "duty": t.duty_prev.map(round3), "action": action});
             if t.over >= self.samples {
                 t.over = 0;
                 t.held_until = now + self.hold_s;
@@ -585,7 +592,8 @@ impl DutyGovernor {
     /// The heartbeat's `gpu_budget` beyond what the controller adds (rules, not_certified).
     pub fn telemetry(&self, now: f64) -> Value {
         let mut units: Vec<Value> = self.units.iter().map(|(id, t)| {
-            let mut u = json!({"id": id, "duty": t.duty_prev.map(round3), "measured": t.last_busy.map(round3), "state": t.state});
+            let mut u = json!({"id": id, "unit": t.key, "workload": crate::workloads::is_fleet_id(*id),
+                               "duty": t.duty_prev.map(round3), "measured": t.last_busy.map(round3), "state": t.state});
             if t.state == "held" {
                 u["why"] = Value::from(t.held_why);
                 u["for_s"] = json!(round3((t.held_until - now).max(0.0)));

@@ -7,8 +7,9 @@ console never runs module code.
 import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
-from ..coordinator import detail, nodepolicy, nodeservices
+from ..coordinator import agentbuilds, detail, nodepolicy, nodeservices
 from ..coordinator.settings import views as settings_views
 from ..coordinator.settings.apply import flat_values, node_values
 
@@ -114,6 +115,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
     v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"), n["node_id"])
     v["gpu"] = detail.gpu(facts, v["doctor"])
     v["services"] = nodeservices.rows(n)
+    v["agent_behind"] = agentbuilds.behind(n)
     return v
 
 
@@ -247,7 +249,34 @@ def node_page(r, nid: str, now: float, manifest_for) -> dict | None:
                   (nid,))
     return {"n": nv, "d": detail.node(r, nid, now, manifest_for), "attempts": atts, "fails": fails, "events": events,
             "history": history, "series": json.dumps(series), "decisions": decisions,
-            "conditions": node_conditions(nv), "node_secrets": secrets}
+            "conditions": node_conditions(nv) + listener_conditions(n), "node_secrets": secrets,
+            "listener_choices": listener_choices(r, nv, manifest_for)}
+
+
+def listener_conditions(n: dict) -> list[dict]:
+    """The node's listener conditions (coordinator/listeners.py explain_rows): a refused listener, a doctor result to fix."""
+    from ..coordinator import listeners
+    return [{"code": c["code"], "tone": "warn",
+             "message": f"{c['detail'].get('listener')}: " + str(c["detail"].get("text") or c["detail"].get("why") or "")}
+            for c in listeners.explain_rows(n)]
+
+
+def listener_choices(r, nv: dict, manifest_for) -> list[dict]:
+    """The inbound listeners the enabled modules request (the Network card's form offers them): [{key, port_hint,
+    port_policy, handover}]."""
+    out = []
+    enabled = {x["name"] for x in r.q("SELECT name FROM module_channels WHERE current IS NOT NULL")}
+    for m in sorted(enabled | set(nv.get("mods") or {})):
+        man = manifest_for(m)
+        decl = getattr(getattr(getattr(man, "sandbox", None), "net", None), "inbound", None)
+        if man is None:                          # no catalogue: what the module's approved grants request
+            g = r.one("SELECT g.requests_json FROM module_grants g JOIN module_channels c ON c.name=g.name "
+                      "AND c.current=g.version WHERE g.name=?", (m,))
+            decl = [SimpleNamespace(**x) for x in (jl(g["requests_json"], {}) or {}).get("inbound") or []] if g else []
+        for x in decl or []:
+            out.append({"key": f"{m}/{x.name}", "port_hint": x.port_hint, "port_policy": x.port_policy,
+                        "handover": getattr(x, "handover", "connections")})
+    return out
 
 
 def node_conditions(n: dict) -> list[dict]:
@@ -288,10 +317,14 @@ def node_conditions(n: dict) -> list[dict]:
 REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#node-defaults"), "campaigns.rebind_platform": ("/campaigns/{campaign_id}", "/campaigns"),
                 "modules.enable_canary": ("/modules", "/modules"), "secrets.set": ("/modules/{module}/secrets", "/modules"),
                 "tools.detect": ("/nodes/{node}#tools", "/"),
+                "listeners.configure": ("/nodes/{node}#network", "/"), "listeners.probe": ("/nodes/{node}#network", "/"),
                 "tools.define": ("/settings#tools", "/settings"),
                 "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
                 "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings"),
+                "workloads.assign": ("/modules/{module}/workloads", "/modules"),
+                "workloads.unassign": ("/modules/{module}/workloads", "/modules"),
+                "workloads.restart": ("/modules/{module}/workloads", "/modules"),
                 "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
                 "protection.ab.abort": ("/protection/ab/{run_id}", "/")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
@@ -853,9 +886,10 @@ def agent_builds(r) -> dict:
                  "WHERE lifecycle NOT IN ('retired') ORDER BY hostname"):
         ch = chans.get(n["platform"]) or {"current": None, "canary": None, "canary_nodes": []}
         assigned = ch["canary"] if ch["canary"] and n["node_id"] in ch["canary_nodes"] else ch["current"]
+        behind = agentbuilds.behind(n)
         nodes.append({**n, "update": jl(n["agent_update_json"], {}) or {}, "assigned": assigned,
-                      "assigned_version": ver.get(assigned), "canary": n["node_id"] in ch["canary_nodes"],
-                      "up_to_date": assigned is None or n["agent_build"] == assigned})
+                      "assigned_version": ver.get(assigned), "canary": n["node_id"] in ch["canary_nodes"], "behind": behind,
+                      "up_to_date": (assigned is None or n["agent_build"] == assigned) and not (assigned is None and behind)})
     for plat, ch in chans.items():
         ch["ready"] = bool(ch["canary"]) and all(n["agent_build"] == ch["canary"] for n in nodes if n["canary"] and n["platform"] == plat)
     return {"builds": builds, "channels": chans, "versions": ver, "nodes": nodes}
