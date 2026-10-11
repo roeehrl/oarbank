@@ -35,6 +35,8 @@ pub struct Protection {
     pub workload_reserved: (f64, f64),
     /// What was last done to each delegated process of the owner's: (rule, paused, lowered) by (pid, start time).
     delegated: std::collections::HashMap<(i32, u64), (String, bool, bool)>,
+    /// The session helpers (a system install): they act on a person's delegated processes the agent's account may not.
+    hub: Option<Arc<P::session::SessionHub>>,
 }
 
 impl Protection {
@@ -49,6 +51,7 @@ impl Protection {
         #[cfg(not(target_os = "macos"))]
         let registry = Arc::new(P::SpawnRegistry::new(Box::new(ContainerActuator), Some(journal.clone()), store));
         let hub = session_hub.then(P::session::SessionHub::new);
+        let hub_keep = hub.clone();
         if let Some(h) = &hub {
             if let Err(e) = P::platform::serve_sessions(h.clone()) {
                 tracing::warn!(error = %e, "cannot serve session helpers: other accounts' paths, arguments, display and input stay unreadable");
@@ -60,7 +63,7 @@ impl Protection {
         Protection { ctrl, presence: P::platform::native_presence(hub), registry, journal, local, policy_seen: Value::Null, lowered: BTreeSet::new(), frozen: BTreeSet::new(),
                      last: None, capacity: None, telemetry: json!({}),
                      service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![], workloads: vec![],
-                     workload_pids: vec![], workload_reserved: (0.0, 0.0), delegated: Default::default() }
+                     workload_pids: vec![], workload_reserved: (0.0, 0.0), delegated: Default::default(), hub: hub_keep }
     }
 
     pub fn tick(&mut self, d: &Value, table: &Table, facts: &Value) {
@@ -230,11 +233,16 @@ impl Protection {
             let (hp, hl) = have.as_ref().map(|h| (h.1, h.2)).unwrap_or((false, false));
             if paused != hp {
                 let sig = if paused { P::Signal::Stop } else { P::Signal::Cont };
-                let _ = self.registry.signal_delegated(k.0, k.1, &rule, sig, if paused { "DELEGATE_PAUSE" } else { "DELEGATE_RESUME" });
+                let reason = if paused { "DELEGATE_PAUSE" } else { "DELEGATE_RESUME" };
+                if let Err(P::Refusal::Failed(_)) = self.registry.signal_delegated(k.0, k.1, &rule, sig, reason) {
+                    self.relay(k, &rule, if paused { "pause" } else { "resume" }, reason);
+                }
             }
             if lowered != hl {
-                let _ = self.registry.set_background_delegated(k.0, k.1, &rule, lowered,
-                                                                if lowered { "DELEGATE_LOWER" } else { "DELEGATE_RESTORE" });
+                let reason = if lowered { "DELEGATE_LOWER" } else { "DELEGATE_RESTORE" };
+                if let Err(P::Refusal::Failed(_)) = self.registry.set_background_delegated(k.0, k.1, &rule, lowered, reason) {
+                    self.relay(k, &rule, if lowered { "lower" } else { "restore" }, reason);
+                }
             }
             if paused || lowered {
                 self.delegated.insert(k, (rule, paused, lowered));
@@ -244,14 +252,23 @@ impl Protection {
         }
     }
 
+    /// A delegated process of another account (a system install): its person's session helper acts on it.
+    fn relay(&self, k: (i32, u64), rule: &str, op: &str, reason: &str) {
+        if let Some(sent) = self.hub.as_ref().and_then(|h| h.act(k.0, k.1, op)) {
+            self.registry.journal_delegated(k.0, k.1, rule, op, reason, sent, "session_helper");
+        }
+    }
+
     /// Resume every delegated process protection paused (the agent is stopping: nothing it paused stays paused).
     pub fn release_delegated(&mut self) {
         for ((pid, start), (rule, paused, lowered)) in std::mem::take(&mut self.delegated) {
-            if paused {
-                let _ = self.registry.signal_delegated(pid, start, &rule, P::Signal::Cont, "DELEGATE_RESUME");
+            if paused && matches!(self.registry.signal_delegated(pid, start, &rule, P::Signal::Cont, "DELEGATE_RESUME"),
+                                  Err(P::Refusal::Failed(_))) {
+                self.relay((pid, start), &rule, "resume", "DELEGATE_RESUME");
             }
-            if lowered {
-                let _ = self.registry.set_background_delegated(pid, start, &rule, false, "DELEGATE_RESTORE");
+            if lowered && matches!(self.registry.set_background_delegated(pid, start, &rule, false, "DELEGATE_RESTORE"),
+                                   Err(P::Refusal::Failed(_))) {
+                self.relay((pid, start), &rule, "restore", "DELEGATE_RESTORE");
             }
         }
     }

@@ -194,10 +194,35 @@ struct Entry {
     usage: HashMap<i32, Track>,
 }
 
+/// A request the system service sends a person's helper: act on one of the person's processes that an owner rule
+/// delegated to host protection (docs/design/workloads.md, "Delegated external processes"). The helper checks that the
+/// process is still the one named (its start time) and acts only with these verbs; the kernel lets it act only on its
+/// own person's processes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Act {
+    pub pid: i32,
+    pub start_us: u64,
+    /// `pause`, `resume`, `lower` or `restore`.
+    pub op: String,
+}
+
+/// The verbs a helper carries out.
+pub const ACT_OPS: [&str; 4] = ["pause", "resume", "lower", "restore"];
+
+/// How the service writes to one helper's connection.
+type Relay = Box<dyn Fn(&str) -> bool + Send>;
+
 /// The system service's view of its helpers' reports.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SessionHub {
     entries: Mutex<HashMap<Principal, Entry>>,
+    relays: Mutex<HashMap<Principal, Relay>>,
+}
+
+impl std::fmt::Debug for SessionHub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionHub").field("entries", &self.entries).finish_non_exhaustive()
+    }
 }
 
 impl SessionHub {
@@ -269,6 +294,25 @@ impl SessionHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&who);
+        self.relays.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
+    }
+
+    /// How to reach `who`'s helper with a request (its connection's write half).
+    pub fn register_relay(&self, who: Principal, relay: impl Fn(&str) -> bool + Send + 'static) {
+        self.relays.lock().unwrap_or_else(|e| e.into_inner()).insert(who, Box::new(relay));
+    }
+
+    /// Ask the helper of the person whose process this is to act on it (`ACT_OPS`). None: no helper described the
+    /// process (or it has no connection to write to); otherwise whether the request was sent (the helper carries it
+    /// out at once; the service sees the effect on its next reading).
+    pub fn act(&self, pid: i32, start_us: u64, op: &str) -> Option<bool> {
+        if !ACT_OPS.contains(&op) {
+            return Some(false);
+        }
+        let who = self.fresh(|e| e.iter().find(|(_, x)| x.procs.contains_key(&(pid, start_us))).map(|(w, _)| *w))?;
+        let line = serde_json::to_string(&serde_json::json!({"act": Act { pid, start_us, op: op.into() }})).ok()? + "\n";
+        let relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+        relays.get(&who).map(|r| r(&line))
     }
 
     /// What a helper said about a process.
@@ -518,5 +562,34 @@ mod tests {
             d.is_new((1, 10)),
             "a process seen again after it was dropped is described again"
         );
+    }
+}
+
+#[cfg(test)]
+mod act_tests {
+    use super::*;
+
+    /// The service sends a request only to the helper that described the process, on its connection, and only with
+    /// the four verbs.
+    #[test]
+    fn a_request_goes_to_the_helper_that_described_the_process() {
+        let hub = SessionHub::new();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let s2 = sent.clone();
+        hub.register_relay(Principal::Uid(501), move |l: &str| {
+            s2.lock().unwrap().push(l.to_string());
+            true
+        });
+        hub.accept(Principal::Uid(501), Report { v: PROTOCOL, live: vec![(77, 5)], procs: vec![ProcClaim {
+            pid: 77, start_us: 5, path: Some("/opt/app".into()), argv: None }], ..Default::default() }, |_, _| true);
+        assert_eq!(hub.act(77, 5, "pause"), Some(true));
+        assert_eq!(hub.act(77, 6, "pause"), None, "a process no helper described");
+        assert_eq!(hub.act(77, 5, "stop"), Some(false), "no other verb");
+        let lines = sent.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(lines[0].trim()).unwrap();
+        assert_eq!(v["act"], serde_json::json!({"pid": 77, "start_us": 5, "op": "pause"}));
+        hub.gone(Principal::Uid(501));
+        assert_eq!(hub.act(77, 5, "pause"), None);
     }
 }
