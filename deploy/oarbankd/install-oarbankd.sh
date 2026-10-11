@@ -1,18 +1,21 @@
 #!/bin/bash
 # Install the Oarbank coordinator as system services (docs/design/coordinator-system-service.md): oarbankd and the
 # console as launchd daemons on macOS or systemd system units on Linux, run by the coordinator's own unprivileged
-# account (_oarbankd, oarbankd), from boot. Runs as root. `--help` lists the options.
+# account (_oarbankd, oarbankd), from boot, and root's trigger for the coordinator's self-update (fleet-updates.md, D58:
+# `oarbank-coordupdate run --once` from PROGRAMS/current when oarbankd writes its update request, and at boot to finish
+# an interrupted one). Runs as root. `--help` lists the options.
 set -euo pipefail
 usage() {
     cat <<USAGE
 usage: $(basename "$0") (--build <archive> | --installed <directory>) --agent-bind <address> [options]
-       $(basename "$0") --refresh [--dry-run]
+       $(basename "$0") --refresh [--installed <directory>] [--dry-run]
        $(basename "$0") --prepare [--owner <user>] [--dry-run]
        $(basename "$0") --uninstall [--keep-programs] [--dry-run]
 
 Install the Oarbank coordinator (oarbankd and the console) as system services run by its own account: launchd
 daemons on macOS, systemd system units on Linux. They start at boot, before anyone logs in. Running it again updates
-an installation in place. Run as root (sudo).
+an installation in place. Root's update runner (oarbank-coordupdate) is installed beside them: it applies the
+coordinator updates oarbankd requests. Run as root (sudo).
 
   --build <archive>        a coordinator build (oarbank-coordinator-<v>-<os>-<arch>.tar.gz from
                            scripts/build-coordinator.sh), unpacked into a root-owned directory beside earlier ones,
@@ -27,7 +30,8 @@ an installation in place. Run as root (sudo).
   --from <url>             the old coordinator's agent URL,
   --from-ca <pin>          and its TLS CA pin
   --archive-home           with --pair: move an existing home aside first (a move back to this machine)
-  --refresh                write the services again from the record of the last install and restart them (upgrades)
+  --refresh                write the services again from the record of the last install and restart them (upgrades);
+                           with --installed, on that build instead (a package upgrade, a coordinator self-update)
   --prepare                only the account, the owners' group and the directories, no service (a migration copies
                            the home in before the services start)
   --uninstall              stop and remove the services (the home, the accounts and the group stay)
@@ -82,23 +86,35 @@ case "$OS" in
 esac
 HOME_DIR="$DATA/coordinator"
 LABELS=(dev.codonic.oarbank.oarbankd dev.codonic.oarbank.console)
+UPDATE=dev.codonic.oarbank.oarbankd.update          # root's coordinator update runner (fleet-updates.md, D58)
+STATE="$DATA/coordinator-update"                     # the runner's own state: root's alone
+RUNNER="$PROGRAMS/current/bin/oarbank-coordupdate"   # PROGRAMS/current names the running build, however installed
+REQUEST="$HOME_DIR/updates/coordinator-request.json"
 [[ $DRY == 1 || $(id -u) == 0 ]] || die "run as root (sudo): system services are root's to create"
 
 # ------------------------------------------------------------------------------------------------- uninstall
 
 if [[ $UNINSTALL == 1 ]]; then
     [[ -z "$BUILD$INSTALLED$BIND" && $REFRESH == 0 ]] || fail "--uninstall takes only --keep-programs and --dry-run"
-    for label in "${LABELS[@]}"; do
+    for label in "${LABELS[@]}" "$UPDATE"; do
         if [[ "$OS" == Darwin ]]; then
             run /bin/launchctl bootout "system/$label" 2>/dev/null || true
             run rm -f "$DEFS/$label.plist"
         else
+            if [[ "$label" == "$UPDATE" ]]; then
+                run systemctl disable --now "$label.path" 2>/dev/null || true
+                run rm -f "$DEFS/$label.path"
+            fi
             run systemctl disable --now "$label.service" 2>/dev/null || true
             run rm -f "$DEFS/$label.service"
         fi
     done
     [[ "$OS" == Darwin ]] || run systemctl daemon-reload
-    [[ $KEEP == 1 ]] || run rm -rf "$PROGRAMS"
+    if [[ $KEEP == 1 ]]; then
+        [[ ! -L "$PROGRAMS/current" ]] || run rm -f "$PROGRAMS/current"     # the link only, never what it names
+    else
+        run rm -rf "$PROGRAMS"
+    fi
     run rm -f "$RECORD"
     echo "Oarbank coordinator services removed. Its home ($HOME_DIR), the $ACCOUNT account and the $GROUP group stay."
     exit 0
@@ -117,11 +133,13 @@ field() {   # a string field of a one-line JSON document: field <name> <document
 }
 SIGNING="${OARBANK_RELEASE_SIGNING:-1}"
 if [[ $REFRESH == 1 ]]; then
-    [[ -z "$BUILD$INSTALLED$BIND$PAIR" ]] || fail "--refresh takes everything from the record of the last install"
+    [[ -z "$BUILD$BIND$PAIR" ]] || fail "--refresh takes everything but --installed from the record of the last install"
     [[ -f "$RECORD" ]] || die "no coordinator installed here ($RECORD is missing): install with --installed or --build"
     rec="$(cat "$RECORD")"
     [[ "$(field format "$rec")" == 1 ]] || die "$RECORD: unknown format"
-    INSTALLED="$(field root "$rec")"; BIND="$(field agent_bind "$rec")"; PORT="$(field agent_port "$rec")"
+    # --installed: the build a package upgrade installed, or the one a self-update unpacked (coordupdate.py)
+    [[ -n "$INSTALLED" ]] || INSTALLED="$(field root "$rec")"
+    BIND="$(field agent_bind "$rec")"; PORT="$(field agent_port "$rec")"
     URL="$(field url "$rec")"; SIGNING="$(field signing "$rec")"; PAIR="$(field pair "$rec")"
     FROM="$(field from "$rec")"; FROMCA="$(field from_ca "$rec")"
 fi
@@ -177,6 +195,8 @@ else
         bad="$(find "$ROOT" -maxdepth 2 \( ! -user 0 -o \( ! -type l \( -perm -0002 -o -perm -0020 \) \) \) -print -quit 2>/dev/null || true)"
         [[ -z "$bad" ]] || die "$ROOT is not root's alone ($bad): the system service runs only a root-owned build"
     fi
+    run install -d -m 0755 "$PROGRAMS"
+    run ln -sfn "$ROOT" "$PROGRAMS/current"   # the update runner's trigger runs PROGRAMS/current, whatever installed it
 fi
 ROOT="${ROOT:-}"
 OARBANKD=("$ROOT/bin/oarbankd" --agent-bind "$BIND")
@@ -321,6 +341,7 @@ write() {   # path body: root's, 0644
 }
 
 if [[ "$OS" == Darwin ]]; then
+    run install -d -m 0700 "$STATE" "$STATE/logs"
     for job in oarbankd console; do
         label="dev.codonic.oarbank.$job"
         if [[ $job == oarbankd ]]; then
@@ -336,12 +357,66 @@ if [[ "$OS" == Darwin ]]; then
         run /bin/launchctl bootstrap system "$DEFS/$label.plist" 2>/dev/null \
             || { sleep 1; run /bin/launchctl bootstrap system "$DEFS/$label.plist"; }
     done
+    # root's update runner: on oarbankd's request (WatchPaths), and at load to finish an interrupted update. It stops and
+    # starts the services above, so it is a job of its own, never reloaded by the runner's own --refresh.
+    body="$(cat <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$UPDATE</string>
+  <key>ProgramArguments</key><array><string>$(xml "$RUNNER")</string><string>run</string><string>--once</string></array>
+  <key>WatchPaths</key><array><string>$(xml "$REQUEST")</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>$(xml "$STATE/logs/runner.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$STATE/logs/runner.log")</string>
+</dict></plist>
+PL
+)"
+    write "$DEFS/$UPDATE.plist" "$body"
+    [[ $DRY == 1 ]] || chown root:wheel "$DEFS/$UPDATE.plist"
+    if [[ "${OARBANK_COORDUPDATE_RUNNING:-}" != 1 ]]; then
+        run /bin/launchctl bootout "system/$UPDATE" 2>/dev/null || true
+        run /bin/launchctl bootstrap system "$DEFS/$UPDATE.plist" 2>/dev/null \
+            || { sleep 1; run /bin/launchctl bootstrap system "$DEFS/$UPDATE.plist"; }
+    fi
 else
     write "$DEFS/dev.codonic.oarbank.oarbankd.service" "$(unit oarbankd on-failure oarbank-coordinator "${OARBANKD[@]}")"
     write "$DEFS/dev.codonic.oarbank.console.service" "$(unit console always "" "${CONSOLE[@]}")"
+    # root's update runner: started by the request's appearance (PathExists), and once at boot to finish an
+    # interrupted update; enabled, never started from here (the runner's own --refresh runs inside it)
+    run install -d -m 0700 "$STATE" "$STATE/logs"
+    write "$DEFS/$UPDATE.path" "[Unit]
+Description=Oarbank coordinator update request
+
+[Path]
+PathExists=$REQUEST
+Unit=$UPDATE.service
+
+[Install]
+WantedBy=multi-user.target"
+    write "$DEFS/$UPDATE.service" "[Unit]
+Description=Oarbank coordinator update runner
+After=local-fs.target network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=\"${RUNNER//%/%%}\" run --once
+TimeoutStartSec=3600
+StandardOutput=append:$STATE/logs/runner.log
+StandardError=append:$STATE/logs/runner.log
+
+[Install]
+WantedBy=multi-user.target"
     run systemctl daemon-reload
-    run systemctl enable dev.codonic.oarbank.oarbankd.service dev.codonic.oarbank.console.service
+    run systemctl enable dev.codonic.oarbank.oarbankd.service dev.codonic.oarbank.console.service "$UPDATE.path" "$UPDATE.service"
     run systemctl restart dev.codonic.oarbank.oarbankd.service dev.codonic.oarbank.console.service
+    run systemctl start "$UPDATE.path"
+fi
+# what the update runner trusts: the owner keys this coordinator pinned, once, while an administrator installs it (it
+# says nothing while there are none yet; `oarbank-coordupdate trust --from-home` pins them later)
+if [[ ! -f "$STATE/trust.json" && -x "$ROOT/bin/oarbank-coordupdate" ]]; then
+    run "$ROOT/bin/oarbank-coordupdate" trust --from-home --home "$HOME_DIR" --state "$STATE" 2>/dev/null || true
 fi
 
 # the record --refresh reads (root's alone: it may hold a standby's pairing code)
