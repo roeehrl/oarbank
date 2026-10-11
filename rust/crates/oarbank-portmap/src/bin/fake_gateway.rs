@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::io::BufRead;
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
     rt.block_on(async {
         let cfg: FakeConfig = std::env::args().nth(1).and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default();
         let gw = FakeGateway::start(cfg).await.expect("fake gateway");

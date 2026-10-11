@@ -67,13 +67,19 @@ pub struct FakeConfig {
     pub silent: bool,
     /// UPnP: refuse a mapping for another internal client than the requester (miniupnpd's secure mode).
     pub secure: bool,
+    /// Act as a NAT on loopback: each IPv4 mapping of ours really forwards `external:external_port` (the external
+    /// address must then be a local one, such as 127.0.0.1) to its internal address, so end-to-end tests can dial the
+    /// mapped address from outside the node.
+    pub forward: bool,
+    /// The external address the router reports (default 198.51.100.7).
+    pub external: Option<Ipv4Addr>,
 }
 
 impl Default for FakeConfig {
     fn default() -> FakeConfig {
         FakeConfig { natpmp: true, pcp: true, upnp: true, igd_v2: true, permanent_only: false, permanent_only_code: 725,
                      not_authorized: false, same_port_required: false, max_lifetime: 86400, firewall: Some((true, true)),
-                     silent: false, secure: true }
+                     silent: false, secure: true, forward: false, external: None }
     }
 }
 
@@ -93,7 +99,8 @@ pub struct RouterState {
 
 impl RouterState {
     fn new(cfg: FakeConfig) -> RouterState {
-        RouterState { cfg, mappings: vec![], pinholes: vec![], next_pinhole: 1, external: Ipv4Addr::new(198, 51, 100, 7),
+        let external = cfg.external.unwrap_or(Ipv4Addr::new(198, 51, 100, 7));
+        RouterState { cfg, mappings: vec![], pinholes: vec![], next_pinhole: 1, external,
                       epoch_start: Instant::now(), epoch_scale: 1.0, deletes: vec![], requests: 0 }
     }
 
@@ -469,6 +476,46 @@ impl FakeGateway {
                     tokio::spawn(async move {
                         let _ = serve_http(s, peer, st).await;
                     });
+                }
+            }));
+        }
+        {
+            // forwarding (cfg.forward): reconcile one TCP forwarder per mapping of ours, every 100 ms
+            let st = state.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut fw: std::collections::HashMap<(u16, SocketAddr), tokio::task::JoinHandle<()>> = Default::default();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let (on, ext, want): (bool, Ipv4Addr, Vec<(u16, SocketAddr)>) = {
+                        let mut s = lock(&st);
+                        s.expire();
+                        (s.cfg.forward && !s.cfg.silent, s.external, s.mappings.iter().filter(|m| !m.foreign && m.client.is_ipv4())
+                            .map(|m| (m.external_port, SocketAddr::new(m.client, m.internal_port))).collect())
+                    };
+                    let want: Vec<(u16, SocketAddr)> = if on { want } else { vec![] };
+                    fw.retain(|k, h| {
+                        let keep = want.contains(k);
+                        if !keep {
+                            h.abort();
+                        }
+                        keep
+                    });
+                    for k in want {
+                        if fw.contains_key(&k) {
+                            continue;
+                        }
+                        let Ok(l) = tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(ext), k.0)).await else { continue };
+                        let to = k.1;
+                        fw.insert(k, tokio::spawn(async move {
+                            while let Ok((mut a, _)) = l.accept().await {
+                                tokio::spawn(async move {
+                                    if let Ok(mut b) = tokio::net::TcpStream::connect(to).await {
+                                        let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+                                    }
+                                });
+                            }
+                        }));
+                    }
                 }
             }));
         }
