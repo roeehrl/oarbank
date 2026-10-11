@@ -1972,9 +1972,10 @@ mod tests {
 
     #[test]
     fn the_boot_clock_moves_and_the_boot_has_an_identity() {
+        // Windows' boot clock (GetTickCount64) moves in steps of about 15.6 ms: sleep over a few of them
         let a = boot::now_s();
-        std::thread::sleep(Duration::from_millis(20));
-        assert!(boot::now_s() - a >= 0.015);
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(boot::now_s() - a >= 0.03);
         assert!(!boot::id().is_empty());
         assert_eq!(boot::id(), boot::id());
     }
