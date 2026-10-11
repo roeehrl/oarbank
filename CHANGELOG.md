@@ -6,24 +6,169 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ## 2.10.0 (unreleased)
 
+Module SDK: **oarbank-sdk 1.7.0**. This release lets fleet work earn beside the people who use the machines: modules
+can accept connections from the internet, run long-lived daemons that are the work itself, and share a GPU with a
+protected program at a measured, certified level. 2.9.0 was not published on its own, so if you run 2.8, read the
+[2.9.0 section](#290-unreleased) as well: its upgrade steps apply.
+
 ### What's new
 
-- **GPU duty governor** under `gpu_jobs = "certified"`: cooperative GPU work (jobs and workloads that declare
+**Inbound listeners and port mapping.** A module can accept TCP connections from the internet without ever holding a
+socket: the node's agent owns the listener and relays each connection to the module's endpoint service or workload.
+
+- A listener opens only when the module version's `[sandbox].net.inbound` grant is approved, you assign it to the node
+  (`oarbank listener set <node> <module>/<listener>`, operation `listeners.configure`; in signing mode the node applies
+  it only after `oarbank node sign <node>`), the module runs there, and no kill switch or managed policy forbids it.
+  A compromised coordinator cannot open a port.
+- The agent maps its own ports on the router with PCP, NAT-PMP or UPnP IGD (v1 and v2): short leases renewed early, a
+  journal written before every request, every mapping verified, and re-mapping after a router reboot, a new public
+  address, a network change or sleep. It never maps a port below 1024 or for another address, and never deletes a
+  mapping it did not make. Forwarding the port by hand (`mapping = "manual"`) and machines with a public address
+  (`mapping = "none"`) are first-class.
+- Reachability is proven by a dial-back from outside: another node of the fleet on a different network, or an
+  endpoint you run (`oarbank-agent probe-endpoint`, setting `listener_probe_endpoint`). The node page's **Network**
+  card says in words what the router, the firewall and the probe found: `DOUBLE_NAT` (with the bridge-mode fix),
+  `CGNAT`, `NO_MAPPING_PROTOCOL`, `PORT_TAKEN`, `MAPPED_UNREACHABLE`, `FIREWALL_BLOCKED`.
+- `oarbank listener list|show|mappings|set|remove|probe`, and `oarbank listener disable --node <node> | --all` as the
+  kill switch (`resume` undoes it). Node settings `inbound_listeners` (managed policies can force it off),
+  `listener_port_range` and `listener_probe_endpoint`. Alerts `listener_unreachable` and `listener_saturated`.
+  Invariant S24: every listener and mapping a node reports has an approved grant, an assignment and the statement the
+  node applied.
+- macOS: the node package adds the agent to the Application Firewall's allowed list when the firewall is on
+  (`oarbank-agent firewall status|allow`); the Windows helper adds the listener's firewall rule. Uninstalling a node,
+  and retiring an online one, releases its router mappings (`oarbank-agent portmap status|release-all`).
+
+**Workloads: long-running daemons that are the work.** A module can declare `[[workloads]]`, such as a node of a
+peer-to-peer network or a public inference server. You assign one to nodes (`oarbank workload assign
+<module>/<workload> --node <node>`, previewed with the secrets it receives, the listeners it opens and the protection
+rules that act on it); the agent runs it in the module sandbox in a process container of its own, restarts it with
+backoff and withdraws it after repeated failures (alert `workload_withdrawn` with the last error and log tail).
+
+- **One seat per identity.** A workload that runs under one identity per node holds a coordinator seat lease with a
+  fence, named by the keyed fingerprints of the secrets it receives, so two nodes given the same key never run it at
+  once (invariant S26). Leases last 30 minutes and are renewed with every heartbeat; workloads survive an agent restart
+  by adoption and a coordinator outage until their lease runs out.
+- **Protection treats a workload as fleet work** with its own ladder: no new seats, throttle, lower, pause up to the
+  workload's declared tolerance, then stop and hold while the cause lasts.
+- The module page's **Workloads** tab and the node page's **Workloads** card show each assignment, its seat, lease,
+  state, last error and log tail; `oarbank workload list|assign|unassign|restart|logs`. Node setting `workloads`
+  (managed policies can force it off). Containment: macOS sandbox identity, a Linux cgroup (a node without a delegated
+  cgroup is not offered workloads), a Windows Job Object.
+
+**Delegated processes.** Behind the node setting `delegated_processes` (off by default, and a managed policy can force
+it off), an owner protection rule can mark the owner's own programs `delegate = {actions = ["pause", "lower"]}`, so
+protection pauses and lowers them for a protected process the way it does fleet work. Only matchers a module cannot
+spoof count (a code-signing identity on macOS, a trusted exact path on Linux and Windows); they are never stopped, and
+every action is journaled. On a system install the person's session helper acts on the person's processes.
+
+**Co-tenancy you can measure.** Protection reacts faster and can prove that fleet work does not slow a protected
+program down.
+
+- **Event-driven owner sources.** Progress and phase sources (JSONL events, log lines, field phases, process triggers)
+  are watched, not polled, and follow the newest of a program's rotating files. A rule marked `immediate = true` pauses
+  fleet work within milliseconds of a phase starting, between the two-second ticks (invariant S25). An unreadable phase
+  counts as on, never looser (`PROTECTION_SOURCE_UNREADABLE`).
+- **Sources in a person's home now work on a system install.** `~/...` and `/Users/<name>/...` sources are read by
+  that person's session helper, which sends counts and phase states, never file contents. With nobody logged in such a
+  source is unreadable and the node says so (`PROTECTION_SOURCE_NEEDS_HELPER`).
+- **The paired on/off harness** (`oarbank protection ab start <node> --rule <id> [--work cpu|gpu|all|<module>]`)
+  measures what given fleet work costs the protected program in randomised ON and OFF blocks and decides at your margin
+  (default 2 %): no slowdown shown, slowdown, or inconclusive, with the blocks still needed. Confounded blocks (a
+  restart, sleep, a power change) are dropped and repeated; a guard aborts a run that harms. The run's page draws the
+  blocks and states the result in words.
+- **Co-tenancy certificates.** A run that shows no slowdown becomes a certificate for that node, rule and fleet
+  configuration, valid 14 days and bound to the hardware, OS, agent version and the protected program's signature
+  (`oarbank protection certificates`; the protection page's **Co-tenancy** card). `oarbank protection ab sweep` finds
+  the highest GPU duty that passes.
+- **GPU duty governor** under the new `gpu_jobs = "certified"`: cooperative GPU work (jobs and workloads that declare
   `cooperative_throttle`) runs beside a protected GPU program at a budget an AIMD loop sets on the program's own
-  progress, never above the co-tenancy certificate, and each unit's measured GPU time is checked against its
-  `gpu_duty`: a unit over its duty is paused, then stopped and not trusted for an hour
-  (`GPU_DUTY_EXCEEDED`, `GPU_DUTY_UNVERIFIED`). `oarbank protection duty [<node>]` and the protection page's GPU duty
-  card show the budget, its baseline and each unit's asked and measured duty. Invariant S28 checks it from the journal.
+  progress, never above the certificate, and each unit's measured GPU time is checked against its `gpu_duty`: a unit
+  over its duty is paused, then stopped and not trusted for an hour (`GPU_DUTY_EXCEEDED`, `GPU_DUTY_UNVERIFIED`).
+  `oarbank protection duty [<node>]` and the protection page's **GPU duty** card show the budget, its baseline and each
+  unit's asked and measured duty. Without a valid certificate `certified` behaves as `when_no_gpu_protected`
+  (`GPU_NOT_CERTIFIED`). Invariant S28 checks it from the journal.
 - **A GPU-using `progress_rate` rule now holds GPU work back** like a `gpu_share` rule (D3d), except under
   `gpu_jobs = always`.
-- **Module SDK:** `oarbank_sdk.duty` holds a runner's `gpu_duty`, the conformance kit's duty specs prove it, and
-  `examples/llmserve` runs language-model batches on MLX or llama.cpp that hold their duty.
-- **Sites: nodes that share one internet line** (`oarbank sites`, the console's Sites page). While a protected process
-  at a site is in a phase its rule tags `uplink`, the agents' transfers (staging, uploads, checkpoints) and
-  network-heavy jobs and workloads (`resources.network = "heavy"`) pause on every node of the site within 5 s; outside
-  such phases a per-site budget limits transfers and network-heavy work at once. Sites are suggested from keyed
-  network fingerprints, never stored addresses. Explain names `SITE_UPLINK_BUSY` and `SITE_UPLINK_BUDGET`; invariant
-  S27 checks the leases. A node's `staging_mbps` cap is now enforced.
+
+**Sites: nodes that share one internet line** (`oarbank sites`, the console's **Sites** page). While a protected process
+at a site is in a phase its rule tags `uplink`, the agents' transfers (staging, uploads, checkpoints) and network-heavy
+jobs and workloads (`resources.network = "heavy"`) pause on every node of the site within 5 s; outside such phases a
+per-site budget limits transfers and network-heavy work at once. Sites are suggested from keyed network fingerprints,
+never stored addresses. Explain names `SITE_UPLINK_BUSY` and `SITE_UPLINK_BUDGET`; invariant S27 checks the leases. A
+node's `staging_mbps` cap is now enforced.
+
+**Module SDK 1.7.0.** Inbound listeners in the manifest (`sandbox.net.inbound`, `services[].listeners`) with the
+`publicecho` reference module; `[[workloads]]`, the workload protocol, `oarbank_sdk.workload.Supervisor` and
+`examples/workload`; `oarbank_sdk.duty` to hold a GPU duty, conformance duty specs, and `examples/llmserve`, which runs
+language-model batches on MLX or llama.cpp that hold their duty; network-heavy stages. Modules that use any of these
+need `requires.core >= 2.10`.
+
+**Also in this release.**
+
+- New reason codes: listeners (`LISTENER_UNAVAILABLE`, `PORT_TAKEN`, `DOUBLE_NAT`, `CGNAT`, `NO_MAPPING_PROTOCOL`,
+  `MAPPED_UNREACHABLE`, `FIREWALL_BLOCKED`), workloads (`WORKLOAD_*`), delegation (`DELEGATE_*`), co-tenancy
+  (`AB_*`, `GPU_NOT_CERTIFIED`, `GPU_DUTY_*`, `PROTECTION_PHASE_ON|OFF`, `PROTECTION_SOURCE_UNREADABLE`,
+  `PROTECTION_SOURCE_NEEDS_HELPER`), sites (`SITE_*`, `TRANSFER_PAUSED`, `TRANSFER_RESUMED`, `PREEMPT_SITE`) and
+  `MEMORY_HARD_FLOOR_WORKLOAD`.
+- The managed policy templates (the macOS profile keys, the Windows ADMX, Linux `policy.json`) gain `workloads`,
+  `delegated_processes` and `inbound_listeners`.
+- `oarbank verify` checks the new invariants S24 to S28 with the others.
+
+### What changes when you upgrade
+
+- **The coordinator's database gains its new tables by itself** on the first start of 2.10 (from a 2.8 or 2.9 home);
+  nothing is converted or removed.
+- **Nodes need the 2.10 agent** for listeners, workloads, delegated processes, event-driven sources, harness runs,
+  the GPU duty and site holds. Older agents keep running jobs as before: the console says "agent ... is older than this
+  coordinator", a listener assignment is refused (`agent_unsupported`), a workload assigned to it does not start
+  until it runs the 2.10 agent, and the Sites page shows such a node as "not reported (update its agent)".
+- **A GPU trainer protected by its progress now holds fleet GPU work back.** Before, only `gpu_share` rules did, so a
+  rule with `protect.metric = "progress_rate"` on a GPU-using program let fleet GPU work run beside it. Under the default
+  `gpu_jobs = "when_no_gpu_protected"` that work now waits; to run it alongside, earn a certificate and set
+  `gpu_jobs = "certified"`.
+- **Sources in a person's home are read for real on a system install.** Before 2.10 such a source could never be read
+  and held fleet work back for good; now it is read while the person is logged in and still holds fleet work back
+  while nobody is.
+- **`staging_mbps` is enforced.** A node cap that was set but had no effect now limits its transfers.
+- **Modules built with SDK 1.7** that declare inbound listeners, workloads, duty specs or network-heavy stages need core
+  2.10 (`requires.core >= 2.10`); an older coordinator refuses them.
+- **The macOS node package edits the Application Firewall's list**: when the firewall is on, the agent is added as
+  allowed, so the first inbound connection does not wait on a prompt.
+
+### Upgrade steps
+
+Upgrade the coordinator first, then the nodes. Running jobs continue; nodes reconnect by themselves.
+
+- **Coordinator:** install `oarbank-coordinator-2.10.0-<os>-<arch>` (macOS pkg, deb or rpm, Windows MSI) over the old
+  one. From 2.8, the 2.9.0 steps above apply (the macOS and Linux coordinator moves to a system service once).
+- **Nodes:** let the coordinator update the agents (`oarbank agent upload`, `sign`, `canary --node <node>`, `promote`),
+  or install the 2.10.0 node package over the old one. Nothing needs to rejoin.
+- **To use the new features:** approve the module versions that ask for them, then assign listeners (`oarbank listener
+  set`, and `oarbank node sign` in signing mode) and workloads (`oarbank workload assign`); group nodes on one line into
+  sites from the Sites page's suggestions; for GPU co-tenancy, give the protected program a `progress_rate` rule, run
+  `oarbank protection ab sweep`, then set the node's `gpu_jobs = "certified"`.
+
+### Known limitations
+
+Built and tested against simulations and fakes; the owner verifies these on real systems before relying on them:
+
+- **Port mapping on real routers.** Every test talks to fake PCP, NAT-PMP and UPnP gateways on loopback. Still to see
+  on real networks: a single NAT with UPnP (map, renew, router reboot, network change, sleep, uninstall leaving nothing
+  behind on the router's own page), NAT-PMP and PCP routers, a double NAT and a CGNAT line, a dial-back between two
+  networks, and IPv6 pinholes ([docs/design/inbound-listeners.md](docs/design/inbound-listeners.md#what-remains-to-verify-on-real-routers)).
+- **Firewalls.** The macOS Application Firewall was checked with an ad hoc–signed agent only: a Developer ID–signed
+  agent with "allow downloaded signed software", and whether the allowance follows the agent across self-updates, are
+  not yet measured; nor is the Windows Defender Firewall rule the helper adds.
+- **Real GPU backends.** `examples/llmserve` conforms in CI with its CPU stand-in; MLX and llama.cpp with a real model
+  are for the owner to run.
+- **A real protected program.** The harness, certificates and the duty governor ran against synthetic protected
+  processes and a simulated plant. The first certificate comes from a run against a real protected program in a window
+  the owner frees for it ([docs/design/gpu-cotenancy.md](docs/design/gpu-cotenancy.md#running-the-first-measurement-against-a-real-protected-program)).
+- **Linux and Windows** gateway fingerprints (sites), workload containment (cgroups, Job Objects) and delegation are
+  compiled and unit-tested on the development Mac and first exercised on those systems in CI.
+- Not in this release: container workloads, UDP listeners, a relay node for nodes that cannot be reached, stopping a
+  delegated process, and multi-node (gang) jobs. On Windows delegated processes are matched by trusted path only, and
+  only in the agent's own session. Releases, agent updates and container image pulls are not held by a site.
 
 ## 2.9.0 (unreleased)
 
