@@ -20,6 +20,12 @@ pub struct DynJob {
     pub started_at: f64,
     /// The module's measured bandwidth class ("low" | "medium" | "high"); None = undeclared (medium).
     pub bandwidth: Option<String>,
+    /// Never paused by the pause probe: a workload (whose peers would time out) or a delegated process of the owner's
+    /// (docs/design/workloads.md).
+    pub probe_exempt: bool,
+    /// The GPU duty this job should hold (`gpu_duty` in its control document): the harness's level for work under
+    /// test, a certificate's for `gpu_jobs = certified` (D50). None: no duty asked.
+    pub gpu_duty: Option<f64>,
 }
 
 impl DynJob {
@@ -98,6 +104,15 @@ pub struct DynInputs {
     /// The OS can lower fleet jobs (false on Linux without a delegated cgroup): when it cannot, a job that would
     /// be lowered is paused if it can be (never a larger allowance, S19).
     pub lowering: bool,
+    /// Jobs the GPU gate (`gpu_protected_active`) does not pause: GPU work under test in a harness run's ON window,
+    /// or certified cooperative GPU work (`gpu_jobs = certified`). Owner rules' own pauses still apply to them.
+    pub gpu_gate_exempt: BTreeSet<i64>,
+    /// A harness run is measuring: no pause probe (the harness replaces it while it runs).
+    pub probe_suppressed: bool,
+    /// A harness run tests GPU work: the GPU gate does not hold GPU admission back (the run decides what runs).
+    pub gpu_admit_open: bool,
+    /// Jobs a harness run holds OFF this window (paused like a pause rule would, whatever else applies).
+    pub harness_off: BTreeSet<i64>,
 }
 
 impl DynInputs {
@@ -117,15 +132,22 @@ impl DynInputs {
             protection_started: false,
             probe_requested: false,
             lowering: true,
+            gpu_gate_exempt: BTreeSet::new(),
+            probe_suppressed: false,
+            gpu_admit_open: false,
+            harness_off: BTreeSet::new(),
         }
     }
 }
 
 /// The cooperative-throttle document written to a job's workspace (`control.json`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThrottleDoc {
     pub threads: Option<i64>,
     pub pause: bool,
+    /// The maximum GPU duty fraction (runner protocol `gpu_duty`; only for runners that declare
+    /// `cooperative_throttle`).
+    pub gpu_duty: Option<f64>,
     pub seq: i64,
 }
 
@@ -209,6 +231,9 @@ pub struct DynamicController {
     last_pressure: HashMap<String, f64>,
     /// Implicit signals, smoothed per source.
     smoothed: HashMap<String, f64>,
+    /// The pause scopes of the last step (rules' and the dynamic layer's own, the probe excluded), for work that is not
+    /// running now: whether it would be paused if it ran (`would_pause`).
+    last_scopes: BTreeSet<ProtectionScope>,
 }
 
 impl Default for DynamicController {
@@ -246,6 +271,7 @@ impl Default for DynamicController {
             harm_gpu_only: false,
             last_pressure: HashMap::new(),
             smoothed: HashMap::new(),
+            last_scopes: BTreeSet::new(),
         }
     }
 }
@@ -253,6 +279,13 @@ impl Default for DynamicController {
 impl DynamicController {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the last step's pause scopes cover work of this kind (GPU or not): what keeps a workload that protection
+    /// stopped held, and one that is not running from starting (the probe never counts).
+    pub fn would_pause(&self, gpu: bool) -> bool {
+        let has = |s| self.last_scopes.contains(&s);
+        has(ProtectionScope::All) || has(ProtectionScope::Io) || if gpu { has(ProtectionScope::Gpu) } else { has(ProtectionScope::Cpu) }
     }
 
     /// The current L1 budget (None: no budget in force).
@@ -440,14 +473,14 @@ impl DynamicController {
                     &mut dyn_pause_cpu,
                 );
                 dyn_lower = self.lowered;
-                self.probe(i, &mut o);
+                if !i.probe_suppressed {
+                    self.probe(i, &mut o);
+                }
             }
         }
 
-        // GPU admission gating
-        if i.gpu_protected_active {
-            pause_scopes.insert(ProtectionScope::Gpu);
-        }
+        // GPU admission gating (per job below: the gate's exemptions keep their run)
+        let gpu_gate = i.gpu_protected_active;
 
         // bandwidth classes (moderate only, when the harm is only to GPU-bound groups): a "low" job
         // costs a GPU trainer nothing, so no dynamic rung touches it; a "high" job gains nothing from a thread
@@ -458,6 +491,11 @@ impl DynamicController {
             self.budget.unwrap_or(i.allocatable_cores) < i.allocatable_cores || worst > 1.0;
         let exempt = |j: &DynJob| bw_mode && j.bandwidth.as_deref() == Some("low");
 
+        let mut scopes_now = pause_scopes.clone();
+        if dyn_pause_cpu {
+            scopes_now.insert(ProtectionScope::Cpu);
+        }
+        self.last_scopes = scopes_now;
         // map scopes onto jobs: pause what is pausable, lower (E-cores) what is not
         for j in jobs {
             let mut scopes = pause_scopes.clone();
@@ -469,7 +507,9 @@ impl DynamicController {
                 || has(ProtectionScope::Io)
                 || (has(ProtectionScope::Cpu) && !j.gpu)
                 || (has(ProtectionScope::Gpu) && j.gpu)
-                || (o.probing && !j.gpu);
+                || (gpu_gate && j.gpu && !i.gpu_gate_exempt.contains(&j.attempt_id))
+                || i.harness_off.contains(&j.attempt_id)
+                || (o.probing && !j.gpu && !j.probe_exempt);
             let lower_j = lower_all
                 || (dyn_lower && !exempt(j))
                 || (bw_mode && budget_shrunk && j.bandwidth.as_deref() == Some("high"));
@@ -483,7 +523,7 @@ impl DynamicController {
         // probe never counts)
         for j in jobs {
             let id = j.attempt_id;
-            if o.paused.contains(&id) && !o.probing {
+            if o.paused.contains(&id) && !o.probing && !i.harness_off.contains(&id) {
                 let since = *self.paused_since.entry(id).or_insert(now);
                 if now - since >= self.max_pause_s {
                     o.evict.push((id, "preempt_protection".into()));
@@ -504,9 +544,10 @@ impl DynamicController {
                 ((b as i64) / (jobs.len() as i64).max(1)).max(1)
             }
         });
-        for j in jobs.iter().filter(|j| j.cooperative) {
+        for j in jobs.iter().filter(|j| j.cooperative || j.gpu_duty.is_some()) {
             let threads = if exempt(j) { None } else { per_job };
             let pause = o.paused.contains(&j.attempt_id);
+            let gpu_duty = j.gpu_duty;
             // a job starts unthrottled: nothing is written or signalled until there is something to change
             let last = self
                 .last_throttle
@@ -515,15 +556,17 @@ impl DynamicController {
                 .unwrap_or(ThrottleDoc {
                     threads: None,
                     pause: false,
+                    gpu_duty: None,
                     seq: 0,
                 });
-            if last.threads == threads && last.pause == pause {
+            if last.threads == threads && last.pause == pause && last.gpu_duty == gpu_duty {
                 continue;
             }
             self.throttle_seq += 1;
             let d = ThrottleDoc {
                 threads,
                 pause,
+                gpu_duty,
                 seq: self.throttle_seq,
             };
             self.last_throttle.insert(j.attempt_id, d);
@@ -533,8 +576,9 @@ impl DynamicController {
             .retain(|k, _| jobs.iter().any(|j| j.attempt_id == *k));
 
         o.budget_cores = self.budget;
-        if i.gpu_protected_active {
-            o.gpu_jobs_allowed = Some(0);
+        if i.gpu_protected_active && !i.gpu_admit_open {
+            // no new GPU work while the gate holds, beyond what it exempts (certified work already running)
+            o.gpu_jobs_allowed = Some(i.gpu_gate_exempt.len() as i64);
         }
         if self.budget == Some(0.0) && !o.no_admit && !i.signals.is_empty() {
             o.no_admit = true;

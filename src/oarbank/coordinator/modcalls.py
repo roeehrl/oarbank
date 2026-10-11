@@ -64,6 +64,8 @@ class ModuleInfo:
             out["pools"] = dict(st.requires.pools)
         if st.requires.needs_pools:
             out["needs_pools"] = list(st.requires.needs_pools)
+        if getattr(st.requires.resources, "network", "normal") == "heavy":
+            out["network"] = "heavy"                  # admitted and paused per site (docs/design/sites.md)
         by = {k: {f: num(x) for f, x in v.requires.resources.model_dump(exclude_none=True).items()}
               for k, v in st.variants.items() if v.requires and v.requires.resources}
         if any(by.values()):

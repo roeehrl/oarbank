@@ -210,3 +210,4 @@ details.lock-pop[open] > span { display:block; max-width:32rem; margin-top:2px }
 .bulk-filter { margin:var(--s2) 0 } .bulk-settings, .bulk-labels { border:1px solid var(--line); min-width:0 }
 .bulk-settings legend h2, .bulk-labels legend h2 { margin:0; font-size:15px }
 .bulk-settings select, .bulk-labels input { width:100%; max-width:36rem } .bulk-settings input[name=bulk_value] { width:min(100%,14rem) }
+.form-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(14rem, 1fr)); gap:6px 12px; margin:6px 0 }

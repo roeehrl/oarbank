@@ -29,7 +29,7 @@ INSTALL_PS1 = REPO / "scripts" / "install" / "oarbank-install.ps1"
 PACKAGE_INSTALL = REPO / "scripts" / "package-install-scripts.sh"
 SECRET = "OB2-0SECRETCODE0DONOTPRINT0"
 URL = "https://coord.example:7443"
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 
 SHELLS = ["sh"] + (["dash"] if shutil.which("dash") else [])
 
@@ -213,7 +213,7 @@ class Sandbox:
         self.bin.mkdir()
         self.launcher = self.bin / "oarbank-launcher"
         write_fake(self.launcher, FAKE_LAUNCHER)
-        for tool in ("systemctl", "loginctl"):
+        for tool in ("systemctl", "loginctl", "chown"):
             write_fake(self.bin / tool, FAKE_TOOL)
         os.symlink(shutil.which("rm"), self.bin / "rm")      # postremove's purge
         self.var = root / "var-lib-oarbank"
@@ -234,9 +234,12 @@ class Sandbox:
         return subprocess.run([shutil.which(sh), str(self.script), *args], env=e, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL)
 
-    def calls(self):
+    def calls(self, trust=False):
+        """The launcher's calls; without `trust`, not the update-trust pin every postinstall makes (its own tests look
+        at it)."""
         p = self.bin / "calls.jsonl"
-        return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+        calls = [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+        return [c for c in calls if trust or c["argv"][:1] != ["update-trust"]]
 
     def tools(self):
         p = self.bin / "tools.jsonl"
@@ -317,20 +320,80 @@ def test_without_systemd_it_stages_without_a_service_and_exits_0(tmp_path):
     assert "systemd is not running" in r.stdout and SECRET not in r.stdout + r.stderr
 
 
-def test_an_upgrade_of_a_joined_node_renders_its_unit_again_and_runs_no_setup(post):
-    # a 2.8 unit has no TimeoutStopSec: the new launcher renders it again (and restarts the service itself), so a stop
-    # gives the agent the time to stop its jobs
-    (post.var / "agent").mkdir(parents=True)
-    (post.var / "agent" / "agent.json").write_text("{}")
+def test_an_upgrade_of_a_joined_node_makes_the_packages_agent_current_renders_its_unit_again_and_runs_no_setup(post):
+    # the package is the unit (D57): its agent becomes current, owned by the node's account, before the service
+    # restarts. A 2.8 unit has no TimeoutStopSec: the new launcher renders it again (and restarts the service itself),
+    # so a stop gives the agent the time to stop its jobs
+    home = post.var / "agent"
+    home.mkdir(parents=True)
+    (home / "agent.json").write_text("{}")
     r = post.run(env={"OARBANK_JOIN_CODE": SECRET})
-    assert r.returncode == 0 and [c["argv"] for c in post.calls()] == [["service", "refresh", "--system"]]
-    assert post.tools() == [] and r.stdout.splitlines() == ["Oarbank: upgraded; the service restarted on the new launcher"]
-    # a launcher that cannot refresh it (an edited unit): the service still restarts on the new launcher
+    assert r.returncode == 0 and [c["argv"] for c in post.calls()] == [
+        ["--home", str(home), "install", "/usr/lib/oarbank/oarbank-agent"], ["service", "refresh", "--system"]]
+    assert post.tools()[:2] == [["chown", "-R", "oarbank:oarbank", f"{home}/versions"],
+                                ["chown", "-h", "oarbank:oarbank", f"{home}/current"]]
+    assert ["systemctl", "try-restart", "dev.codonic.oarbank.agent.service"] not in post.tools()
+    assert r.stdout.splitlines() == ["Oarbank: upgraded; the service restarted on the new launcher"]
+    # a launcher that cannot install or refresh (an edited unit): the service still restarts on the new launcher
     post.rcs(1)
     (post.bin / "calls.jsonl").unlink()
+    (post.bin / "tools.jsonl").unlink()
     r = post.run()
-    assert r.returncode == 0 and [c["argv"] for c in post.calls()] == [["service", "refresh", "--system"]]
+    assert r.returncode == 0 and [c["argv"] for c in post.calls()] == [
+        ["--home", str(home), "install", "/usr/lib/oarbank/oarbank-agent"], ["service", "refresh", "--system"]]
+    assert "Oarbank: the package's agent could not be made current; the service keeps the agent it had" in r.stdout
+    assert not [t for t in post.tools() if t[0] == "chown"]
     assert ["systemctl", "try-restart", "dev.codonic.oarbank.agent.service"] in post.tools()
+
+
+UPDATE_UNITS = ["dev.codonic.oarbank.agent.update.service", "dev.codonic.oarbank.agent.update.path"]
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_every_install_pins_update_trust_and_starts_the_runners_watch_never_the_runner(post, joined):
+    if joined:
+        (post.var / "agent").mkdir(parents=True)
+        (post.var / "agent" / "agent.json").write_text("{}")
+    r = post.run()
+    assert r.returncode == 0
+    calls = [c["argv"] for c in post.calls(trust=True)]
+    assert calls[-1] == ["update-trust", "--from-agent"] and calls.count(["update-trust", "--from-agent"]) == 1
+    tools = post.tools()
+    assert ["systemctl", "daemon-reload"] in tools and ["systemctl", "enable", *UPDATE_UNITS] in tools
+    assert ["systemctl", "start", "dev.codonic.oarbank.agent.update.path"] in tools
+    # a watch the start limit stopped (a request no runner could take) watches again
+    assert tools.index(["systemctl", "reset-failed", *UPDATE_UNITS]) < tools.index(["systemctl", "start", "dev.codonic.oarbank.agent.update.path"])
+    # the runner itself is never started (nor restarted) by the package: it may be the one running dpkg
+    assert not [t for t in tools if t[1] in ("start", "restart", "try-restart", "reload-or-restart")
+                and "dev.codonic.oarbank.agent.update.service" in t]
+    assert tools.index(["systemctl", "daemon-reload"]) < tools.index(["systemctl", "start", "dev.codonic.oarbank.agent.update.path"])
+
+
+def test_without_systemd_the_trust_is_still_pinned_and_no_unit_is_touched(tmp_path):
+    s = Sandbox(tmp_path, POSTINSTALL)
+    r = s.run()
+    assert r.returncode == 0 and ["update-trust", "--from-agent"] in [c["argv"] for c in s.calls(trust=True)]
+    assert s.tools() == []
+
+
+def test_the_update_units_run_the_runner_once_as_root_apart_from_the_agents_service():
+    path = (LINUX / "dev.codonic.oarbank.agent.update.path").read_text(encoding="utf-8")
+    svc = (LINUX / "dev.codonic.oarbank.agent.update.service").read_text(encoding="utf-8")
+    assert "PathExists=/var/lib/oarbank/agent/updates/request.json\n" in path
+    assert "Unit=dev.codonic.oarbank.agent.update.service\n" in path and "WantedBy=paths.target\n" in path
+    assert "Type=oneshot\n" in svc and "ExecStart=/usr/lib/oarbank/oarbank-launcher update-run --once\n" in svc
+    assert "TimeoutStartSec=45min\n" in svc and "WantedBy=multi-user.target\n" in svc       # at boot: resume
+    assert "StartLimitIntervalSec=10min\n" in svc and "StartLimitBurst=5\n" in svc
+    directives = [l.split("=", 1)[0] for l in svc.splitlines() if l and not l.startswith(("#", "["))]
+    # root's (no User=), and nothing ties it to the agent's unit: try-restart, stop or restart of that never stops it
+    assert "User" not in directives and "DynamicUser" not in directives
+    for tie in ("PartOf", "BindsTo", "Requires", "Requisite", "Conflicts", "StopWhenUnneeded", "Restart"):
+        assert tie not in directives, tie
+    assert "dev.codonic.oarbank.agent.service" not in "\n".join(l for l in svc.splitlines() if not l.startswith("#"))
+    units = by_dst()
+    for name in ("dev.codonic.oarbank.agent.update.path", "dev.codonic.oarbank.agent.update.service"):
+        e = units[f"/usr/lib/systemd/system/{name}"]
+        assert e["src"] == f"./{name}" and e["file_info"] == "{mode: 0644}"
 
 
 def test_containers_only_hint_at_podman_when_it_is_missing(post):
@@ -357,11 +420,15 @@ def test_preremove_leaves_an_upgrade_alone(tmp_path, arg):
 @pytest.mark.parametrize("arg", ["remove", "deconfigure", "0"])
 def test_preremove_removes_the_service_and_keeps_the_node(tmp_path, arg):
     s = Sandbox(tmp_path, PREREMOVE)
+    s.systemd.mkdir()
     s.rcs(1)                                               # a failing removal still lets the package go
     r = s.run(arg)
     assert r.returncode == 0
     assert [c["argv"] for c in s.calls()] == [["remove", "--scope", "system"]]
     assert ["loginctl", "disable-linger", "oarbank"] in s.tools()
+    # the update runner's watch stops and neither unit starts again; a runner at work is not stopped
+    assert s.tools()[:2] == [["systemctl", "disable", "--now", "dev.codonic.oarbank.agent.update.path"],
+                             ["systemctl", "disable", "dev.codonic.oarbank.agent.update.service"]]
 
 
 @pytest.mark.parametrize("arg,kept", [("purge", False), ("remove", True), ("0", True), ("upgrade", True), ("1", True)])

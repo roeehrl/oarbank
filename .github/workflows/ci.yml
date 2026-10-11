@@ -380,3 +380,30 @@ jobs:
         with:
           name: oarbank-${{ env.VERSION || github.sha }}-windows-${{ matrix.arch }}-unsigned
           path: dist/
+
+  fleet-manifest:
+    # oarbank-fleet-<v>.json, the fleet release manifest (docs/design/fleet-updates.md, D56), from every package job's
+    # assets: what the owner signs (`oarbank update sign <v>`) and the vendor lists as a TUF target, published with the
+    # release's other files
+    if: >-
+      always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
+      needs.package.result == 'success' && needs.package-linux.result == 'success' && needs.package-windows.result == 'success'
+    needs: [package, package-linux, package-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oarbank-${{ env.VERSION || github.sha }}-*-unsigned
+          path: dist
+          merge-multiple: true
+      - run: |
+          v="${VERSION#v}"
+          [[ -n "$v" ]] || v="$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)"
+          python3 scripts/fleet-manifest.py "$v" dist --out "oarbank-fleet-$v.json"
+          mkdir fleet && mv "oarbank-fleet-$v.json" fleet/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oarbank-${{ env.VERSION || github.sha }}-fleet-manifest
+          path: fleet/

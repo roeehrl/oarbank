@@ -1,12 +1,15 @@
 #!/bin/sh
 # Remove the Oarbank node from this Mac: the menu bar app, the managed-policy job (so no profile joins the node again
-# halfway through) and the root helper with its authorization rights, the node's service, then (with --purge) its home
-# with the node's keys and caches, then the programs, `oarbank-node` and the status document. Run with sudo for a
+# halfway through), the update runner's job (so no update starts on the way out) and the root helper with its
+# authorization rights, the node's service, then (with --purge) its home with the node's keys and caches, then the
+# programs, `oarbank-node`, the status document and the update runner's state (its trust, journal, kept packages and
+# logs). Run with sudo for a
 # system install, and for everything the pkg put outside the account (the app, the jobs, the programs).
 set -eu
 BIN=/Library/Oarbank/bin
 POLICY=dev.codonic.oarbank.agent.policy
 HELPER=dev.codonic.oarbank.agent.helper
+UPDATE=dev.codonic.oarbank.agent.update
 APP="/Applications/Oarbank Node.app"
 root=
 [ "$(/usr/bin/id -u)" = 0 ] && root=yes
@@ -15,6 +18,8 @@ root=
 if [ -n "$root" ]; then
     /bin/launchctl bootout "system/$POLICY" 2>/dev/null || true
     /bin/rm -f "/Library/LaunchDaemons/$POLICY.plist"
+    /bin/launchctl bootout "system/$UPDATE" 2>/dev/null || true
+    /bin/rm -f "/Library/LaunchDaemons/$UPDATE.plist"
     /bin/launchctl bootout "system/$HELPER" 2>/dev/null || true
     /bin/rm -f "/Library/LaunchDaemons/$HELPER.plist"
     "$BIN/oarbank-node-helper" remove-rights 2>/dev/null || true
@@ -32,9 +37,10 @@ if [ -n "$root" ]; then
     # oarbank-node only while it is ours: a name someone else's tool took stays
     [ "$(/usr/bin/readlink /usr/local/bin/oarbank-node 2>/dev/null)" = "$BIN/oarbank-launcher" ] && /bin/rm -f /usr/local/bin/oarbank-node
     /bin/rm -rf "/Library/Application Support/Oarbank/status"
+    /bin/rm -rf "/Library/Application Support/Oarbank/update"
     /bin/rm -f /var/log/oarbank-policy.log
     /bin/rm -rf /Library/Oarbank
     /usr/sbin/pkgutil --forget dev.codonic.oarbank.agent >/dev/null 2>&1 || true
 else
-    echo "Oarbank Node.app, the managed-policy job, the helper and the programs in /Library/Oarbank stay; remove them with: sudo $0"
+    echo "Oarbank Node.app, the managed-policy job, the update runner, the helper and the programs in /Library/Oarbank stay; remove them with: sudo $0"
 fi

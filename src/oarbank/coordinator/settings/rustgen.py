@@ -51,12 +51,13 @@ def render() -> str:
         "pub const DEFS: &[Def] = &[",
     ]
     for d in R.SETTINGS:
-        if not d.wire:
+        if not d.wire and not d.managed:
             continue
+        section = d.wire.capitalize() if d.wire else "Coordinator"     # managed keys the coordinator applies: reported
         sch = d.schema
         lo = sch.get("minimum", sch.get("exclusiveMinimum"))
         choices = ", ".join(_rs_str(c) for c in sch.get("enum", []))
-        lines.append(f"    Def {{ key: {_rs_str(d.key)}, section: Section::{d.wire.capitalize()}, kind: Kind::{_kind(d)}, "
+        lines.append(f"    Def {{ key: {_rs_str(d.key)}, section: Section::{section}, kind: Kind::{_kind(d)}, "
                      f"nullable: {'true' if d.nullable or d.wire == 'limits' and d.default is None else 'false'}, "
                      f"min: {_f(lo)}, exclusive_min: {'true' if 'exclusiveMinimum' in sch else 'false'}, max: {_f(sch.get('maximum'))}, "
                      f"choices: &[{choices}], default: {_rs_str(json.dumps(d.default))}, "

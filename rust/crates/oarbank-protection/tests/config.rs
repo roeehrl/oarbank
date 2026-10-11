@@ -3,6 +3,7 @@
 mod common;
 
 use oarbank_protection::*;
+use oarbank_protection::config::TreeScope;
 use serde_json::json;
 
 #[test]
@@ -134,9 +135,44 @@ fn rule_fields_parse() {
     // lower_fleet: null is absent; a during block alone is an action
     let r2 = common::rule(
         json!({"id": "d", "match": {"name": "a"}, "lower_fleet": null,
-                                 "during": [{"source": {"jsonl": "/p"}}]}),
+                                 "during": [{"source": {"jsonl": "/p", "enter": "a", "exit": "b"}}]}),
     );
     assert!(!r2.lower_fleet && r2.during.len() == 1);
+    assert!(!r2.immediate && r2.during[0].tags.is_empty() && r2.during[0].on_exec.is_none());
+}
+
+#[test]
+fn phase_sources_immediate_rules_tags_and_process_triggers() {
+    let r = common::rule(json!({
+        "id": "t", "match": {"name": "trainer"}, "immediate": true,
+        "during": [
+            {"source": {"jsonl": "~/logs/events-*.jsonl", "event": "heartbeat_response", "field": "response.phase",
+                        "on": ["uploading", "merging"], "soon": "upload_soon"},
+             "pause_fleet": {"scope": "gpu"}, "tags": ["uplink"]},
+            {"source": {"on_exec": {"match": {"name": "uploader"}, "tree": "descendants"}}, "cap_fleet": {"staging_mbps": 0}},
+            {"source": {"jsonl": "/e.jsonl", "enter": "a", "enter_soon": "a_soon", "exit": "b"}, "lower_fleet": {}},
+        ],
+    }));
+    assert!(r.immediate);
+    assert_eq!(r.during[0].tags, ["uplink"]);
+    assert_eq!(r.during[0].pause_fleet, Some(ProtectionScope::Gpu));
+    let (m, tree) = r.during[1].on_exec.clone().unwrap();
+    assert_eq!((m.name.as_deref(), tree), (Some("uploader"), TreeScope::Descendants));
+    // a source that names no phase rule is refused, not left inert
+    let bad = |src: serde_json::Value| {
+        ProtectionRule::from_json(&json!({"id": "x", "match": {"name": "a"}, "during": [{"source": src}]})).unwrap_err().0
+    };
+    assert!(bad(json!({"jsonl": "/p"})).contains("during source needs"));
+    assert!(bad(json!({"jsonl": "/p", "field": "x"})).contains("during source needs"));
+    assert!(bad(json!({"on_exec": {}})).contains("on_exec needs a match"));
+    assert!(bad(json!({"on_exec": {"match": {"name": "u"}, "tree": "up"}})).contains("unknown tree"));
+    // gpu_jobs: certified is a value, and ranks between always and when_no_gpu_protected in the union
+    let c = |g: &str| ProtectionConfig::from_json(&json!({"node": {"gpu_jobs": g}}), "x");
+    assert!(c("certified").is_ok());
+    assert!(c("sometimes").unwrap_err().0.contains("certified"));
+    let (a, cert, w) = (c("always").unwrap(), c("certified").unwrap(), c("when_no_gpu_protected").unwrap());
+    assert_eq!(a.union(&cert).gpu_jobs, "certified");
+    assert_eq!(cert.union(&w).gpu_jobs, "when_no_gpu_protected");
 }
 
 #[test]
@@ -337,4 +373,39 @@ fn max_pause_is_bounded_and_the_union_keeps_the_shorter() {
     assert_eq!(short.max_pause_s, 30.0);
     assert!(c(serde_json::json!({"max_pause_s": 601})).is_err() && c(serde_json::json!({"max_pause_s": 5})).is_err());
     assert_eq!(ProtectionConfig::default().union(&short).max_pause_s, 30.0);
+}
+
+#[test]
+fn delegate_rules_are_kept_apart_and_need_an_unspoofable_matcher() {
+    let c = ProtectionConfig::from_json(
+        &json!({"rule": [
+            {"id": "app", "match": {"team_id": "ABCDE12345", "identifier": "com.example.app"}, "tree": "descendants",
+             "delegate": {"actions": ["pause", "lower"]}},
+            {"id": "tool", "match": {"path_prefix": "/usr/local/bin/tool"}, "delegate": {"actions": ["lower"]}},
+            {"id": "keep", "match": {"name": "x"}, "pause_fleet": {}}]}),
+        "central",
+    )
+    .unwrap();
+    assert_eq!(c.rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["keep"]);
+    let d: Vec<(&str, bool, bool)> = c.delegations.iter().map(|d| (d.id.as_str(), d.pause, d.lower)).collect();
+    assert_eq!(d, vec![("app", true, true), ("tool", false, true)]);
+    assert_eq!(c.summary()["delegations"], json!(["app", "tool"]));
+    let bad = |rule: serde_json::Value| ProtectionConfig::from_json(&json!({"rule": [rule]}), "central").unwrap_err().to_string();
+    assert!(bad(json!({"id": "a", "match": {"name": "miner"}, "delegate": {"actions": ["pause"]}})).contains("cannot spoof"));
+    assert!(bad(json!({"id": "a", "match": {"path_prefix": "/opt/"}, "delegate": {"actions": ["pause"]}})).contains("cannot spoof"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {"actions": ["stop"]}}))
+        .contains("not offered"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {"actions": []}})).contains("empty"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {"actions": ["pause"]},
+                       "pause_fleet": {}})).contains("no other action"));
+    assert!(bad(json!({"id": "a", "match": {"team_id": "T", "identifier": "i"}, "delegate": {}})).contains("lists what"));
+    // per OS: a signing identity on macOS, an exact path elsewhere
+    use oarbank_protection::support::{refusals, Os};
+    assert!(refusals(&c, Os::Darwin).iter().any(|r| r.contains("rule tool")));
+    assert!(refusals(&c, Os::Linux).iter().any(|r| r.contains("rule app")) && !refusals(&c, Os::Linux).iter().any(|r| r.contains("rule tool")));
+    // union keeps both sides' delegations
+    let local = ProtectionConfig::from_json(&json!({"rule": [{"id": "app", "match": {"requirement": "anchor apple"},
+                                                             "delegate": {"actions": ["pause"]}}]}), "local").unwrap();
+    let u = c.union(&local);
+    assert_eq!(u.delegations.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec!["app", "tool", "app@local"]);
 }

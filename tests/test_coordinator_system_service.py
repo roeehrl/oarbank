@@ -141,3 +141,87 @@ def test_an_account_outside_the_owners_group_is_told_how_to_join(tmp_path, monke
     assert "log in again" in localchannel.unreachable_reason(system)
     assert mine                                                        # (this account's own group exists)
     assert socket                                                      # noqa: B018
+
+
+@pytest.mark.parametrize("os_name", ["Linux", "Darwin"])
+def test_the_installer_adds_root_s_update_runner_and_a_refresh_can_name_the_build(tmp_path, os_name):
+    """install-oarbankd.sh (dry run): the trigger of the coordinator update runner (fleet-updates.md, D58) runs
+    PROGRAMS/current, which names the installed build however it was installed; `--refresh --installed` points the
+    services at another build (a package upgrade, a self-update); --uninstall removes the trigger."""
+    import json
+    import re
+    import subprocess
+    repo = Path(__file__).resolve().parents[1]
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    arch = "arm64" if os_name == "Darwin" else "x86_64"
+    (tools / "uname").write_text(f'#!/bin/sh\ncase "$1" in -s) echo {os_name} ;; -m) echo {arch} ;; esac\n')
+    (tools / "uname").chmod(0o755)
+    root = tmp_path / "root"
+    darwin = os_name == "Darwin"
+
+    def build(name):
+        b = tmp_path / name
+        (b / "bin").mkdir(parents=True)
+        plat = "darwin-arm64" if darwin else "linux-amd64"
+        (b / "oarbank-coordinator.json").write_text(json.dumps({"format": 1, "version": "2.10.0", "platform": plat}))
+        for n in ("oarbankd", "oarbank-console", "oarbank-coordupdate"):
+            (b / "bin" / n).write_text("#!/bin/sh\n")
+            (b / "bin" / n).chmod(0o755)
+        return b
+
+    def installer(*argv, **env):
+        return subprocess.run(["bash", str(repo / "deploy/oarbankd/install-oarbankd.sh"), *argv, "--dry-run"],
+                              capture_output=True, text=True,
+                              env={"PATH": f"{tools}:/usr/bin:/bin", "HOME": str(tmp_path), "OARBANK_INSTALL_ROOT": str(root), **env})
+    a, b = build("a"), build("b")
+    r = installer("--installed", str(a), "--agent-bind", "10.0.0.1")
+    assert r.returncode == 0, r.stderr
+    data = root / ("Library/Application Support/Oarbank" if darwin else "var/lib/oarbank")
+    programs = root / ("Library/Oarbank/Coordinator" if darwin else "opt/oarbank/coordinator-builds")
+    runner, request = f"{programs}/current/bin/oarbank-coordupdate", f"{data}/coordinator/updates/coordinator-request.json"
+    assert f"ln -sfn {a} {programs}/current" in r.stdout
+    assert f"{a}/bin/oarbank-coordupdate trust --from-home --home {data}/coordinator --state {data}/coordinator-update" in r.stdout
+    assert f"install -d -m 0700 {data}/coordinator-update {data}/coordinator-update/logs" in r.stdout
+    if darwin:
+        plist = r.stdout.split(f"# {root}/Library/LaunchDaemons/dev.codonic.oarbank.oarbankd.update.plist\n")[1].split("</plist>")[0]
+        for want in ("<key>Label</key><string>dev.codonic.oarbank.oarbankd.update</string>",
+                     f"<key>ProgramArguments</key><array><string>{runner}</string><string>run</string><string>--once</string></array>",
+                     f"<key>WatchPaths</key><array><string>{request}</string></array>",
+                     "<key>RunAtLoad</key><true/>", "<key>AbandonProcessGroup</key><true/>"):
+            assert want in plist, want
+        assert "UserName" not in plist                                           # root's
+        assert f"/bin/launchctl bootstrap system {root}/Library/LaunchDaemons/dev.codonic.oarbank.oarbankd.update.plist" in r.stdout
+        # the runner's own refresh leaves its job loaded
+        r2 = installer("--installed", str(a), "--agent-bind", "10.0.0.1", OARBANK_COORDUPDATE_RUNNING="1")
+        assert "bootout system/dev.codonic.oarbank.oarbankd.update" not in r2.stdout and "update.plist" in r2.stdout
+    else:
+        units = root / "etc/systemd/system"
+        path = r.stdout.split(f"# {units}/dev.codonic.oarbank.oarbankd.update.path\n")[1]
+        assert f"\n[Path]\nPathExists={request}\nUnit=dev.codonic.oarbank.oarbankd.update.service\n" in path
+        svc = r.stdout.split(f"# {units}/dev.codonic.oarbank.oarbankd.update.service\n")[1]
+        assert f'\nType=oneshot\nExecStart="{runner}" run --once\n' in svc and "\nWantedBy=multi-user.target" in svc
+        assert "User=" not in svc.split("[Install]")[0]                          # root's
+        assert ("systemctl enable dev.codonic.oarbank.oarbankd.service dev.codonic.oarbank.console.service "
+                "dev.codonic.oarbank.oarbankd.update.path dev.codonic.oarbank.oarbankd.update.service") in r.stdout
+        assert "systemctl start dev.codonic.oarbank.oarbankd.update.path" in r.stdout
+        assert "systemctl start dev.codonic.oarbank.oarbankd.update.service" not in r.stdout   # never from here
+    # a refresh from the record, or on the build it names
+    rec = re.search(r'^\{"format": "1".*$', r.stdout, re.M).group(0)
+    record = root / ("Library/Application Support/Oarbank" if darwin else "etc/oarbank") / "coordinator-service.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(rec + "\n")
+    r = installer("--refresh")
+    assert r.returncode == 0 and f"{a}/bin/oarbankd" in r.stdout and f"{b}/bin/oarbankd" not in r.stdout, r.stderr
+    r = installer("--refresh", "--installed", str(b))
+    assert r.returncode == 0 and f"{b}/bin/oarbankd" in r.stdout and f"{a}/bin/oarbankd" not in r.stdout, r.stderr
+    assert f'"root": "{b}"' in r.stdout and f"ln -sfn {b} {programs}/current" in r.stdout
+    assert installer("--refresh", "--agent-bind", "10.0.0.2").returncode == 2
+    r = installer("--uninstall", "--keep-programs")
+    assert r.returncode == 0
+    if darwin:
+        assert f"rm -f {root}/Library/LaunchDaemons/dev.codonic.oarbank.oarbankd.update.plist" in r.stdout
+    else:
+        assert "systemctl disable --now dev.codonic.oarbank.oarbankd.update.path" in r.stdout
+        assert f"rm -f {root}/etc/systemd/system/dev.codonic.oarbank.oarbankd.update.service" in r.stdout
+    assert [p for p in root.rglob("*") if not p.is_dir()] == [record]           # a dry run writes nothing

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Model-check OarbankLease.tla under every config and compare each outcome with the expected one.
+# Model-check the specs (OarbankLease.tla, OarbankFastPause.tla, OarbankPortmap.tla, OarbankSeat.tla, OarbankGpuDuty.tla,
+# OarbankSiteUplink.tla, OarbankRollout.tla) under every config and compare each outcome with the expected one. A
+# config's spec is its name up to the first underscore: OarbankLease_liveness.cfg checks OarbankLease.tla,
+# OarbankPortmap_a_nojournal.cfg checks OarbankPortmap.tla.
 #
-#   ./run_tlc.sh            run every config
-#   ./run_tlc.sh a_nofence  run only the configs whose name contains "a_nofence"
-#   QUICK=1 ./run_tlc.sh    skip the four slowest configs (about 13 of the 21 minutes)
+#   ./run_tlc.sh                 run every config
+#   ./run_tlc.sh a_nofence       run only the configs whose name contains "a_nofence"
+#   ./run_tlc.sh OarbankPortmap  run only one spec's configs
+#   QUICK=1 ./run_tlc.sh         skip the four slowest configs (about 13 of the 21 minutes)
 #
 # A line says PASS when TLC's outcome matches the expectation: "ok" (no violation) for the
 # reference protocol, and the named invariant / temporal-property violation for each weakened
@@ -77,6 +81,80 @@ CONFIGS=(
   "OarbankLease_module_faults                        ok"
   "OarbankLease_module_faults_liveness               ok"
   "OarbankLease_o_no_await_lease                     inv:ModuleFaultsNotCharged"
+  "OarbankFastPause                                  ok"
+  "OarbankFastPause_a_nofresh                        inv:FastPauseHolds"
+  "OarbankFastPause_b_unshared                       liveness"
+
+  # OarbankPortmap.tla: the agent's port-mapping lifecycle (docs/design/inbound-listeners.md)
+  "OarbankPortmap                                    ok"
+  "OarbankPortmap_refuse_permanent                   ok"
+  "OarbankPortmap_liveness                           ok"
+  "OarbankPortmap_permanent_liveness                 ok"
+  "OarbankPortmap_permanent_dead_agent               liveness"
+  "OarbankPortmap_witness_RebootRecovered            inv:W_RebootRecovered"
+  "OarbankPortmap_witness_ConflictNextFree           inv:W_ConflictNextFree"
+  "OarbankPortmap_witness_NetChangeRemapped          inv:W_NetChangeRemapped"
+  "OarbankPortmap_witness_RestartCleanup             inv:W_RestartCleanup"
+  "OarbankPortmap_a_nojournal                        inv:AtMostOneExternalPortPerListener"
+  "OarbankPortmap_a_nojournal_liveness               liveness"
+  "OarbankPortmap_b_delete_by_port                   inv:NoForeignDelete"
+  "OarbankPortmap_c_no_epoch                         inv:AnnouncedImpliesMapped"
+  "OarbankPortmap_d_remap_before_release             inv:AtMostOneExternalPortPerListener"
+  "OarbankPortmap_e_readback_race                    inv:NoForeignDelete"
+  "OarbankPortmap_f_keyed_delete                     inv:AtMostOneExternalPortPerListener"
+  "OarbankPortmap_g_epoch_forgets_entry              inv:AtMostOneExternalPortPerListener"
+
+  # OarbankGpuDuty.tla: the GPU duty governor (docs/design/gpu-cotenancy.md)
+  "OarbankGpuDuty                                    ok"
+  "OarbankGpuDuty_liveness                           ok"
+  "OarbankGpuDuty_a_noclamp                          inv:DutyWithinCeiling"
+  "OarbankGpuDuty_b_grow_unclean                     inv:NoGrowthOnUnclean"
+  "OarbankGpuDuty_c_nohold                           inv:ExcessBounded"
+  "OarbankGpuDuty_d_strikes_reset                    liveness"
+
+  # OarbankSiteUplink.tla: transfer leases at a site (docs/design/sites.md)
+  "OarbankSiteUplink                                 ok"
+  "OarbankSiteUplink_a_nomargin                      inv:Budget"
+  "OarbankSiteUplink_b_norevoke                      inv:HoldBound"
+  "OarbankSiteUplink_c_slotfreed                     inv:Budget"
+)
+# OarbankSeat (docs/design/workloads.md, D46)
+CONFIGS+=(
+  "OarbankSeat                                       ok"
+  "OarbankSeat_fence_per_run                         ok"
+  "OarbankSeat_liveness                              ok"
+  "OarbankSeat_witness_SeatMovedAfterExpiry          inv:W_SeatMovedAfterExpiry"
+  "OarbankSeat_witness_SeatMovedOnRelease            inv:W_SeatMovedOnRelease"
+  "OarbankSeat_witness_AdoptedAcrossRestart          inv:W_AdoptedAcrossRestart"
+  "OarbankSeat_a_nofence_release                     inv:AtMostOneRunning"
+  "OarbankSeat_b_renew_after_expiry                  inv:AtMostOneRunning"
+  "OarbankSeat_c_no_grace                            inv:AtMostOneRunning"
+  "OarbankSeat_d_deadline_from_receive               inv:AtMostOneRunning"
+  "OarbankSeat_e_adopt_without_lease                 inv:AtMostOneRunning"
+  "OarbankSeat_f_clock_stops_in_sleep                inv:AtMostOneRunning"
+  "OarbankSeat_finding_release_if_unassigned         inv:AtMostOneRunning"
+  "OarbankSeat_agent_down_past_lease                 inv:AtMostOneRunning"
+  "OarbankSeat_faults2                               ok"
+  "OarbankSeat_unbounded                             ok"
+)
+SLOW+=" OarbankSeat OarbankSeat_fence_per_run OarbankSeat_faults2 OarbankSeat_unbounded "
+# OarbankRollout (docs/design/fleet-updates.md, D57-D61, S29-S31)
+CONFIGS+=(
+  "OarbankRollout                                    ok"
+  "OarbankRollout_noautorollback                     ok"
+  "OarbankRollout_liveness                           ok"
+  "OarbankRollout_witness_FleetUpdated               inv:W_FleetUpdated"
+  "OarbankRollout_witness_RolledBackAfterCanaryFailure inv:W_RolledBackAfterCanaryFailure"
+  "OarbankRollout_witness_MovedNodeRolledBack        inv:W_MovedNodeRolledBack"
+  "OarbankRollout_witness_OfflineNodeCaughtUp        inv:W_OfflineNodeCaughtUp"
+  "OarbankRollout_witness_CommittedAfterRunnerCrash  inv:W_CommittedAfterRunnerCrash"
+  "OarbankRollout_witness_CoordinatorRolledBack      inv:W_CoordinatorRolledBack"
+  "OarbankRollout_a_nocap                            inv:CapRespected"
+  "OarbankRollout_b_noorder                          inv:RingOrder"
+  "OarbankRollout_c_coordlast                        inv:NoNodeAheadOfCoordinator"
+  "OarbankRollout_d_nohalt                           inv:BudgetHalts"
+  "OarbankRollout_e_norunnerjournal                  inv:RunnerSafe"
+  "OarbankRollout_f_noevidence                       inv:WidenOnlyOnEvidence"
 )
 
 if [ ! -f "$JAR" ]; then
@@ -95,11 +173,12 @@ for row in "${CONFIGS[@]}"; do
   if [ -n "$FILTER" ] && [[ "$cfg" != *"$FILTER"* ]]; then continue; fi
   if [ -n "${QUICK:-}" ] && [[ "$SLOW" == *" $cfg "* ]]; then continue; fi
   log="out/$cfg.log"
+  spec="${cfg%%_*}.tla"
   meta="$(mktemp -d "${TMPDIR:-/tmp}/tlc-meta.XXXXXX")"
   start=$(date +%s)
   "$JAVA" -XX:+UseParallelGC -Xmx"$HEAP" -cp "$JAR" tlc2.TLC \
       -workers "$WORKERS" -deadlock -cleanup -metadir "$meta" \
-      -config "$cfg.cfg" OarbankLease.tla >"$log" 2>&1
+      -config "$cfg.cfg" "$spec" >"$log" 2>&1
   secs=$(( $(date +%s) - start ))
   rm -rf "$meta"
 
@@ -107,7 +186,7 @@ for row in "${CONFIGS[@]}"; do
     got="ok"
   elif inv=$(grep -oE "Invariant [A-Za-z0-9_]+ is violated" "$log" | head -1) && [ -n "$inv" ]; then
     got="inv:$(echo "$inv" | awk '{print $2}')"
-  elif grep -q "Temporal properties were violated" "$log"; then
+  elif grep -qE "Temporal propert(ies were|y [A-Za-z0-9_]+ was) violated" "$log"; then   # TLC 2.19; newer TLC
     got="liveness"
   else
     got="error"

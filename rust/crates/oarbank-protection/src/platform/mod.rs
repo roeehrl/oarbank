@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::controller::Host;
 use crate::session::SessionHub;
 use crate::signals::{Meter, Presence, PresenceReading};
+use crate::events::EventSources;
 use crate::sources::FileOwnerSources;
 use crate::spawn_registry::Actuator;
 use crate::support::Os;
@@ -26,6 +27,7 @@ pub mod windows;
 
 /// This platform's host interfaces; `hub` carries what the session helpers report (the system service's).
 pub fn native_host(hub: Option<Arc<SessionHub>>) -> Host {
+    let hub_for_sources = hub.clone();
     #[cfg(target_os = "macos")]
     let (processes, meter): (Box<dyn ProcessSource>, Box<dyn Meter>) = (
         Box::new(macos::NativeProcessSource::new(hub.clone())),
@@ -55,11 +57,37 @@ pub fn native_host(hub: Option<Arc<SessionHub>>) -> Host {
             Box::new(crate::signals::NullMeter),
         )
     };
+    // owner sources, event-driven (D51): a system install's paths in a person's home are read by that person's
+    // session helper; a second process source drives the fast listing of immediate exec triggers
+    let hub = hub_for_sources;
+    let files = match &hub {
+        Some(h) => FileOwnerSources::system(Some(h.clone() as Arc<dyn crate::sources::PersonReader>)),
+        None => FileOwnerSources::new(),
+    };
+    let sources = EventSources::new(files, None, exec_source(hub.clone()));
+    if let Some(h) = &hub {
+        h.set_source_hook(sources.helper_hook());
+    }
     Host {
         processes,
         meter,
-        sources: Box::new(FileOwnerSources::new()),
+        sources: Box::new(sources),
         os: Os::current(),
+    }
+}
+
+/// A process source of its own for the event path's exec listing.
+fn exec_source(hub: Option<Arc<SessionHub>>) -> Option<Box<dyn ProcessSource>> {
+    #[cfg(target_os = "macos")]
+    return Some(Box::new(macos::NativeProcessSource::new(hub)));
+    #[cfg(target_os = "linux")]
+    return Some(Box::new(linux::NativeProcessSource::new(hub)));
+    #[cfg(windows)]
+    return Some(Box::new(windows::NativeProcessSource::new(windows::Snapshots::shared(), hub)));
+    #[allow(unreachable_code)]
+    {
+        let _ = hub;
+        None
     }
 }
 

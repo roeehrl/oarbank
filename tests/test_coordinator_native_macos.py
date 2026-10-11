@@ -99,8 +99,11 @@ def test_the_postinstall_links_the_commands_and_only_refreshes_or_migrates():
     assert f'ROOT="{APP_BIN[:-len("/bin")]}"' in code and 'BIN="$ROOT/bin"' in code
     assert 'for name in oarbank oarbank-setup; do' in code and '/bin/ln -sfn "$BIN/$name" "$link"' in code
     # a first install starts nothing (the wizard does, with the person's address); never a new fleet from here
-    assert '/bin/bash "$ROOT/install-oarbankd.sh" --refresh' in code
+    # an upgrade's refresh runs this build, also after a coordinator self-update ran another (fleet-updates.md, D58)
+    refresh = '/bin/bash "$ROOT/install-oarbankd.sh" --refresh --installed "$ROOT"'
+    assert refresh in code and code.count('--installed') == 1
     assert '"$BIN/oarbank" coordinator migrate --run --from-installer --build "$ROOT"' in code
+    code = code.replace(refresh, '')
     for word in ('launchctl', '--installed', 'chown', 'chmod', 'rm ', 'set -e', 'account create', 'join-code'):
         assert word not in code, word
     assert text.rstrip().endswith('exit 0')
@@ -196,7 +199,8 @@ def test_an_upgrade_refreshes_the_system_service_and_a_per_user_coordinator_is_m
     agents.mkdir(parents=True)
     (agents / 'dev.codonic.oarbank.oarbankd.plist').write_text('<plist/>')
     out = mac.run()
-    assert out.returncode == 0 and out.stdout.splitlines() == ['installer --refresh'], out
+    # on this build: also after a coordinator self-update ran another one (fleet-updates.md, D58)
+    assert out.returncode == 0 and out.stdout.splitlines() == [f'installer --refresh --installed {build}'], out
     # an earlier release's per-user coordinator and no system service yet: the migration, from the app's build
     mac.record.unlink()
     out = mac.run()

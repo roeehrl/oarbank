@@ -77,6 +77,77 @@ def _os_reserve(facts: dict) -> tuple:
     return (4 if ram <= 32 else (8 if ram >= 96 else 6)), f"{ram:g} GB RAM"
 
 
+def _port_range(v):
+    """listener_port_range: "<a>-<b>" with 1024 <= a <= b <= 65535."""
+    v = _check(REGISTRY["listener_port_range"].schema, v, "listener_port_range")
+    a, b = (int(x) for x in v.split("-"))
+    if not 1024 <= a <= b <= 65535:
+        raise SettingError("bad_value", f"listener_port_range: {v!r} must be <a>-<b> with 1024 <= a <= b <= 65535")
+    return f"{a}-{b}"
+
+
+def _until(v, where: str):
+    """An expiry: Unix seconds, an ISO 8601 time (UTC when it names no zone), or none."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
+        return float(v)
+    if isinstance(v, str) and v.strip():
+        import datetime as dt
+        try:
+            t = dt.datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise SettingError("bad_value", f"{where}.until: {v!r} is not a time (ISO 8601 or Unix seconds)")
+        return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).timestamp()
+    raise SettingError("bad_value", f"{where}.until: a time (ISO 8601 or Unix seconds), or none")
+
+
+def _reason(v: dict, where: str) -> str:
+    r = v.get("reason")
+    if not isinstance(r, str) or not r.strip() or len(r) > 300:
+        raise SettingError("bad_value", f"{where}.reason: say why (at most 300 characters)")
+    return r.strip()
+
+
+def _hold(v):
+    """update_hold: {reason, until} (until: an expiry, or none), or none."""
+    if v is None:
+        return None
+    if not isinstance(v, dict) or set(v) - {"reason", "until"}:
+        raise SettingError("bad_value", "update_hold: {reason, until}, or none")
+    return {"reason": _reason(v, "update_hold"), "until": _until(v.get("until"), "update_hold")}
+
+
+VERSION = r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]{1,40})?$"
+
+
+def _pin(v):
+    """update_pin: {version, reason, until}, or none."""
+    if v is None:
+        return None
+    if not isinstance(v, dict) or set(v) - {"version", "reason", "until"}:
+        raise SettingError("bad_value", "update_pin: {version, reason, until}, or none")
+    if not isinstance(v.get("version"), str) or not re.fullmatch(VERSION, v["version"].strip()):
+        raise SettingError("bad_value", "update_pin.version: a release version such as 2.10.0")
+    return {"version": v["version"].strip(), "reason": _reason(v, "update_pin"), "until": _until(v.get("until"), "update_pin")}
+
+
+def _source(v):
+    """update_source: an http(s) or file URL."""
+    v = _check(REGISTRY["update_source"].schema, v, "update_source")
+    if not re.fullmatch(r"(https?://[^\s/$.?#][^\s]*|file:///?[^\s]+)", v):
+        raise SettingError("bad_value", f"update_source: {v!r} is not an http(s) or file URL")
+    return v.rstrip("/")
+
+
+def _https_or_none(v):
+    """listener_probe_endpoint: an https:// URL, or none."""
+    v = _check(REGISTRY["listener_probe_endpoint"].schema, v, "listener_probe_endpoint")
+    if v is not None and not v.lower().startswith("https://"):
+        raise SettingError("bad_value", f"listener_probe_endpoint: {v!r} is not an https:// URL")
+    return v
+
+
 SERVICE_NAME = r"^[a-z0-9][a-z0-9_.-]{0,63}$"
 HOST = r"^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:[0-9]{1,5})?$"
 NUM_GE0 = {"type": "number", "minimum": 0}
@@ -97,8 +168,10 @@ SECTIONS = {
     "module_own": ("Its settings", "The settings the module declares in its manifest."),
     "protection": ("Protection", "How fleet work yields to the owner's own programs. Protected-process rules from every "
                                  "scope apply together; they are edited on the protection pages."),
+    "network": ("Network", "Inbound listeners and how they are checked from outside (docs/design/inbound-listeners.md)."),
+    "updates": ("Updates", "How new Oarbank releases reach the coordinator and the nodes (docs/design/fleet-updates.md)."),
 }
-NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection")
+NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection", "network", "updates")
 FLEET_SECTIONS = ("notifications", "access", "verification")
 # the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
 MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
@@ -146,6 +219,14 @@ SETTINGS = (
             "Jobs over their memory or CPU reservation are stopped where the OS enforces it (Linux cgroups, Windows Job "
             "Objects; macOS has none).", {"type": "boolean"}, default=False, wire="policy", section="jobs", advanced=True,
             tighten="higher", managed=True),
+    Setting("workloads", "Run workloads",
+            "Off: the node runs no module workloads (long-running daemons the owner assigned), and running ones stop.",
+            {"type": "boolean"}, default=True, wire="policy", section="jobs", tighten="lower", managed=True),
+    Setting("delegated_processes", "Delegated processes",
+            "On: owner rules with `delegate` let host protection pause and lower the owner's named processes (by code "
+            "signature or a trusted exact path) for a protected process. Never stopped.",
+            {"type": "boolean"}, default=False, wire="policy", section="protection", danger="T2", tighten="lower",
+            managed=True),
     Setting("services.disabled", "Services that do not run",
             "The module's services by name; a change re-checks and re-certifies the module on the nodes it reaches.",
             {"type": "array", "items": {"type": "string", "pattern": SERVICE_NAME}, "maxItems": 64}, default=[],
@@ -188,6 +269,27 @@ SETTINGS = (
             "The memory guard, timing, GPU jobs and longest pause beside the mode (the node section of a protection "
             "config).", {"type": "object", "x-kind": "protection_node"}, default={}, advanced=True,
             effects=("protection",)),
+    # ---------------------------------------------------------------- network (inbound listeners; the agent)
+    Setting("inbound_listeners", "Inbound listeners",
+            "Off: no module listener opens on this computer and every router mapping is removed (a machine's managed policy "
+            "can forbid listeners).", {"type": "boolean"}, default=True, wire="policy", section="network", tighten="lower",
+            managed=True),
+    Setting("listener_port_range", "Internal listener ports",
+            "The local ports listeners bind when their entry names no internal port (each listener gets the same port on "
+            "every start while it is free).", {"type": "string", "pattern": r"^\d{4,5}-\d{4,5}$", "maxLength": 11},
+            default="41000-41999", wire="policy", section="network", advanced=True,
+            validator=lambda v: _port_range(v), examples=("41000-41999",)),
+    Setting("listener_probe_endpoint", "Probe endpoint",
+            "An https:// URL of an `oarbank-agent probe-endpoint` the owner runs on another network: it checks a listener "
+            "from outside when no fleet node on another network can; none: no endpoint.",
+            {"type": ["string", "null"], "format": "uri", "maxLength": 2048}, default=None, scopes=("fleet",),
+            wire="policy", section="network", lockable=False, validator=lambda v: _https_or_none(v),
+            examples=("https://probe.example.net:7480/",)),
+    Setting("listener_stun_server", "STUN server",
+            "host:port of a STUN server the agents ask for their public address every 30 minutes; none: no third party is "
+            "ever contacted.", {"type": ["string", "null"], "pattern": r"^[A-Za-z0-9.-]+:[0-9]{1,5}$", "maxLength": 260},
+            default=None, scopes=("fleet",), wire="policy", section="network", lockable=False,
+            examples=("stun.example.net:3478",)),
     # ---------------------------------------------------------------- fleet-wide (the coordinator)
     Setting("ntfy.url", "Topic URL", "The ntfy topic alerts are pushed to; none: notifications off.",
             {"type": ["string", "null"], "format": "uri", "maxLength": 2048}, scopes=("fleet",), applies="coordinator",
@@ -205,6 +307,38 @@ SETTINGS = (
             "the fleet's (the higher applies).",
             {"type": "number", "minimum": 0, "maximum": 1}, default=0.03, scopes=("fleet",), merge="max",
             applies="coordinator", section="verification", lockable=False, qualifier="optional", campaign=True),
+    # ---------------------------------------------------------------- fleet updates (docs/design/fleet-updates.md, D60)
+    Setting("update_auto", "Update automatically",
+            "on: a newly imported signed release starts a rollout by itself (inside each node's window); notify: the "
+            "coordinator says it is ready and the owner starts it; off: neither (it can still be started by hand).",
+            {"type": "string", "enum": ["off", "notify", "on"]}, default="notify", applies="coordinator", section="updates",
+            order=("on", "notify", "off"), tighten="higher", managed=True),
+    Setting("update_ring", "Update ring",
+            "Which ring of a rollout updates this node: canary first, then early, then broad.",
+            {"type": "string", "enum": ["canary", "early", "broad"]}, default="broad", scopes=("group", "node"),
+            applies="coordinator", section="updates"),
+    Setting("update_window", "Update window",
+            "Updates install only inside this window (local time on the node); none: any time.",
+            {"type": ["object", "null"], "x-kind": "schedule"}, default=None, applies="coordinator", section="updates"),
+    Setting("update_hold", "Update hold",
+            "Held: the node takes no update until the hold is lifted or expires ({reason, until}).",
+            {"type": ["object", "null"]}, default=None, scopes=("group", "node"), applies="coordinator",
+            section="updates", tighten="higher", managed=True, lockable=False, writer="updates.hold",
+            validator=lambda v: _hold(v)),
+    Setting("update_pin", "Update pin",
+            "The node stays on (or moves to) this release whatever rollouts do, until the pin is lifted or expires "
+            "({version, reason, until}).", {"type": ["object", "null"]}, default=None, scopes=("node",),
+            applies="coordinator", section="updates", lockable=False, writer="updates.pin", validator=lambda v: _pin(v)),
+    Setting("update_source", "Release source",
+            "Where `oarbank update fetch` and the periodic check download fleet releases from: a GitHub releases page, "
+            "or any http(s) or file URL laid out the same way (<source>/download/v<version>/<asset>).",
+            {"type": "string", "maxLength": 2048}, default="https://github.com/roeehrl/oarbank/releases", scopes=("fleet",),
+            applies="coordinator", section="updates", lockable=False, validator=lambda v: _source(v),
+            examples=("https://github.com/roeehrl/oarbank/releases",)),
+    Setting("update_check_h", "Check for releases every",
+            "Hours between checks of the release source for a newer release (0: never).",
+            {"type": "number", "minimum": 0}, default=6, unit="h", scopes=("fleet",), applies="coordinator",
+            section="updates", lockable=False),
     # ---------------------------------------------------------------- written by their own operations
     Setting("folder_registry", "Folders", "A folder id mapped to its access and a path on each node.", {"type": "object"},
             default={}, scopes=("fleet",), applies="coordinator", lockable=False, writer="settings.folders.update",
@@ -408,7 +542,9 @@ def _strictness(d: Setting, v):
     bound, is the loosest of all)."""
     if v is None:
         return float("-inf")
-    if d.order:
+    if isinstance(v, dict):
+        x = 1                                    # a key whose value is an object or none (a hold): set is stricter
+    elif d.order:
         x = d.order.index(v) if v in d.order else -1
     elif isinstance(v, bool):
         x = int(v)

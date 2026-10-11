@@ -400,6 +400,12 @@ pub struct DuringSpec {
     pub cap_fleet: Option<CapFleet>,
     pub pause_fleet: Option<ProtectionScope>,
     pub lower_fleet: bool,
+    /// A process trigger (`source = { on_exec = { match = ..., tree = ... } }`): the phase is on while a matching
+    /// owner process runs.
+    pub on_exec: Option<(ProcessMatch, TreeScope)>,
+    /// Owner-set labels reported with the phase (`uplink`: the phase uses the site's internet line), for
+    /// coordinator-side aggregation; they change nothing on the node.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -419,6 +425,9 @@ pub struct ProtectionRule {
     pub during: Vec<DuringSpec>,
     pub enter_for_s: Option<f64>,
     pub exit_after_s: Option<f64>,
+    /// The rule's `during` phases act at once, between ticks (the event path; S25), with the phase's own exit as
+    /// the hysteresis; they also act while the rule's group is present but not yet active.
+    pub immediate: bool,
 }
 
 impl ProtectionRule {
@@ -440,6 +449,7 @@ impl ProtectionRule {
             during: vec![],
             enter_for_s: None,
             exit_after_s: None,
+            immediate: false,
         }
     }
 
@@ -525,13 +535,45 @@ impl ProtectionRule {
                 return err(format!("rule {id}: during needs a source"));
             }
             let dc = get(ds, "cap_fleet");
+            let source_json = src.cloned().unwrap_or(Value::Null);
+            let on_exec = match get(src, "on_exec") {
+                None => {
+                    if crate::sources::PhaseRule::from_json(&source_json).is_none() {
+                        return err(format!(
+                            "rule {id}: a during source needs jsonl with enter and exit events, jsonl with field and on \
+                             values, or on_exec"
+                        ));
+                    }
+                    None
+                }
+                Some(x) => {
+                    let Some(m) = get(Some(x), "match") else {
+                        return err(format!("rule {id}: during.source.on_exec needs a match"));
+                    };
+                    let tree = match str_of(get(Some(x), "tree")) {
+                        None => TreeScope::SelfOnly,
+                        Some(t) => match TreeScope::parse(t) {
+                            Some(ts) => ts,
+                            None => return err(format!("rule {id}: during.source.on_exec: unknown tree {t}")),
+                        },
+                    };
+                    Some((ProcessMatch::from_json(m)?, tree))
+                }
+            };
+            let tags = get(ds, "tags")
+                .and_then(|t| t.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
             r.during.push(DuringSpec {
-                source_json: src.cloned().unwrap_or(Value::Null),
+                source_json,
                 cap_fleet: is_object(dc).then(|| CapFleet::from_json(dc, false)),
                 pause_fleet: scope_action(get(ds, "pause_fleet")),
                 lower_fleet: present(get(ds, "lower_fleet")),
+                on_exec,
+                tags,
             });
         }
+        r.immediate = bool_of(get(j, "immediate")).unwrap_or(false);
         r.enter_for_s = f64_of(get(j, "enter_for_s"));
         r.exit_after_s = f64_of(get(j, "exit_after_s"));
         let has_action = r.reserve_cpu.is_some()
@@ -559,9 +601,79 @@ impl ProtectionRule {
     }
 }
 
+/// The values of `[node] gpu_jobs`.
+pub const GPU_JOBS: [&str; 4] = ["never", "when_no_gpu_protected", "certified", "always"];
+
 /// The bounds of `[node] max_pause_s` (spec/runner-protocol.md: a pause lasts at most 10 minutes).
 pub const MAX_PAUSE_S: f64 = 600.0;
 pub const MIN_PAUSE_S: f64 = 10.0;
+
+/// An owner rule that delegates a process tree of the owner's to host protection (docs/design/workloads.md,
+/// "Delegated external processes"): protection may pause and lower it as fleet work, never stop it. It counts only on a
+/// node whose `delegated_processes` setting is on, and only with a matcher a module cannot spoof.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delegation {
+    pub id: String,
+    pub match_: ProcessMatch,
+    pub tree: TreeScope,
+    pub pause: bool,
+    pub lower: bool,
+}
+
+/// The actions a delegation may allow (`stop` is not offered in this version).
+pub const DELEGATE_ACTIONS: [&str; 2] = ["pause", "lower"];
+/// Every other key a rule may carry: none of them goes with `delegate`.
+const NON_DELEGATE_KEYS: [&str; 11] = ["ignore", "reserve", "cap_fleet", "lower_fleet", "pause_fleet", "evict", "protect",
+                                       "during", "active_when", "enter_for_s", "exit_after_s"];
+
+impl Delegation {
+    pub fn from_json(json: &Value) -> Result<Self, ConfigError> {
+        let j = Some(json);
+        let id = match str_of(get(j, "id")) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => return err("rule without an id"),
+        };
+        let Some(m) = get(j, "match") else {
+            return err(format!("rule {id}: no match"));
+        };
+        let match_ = ProcessMatch::from_json(m)?;
+        if let Some(k) = NON_DELEGATE_KEYS.iter().find(|k| get(j, k).is_some_and(|v| !v.is_null() && *v != Value::Bool(false))) {
+            return err(format!("rule {id}: a delegate rule has no other action ({k})"));
+        }
+        let unspoofable = match_.requirement.is_some()
+            || (match_.team_id.is_some() && match_.identifier.is_some())
+            || match_.path_prefix.as_deref().is_some_and(|p| !p.ends_with('/') && !p.ends_with('\\'));
+        if !unspoofable {
+            return err(format!("rule {id}: delegate needs a matcher a module cannot spoof: requirement, or team_id with \
+                                identifier (macOS), or path_prefix naming one executable's exact path (Linux, Windows)"));
+        }
+        let mut tree = TreeScope::SelfOnly;
+        if let Some(t) = str_of(get(j, "tree")) {
+            match TreeScope::parse(t) {
+                Some(ts) => tree = ts,
+                None => return err(format!("rule {id}: unknown tree {t}")),
+            }
+        }
+        let d = get(j, "delegate");
+        let actions: Vec<String> = match get(d, "actions").and_then(|a| a.as_array()) {
+            Some(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+            None => return err(format!("rule {id}: delegate.actions lists what protection may do (pause, lower)")),
+        };
+        if actions.is_empty() {
+            return err(format!("rule {id}: delegate.actions is empty"));
+        }
+        for a in &actions {
+            if a == "stop" {
+                return err(format!("rule {id}: delegate.actions stop is not offered in this version (pause and lower only)"));
+            }
+            if !DELEGATE_ACTIONS.contains(&a.as_str()) {
+                return err(format!("rule {id}: unknown delegate action {a} (pause, lower)"));
+            }
+        }
+        Ok(Delegation { id, match_, tree, pause: actions.iter().any(|a| a == "pause"),
+                        lower: actions.iter().any(|a| a == "lower") })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtectionConfig {
@@ -576,7 +688,9 @@ pub struct ProtectionConfig {
     pub cooldown_backoff: f64,
     pub cooldown_max_s: f64,
     pub cooldown_window_s: f64,
-    /// GPU fleet jobs: never | when_no_gpu_protected | always.
+    /// GPU fleet jobs: never | when_no_gpu_protected | certified | always. `certified` (D50) lets cooperative fleet GPU
+    /// work run beside a protected GPU group only up to the duty level of a valid co-tenancy certificate for that
+    /// rule; without one it behaves as `when_no_gpu_protected`.
     pub gpu_jobs: String,
     /// moderate / strict_yield only: protect the frontmost app while the user is present, and a generic owner
     /// CPU stall signal over every unmatched owner process.
@@ -586,6 +700,9 @@ pub struct ProtectionConfig {
     /// 600 s; an owner may set less (`[node] max_pause_s`, 10 to 600).
     pub max_pause_s: f64,
     pub rules: Vec<ProtectionRule>,
+    /// Owner rules that delegate a process tree to protection (`delegate`), kept apart from the rules: they protect
+    /// nothing, they name fleet work.
+    pub delegations: Vec<Delegation>,
     /// Where each part came from ("central", "local"), for the status page.
     pub sources: Vec<String>,
 }
@@ -607,6 +724,7 @@ impl Default for ProtectionConfig {
             owner_stall_max: Some(0.15),
             max_pause_s: MAX_PAUSE_S,
             rules: vec![],
+            delegations: vec![],
             sources: vec![],
         }
     }
@@ -639,6 +757,9 @@ impl ProtectionConfig {
         }
         c.pause = bool_of(get(node, "pause")).unwrap_or(false);
         if let Some(g) = str_of(get(node, "gpu_jobs")) {
+            if !GPU_JOBS.contains(&g) {
+                return err(format!("node.gpu_jobs {g}: one of {}", GPU_JOBS.join(" | ")));
+            }
             c.gpu_jobs = g.to_string();
         }
         let im = get(node, "implicit");
@@ -685,15 +806,14 @@ impl ProtectionConfig {
         let raw = get(j, "rule")
             .or_else(|| get(j, "rules"))
             .and_then(|r| r.as_array());
-        c.rules = raw
-            .into_iter()
-            .flatten()
-            .map(ProtectionRule::from_json)
-            .collect::<Result<_, _>>()?;
+        let (deleg, plain): (Vec<&Value>, Vec<&Value>) =
+            raw.into_iter().flatten().partition(|r| r.get("delegate").is_some_and(|d| !d.is_null()));
+        c.rules = plain.into_iter().map(ProtectionRule::from_json).collect::<Result<_, _>>()?;
+        c.delegations = deleg.into_iter().map(Delegation::from_json).collect::<Result<_, _>>()?;
         let mut seen = HashSet::new();
-        for r in &c.rules {
-            if !seen.insert(r.id.as_str()) {
-                return err(format!("duplicate rule id {}", r.id));
+        for id in c.rules.iter().map(|r| &r.id).chain(c.delegations.iter().map(|d| &d.id)) {
+            if !seen.insert(id.as_str()) {
+                return err(format!("duplicate rule id {id}"));
             }
         }
         c.sources = vec![source.to_string()];
@@ -705,11 +825,20 @@ impl ProtectionConfig {
     pub fn union(&self, o: &ProtectionConfig) -> ProtectionConfig {
         let gpu_rank = |s: &str| match s {
             "always" => 0,
-            "when_no_gpu_protected" => 1,
-            "never" => 2,
-            _ => 1,
+            "certified" => 1,
+            "when_no_gpu_protected" => 2,
+            "never" => 3,
+            _ => 2,
         };
-        let ids: HashSet<&str> = self.rules.iter().map(|r| r.id.as_str()).collect();
+        let ids: HashSet<&str> = self.rules.iter().map(|r| r.id.as_str()).chain(self.delegations.iter().map(|d| d.id.as_str())).collect();
+        let mut delegations = self.delegations.clone();
+        delegations.extend(o.delegations.iter().map(|d| {
+            let mut d = d.clone();
+            if ids.contains(d.id.as_str()) {
+                d.id.push_str("@local");
+            }
+            d
+        }));
         let mut rules = self.rules.clone();
         rules.extend(o.rules.iter().map(|r| {
             let mut r = r.clone();
@@ -744,6 +873,7 @@ impl ProtectionConfig {
             },
             max_pause_s: self.max_pause_s.min(o.max_pause_s),
             rules,
+            delegations,
             sources: self.sources.iter().chain(&o.sources).cloned().collect(),
         }
     }
@@ -751,13 +881,18 @@ impl ProtectionConfig {
     /// The status page's view of the config.
     pub fn summary(&self) -> Value {
         let ids: Vec<String> = self.rules.iter().map(|r| r.id.clone()).collect();
-        Value::Object(obj([
+        let delegated: Vec<String> = self.delegations.iter().map(|d| d.id.clone()).collect();
+        let mut o = obj([
             ("mode", Value::from(self.mode.as_str())),
             ("pause", Value::from(self.pause)),
             ("memory", self.memory.to_json()),
             ("rules", strings(&ids)),
             ("sources", strings(&self.sources)),
-        ]))
+        ]);
+        if !delegated.is_empty() {
+            o.insert("delegations".into(), strings(&delegated));
+        }
+        Value::Object(o)
     }
 }
 

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::signals::{Front, FrontReading, ProcCounters};
+use crate::sources::{PersonReader, PersonReading, RelayedSource};
 
 pub const PROTOCOL: u32 = 2;
 /// How often a helper reports.
@@ -172,6 +173,26 @@ pub struct Report {
     pub gpu_unknown: Vec<i32>,
     /// Every live process's resource use (macOS, where only the process's own account may read it).
     pub usage: Vec<Usage>,
+    /// The owner sources the service asked this helper to read (`Watch`), as counts and phase states: never the
+    /// files' contents (D51).
+    #[serde(default)]
+    pub sources: Vec<SourceReport>,
+}
+
+/// One owner source as a helper read it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceReport {
+    pub key: String,
+    #[serde(flatten)]
+    pub reading: PersonReading,
+}
+
+/// The service's message to a helper: the owner sources under this person's home it should read (sent when the
+/// list changes and on every new connection).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Watch {
+    pub v: u32,
+    pub watch: Vec<RelayedSource>,
 }
 
 /// Who a helper speaks for, as the transport proved it.
@@ -186,6 +207,7 @@ pub enum Principal {
 #[derive(Debug)]
 struct Entry {
     at: Instant,
+    sources: HashMap<String, PersonReading>,
     procs: HashMap<(i32, u64), ProcClaim>,
     idle_s: Option<f64>,
     front: Option<FrontReading>,
@@ -194,10 +216,51 @@ struct Entry {
     usage: HashMap<i32, Track>,
 }
 
-/// The system service's view of its helpers' reports.
+/// A request the system service sends a person's helper: act on one of the person's processes that an owner rule
+/// delegated to host protection (docs/design/workloads.md, "Delegated external processes"). The helper checks that the
+/// process is still the one named (its start time) and acts only with these verbs; the kernel lets it act only on its
+/// own person's processes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Act {
+    pub pid: i32,
+    pub start_us: u64,
+    /// `pause`, `resume`, `lower` or `restore`.
+    pub op: String,
+}
+
+/// The verbs a helper carries out.
+pub const ACT_OPS: [&str; 4] = ["pause", "resume", "lower", "restore"];
+
+/// How the service writes to one helper's connection.
+type Relay = Box<dyn Fn(&str) -> bool + Send>;
+
+/// A callback for source changes a helper reported (the event path, `events.rs`): the keys and when the helper saw
+/// the change.
+pub type SourceHook = Box<dyn Fn(Vec<String>, f64) + Send + Sync>;
+
+/// The owner sources the helpers should read, with a generation that bumps on every change.
 #[derive(Debug, Default)]
+struct Wanted {
+    gen: u64,
+    sources: Vec<RelayedSource>,
+}
+
+/// The system service's view of its helpers' reports.
+#[derive(Default)]
 pub struct SessionHub {
     entries: Mutex<HashMap<Principal, Entry>>,
+    relays: Mutex<HashMap<Principal, Relay>>,
+    wanted: Mutex<Wanted>,
+    wanted_cv: std::sync::Condvar,
+    hook: Mutex<Option<SourceHook>>,
+    /// Who each principal is (an account name, where the transport proves it).
+    accounts: Mutex<HashMap<Principal, Option<String>>>,
+}
+
+impl std::fmt::Debug for SessionHub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionHub").finish_non_exhaustive()
+    }
 }
 
 impl SessionHub {
@@ -224,6 +287,7 @@ impl SessionHub {
         let mut all = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let e = all.entry(who).or_insert_with(|| Entry {
             at: Instant::now(),
+            sources: HashMap::new(),
             procs: HashMap::new(),
             idle_s: None,
             front: None,
@@ -261,6 +325,67 @@ impl SessionHub {
                 e.usage.entry(u.pid).or_default().push(now, u);
             }
         }
+        // owner sources: only the ones this principal was asked to read; a phase change wakes the event path
+        let asked: HashSet<String> = self.asked(who).into_iter().map(|s| s.key).collect();
+        let mut changed: Vec<String> = vec![];
+        let mut t = 0.0f64;
+        for sr in r.sources {
+            if !asked.contains(&sr.key) || !sr.reading.event_t.is_finite() {
+                continue;
+            }
+            let before = e.sources.insert(sr.key.clone(), sr.reading);
+            if before.is_none_or(|b| b.on != sr.reading.on || b.readable != sr.reading.readable) {
+                changed.push(sr.key);
+                t = t.max(sr.reading.event_t);
+            }
+        }
+        e.sources.retain(|k, _| asked.contains(k));
+        drop(all);
+        if !changed.is_empty() {
+            if let Some(h) = self.hook.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                h(changed, if t > 0.0 { t } else { crate::sources::wall_now() });
+            }
+        }
+    }
+
+    /// Where the event path hears of source changes a helper reports.
+    pub fn set_source_hook(&self, hook: SourceHook) {
+        *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Who a connected principal is (the transport's proof: a uid's account name; None: not proven).
+    pub fn set_account(&self, who: Principal, account: Option<String>) {
+        self.accounts.lock().unwrap_or_else(|e| e.into_inner()).insert(who, account);
+    }
+
+    /// The sources a principal should read: those for any person, and those for its own account.
+    pub fn asked(&self, who: Principal) -> Vec<RelayedSource> {
+        if matches!(who, Principal::Session(_)) {
+            return self.all_wanted(); // the pipe proves the session, not the account
+        }
+        let account = self.accounts.lock().unwrap_or_else(|e| e.into_inner()).get(&who).cloned().flatten();
+        let w = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        w.sources
+            .iter()
+            .filter(|s| s.account.is_none() || (account.is_some() && s.account == account))
+            .cloned()
+            .collect()
+    }
+
+    /// Every source the helpers should read (a transport that cannot prove the account sends them all; the helper
+    /// keeps its own).
+    pub fn all_wanted(&self) -> Vec<RelayedSource> {
+        self.wanted.lock().unwrap_or_else(|e| e.into_inner()).sources.clone()
+    }
+
+    /// The wanted generation, waiting up to `timeout` for it to move past `seen`.
+    pub fn wanted_after(&self, seen: u64, timeout: Duration) -> u64 {
+        let w = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if w.gen != seen {
+            return w.gen;
+        }
+        let (w, _) = self.wanted_cv.wait_timeout(w, timeout).unwrap_or_else(|e| e.into_inner());
+        w.gen
     }
 
     /// A helper's connection ended.
@@ -269,6 +394,34 @@ impl SessionHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&who);
+        self.relays.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
+        self.accounts.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
+        if let Some(h) = self.hook.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            // its sources read as unreadable now: let the event path see it
+            let keys: Vec<String> = self.wanted.lock().unwrap_or_else(|e| e.into_inner())
+                .sources.iter().map(|s| s.key.clone()).collect();
+            if !keys.is_empty() {
+                h(keys, crate::sources::wall_now());
+            }
+        }
+    }
+
+    /// How to reach `who`'s helper with a request (its connection's write half).
+    pub fn register_relay(&self, who: Principal, relay: impl Fn(&str) -> bool + Send + 'static) {
+        self.relays.lock().unwrap_or_else(|e| e.into_inner()).insert(who, Box::new(relay));
+    }
+
+    /// Ask the helper of the person whose process this is to act on it (`ACT_OPS`). None: no helper described the
+    /// process (or it has no connection to write to); otherwise whether the request was sent (the helper carries it
+    /// out at once; the service sees the effect on its next reading).
+    pub fn act(&self, pid: i32, start_us: u64, op: &str) -> Option<bool> {
+        if !ACT_OPS.contains(&op) {
+            return Some(false);
+        }
+        let who = self.fresh(|e| e.iter().find(|(_, x)| x.procs.contains_key(&(pid, start_us))).map(|(w, _)| *w))?;
+        let line = serde_json::to_string(&serde_json::json!({"act": Act { pid, start_us, op: op.into() }})).ok()? + "\n";
+        let relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+        relays.get(&who).map(|r| r(&line))
     }
 
     /// What a helper said about a process.
@@ -318,6 +471,30 @@ impl SessionHub {
     }
 }
 
+impl PersonReader for SessionHub {
+    fn want(&self, sources: Vec<RelayedSource>) {
+        let mut w = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if w.sources != sources {
+            w.sources = sources;
+            w.gen += 1;
+            self.wanted_cv.notify_all();
+        }
+    }
+
+    /// The newest readable reading of a source among the fresh helpers (a phase on anywhere wins: never looser).
+    fn reading(&self, key: &str) -> Option<PersonReading> {
+        self.fresh(|e| {
+            let rs: Vec<PersonReading> = e.values().filter_map(|x| x.sources.get(key).copied()).collect();
+            let readable: Vec<&PersonReading> = rs.iter().filter(|r| r.readable).collect();
+            if readable.is_empty() {
+                return rs.first().copied();
+            }
+            let on = readable.iter().find(|r| r.on);
+            Some(**on.unwrap_or_else(|| readable.iter().max_by(|a, b| a.event_t.total_cmp(&b.event_t)).unwrap()))
+        })
+    }
+}
+
 /// The helper's side: which processes it has described on the current connection.
 #[derive(Debug, Default)]
 pub struct Described(HashSet<(i32, u64)>);
@@ -358,6 +535,7 @@ mod tests {
             gpu_busy: HashMap::from([(10, 0.25)]),
             gpu_unknown: vec![11],
             usage: vec![usage(10, 1000, 1.5, 0.25)],
+            sources: vec![],
         };
         let line = serde_json::to_string(&r).unwrap();
         assert!(!line.contains('\n'));
@@ -391,6 +569,7 @@ mod tests {
                 gpu_busy: HashMap::from([(10, 0.5), (20, 0.9)]),
                 gpu_unknown: vec![20],
                 usage: vec![usage(10, 1000, 2.0, 0.5), usage(20, 5, 9.0, 9.0)],
+                sources: vec![],
             },
             owns,
         );
@@ -518,5 +697,34 @@ mod tests {
             d.is_new((1, 10)),
             "a process seen again after it was dropped is described again"
         );
+    }
+}
+
+#[cfg(test)]
+mod act_tests {
+    use super::*;
+
+    /// The service sends a request only to the helper that described the process, on its connection, and only with
+    /// the four verbs.
+    #[test]
+    fn a_request_goes_to_the_helper_that_described_the_process() {
+        let hub = SessionHub::new();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let s2 = sent.clone();
+        hub.register_relay(Principal::Uid(501), move |l: &str| {
+            s2.lock().unwrap().push(l.to_string());
+            true
+        });
+        hub.accept(Principal::Uid(501), Report { v: PROTOCOL, live: vec![(77, 5)], procs: vec![ProcClaim {
+            pid: 77, start_us: 5, path: Some("/opt/app".into()), argv: None }], ..Default::default() }, |_, _| true);
+        assert_eq!(hub.act(77, 5, "pause"), Some(true));
+        assert_eq!(hub.act(77, 6, "pause"), None, "a process no helper described");
+        assert_eq!(hub.act(77, 5, "stop"), Some(false), "no other verb");
+        let lines = sent.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(lines[0].trim()).unwrap();
+        assert_eq!(v["act"], serde_json::json!({"pid": 77, "start_us": 5, "op": "pause"}));
+        hub.gone(Principal::Uid(501));
+        assert_eq!(hub.act(77, 5, "pause"), None);
     }
 }

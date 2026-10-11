@@ -17,6 +17,7 @@ import functools
 import hashlib
 import hmac
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -485,6 +486,23 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": "the database is busy; reload", "actor": actor}, 503)
         return render(request, "groups.html", {**d, "actor": actor})
 
+    @app.get("/sites", response_class=HTMLResponse)
+    async def sites_list(request: Request):
+        """Sites: nodes that share one internet line, their uplink budgets and holds, and suggested sites."""
+        actor = who(request)
+        d = await drill(views.sites_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy; reload", "actor": actor}, 503)
+        return render(request, "sites.html", {**d, "actor": actor})
+
+    @app.get("/sites/{ref}", response_class=HTMLResponse)
+    async def site_detail(ref: str, request: Request):
+        actor = who(request)
+        d = await drill(views.site_page, ref)
+        if d is None:
+            return render(request, "error.html", {"message": f"no site {ref} (or the database is busy)", "actor": actor}, 404)
+        return render(request, "site.html", {**d, "actor": actor})
+
     @app.get("/groups/{gid}", response_class=HTMLResponse)
     async def group_detail(gid: str, request: Request):
         actor = who(request)
@@ -520,7 +538,19 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         d["panels"] = await panels("node.detail.panel", request, actor,
                                    {"node": {"id": nid, "node_id": nid, "online": d["n"]["online"]}})
+        r = await coordinator_json("GET", f"/api/v1/workloads?node={nid}", actor)
+        d["workloads"] = (r.json() if r.status_code == 200 else {}).get("workloads") or []
+        d["listener_focus"] = await listener_focus(nid, request.query_params.get("listener"), actor)
         return render(request, "node.html", {**d, "actor": actor})
+
+    async def listener_focus(nid: str, key: str | None, actor: str) -> str | None:
+        """A listener's detail on the node page (?listener=<module>/<listener>): looking at it asks the node for its top
+        client addresses for 10 minutes (oarbankd's GET /api/v1/nodes/{node}/listeners/{key})."""
+        if not key:
+            return None
+        from urllib.parse import quote
+        await coordinator_json("GET", f"/api/v1/nodes/{quote(nid)}/listeners/{quote(key, safe='/')}", actor)
+        return key
 
     async def node_settings_ctx(nid: str, request: Request, errors: list | None = None, form=None):
         """The node's Settings tab; after a refused save, the refusals (an error summary per section, each beside its
@@ -650,6 +680,15 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         if d is None:
             return render(request, "error.html", {"message": f"node {nid} not found (or the database is busy)", "actor": actor}, 404)
         return render(request, "protection.html", {**d, "actor": actor})
+
+    @app.get("/protection/ab/{run_id}", response_class=HTMLResponse)
+    async def ab_run_page(run_id: str, request: Request):
+        """A harness run: its blocks, interval and decision (docs/design/gpu-cotenancy.md)."""
+        actor = who(request)
+        d = await drill(views.ab_run_page, run_id)
+        if d is None:
+            return render(request, "error.html", {"message": f"run {run_id} not found (or the database is busy)", "actor": actor}, 404)
+        return render(request, "ab_run.html", {**d, "actor": actor})
 
     @app.get("/frag/nodes/{nid}/protection/preview", response_class=HTMLResponse)
     async def node_protection_preview(nid: str, request: Request):
@@ -902,6 +941,13 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         d = await drill(views.agent_builds) or {"builds": [], "channel": {}, "versions": {}, "nodes": [], "canary_ready": False}
         return render(request, "agent.html", {**d, "actor": actor})
 
+    @app.get("/updates", response_class=HTMLResponse)
+    async def updates_page(request: Request):
+        """Fleet updates (docs/design/fleet-updates.md, D62): the coordinator, releases, the active rollout, every node."""
+        actor = who(request)
+        r = await coordinator_json("GET", "/api/v1/updates", actor)
+        return render(request, "updates.html", {"u": r.json() if r.status_code == 200 else None, "actor": actor})
+
     @app.get("/modules/{name}", response_class=HTMLResponse)
     async def module_overview(name: str, request: Request):
         actor = who(request)
@@ -1064,6 +1110,21 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
                                                         "secrets": (r.json() if r.status_code == 200 else {}).get("secrets") or [],
                                                         "actor": actor})
 
+    @app.get("/modules/{name}/workloads", response_class=HTMLResponse)
+    async def module_workloads(name: str, request: Request):
+        """The module's workloads (docs/design/workloads.md): each one's assignments per node with seat, fence, lease,
+        state, last error and log tail, the protection actions on it, and Assign / Unassign / Restart."""
+        actor = who(request)
+        await refresh_catalog(actor)
+        man = catalog.manifest(name)
+        if man is None:
+            return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
+        r = await coordinator_json("GET", f"/api/v1/workloads?module={name}", actor)
+        rows = (r.json() if r.status_code == 200 else {}).get("workloads") or []
+        nodes = await drill(lambda rd: rd.q("SELECT node_id, hostname FROM nodes WHERE lifecycle='ready' ORDER BY hostname")) or []
+        return render(request, "module_workloads.html", {"name": name, "man": man, "tab": "workloads", "rows": rows,
+                                                          "nodes": nodes, "actor": actor})
+
     @app.get("/modules/{name}/nodes", response_class=HTMLResponse)
     async def module_nodes(name: str, request: Request):
         """The module's Nodes matrix (docs/design/host-tools.md): per node and host tool request, what the node found, the
@@ -1075,8 +1136,11 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": f"no module {name}", "actor": actor}, 404)
         r = await coordinator_json("GET", f"/api/v1/tools?module={name}", actor)
         doc = r.json() if r.status_code == 200 else None
+        from ..coordinator import listeners           # its inbound listeners per node (docs/design/inbound-listeners.md)
+        lrows = await drill(listeners.module_rows, name) if man.sandbox.net.inbound else []
         return render(request, "module_nodes.html", {"name": name, "man": man, "tab": "nodes", "actor": actor,
-                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200]})
+                                                      "matrix": (doc or {}).get("module"), "error": None if doc else r.text[:200],
+                                                      "listener_rows": lrows or []})
 
     @app.get("/modules/{name}/health", response_class=HTMLResponse)
     async def module_page(name: str, request: Request):
@@ -1179,6 +1243,19 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             if up.status_code != 200:
                 return back(return_to, f"upload failed: {up.text[:200]}", "bad")
             form = {**{k: form.get(k) for k in form.keys() if k != "archive"}, "p.sha256": up.json()["sha256"]}
+        if op == "updates.import" and hasattr(form, "getlist"):
+            man = None                                # each file staged on oarbankd; the operation names the manifest
+            for f in form.getlist("files"):
+                if not (getattr(f, "read", None) and f.filename):
+                    continue
+                up = await http.post("/api/v1/updates/uploads", content=await f.read(), headers=state.coordinator_headers(actor))
+                if up.status_code != 200:
+                    return back(return_to, f"upload of {Path(f.filename).name} failed: {up.text[:200]}", "bad")
+                if re.fullmatch(r"oarbank-fleet-.+\.json", Path(f.filename).name):
+                    man = up.json()["sha256"]
+            if man is None:
+                return back(return_to, "choose the release's oarbank-fleet-<version>.json with its packages", "bad")
+            form = {**{k: form.get(k) for k in form.keys() if k != "files"}, "p.manifest": man}
         if op == "vendor.metadata.upload" and hasattr(form, "getlist"):
             files = {}
             for f in form.getlist("metadata"):
@@ -1216,7 +1293,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             if any(c.get("scope") in ("fleet", "group", "campaign") for c in cs) or len({c.get("scope_id") for c in cs
                                                                              if c.get("scope") == "node"}) > 1:
                 tier = "T2" if tier in ("T0", "T1") else tier
-        if op in ("settings.promote", "nodes.label", "groups.create") and tier in ("T0", "T1"):
+        if op in ("settings.promote", "nodes.label", "groups.create", "sites.create", "sites.assign", "sites.update") \
+                and tier in ("T0", "T1"):
             tier = "T2"                                   # these always show who they reach before anything changes
         if tier in ("T2", "T3"):
             r = await http.post(f"/api/v1/ops/{op}", json={"target": target, "params": params, "dry_run": True}, headers=headers)

@@ -412,8 +412,15 @@ def _pinned_open(db, nid) -> list[int]:
     return [r["job_id"] for r in db.q("SELECT job_id FROM jobs WHERE target_node=? AND state IN ('pending','leased')", (nid,))]
 
 
+def _retire_impact(db, r) -> dict:
+    from . import listeners
+    out = {"live_attempts": _live_on(db, _nid(db, r)), "pinned_jobs_cancelled": len(_pinned_open(db, _nid(db, r)))}
+    warn = listeners.retire_warning(db, _nid(db, r))          # an offline node cannot release its router mappings
+    return {**out, "warning": warn} if warn else out
+
+
 @handler("nodes.retire", target_type="node", snapshot=_node_snap, name=lambda db, r: _node(db, r.target)["hostname"],
-         impact=lambda db, r: {"live_attempts": _live_on(db, _nid(db, r)), "pinned_jobs_cancelled": len(_pinned_open(db, _nid(db, r)))})
+         impact=_retire_impact)
 def _retire(db, req):
     nid = _nid(db, req)
     db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL WHERE node_id=?", (nid,))
@@ -511,6 +518,36 @@ def _set_mode(db, req):
 def _probe_now(db, req):
     protection.request_probe(db, _nid(db, req), req.actor)
     return {"run_probe": True}
+
+
+# ------------------------------------------------------------------ co-tenancy: the on/off harness (D52)
+
+def _ab(fn):
+    from . import cotenancy
+    try:
+        return fn(cotenancy)
+    except cotenancy.CotenancyError as e:
+        raise core.ApiError(422, "bad_ab_run", str(e))
+
+
+@handler("protection.ab.start", target_type="node", snapshot=_node_snap,
+         impact=lambda db, r: _ab(lambda c: c.plan(db, _nid(db, r), r.params)))
+def _ab_start(db, req):
+    """Ask a node for a paired on/off run over one protected rule (docs/design/gpu-cotenancy.md)."""
+    return _ab(lambda c: c.start(db, _nid(db, req), req.params, req.actor, req.reason))
+
+
+@handler("protection.ab.abort", target_type="ab_run", snapshot=lambda db, r: db.one(
+    "SELECT run_id, state, node_id FROM ab_runs WHERE run_id=?", (r.target,)))
+def _ab_abort(db, req):
+    return _ab(lambda c: c.abort(db, str(req.target), req.actor, req.reason))
+
+
+@handler("protection.ab.sweep", target_type="node", snapshot=_node_snap,
+         impact=lambda db, r: _ab(lambda c: {**c.plan(db, _nid(db, r), {**r.params, "duty": c.levels_of(r.params)[0]}),
+                                             "levels": c.levels_of(r.params)}))
+def _ab_sweep(db, req):
+    return _ab(lambda c: c.sweep(db, _nid(db, req), req.params, req.actor, req.reason))
 
 
 # ------------------------------------------------------------------ alerts
@@ -1303,6 +1340,195 @@ def _agent_sign(db, req):
     return _agent_op(fn)(db, req)
 
 
+# ------------------------------------------------------------------ fleet updates (docs/design/fleet-updates.md)
+
+def _updates(fn):
+    """A fleet-update handler: the module's refusals become 409 `update`."""
+    def run(db, req):
+        from . import fleetupdates, rollouts
+        try:
+            return fn(db, req, fleetupdates, rollouts)
+        except (fleetupdates.UpdateError, rollouts.RolloutError) as e:
+            raise core.ApiError(409, "update", str(e))
+    return run
+
+
+def _release_ref(db, req) -> str:
+    """The release an operation names (its target or params.version), else the newest ready one."""
+    from . import fleetupdates
+    v = req.target or req.params.get("version")
+    if not v:
+        rels = [r for r in fleetupdates.releases(db) if r["state"] == "ready"]
+        if not rels:
+            raise core.ApiError(404, "not_found", "no fleet release is ready (oarbank update import or fetch)")
+        v = rels[0]["version"]
+    if not db.one("SELECT 1 FROM fleet_releases WHERE version=?", (v,)):
+        raise core.ApiError(404, "not_found", f"no fleet release {v} is imported")
+    req.target = v
+    return v
+
+
+def _rollout_ref(db, req) -> dict:
+    from . import rollouts
+    try:
+        r = rollouts.resolve_target(db, req.target or req.params.get("rollout"))
+    except rollouts.RolloutError as e:
+        raise core.ApiError(404, "not_found", str(e))
+    req.target = r["rollout_id"]
+    return r
+
+
+def _updates_snap(db, req):
+    from . import rollouts
+    a = rollouts.active(db)
+    return {"rollout": {k: a[k] for k in ("rollout_id", "version", "state", "ring")} if a else None}
+
+
+@handler("updates.import", target_type="fleet_release", atomic=False)
+def _updates_import(db, req):
+    def fn(db, req, F, RO):
+        if req.params.get("manifest"):
+            out = F.import_staged(db, req.params["manifest"], req.actor)
+        elif req.params.get("dir"):
+            out = F.import_dir(db, req.params["dir"], req.actor)
+        else:
+            raise F.UpdateError("params: dir (a directory on the coordinator) or manifest (a staged manifest's sha256)")
+        req.target = out["version"]
+        return out
+    return _updates(fn)(db, req)
+
+
+@handler("updates.fetch", target_type="fleet_release", atomic=False)
+def _updates_fetch(db, req):
+    def fn(db, req, F, RO):
+        out = F.fetch(db, req.target or req.params.get("version") or "latest", req.actor)
+        req.target = out["version"]
+        return out
+    return _updates(fn)(db, req)
+
+
+@handler("updates.sign", target_type="fleet_release")
+def _updates_sign(db, req):
+    def fn(db, req, F, RO):
+        v = _release_ref(db, req)
+        return F.attach_signature(db, v, req.params.get("statement") or "", req.params.get("signature") or "", req.actor)
+    return _updates(fn)(db, req)
+
+
+def _updates_start_impact(db, r):
+    from . import rollouts
+    try:
+        return rollouts.plan_impact(rollouts.plan(db, _release_ref(db, r), r.params))
+    except rollouts.RolloutError as e:
+        return {"refused": str(e)}
+
+
+@handler("updates.start", target_type="rollout", impact=_updates_start_impact, snapshot=_updates_snap,
+         name=lambda db, r: r.target or "")
+def _updates_start(db, req):
+    def fn(db, req, F, RO):
+        v = _release_ref(db, req)
+        out = RO.start(db, v, req.actor, req.params)
+        return {"rollout_id": out["rollout_id"], "version": v, "state": out["state"], "ring": out["ring"]}
+    return _updates(fn)(db, req)
+
+
+def _rollout_op(action):
+    def apply(db, req):
+        def fn(db, req, F, RO):
+            r = _rollout_ref(db, req)
+            if action == "halt":
+                out = RO.halt(db, r, req.reason or f"halted by {req.actor}", req.actor)
+            else:
+                out = getattr(RO, action)(db, r, req.actor)
+            return {"rollout_id": out["rollout_id"], "state": out["state"]}
+        return _updates(fn)(db, req)
+    return apply
+
+
+for _a in ("pause", "resume", "halt"):
+    handler(f"updates.{_a}", target_type="rollout", snapshot=_updates_snap)(_rollout_op(_a))
+
+
+def _rollback_impact(db, r):
+    from . import rollouts
+    try:
+        ro = rollouts.resolve_target(db, r.target or r.params.get("rollout"))
+    except rollouts.RolloutError as e:
+        return {"refused": str(e)}
+    moved = rollouts.rollback_plan(db, ro)
+    return {"rollout": ro["rollout_id"], "release": ro["version"], "state": ro["state"],
+            "nodes": [{"hostname": m["hostname"], "back_to": m["from_version"], "state": m["state"]} for m in moved],
+            "then": "each node reinstalls the release it ran (the package its runner kept, or that release's package)"}
+
+
+@handler("updates.rollback", target_type="rollout", impact=_rollback_impact, snapshot=_updates_snap,
+         name=lambda db, r: r.target or "")
+def _updates_rollback(db, req):
+    def fn(db, req, F, RO):
+        r = _rollout_ref(db, req)
+        out = RO.rollback(db, r, req.actor, req.reason or f"rolled back by {req.actor}")
+        return {"rollout_id": out["rollout_id"], "state": out["state"]}
+    return _updates(fn)(db, req)
+
+
+@handler("updates.skip", target_type="node")
+def _updates_skip(db, req):
+    def fn(db, req, F, RO):
+        nid = _nid(db, req)
+        req.target = nid
+        return RO.skip(db, nid, req.actor)
+    return _updates(fn)(db, req)
+
+
+def _update_value(db, req, key: str, value):
+    """Write a node's update_hold or update_pin (their own operations own those settings: R.Setting.writer)."""
+    from .settings import registry as R, store
+    nid = _nid(db, req)
+    req.target = nid
+    try:
+        v = R.check(key, value) if value is not None else None
+    except R.SettingError as e:
+        raise core.ApiError(400, "bad_params", e.detail)
+    rev = store.next_rev(db)
+    if v is None:
+        gone = store.delete(db, "node", nid, "", key)
+        db.event(f"{key}_lifted", actor=req.actor, node_id=nid, reason=req.reason)
+        return {"node_id": nid, key: None, "was_set": gone, "rev": rev}
+    store.put(db, "node", nid, "", key, v, req.actor, rev, req.reason)
+    db.event(f"{key}_set", actor=req.actor, node_id=nid, reason=json.dumps(v)[:300])
+    return {"node_id": nid, key: v, "rev": rev}
+
+
+def _hold_snap(key):
+    return lambda db, req: {key: (db.one("SELECT value_json FROM setting_values WHERE scope='node' AND key=? AND scope_id IN "
+                                         "(SELECT node_id FROM nodes WHERE node_id=? OR hostname=?)", (key, req.target, req.target))
+                                  or {}).get("value_json")}
+
+
+@handler("updates.hold", target_type="node", snapshot=_hold_snap("update_hold"))
+def _updates_hold(db, req):
+    return _update_value(db, req, "update_hold", {"reason": req.params.get("reason") or req.reason or "",
+                                                  "until": req.params.get("until")})
+
+
+@handler("updates.unhold", target_type="node", snapshot=_hold_snap("update_hold"))
+def _updates_unhold(db, req):
+    return _update_value(db, req, "update_hold", None)
+
+
+@handler("updates.pin", target_type="node", snapshot=_hold_snap("update_pin"))
+def _updates_pin(db, req):
+    return _update_value(db, req, "update_pin", {"version": req.params.get("version") or "",
+                                                 "reason": req.params.get("reason") or req.reason or "",
+                                                 "until": req.params.get("until")})
+
+
+@handler("updates.unpin", target_type="node", snapshot=_hold_snap("update_pin"))
+def _updates_unpin(db, req):
+    return _update_value(db, req, "update_pin", None)
+
+
 # ------------------------------------------------------------------ coordinator builds
 
 def _cb_impact(db, r):
@@ -1917,6 +2143,125 @@ def _sign_statement(db, req):
         raise core.ApiError(422, "bad_statement_signature", str(e))
 
 
+# ------------------------------------------------------------------ inbound listeners (docs/design/inbound-listeners.md)
+
+def _listener_req(db, req) -> tuple[dict, str, dict]:
+    """(the target node, the listener key `<module>/<listener>`, the entry's fields)."""
+    node = _node(db, req.target)
+    p = dict(req.params or {})
+    key = p.pop("key", None)
+    if not isinstance(key, str) or not key:
+        raise core.ApiError(400, "missing_key", "params.key: the listener as <module>/<listener>")
+    return node, key.strip(), p
+
+
+def _listener_err(fn):
+    def run(*a, **kw):
+        from . import listeners
+        try:
+            return fn(*a, **kw)
+        except listeners.ListenerError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+    return run
+
+
+def _listener_snap(db, req):
+    from . import listeners
+    n = db.one("SELECT node_id, listeners_disabled FROM nodes WHERE node_id=? OR hostname=?", (req.target, req.target))
+    key = (req.params or {}).get("key")
+    return {"fleet_disabled": bool(db.get_state(listeners.FLEET_DISABLED, False)),
+            **({"node_disabled": bool(n["listeners_disabled"]),
+                "entry": listeners.node_config(db, n["node_id"]).get(key) if key else None} if n else {})}
+
+
+@_listener_err
+def _configure_impact(db, r):
+    from . import listeners
+    node, key, p = _listener_req(db, r)
+    entry, lst, ver = listeners.check_entry(db, node, key, p)
+    res = listeners.resolve(entry, lst)
+    limits = {k: getattr(lst, k) for k in listeners.LIMIT_KEYS}
+    eff = {k: res["limits"].get(k, v) for k, v in limits.items()}
+    lim = (f"at most {eff['max_conns']:g} connections, {eff['max_conns_per_ip']:g} per address, "
+           f"{eff['new_conns_per_ip_per_s']:g} new a second per address, idle {eff['idle_timeout_s']:g} s"
+           + (f", {eff['max_bytes_per_s']:g} bytes a second" if eff.get("max_bytes_per_s") else ""))
+    lowered = ", ".join(f"{k} {res['limits'][k]:g} (module {limits[k]:g})" if limits[k] is not None
+                        else f"{k} {res['limits'][k]:g} (module: none)" for k in res["limits"])
+    approved = listeners.granted(db, node["node_id"], key)
+    then = ("the node gets a new statement with this entry"
+            + (f"; sign the node statement (oarbank node sign {node['hostname']}) before the node applies it" if _signing() else "")
+            if approved else f"kept, but not in the node statement until the sandbox grants of {key.split('/')[0]} {ver} are "
+                             f"approved (oarbank module approve {key.split('/')[0]}@{ver})")
+    return {"node": f"{node['hostname']} ({node['node_id']})", "module": f"{key.split('/')[0]} {ver}", "listener": key,
+            "external_port": res["external_port"] or "the internal port", "fallback": res["fallback"],
+            "mapping": res["mapping"], "ipv6": res["ipv6"], "bind": res["bind"], "internal_port": res["internal_port"],
+            "limits": lim, "limits_lowered": lowered or None, "allow": res["allow"] or "everyone",
+            "replaces": listeners.describe_entry(key, listeners.resolve(listeners.node_config(db, node["node_id"])[key], lst))
+            if key in listeners.node_config(db, node["node_id"]) else None,
+            "then": then}
+
+
+@handler("listeners.configure", target_type="node", impact=_configure_impact, snapshot=_listener_snap)
+@_listener_err
+def _listeners_configure(db, req):
+    """Assign a module's inbound listener to a node, or change its entry (fields given as null return to their default;
+    `limits` and `allow` replace what was set). The node's statement is rebuilt; in signing mode the owner signs it before
+    the node applies it."""
+    from . import listeners, statements
+    node, key, p = _listener_req(db, req)
+    entry, lst, ver = listeners.check_entry(db, node, key, p)
+    listeners.set_entry(db, node["node_id"], key, entry)
+    changed = statements.refresh(db, [node["node_id"]])
+    res = listeners.resolve(entry, lst)
+    db.event("listener_configured", actor=req.actor, node_id=node["node_id"], module=key.split("/")[0],
+             reason=listeners.describe_entry(key, res)[:300])
+    return {"node": node["node_id"], "key": key, "entry": res, "statements": changed,
+            "in_statement": listeners.granted(db, node["node_id"], key)}
+
+
+@handler("listeners.remove", target_type="node", snapshot=_listener_snap)
+def _listeners_remove(db, req):
+    """Remove a listener's entry from a node: the new statement no longer lists it, and the agent closes the listener
+    and removes its router mapping once it applies it (a key that is not configured: nothing to do)."""
+    from . import listeners, statements
+    node, key, _ = _listener_req(db, req)
+    if key not in listeners.node_config(db, node["node_id"]):
+        return {"node": node["node_id"], "key": key, "removed": False, "statements": []}
+    listeners.set_entry(db, node["node_id"], key, None)
+    changed = statements.refresh(db, [node["node_id"]])
+    db.event("listener_removed", actor=req.actor, node_id=node["node_id"], module=key.split("/")[0], reason=key)
+    return {"node": node["node_id"], "key": key, "removed": True, "statements": changed}
+
+
+def _kill_switch(on: bool):
+    def apply(db, req):
+        from . import listeners
+        if req.target in (None, "", "fleet", "all"):
+            db.set_state(listeners.FLEET_DISABLED, on)
+            db.event("listeners_disabled" if on else "listeners_resumed", actor=req.actor, reason=f"fleet: {req.reason or ''}".strip())
+            return {"scope": "fleet", "listeners_disabled": on}
+        nid = _nid(db, req)
+        db.x("UPDATE nodes SET listeners_disabled=? WHERE node_id=?", (1 if on else 0, nid))
+        db.event("listeners_disabled" if on else "listeners_resumed", actor=req.actor, node_id=nid, reason=req.reason)
+        return {"scope": "node", "node": nid, "listeners_disabled": on,
+                "fleet_disabled": bool(db.get_state(listeners.FLEET_DISABLED, False))}
+    return apply
+
+
+HANDLERS["listeners.disable"] = Handler(target_type="node", apply=_kill_switch(True), snapshot=_listener_snap)
+HANDLERS["listeners.resume"] = Handler(target_type="node", apply=_kill_switch(False), snapshot=_listener_snap)
+
+
+@handler("listeners.probe", target_type="node", snapshot=_node_snap)
+@_listener_err
+def _listeners_probe(db, req):
+    """Check a listener from outside now (Check now): a dial-back probe by a fleet node on another network, at the
+    external address the node's router reported; at most one a minute per listener."""
+    from . import listeners
+    node, key, _ = _listener_req(db, req)
+    return listeners.schedule(db, node["node_id"], key)
+
+
 def _origins_impact(db, r):
     from oarbank_sdk import origins as O
     from . import blobstore
@@ -2330,3 +2675,7 @@ def _register_catalogue():
 
 
 _register_catalogue()
+
+
+from . import workloads_ops as _workloads_ops  # noqa: E402,F401  (registers the workloads.* handlers)
+from . import sites_ops  # noqa: E402,F401  (the site operations register their handlers: docs/design/sites.md)

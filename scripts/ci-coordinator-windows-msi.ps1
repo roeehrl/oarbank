@@ -45,6 +45,7 @@ try {
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($code -ne 2) { throw "oarbank on the PATH does not pass the CLI's exit code back ($code)" }
+    $global:LASTEXITCODE = 0   # the 2 was expected and checked: it must not become the step's exit code
     # once setup has pointed Coordinator\current at a build, the PATH runs that build's CLI, arguments and exit code intact
     $current = Join-Path $env:ProgramW6432 'Oarbank\Coordinator\current'
     $fake = Join-Path $env:RUNNER_TEMP 'coordinator-current-fixture'
@@ -56,6 +57,7 @@ try {
         if ($LASTEXITCODE -ne 7 -or $out.Trim() -ne 'current build: join-code --label "a b"') {
             throw "oarbank on the PATH did not forward to Coordinator\current ($LASTEXITCODE): $out"
         }
+        $global:LASTEXITCODE = 0   # the 7 was expected and checked
     } finally {
         [IO.Directory]::Delete($current)
     }
@@ -71,3 +73,6 @@ if (Get-Command oarbank -ErrorAction SilentlyContinue) { throw 'oarbank still re
 if (-not (Test-Path $sentinel)) { throw 'uninstall deleted coordinator data' }
 foreach ($name in $services) { if (Get-Service $name -ErrorAction SilentlyContinue) { throw "service remains: $name" } }
 'Coordinator MSI install/uninstall passed; oarbank on the PATH and off it again, no services created, existing data retained.'
+# every check above throws on failure; reaching here means all passed (the deliberate CLI exit codes, or a
+# cmdlet's status, must not decide the step's exit code)
+exit 0

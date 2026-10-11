@@ -175,6 +175,53 @@ def cmd_secret(a):
     print(f"{a.module}/{a.name} set for {res.get('scope') or 'the module'}: fingerprint {res['fingerprint']}")
 
 
+def cmd_workload(a):
+    """Workloads (docs/design/workloads.md): list, assign, unassign, restart, logs [--follow]."""
+    if a.action == "list":
+        q = "&".join(f"{k}={v}" for k, v in (("node", a.node), ("module", a.module)) if v)
+        rows = api("GET", "/api/v1/workloads" + (f"?{q}" if q else ""))["workloads"]
+        if a.json:
+            print(json.dumps(rows, indent=1, default=str))
+            return
+        if not rows:
+            print("no workloads assigned")
+        for r in rows:
+            rep = r["report"] or {}
+            seat = f" seat {r['seat_id']} fence {r['fence']}" if r.get("seat_id") else ""
+            lease = f" lease {rep['lease_left_s']:.0f} s" if rep.get("lease_left_s") is not None else ""
+            extra = [x for x in (rep.get("held") and f"held: {rep['held']}", rep.get("paused") and "paused",
+                                 rep.get("lowered") and "lowered", rep.get("error")) if x]
+            print(f"{r['key']:<28} {r['hostname'] or r['node_id']:<16} {r['state']:<10}"
+                  f"{(' ' + r['reason']) if r.get('reason') else ''}{seat}{lease}"
+                  f"{'  (' + '; '.join(map(str, extra)) + ')' if extra else ''}")
+        return
+    if not a.workload or "/" not in a.workload:
+        sys.exit(f"oarbank workload {a.action} <module>/<workload> --node N")
+    if a.action == "logs":
+        if not a.node:
+            sys.exit("oarbank workload logs <module>/<workload> --node N [--follow]")
+        module, name = a.workload.split("/", 1)
+        seen = None
+        while True:
+            d = api("GET", f"/api/v1/workloads/{module}/{name}/logs?node={a.node}")
+            text = d["log_tail"]
+            if text != seen:
+                new = text
+                if seen:                                 # only what came after the last part already printed
+                    tail = seen[-200:]
+                    at = text.rfind(tail)
+                    new = text[at + len(tail):] if at >= 0 else text
+                print(new, end="" if not new or new.endswith("\n") else "\n")
+                seen = text
+            if not a.follow:
+                return
+            time.sleep(2)
+    params = {"node": a.node} if a.node else ({"count": a.count} if a.count is not None else {})
+    op = {"assign": "workloads.assign", "unassign": "workloads.unassign", "restart": "workloads.restart"}[a.action]
+    res = run_op(op, a.workload, params, a.reason, a.yes, dry_run=a.dry_run)
+    print(json.dumps(res.get("result", res), indent=1, default=str))
+
+
 MARK = {"done": "[done]   ", "blocked": "[BLOCKED]", "waiting": "[waiting]", "next": "[next]   ", "skipped": "[n/a]    "}
 
 
@@ -467,6 +514,148 @@ def cmd_agent(a):
     else:
         res = run_op(f"agent.{a.action}", a.what, {"platform": a.platform} if a.platform else None, **ask)
     print(json.dumps(res, indent=1, default=str))
+
+
+def _ago(t) -> str:
+    import time as _t
+    if not t:
+        return "never"
+    d = _t.time() - float(t)
+    return f"{d:.0f}s ago" if d < 90 else f"{d / 60:.0f}m ago" if d < 5400 else f"{d / 3600:.1f}h ago"
+
+
+def _print_rollout(r: dict):
+    print(f"rollout {r['rollout_id']} {r['kind']} to {r['version']}: {r['state']}"
+          + (f" (ring {r['ring']})" if r.get("ring") else "") + (f": {r['halted_reason']}" if r.get("halted_reason") else ""))
+    for g in r["rings"]:
+        if g.get("skipped"):
+            print(f"  {g['ring']:<11} skipped ({g['skipped']})")
+            continue
+        if not g["nodes"] and g["ring"] != "coordinator":
+            continue
+        gate = []
+        if g.get("bake_left_s") is not None:
+            gate.append(f"bake {g['bake_left_s'] / 60:.0f} min left")
+        if g.get("heartbeats_min") is not None:
+            gate.append(f"heartbeats >= {g['heartbeats_min']}")
+        state = "baked" if g.get("baked_at") else "finished" if g.get("finished_at") else "running" if g.get("started_at") else "waiting"
+        print(f"  {g['ring']:<11} {state:<9} {g['done']}/{g['nodes']} done, {g['busy']} busy"
+              + (f" of {g['max_unavailable']}" if g.get("max_unavailable") else "")
+              + f", failures {g['failures']}/{g['budget']}" + (f"  ({', '.join(gate)})" if gate else ""))
+    for n in r["nodes"]:
+        print(f"    {n['hostname'] or n['node_id']:<22} {n['ring']:<7} {n['state']:<11} {n['from_version'] or '?'} -> {n['target']}"
+              + (" go" if n["go"] else "") + (f"  {n['error'][:100]}" if n.get("error") else ""))
+
+
+def _update_upload(dir_: Path) -> str:
+    """Stage a release directory's manifest and the artifacts this fleet needs; returns the manifest's sha256."""
+    mans = sorted(dir_.glob("oarbank-fleet-*.json"))
+    if len(mans) != 1:
+        sys.exit(f"{dir_} holds {len(mans)} oarbank-fleet-<version>.json manifests (one is needed)")
+    doc = json.loads(mans[0].read_text(encoding="utf-8"))
+    st = api("GET", "/api/v1/updates")
+    want = {st["coordinator"]["platform"]} | {n["platform"] for n in st["nodes"] if n.get("platform")}
+
+    def put(p: Path) -> str:
+        r = http_request("POST", f"{URL}/api/v1/updates/uploads", content=p.read_bytes(),
+                         headers={"x-oarbank-source": "cli", **auth_headers()}, timeout=3600)
+        if r.status_code >= 400:
+            sys.exit(f"upload {p.name}: {r.status_code} {r.text}")
+        return r.json()["sha256"]
+    for x in doc.get("artifacts") or []:
+        if x.get("platform") in want and (dir_ / x["name"]).is_file():
+            print(f"uploading {x['name']} ({x.get('size', 0) // 2 ** 20} MB)")
+            put(dir_ / x["name"])
+    return put(mans[0])
+
+
+def cmd_update(a):
+    """oarbank update <status|releases|import|fetch|sign|plan|start|pause|resume|halt|rollback|skip|hold|unhold|pin|unpin|
+    coordinator>: fleet updates (docs/design/fleet-updates.md): whole packages on every node, the coordinator first."""
+    ask_ = dict(reason=a.reason, yes=a.yes, dry_run=a.dry_run)
+    act = a.action
+    if act in ("status", "releases") or (act == "coordinator" and a.what in (None, "status")):
+        v = api("GET", "/api/v1/updates")
+        c = v["coordinator"]
+        if act == "coordinator":
+            u = c.get("update") or {}
+            print(f"coordinator {c['version']} on {c['platform']}; last self-update: "
+                  + (f"{u.get('version')} {u.get('state')}" + (f" ({u['error']})" if u.get("error") else "") if u else "none"))
+            return
+        if act == "releases" or not v["releases"]:
+            for r in v["releases"]:
+                print(f"{r['version']:<10} seq {r['seq']:<7} {r['state']:<10} {'signed' if r['signed'] else 'unsigned':<8} "
+                      f"from {r['source']}  imported {_ago(r['imported_at'])} by {r['imported_by']}")
+                for g in r["gaps"]:
+                    print(f"  needs: {g}")
+            if not v["releases"]:
+                print("no fleet release imported (oarbank update import <dir> | fetch <version>)")
+            if act == "releases":
+                return
+        nr = v.get("newest_ready")
+        print(f"coordinator {c['version']} ({c['platform']}); newest ready release: {nr['version'] if nr else 'none'}; "
+              f"update_auto {v['update_auto']}; source {v['source']}")
+        for r in (v.get("active"), v.get("rolling_back")):
+            if r:
+                _print_rollout(r)
+        for n in v["nodes"]:
+            rp = n["report"] or {}
+            extra = [f"ring {n['ring']}"]
+            if n.get("hold"):
+                extra.append(f"held: {n['hold']['reason']}" + (" (expired)" if n["hold_expired"] else ""))
+            if n.get("pin"):
+                extra.append(f"pinned {n['pin']['version']}: {n['pin']['reason']}" + (" (expired)" if n["pin_expired"] else ""))
+            if not n["updater"]:
+                extra.append(f"no updater ({(n['install'] or {}).get('why') or 'agent self-update only'})")
+            print(f"  {n['hostname']:<22} {n['version'] or '?':<9} -> {n['target'] or '-':<9} {rp.get('state') or 'idle':<11} "
+                  + "; ".join(extra) + (f"  error: {rp['error'][:100]}" if rp.get("error") else ""))
+        return
+    if act == "import":
+        if not a.what:
+            sys.exit("oarbank update import <dir with oarbank-fleet-<version>.json and its artifacts> [--local]")
+        d = Path(a.what).expanduser()
+        if a.local:
+            res = run_op("updates.import", None, {"dir": str(d.resolve())}, **ask_)
+        else:
+            res = run_op("updates.import", None, {"manifest": _update_upload(d)}, **ask_)
+    elif act == "fetch":
+        res = run_op("updates.fetch", a.what or "latest", **ask_)
+    elif act == "sign":
+        if not a.what:
+            sys.exit("oarbank update sign <version> [--key PATH]")
+        from .. import signing
+        rel = next((r for r in api("GET", "/api/v1/updates")["releases"] if r["version"] == a.what), None)
+        if rel is None:
+            sys.exit(f"no fleet release {a.what} is imported")
+        stmt = signing.fleet_release_statement(rel["version"], rel["seq"], rel["manifest_sha256"])
+        sig = signing.sign(stmt, Path(a.key) if a.key else signing.DEFAULT_KEY)
+        res = run_op("updates.sign", rel["version"], {"statement": stmt, "signature": sig}, **ask_)
+    elif act in ("plan", "start", "coordinator"):
+        if not a.what:
+            sys.exit(f"oarbank update {act} <version>")
+        params = {"fast": True} if a.fast else {}
+        if act == "coordinator":
+            params["rings"] = ["coordinator"]
+        if a.rings:
+            params["rings"] = a.rings.split(",")
+        if a.max_unavailable:
+            params["max_unavailable"] = a.max_unavailable
+        res = run_op("updates.start", a.what, params, **{**ask_, "dry_run": a.dry_run or act == "plan"})
+    elif act in ("pause", "resume", "halt", "rollback"):
+        res = run_op(f"updates.{act}", a.what, **ask_)
+    elif act in ("skip", "unhold", "unpin"):
+        if not a.what:
+            sys.exit(f"oarbank update {act} <node>")
+        res = run_op(f"updates.{act}", a.what, **ask_)
+    elif act == "hold":
+        if not a.what or not a.reason:
+            sys.exit("oarbank update hold <node> --reason <why> [--until <ISO time>]")
+        res = run_op("updates.hold", a.what, {"reason": a.reason, "until": a.until}, **ask_)
+    else:                                             # pin
+        if not a.what or not a.version or not a.reason:
+            sys.exit("oarbank update pin <node> <version> --reason <why> [--until <ISO time>]")
+        res = run_op("updates.pin", a.what, {"version": a.version, "reason": a.reason, "until": a.until}, **ask_)
+    print(json.dumps((res or {}).get("result") or res, indent=1, default=str))
 
 
 def cmd_account(a):
@@ -1129,6 +1318,94 @@ def cmd_groups(a):
     print(r.get("message") or json.dumps(r, indent=1, default=str))
 
 
+def _site_params(a) -> dict:
+    p = {}
+    for k, v in (("uplink_mbps", a.mbps), ("max_transfers", a.transfers), ("max_heavy_jobs", a.heavy_jobs),
+                 ("description", a.description), ("name", a.name if a.action == "update" else None)):
+        if v is not None:
+            p[k] = None if (k == "uplink_mbps" and v == 0) else v
+    return p
+
+
+def _print_site(s: dict, full: bool = False) -> None:
+    rate = f"{s['uplink_mbps']:g} Mbit/s ({s['lease_mbps']:g} each)" if s.get("uplink_mbps") else "no rate limit"
+    print(f"{s['name']} ({s['site_id']}): {', '.join(s['members']) or 'no members'}")
+    print(f"  budget: {s['max_transfers']} transfer(s), {s['max_heavy_jobs']} network-heavy job(s) at once, {rate}")
+    print(f"  now: {s['state']}" + ("" if s["hold"] else f" ({s['transfers']} transfer(s), {s['heavy_jobs']} network-heavy job(s) running)"))
+    for d, h in sorted((s.get("hint") or {}).items()):
+        print(f"  measured {d}: large transfers here reached {h['mbps']:g} Mbit/s ({h['n']})")
+    if full:
+        for m in s.get("member_rows") or []:
+            ph = ", ".join(f"{p['key']} {'on' if p.get('on') else ('unreadable' if p.get('readable') is False else 'off')}"
+                           for p in m["phases"]) or "no uplink phase"
+            up = m.get("uplink") or {}
+            print(f"    {m['hostname']}: {ph}; " + (f"{len(up.get('active') or [])} transfer(s)" + (f", held: {up['held']}" if up.get("held") else "")
+                                                   if m.get("reports_uplink") else "its agent does not report transfers"))
+        for x in s.get("leases") or []:
+            print(f"    lease {x['lease_id']}: {x['node']} {x['kind']} {x['dir']}" + (f" at {x['mbps']:g} Mbit/s" if x["mbps"] else ""))
+
+
+def cmd_sites(a):
+    """oarbank sites list|show|create|update|add|remove|delete|suggest|accept|dismiss (docs/design/sites.md)."""
+    if a.action in ("list", "suggest") or (a.action == "show" and not a.site):
+        d = api("GET", "/api/v1/sites")
+        if a.json:
+            print(json.dumps(d if a.action == "list" else d["suggestions"], indent=1, default=str))
+            return
+        if a.action == "list":
+            for s in d["sites"]:
+                _print_site(s)
+            if not d["sites"]:
+                print("no sites (oarbank sites suggest, oarbank sites create <name> --node N ...)")
+            if d["unplaced"]:
+                print("at no site: " + ", ".join(d["unplaced"]))
+        for g in d["suggestions"] if a.action == "suggest" or d["suggestions"] else []:
+            nodes = ", ".join(x["hostname"] + (f" (at {x['site']})" if x["site"] else "") for x in g["nodes"])
+            print(f"suggestion {g['key']}: {g['text']}: {nodes}")
+        if a.action == "suggest" and not d["suggestions"]:
+            print("nothing to suggest")
+        return
+    if a.action == "show":
+        d = api("GET", f"/api/v1/sites/{a.site}")
+        print(json.dumps(d, indent=1, default=str)) if a.json else _print_site(d, full=True)
+        return
+    if not a.site:
+        sys.exit(f"oarbank sites {a.action} needs {'a suggestion key' if a.action in ('accept', 'dismiss') else 'a site or node'}")
+    nodes = [x for n in (a.node or []) + list(a.nodes or []) for x in n.split(",") if x]
+    if a.action == "create":
+        res = run_op("sites.create", a.site, {**_site_params(a), "nodes": nodes}, a.reason, a.yes, preview=True)
+    elif a.action == "update":
+        params = _site_params(a)
+        if not params:
+            sys.exit("oarbank sites update <site> with what to change: --name, --mbps, --transfers, --heavy-jobs, --description")
+        res = run_op("sites.update", a.site, params, a.reason, a.yes, preview=True)
+    elif a.action == "add":
+        if not nodes:
+            sys.exit("oarbank sites add <site> <node> [<node> ...]")
+        res = run_op("sites.assign", a.site, {"nodes": nodes}, a.reason, a.yes, preview=True)
+    elif a.action == "remove":
+        res = run_op("sites.unassign", None, {"nodes": [a.site, *nodes]}, a.reason, a.yes, preview=True)
+    elif a.action == "delete":
+        res = run_op("sites.delete", a.site, {}, a.reason, a.yes, a.confirm)
+    elif a.action == "dismiss":
+        res = run_op("sites.dismiss", a.site, {}, a.reason, a.yes)
+    else:                                                  # accept
+        sug = next((g for g in api("GET", "/api/v1/sites")["suggestions"] if g["key"] == a.site), None)
+        if sug is None:
+            sys.exit(f"no suggestion {a.site} (oarbank sites suggest)")
+        ids = [x["node_id"] for x in sug["nodes"]]
+        if a.to_site or len(sug["sites"]) == 1 and not a.name:
+            res = run_op("sites.assign", a.to_site or sug["sites"][0], {"nodes": ids, "suggestion": sug["key"]}, a.reason,
+                         a.yes, preview=True)
+        else:
+            if not a.name:
+                sys.exit("oarbank sites accept <suggestion> --name <name> (a new site) or --site <site> (an existing one)")
+            res = run_op("sites.create", a.name, {**_site_params(a), "nodes": ids, "suggestion": sug["key"]}, a.reason,
+                         a.yes, preview=True)
+    r = (res or {}).get("result") or {}
+    print(r.get("message") or json.dumps(r, indent=1, default=str))
+
+
 def print_job(d: dict) -> None:
     """`oarbank job show`: the job page's facts (detail.job and its explain document, GET /api/v1/jobs/<id>)."""
     j = d["job"]
@@ -1210,6 +1487,24 @@ def cmd_protection(a):
     them on a group first, then `oarbank settings promote protection.rules --group <group>` (the mode: oarbank node
     mode, or oarbank settings set protection.mode)."""
     ask = dict(reason=a.reason, yes=a.yes)
+    if a.action == "ab":
+        return cmd_protection_ab(a, ask)
+    if a.action == "duty":
+        return cmd_protection_duty(a)
+    if a.action == "certificates":
+        q = f"?node={a.node}" if a.node else ""
+        d = api("GET", f"/api/v1/protection/certificates{q}")
+        if a.json:
+            print(json.dumps(d, indent=1, default=str))
+            return
+        if not d["certificates"]:
+            print("no co-tenancy certificates (oarbank protection ab start|sweep <node> --rule <id> earns one)")
+        for c in d["certificates"]:
+            duty = f"duty {c['duty']}" if c.get("duty") is not None else "no duty"
+            print(f"{c['cert_id']}  {c['hostname'] or c['node_id']:<22} rule {c['rule']:<16} {c['work']:<10} {duty:<10} "
+                  f"R {c['r']:.3f} [{c['r_lo']:.3f}, {c['r_hi']:.3f}] margin {c['margin'] * 100:.0f} %  until "
+                  f"{_when(c['valid_until'])}  {c['status']}" + (f" ({c['why']})" if c.get("why") else ""))
+        return
     need = {"show": "<node>", "probe": "<node>", "set": "<node|fleet|group:G> <file>", "preview": "<node|fleet|group:G> <file>"}
     if a.action in need and (not a.node or need[a.action].count("<") == 2 and not a.value):
         sys.exit(f"oarbank protection {a.action} {need[a.action]}")
@@ -1225,6 +1520,110 @@ def cmd_protection(a):
     else:
         res = run_op("protection.probe_now", a.node, None, **ask)
     print(json.dumps((res or {}).get("result"), indent=1, default=str))
+
+
+def cmd_protection_duty(a) -> None:
+    """oarbank protection duty [<node>]: the GPU duty governor (D50) on each node that has one, or on <node>: the budget
+    against the certified ceiling, each GPU unit's requested and measured duty and compliance state, and recent steps."""
+    q = f"?node={a.node}" if a.node else ""
+    d = api("GET", f"/api/v1/protection/duty{q}")
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    if not d["nodes"]:
+        print("no node reports a GPU duty budget (it needs gpu_jobs = certified and a protected group using the GPU)")
+    for n in d["nodes"]:
+        name = n["hostname"] or n["node_id"]
+        if n["not_certified"]:
+            print(f"{name}: not certified for {', '.join(n['not_certified'])}: GPU work waits "
+                  "(oarbank protection ab sweep <node> --rule <id>)")
+            continue
+        if n["state"] is None:
+            print(f"{name}: no GPU duty budget (gpu_jobs is not certified, or no protected group is using the GPU)")
+            continue
+        lock = f", locked {n['lockout_s']:.0f} s" if n.get("lockout_s") else ""
+        print(f"{name}: gpu_duty budget {n['duty']} of ceiling {n['ceiling']} ({n['state']}{lock}) beside "
+              f"{', '.join(n['rules']) or '-'}; {n['jobs'] or 0} unit(s) at {n['per_job']} each")
+        for rule, b in sorted((n.get("baseline") or {}).items()):
+            rate = f"{b['rate']}/s, {b['age_s']:.0f} s old" if b.get("rate") is not None else "not measured yet"
+            press = f", last pressure {b['pressure']}" if b.get("pressure") is not None else ""
+            print(f"  baseline {rule}: {rate}{press}")
+        for u in n["units"]:
+            what = f"{u.get('module') or '?'}/{u.get('stage') or '?'} " + ("workload" if u.get("workload") else
+                                                                          f"attempt {u['attempt_id']}")
+            why = f" ({u['why']}, {u.get('for_s', 0):.0f} s left)" if u.get("why") else ""
+            print(f"  {what:<44} duty {u.get('duty') if u.get('duty') is not None else '-':<6} measured "
+                  f"{u.get('measured') if u.get('measured') is not None else '-':<6} {u['state']}{why}")
+        for x in n["distrusted"]:
+            print(f"  not trusted: {x['unit']} for {x['for_s'] / 60:.0f} min more")
+        for e in n["events"][:10]:
+            detail = e.get("why") or (f"{e.get('unit')} measured {e.get('measured')} against {e.get('duty')}: "
+                                      f"{e.get('action')}" if e.get("unit") else "")
+            print(f"  {_when(e['t'])}  {e['reason']:<20} duty {e.get('duty', '-')}  {detail}")
+
+
+def print_ab_run(d: dict) -> None:
+    """One harness run as `oarbank protection ab show` prints it: the decision in words, then the blocks."""
+    print(f"run {d['run_id']} on {d['hostname'] or d['node_id']}: rule {d['rule']}, work {d['work']}"
+          + (f", gpu_duty {d['duty']}" if d.get("duty") is not None else "") + f"; {d['state']}"
+          + (f", {d['decision']}" if d.get("decision") else ""))
+    print(f"  {d['summary']}")
+    rep = d.get("report") or {}
+    o = (d.get("outcome") or {})
+    if o.get("reason"):
+        print(f"  why: {o['reason']}")
+    if o.get("min_detectable") is not None:
+        print(f"  the pilot's spread lets the planned run detect a {o['min_detectable'] * 100:.1f} % slowdown (80 % power)")
+    for i, b in enumerate(rep.get("blocks") or [], 1):
+        ratio = b["on_rate"] / b["off_rate"] if b.get("off_rate") else float("nan")
+        print(f"  block {i:<3} {'ON first ' if b.get('on_first') else 'OFF first'}  on {b['on_rate']:.3f}/s  "
+              f"off {b['off_rate']:.3f}/s  ratio {ratio:.4f}")
+    for x in rep.get("excluded") or []:
+        print(f"  excluded {_when(x['start'])}: {x['reason']}")
+    if d.get("cert_id"):
+        print(f"  certificate {d['cert_id']}")
+
+
+def cmd_protection_ab(a, ask) -> None:
+    """oarbank protection ab start|status|show|abort|sweep: the paired on/off harness (docs/design/gpu-cotenancy.md)."""
+    sub, target = a.node, a.value
+    if sub not in ("start", "status", "show", "abort", "sweep"):
+        sys.exit("oarbank protection ab start|status|show|abort|sweep ...")
+    if sub in ("start", "sweep"):
+        if not target or not a.rule:
+            sys.exit(f"oarbank protection ab {sub} <node> --rule <id>")
+        params = {"rule": a.rule, "work": a.work, "duty": a.duty, "blocks": a.blocks, "window_s": a.window,
+                  "washout_s": a.washout, "margin": a.margin, "off": a.off, "max_hours": a.max_hours}
+        if sub == "sweep" and a.levels:
+            params["levels"] = [float(x) for x in a.levels.split(",")]
+        params = {k: v for k, v in params.items() if v is not None}
+        res = run_op(f"protection.ab.{sub}", target, params, **ask)
+        print(json.dumps((res or {}).get("result"), indent=1, default=str))
+        return
+    if sub == "abort":
+        if not target:
+            sys.exit("oarbank protection ab abort <run>")
+        res = run_op("protection.ab.abort", target, None, **ask)
+        print(json.dumps((res or {}).get("result"), indent=1, default=str))
+        return
+    if sub == "show":
+        if not target:
+            sys.exit("oarbank protection ab show <run>")
+        d = api("GET", f"/api/v1/protection/ab/runs/{target}")
+        print(json.dumps(d, indent=1, default=str)) if a.json else print_ab_run(d)
+        return
+    q = f"?node={target}" if target else ""
+    d = api("GET", f"/api/v1/protection/ab/runs{q}")
+    if a.json:
+        print(json.dumps(d, indent=1, default=str))
+        return
+    if not d["runs"]:
+        print("no harness runs")
+    for r in d["runs"]:
+        prog = f"{r['blocks_done']}/{r['target_blocks'] or '?'} blocks"
+        print(f"{r['run_id']}  {r['hostname'] or r['node_id']:<22} {r['rule']:<16} {r['work']:<10} "
+              f"{'duty ' + str(r['duty']) if r.get('duty') is not None else '':<10} {r['state']:<9} {prog:<12} "
+              f"{r['decision'] or ''}")
 
 
 def cmd_verify(a):
@@ -1385,6 +1784,124 @@ def cmd_folders(a):
     nodes = {k: v or None for k, _, v in (x.partition("=") for x in a.node or [])}
     res = run_op("settings.folders.update", a.what, {"access": a.access, "nodes": nodes}, a.reason, a.yes)
     print(json.dumps(res, indent=1, default=str))
+
+
+# ------------------------------------------------------------------ inbound listeners (docs/design/inbound-listeners.md)
+
+def _listener_lines(row: dict) -> list[str]:
+    """One listener as the owner reads it: where it is reachable, the agent's result with its text and fix as they are,
+    its connections and the latest probe."""
+    ext = row.get("external") or "no external address yet"
+    out = [f"  {row['key']:<28} {row.get('state') or 'not reported':<10} {ext}"
+           + (f"  (IPv6 {row['external_v6']})" if row.get("external_v6") else "")
+           + (f"  refused: {row['refused']}" if row.get("refused") else "")]
+    if row.get("result"):
+        out.append(f"    {row['result']}" + (f" [{', '.join(row['flags'])}]" if row.get("flags") else ""))
+    if row.get("text"):
+        out.append(f"    {row['text']}")
+    if row.get("fix"):
+        out.append(f"    fix: {row['fix']}")
+    c = row.get("conns") or {}
+    if c.get("accepted") is not None:
+        ref = ", ".join(f"{k} {v}" for k, v in (c.get("refused") or {}).items() if v)
+        out.append(f"    connections: {c.get('open') or 0} open, {c.get('accepted') or 0} accepted"
+                   + (f", refused {ref}" if ref else ""))
+    p = row.get("probe") or {}
+    if p.get("state"):
+        out.append(f"    last check from outside: {p['state']}" + (f" via {p['via']}" if p.get("via") else "")
+                   + (f" ({p['detail']})" if p.get("detail") else ""))
+    if p.get("pending"):
+        out.append(f"    a check from outside is running (via {p['pending'].get('via')})")
+    if row.get("configured") is not None and row.get("statement") is None:
+        out.append("    configured, but not in the node's statement (its module version does not request it, or its grants "
+                   "are not approved)")
+    return out
+
+
+def _mapping_line(m: dict) -> str:
+    exp = f", expires {time.strftime('%H:%M', time.localtime(m['expires_at']))}" if m.get("expires_at") else ""
+    return (f"  {m.get('key') or '?':<28} {m.get('protocol') or '?':<7} {m.get('family') or '':<5} {m.get('external') or '?'}"
+            f" -> {m.get('internal') or '?'}  via {m.get('gateway') or '?'}  {m.get('state') or ''}{exp}"
+            + ("  permanent" if m.get("permanent") else "") + (f"  error: {m['error']}" if m.get("error") else ""))
+
+
+def cmd_listener(a):
+    """oarbank listener list|show|mappings|set|remove|probe|disable|resume: inbound listeners (a module accepting
+    connections from the internet on nodes the owner assigns). The agent's results are printed as it words them."""
+    from urllib.parse import quote
+    if a.action in ("list", "mappings"):
+        node = a.node or a.target
+        v = api("GET", "/api/v1/listeners" + (f"?node={quote(node)}" if node else ""))
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        if v.get("fleet_disabled"):
+            print("listeners are disabled for the whole fleet (oarbank listener resume --all)")
+        if not v["nodes"]:
+            print("no node has a listener or a router mapping (oarbank listener set <node> <module>/<listener> assigns one)")
+        for d in v["nodes"]:
+            off = " (listeners disabled on this node)" if d["disabled"]["node"] else ""
+            print(f"{d['hostname']} ({d['node_id']}){'' if d['online'] else ' offline'}{off}")
+            if a.action == "list":
+                for row in d["listeners"]:
+                    print("\n".join(_listener_lines(row)))
+                if not d["listeners"]:
+                    print("  no listeners")
+                continue
+            for m in d["portmaps"]:
+                print(_mapping_line(m))
+            others = [m for m in d["router_mappings"] if not m.get("ours")]
+            if others:
+                print("  other mappings the router reports for this machine (Oarbank never touches them):")
+                for m in others:
+                    print(f"    {m.get('protocol') or '?'} {m.get('external_port')} -> {m.get('internal')}"
+                          + (f"  {m['description']}" if m.get("description") else ""))
+            if not d["portmaps"] and not others:
+                print("  no router mappings")
+        return
+    if a.action in ("disable", "resume"):
+        if bool(a.all) == bool(a.node):
+            sys.exit(f"oarbank listener {a.action} --node <node> | --all")
+        res = run_op(f"listeners.{a.action}", "fleet" if a.all else a.node, {}, a.reason, a.yes)
+        print(json.dumps(res.get("result"), indent=1, default=str))
+        return
+    if not a.target or not a.key:
+        sys.exit(f"oarbank listener {a.action} <node> <module>/<listener>")
+    if a.action == "show":
+        v = api("GET", f"/api/v1/nodes/{quote(a.target)}/listeners/{quote(a.key, safe='/')}")
+        if a.json:
+            print(json.dumps(v, indent=1, default=str))
+            return
+        row = v["listener"]
+        print(f"{v['hostname']} ({v['node_id']}): {row['key']}")
+        print("\n".join(_listener_lines(row)))
+        if row.get("statement"):
+            print(f"  entry: {json.dumps(row['statement'], sort_keys=True)}")
+        for m in row.get("portmaps") or []:
+            print(_mapping_line(m))
+        if row.get("talkers"):
+            print("  top client addresses (24 h):")
+            for t in row["talkers"]:
+                print(f"    {t.get('addr'):<40} {t.get('conns') or 0} connections, {t.get('refused') or 0} refused")
+        else:
+            print("  top client addresses: asked for; the node sends them with its next heartbeat (run this again)")
+        return
+    if a.action == "set":
+        params = {"key": a.key}
+        for k, v in (("external_port", a.external_port), ("fallback", a.fallback), ("mapping", a.mapping),
+                     ("ipv6", a.ipv6), ("bind", a.bind), ("internal_port", a.internal_port)):
+            if v is not None:
+                params[k] = v
+        if a.limit:
+            params["limits"] = _kv(a.limit)
+        if a.allow:
+            params["allow"] = [c for x in a.allow for c in x.replace(",", " ").split()]
+        res = run_op("listeners.configure", a.target, params, a.reason, a.yes)
+        print(json.dumps(res.get("result"), indent=1, default=str))
+    elif a.action == "remove":
+        print(json.dumps(run_op("listeners.remove", a.target, {"key": a.key}, a.reason, a.yes).get("result"), indent=1))
+    elif a.action == "probe":
+        print(json.dumps(run_op("listeners.probe", a.target, {"key": a.key}, a.reason, True).get("result"), indent=1))
 
 
 def _inst(i: dict) -> str:
@@ -1591,6 +2108,25 @@ def parser() -> argparse.ArgumentParser:
     gr.add_argument("--confirm")
     gr.add_argument("--yes", "-y", action="store_true")
     gr.set_defaults(fn=cmd_groups)
+    si = sub.add_parser("sites", help="sites (nodes that share one internet line): list, show, create, update, add, remove, "
+                                      "delete; suggest (from what nodes observe of their network), accept, dismiss")
+    si.add_argument("action", choices=["list", "show", "create", "update", "add", "remove", "delete", "suggest", "accept",
+                                       "dismiss"])
+    si.add_argument("site", nargs="?", help="a site's id or name (create: its name; remove: a node; accept, dismiss: a "
+                                            "suggestion key)")
+    si.add_argument("nodes", nargs="*", help="add, remove: nodes (names or ids)")
+    si.add_argument("--node", action="append", help="create: a member (repeat or comma-separate)")
+    si.add_argument("--mbps", type=float, help="the rate the site's fleet transfers may use together, Mbit/s (0: no limit)")
+    si.add_argument("--transfers", type=int, help="bulk transfers at once (default 1)")
+    si.add_argument("--heavy-jobs", type=int, help="network-heavy jobs at once (default 1)")
+    si.add_argument("--name", help="update: a new name; accept: the new site's name")
+    si.add_argument("--site", dest="to_site", help="accept: add the suggestion's nodes to this existing site")
+    si.add_argument("--description")
+    si.add_argument("--json", action="store_true")
+    si.add_argument("--reason")
+    si.add_argument("--confirm")
+    si.add_argument("--yes", "-y", action="store_true")
+    si.set_defaults(fn=cmd_sites)
     jb = sub.add_parser("job", help="a job: show (attempts, checkpoint, results, why), retry, cancel")
     jb.add_argument("action", choices=["show", "retry", "cancel"])
     jb.add_argument("id")
@@ -1601,10 +2137,23 @@ def parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("protection", help="protected-process rules on the settings chain: show (a node's effective "
                                            "rules and where each comes from), set / preview (a node's, the fleet's or "
                                            "a group's own section), probe (the mode: oarbank node mode)")
-    pr.add_argument("action", choices=["show", "set", "preview", "probe"])
-    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>")
-    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml)")
-    pr.add_argument("--json", action="store_true", help="show: as JSON")
+    pr.add_argument("action", choices=["show", "set", "preview", "probe", "ab", "certificates", "duty"])
+    pr.add_argument("node", nargs="?", help="a node id or hostname; set and preview also take fleet or group:<group>; "
+                                            "ab: start|status|show|abort|sweep; certificates, duty: a node (all without)")
+    pr.add_argument("value", nargs="?", help="set, preview: a protection section file (JSON, or TOML ending .toml); "
+                                             "ab start|sweep|status: a node; ab show|abort: a run")
+    pr.add_argument("--json", action="store_true", help="show, ab show|status, certificates, duty: as JSON")
+    pr.add_argument("--rule", help="ab start|sweep: the protected rule (its progress_rate source is what is measured)")
+    pr.add_argument("--work", help="ab start|sweep: the fleet work under test: gpu (default), cpu, all, <module>, "
+                                   "<module>/<workload>")
+    pr.add_argument("--duty", type=float, help="ab start: the gpu_duty the GPU work under test holds in ON windows")
+    pr.add_argument("--blocks", type=int, help="ab start|sweep: planned blocks (default 12)")
+    pr.add_argument("--window", type=float, help="ab start|sweep: window length in seconds (default 300)")
+    pr.add_argument("--washout", type=float, help="ab start|sweep: seconds discarded after each switch (default 60)")
+    pr.add_argument("--margin", type=float, help="ab start|sweep: the slowdown margin (default 0.02)")
+    pr.add_argument("--off", choices=["paused", "evicted"], help="ab start|sweep: how OFF holds the work (default paused)")
+    pr.add_argument("--max-hours", type=float, help="ab start|sweep: the run's cap (default 8)")
+    pr.add_argument("--levels", help="ab sweep: rising gpu_duty levels, comma-separated (default 0.1,0.2,0.35,0.5,...)")
     pr.add_argument("--reason")
     pr.add_argument("--yes", "-y", action="store_true")
     pr.set_defaults(fn=cmd_protection)
@@ -1637,6 +2186,28 @@ def parser() -> argparse.ArgumentParser:
     fo.add_argument("--reason")
     fo.add_argument("--yes", "-y", action="store_true")
     fo.set_defaults(fn=cmd_folders)
+    li = sub.add_parser("listener", help="inbound listeners: list, show <node> <key>, mappings (router mappings), set <node> "
+                                         "<key> (the node's entry; signing mode: oarbank node sign), remove, probe (check "
+                                         "from outside now), disable|resume --node N | --all (the kill switch)")
+    li.add_argument("action", choices=["list", "show", "mappings", "set", "remove", "probe", "disable", "resume"])
+    li.add_argument("target", nargs="?", help="a node (list and mappings: optional)")
+    li.add_argument("key", nargs="?", help="the listener: <module>/<listener>")
+    li.add_argument("--node", help="list, mappings: one node; disable, resume: this node")
+    li.add_argument("--all", action="store_true", help="disable, resume: the whole fleet")
+    li.add_argument("--external-port", type=int, help="set: the port to ask the router for")
+    li.add_argument("--fallback", help="set: refuse | next_free:<a>-<b> | router_choice")
+    li.add_argument("--mapping", choices=["auto", "pcp", "natpmp", "upnp", "manual", "none"])
+    li.add_argument("--ipv6", choices=["auto", "off"])
+    li.add_argument("--bind", help="set: default_route or an address of the node")
+    li.add_argument("--internal-port", type=int, help="set: the local port (fixed, for a forward made by hand)")
+    li.add_argument("--limit", action="append", metavar="KEY=VALUE",
+                    help="set: lower one of the module's limits (max_conns, max_conns_per_ip, new_conns_per_ip_per_s, "
+                         "idle_timeout_s, max_bytes_per_s); repeatable")
+    li.add_argument("--allow", action="append", metavar="CIDR", help="set: only these client addresses (repeatable)")
+    li.add_argument("--json", action="store_true")
+    li.add_argument("--reason")
+    li.add_argument("--yes", "-y", action="store_true")
+    li.set_defaults(fn=cmd_listener)
     tl = sub.add_parser("tools", help="host tools: list (definitions, what each node found, each module's resolution), "
                                       "detect <node>, define <id>, delete <id> (a tool's path on a node: oarbank settings set "
                                       "tool.<id>.path <path> --node <node>)")
@@ -1721,6 +2292,19 @@ def parser() -> argparse.ArgumentParser:
     mo.add_argument("--yes", action="store_true")
     mo.add_argument("--dry-run", action="store_true")
     mo.set_defaults(fn=cmd_module)
+    wl = sub.add_parser("workload", help="workloads (long-running daemons the owner assigns to nodes): list, assign, unassign, "
+                        "restart, logs [--follow]")
+    wl.add_argument("action", choices=["list", "assign", "unassign", "restart", "logs"])
+    wl.add_argument("workload", nargs="?", help="<module>/<workload>")
+    wl.add_argument("--node", help="a node (hostname or id)")
+    wl.add_argument("--module", help="list: one module's workloads only")
+    wl.add_argument("--count", type=int, help="assign: place this many seats of a seat = \"fleet\" workload")
+    wl.add_argument("--follow", action="store_true", help="logs: keep printing new lines")
+    wl.add_argument("--json", action="store_true")
+    wl.add_argument("--reason")
+    wl.add_argument("--yes", action="store_true")
+    wl.add_argument("--dry-run", action="store_true")
+    wl.set_defaults(fn=cmd_workload)
     se = sub.add_parser("secret", help="module secrets, write-only: set (value from stdin or a no-echo prompt), clear, list")
     se.add_argument("action", choices=["set", "clear", "list"])
     se.add_argument("module")
@@ -1813,6 +2397,21 @@ def parser() -> argparse.ArgumentParser:
     ag.add_argument("--yes", action="store_true")
     ag.add_argument("--dry-run", action="store_true")
     ag.set_defaults(fn=cmd_agent)
+    up = sub.add_parser("update", help="fleet updates: import, sign and roll out a release to the coordinator and every node")
+    up.add_argument("action", choices=["status", "releases", "import", "fetch", "sign", "plan", "start", "pause", "resume", "halt",
+                                       "rollback", "skip", "hold", "unhold", "pin", "unpin", "coordinator"])
+    up.add_argument("what", nargs="?", help="a release version, a directory (import), a node, or a rollout id")
+    up.add_argument("version", nargs="?", help="pin: the release to pin the node to")
+    up.add_argument("--fast", action="store_true", help="start: the fast policy (short bakes) for a critical release")
+    up.add_argument("--rings", help="start, plan: only these rings, e.g. coordinator,canary")
+    up.add_argument("--max-unavailable", type=int, help="start, plan: nodes updating at once in every node ring")
+    up.add_argument("--local", action="store_true", help="import: the directory is on the coordinator's machine (no upload)")
+    up.add_argument("--until", help="hold, pin: when it expires (ISO 8601; default never)")
+    up.add_argument("--key", help=f"sign: the owner key (default {key})")
+    up.add_argument("--reason", help="hold, pin: why (also the audit record's reason)")
+    up.add_argument("--yes", action="store_true")
+    up.add_argument("--dry-run", action="store_true")
+    up.set_defaults(fn=cmd_update)
     sub.add_parser("modules").set_defaults(fn=lambda a: [print(f"{m['name']:<12} v{m['version']} requires={m['requires']} "
                                                                f"{'enabled' if m['enabled'] else 'disabled'}") for m in api("GET", "/api/v1/modules")])
     v = sub.add_parser("verify", help="check protocol invariants and fleet health (exit 1 on violations)")

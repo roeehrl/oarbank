@@ -3,7 +3,9 @@
 # NT SERVICE\dev.codonic.oarbank.console), started at boot (delayed) and restarted after a crash or a failed exit, with
 # the coordinator's home in %ProgramData%\Oarbank\coordinator (docs/design/windows-coordinator.md). Run it from an
 # elevated PowerShell; running it again with a newer build upgrades in place. `-Help` lists the options. A move to a
-# Windows machine that is not an enrolled node installs the standby with -Pair (coordinator-move.md, runbook).
+# Windows machine that is not an enrolled node installs the standby with -Pair (coordinator-move.md, runbook). Root's
+# coordinator update runner runs as the SYSTEM task \Oarbank\CoordinatorUpdate, every minute and at boot, from the
+# running build (`oarbank-coordupdate run --once`: fleet-updates.md, D58); it exits at once without a request.
 param(
   [string]$Build = "",            # oarbank-coordinator-<v>-windows-<arch>.tar.gz (scripts\build-coordinator.ps1)
   [string]$Installed = "",        # an already installed build directory (the coordinator MSI's package directory)
@@ -27,6 +29,8 @@ $ProgramRoot = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramF
 $App = "$ProgramRoot\Oarbank\Coordinator"
 $Home_ = "$env:ProgramData\Oarbank\coordinator"
 $Rule = "Oarbank coordinator (agents)"
+$UpdateTask = @{TaskPath = "\Oarbank\"; TaskName = "CoordinatorUpdate"}
+$UpdateState = "$env:ProgramData\Oarbank\coordinator-update"
 
 if ($Help) {
   @"
@@ -158,8 +162,17 @@ if ($RestoreConfiguration) {
   exit 0
 }
 
+function Remove-UpdateTask {
+  if (Get-ScheduledTask @UpdateTask -ErrorAction SilentlyContinue) {
+    if ($DryRun) { "Unregister-ScheduledTask $($UpdateTask.TaskPath)$($UpdateTask.TaskName)" } else {
+      Unregister-ScheduledTask @UpdateTask -Confirm:$false
+    }
+  }
+}
+
 if ($Uninstall) {
   if ($SaveConfiguration) { Save-Configuration }
+  Remove-UpdateTask
   Remove-Services
   if (Get-NetFirewallRule -DisplayName $Rule -ErrorAction SilentlyContinue) {
     if ($DryRun) { "Remove-NetFirewallRule -DisplayName '$Rule'" } else { Remove-NetFirewallRule -DisplayName $Rule }
@@ -287,6 +300,24 @@ if ($DryRun) { "firewall rule '$Rule': inbound TCP $AgentPort for $($Services.oa
     -Service $Services.oarbankd | Out-Null
 }
 foreach ($k in "oarbankd", "console") { Run "sc.exe" @("start", $Services[$k]) }
+
+# root's coordinator update runner (fleet-updates.md, D58): SYSTEM, every minute and at boot (an interrupted update is
+# finished), one instance at a time, from whatever build `current` names
+$runner = "$App\current\bin\oarbank-coordupdate.py"
+if ($DryRun) { "Register-ScheduledTask $($UpdateTask.TaskPath)$($UpdateTask.TaskName): SYSTEM, every minute and at startup: `"$py`" -I `"$runner`" run --once" } else {
+  $action = New-ScheduledTaskAction -Execute $py -Argument "-I `"$runner`" run --once"
+  $triggers = @((New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)),
+                (New-ScheduledTaskTrigger -AtStartup))
+  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  Register-ScheduledTask @UpdateTask -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
+}
+# what it trusts: the owner keys this coordinator pinned, once, while an administrator installs it (nothing yet while
+# there are none: `oarbank-coordupdate trust --from-home` pins them later)
+if (-not $DryRun -and -not (Test-Path "$UpdateState\trust.json") -and (Test-Path -LiteralPath $runner)) {
+  try { & $py -I $runner trust --from-home 2>$null | Out-Null } catch { }
+}
 @"
 Oarbank coordinator installed ($($manifest.version), $($manifest.platform)).
   agents:  $Url (client certificates; give nodes a join code)

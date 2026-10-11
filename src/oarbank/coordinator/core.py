@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools
+from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, fleetupdates, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, sites, statements, tools, workloads
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -34,7 +34,7 @@ AWAIT_MODULE_TTL = 600.0     # lease held for a completion waiting on a module f
 
 
 NON_FAILURE_RELEASES = {"preempt_memory", "preempt_protection", "user_cancel", "limit_mem", "limit_cpu", "limit_schedule",
-                        "transient", "agent_stop"}
+                        "transient", "agent_stop", "preempt_site"}
 HOST_FAILURES = {"doctor", "mode_mismatch", "oom", "no_metrics"}   # failures that implicate the host first
 
 
@@ -283,6 +283,8 @@ def _node_directives(db: DB, node: dict) -> dict:
         if C.RELEASE_SIGNING:
             release.update(statement=rel["statement"], signature=rel["signature"])
     from .settings import apply as settings_apply
+    from . import fleetupdates
+    node_update = fleetupdates.directive(db, node)
     return {"now": now(), "desired_state": node["desired_state"], "lifecycle": node["lifecycle"],
             # the complete effective policy and caps, with the revision the agent reports back once it applied them
             **settings_apply.directive(db, node),
@@ -290,7 +292,9 @@ def _node_directives(db: DB, node: dict) -> dict:
             "release_pubkey": db.get_state("release_pubkey") if C.RELEASE_SIGNING else None,
             "prefetch": prefetch_for(db, node), "run_doctor": bool(node["want_doctor"]),
             "run_probe": bool(node.get("want_probe")), "send_processes": bool(node.get("want_processes")),
-            "agent_update": agentbuilds.directive(db, node),
+            # the whole package through the node's update runner (fleet updates); the agent-only self-update stands aside
+            # while a node has one (docs/design/fleet-updates.md)
+            "node_update": node_update, "agent_update": None if node_update else agentbuilds.directive(db, node),
             "coordinator": {"fleet_id": identity.fleet_id(db), "cik": identity.key(Path(db.path).parent).public_b64,
                             "epoch": identity.epoch(db)},
             "install_coordinator": jl(node.get("install_coordinator_json")),
@@ -300,7 +304,20 @@ def _node_directives(db: DB, node: dict) -> dict:
             "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
             "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
-            **coordmove.directives(db), **owner.directives(db)}
+            # harness runs and co-tenancy certificates (docs/design/gpu-cotenancy.md)
+            **cotenancy.directives(db, node),
+            # the node's site (shared internet line): its hold and lease terms, and the gateway salt (docs/design/sites.md)
+            **sites.directives(db, node),
+            **coordmove.directives(db), **owner.directives(db),
+            # inbound listeners: the kill switch, dial-back probes, reachability, the observed address (listeners.py)
+            **_listener_directives(db, node),
+            # what this node runs of the modules' workloads, with each seat's fence and lease (docs/design/workloads.md)
+            "workloads": workloads.directives(db, node)}
+
+
+def _listener_directives(db: DB, node: dict) -> dict:
+    from . import listeners
+    return listeners.directives(db, node)
 
 
 def _renew_within() -> float:
@@ -324,6 +341,8 @@ def hello(db: DB, node: dict, body: dict) -> dict:
     if facts.get("platform"):
         releases.ensure(db, platforms.facts_platform(facts)["platform"])     # a platform the fleet has no release for yet
     with db.tx():
+        if body.get("boot_id") and body.get("boot_id") != node.get("boot_id"):
+            cotenancy.agent_restarted(db, node["node_id"])           # a harness run it held is gone with it
         db.x("UPDATE nodes SET agent_version=?, boot_id=?, facts_json=?, release_id=?, last_hello_at=?,"
              " last_heartbeat_at=?, ready_datasets_json=?, clock_offset_s=? WHERE node_id=?",
              (body.get("agent_version"), body.get("boot_id"), json.dumps(facts or jl(node["facts_json"], {})),
@@ -354,8 +373,10 @@ def hello(db: DB, node: dict, body: dict) -> dict:
                 _end_attempt(db, a["attempt_id"], "released", "agent_restart", count_failure=False)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         agentbuilds.observe(db, node, body)
+        fleetupdates.observe(db, node, body, heartbeat=False)
         _observe_identity(db, node, body)
         _observe_tools(db, node, body)
+        wl_ack = workloads.observe(db, node, body)       # an adopted workload's report renews its lease below
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         _lifecycle_step(db, node, facts)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
@@ -366,6 +387,8 @@ def hello(db: DB, node: dict, body: dict) -> dict:
     run_pending_goldens(db, node["node_id"])
     d = _node_directives(db, node)
     d.update(node_id=node["node_id"], kill=kill)
+    if wl_ack is not None:
+        d["workload_reports_ack"] = wl_ack
     return d
 
 
@@ -397,7 +420,7 @@ def _observe_tools(db: DB, node: dict, body: dict):
         db.x("UPDATE nodes SET tools_json=? WHERE node_id=?", (text, node["node_id"]))
 
 
-def heartbeat(db: DB, node: dict, body: dict) -> dict:
+def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
     t = now()
     nid = node["node_id"]
     tel, cap = body.get("telemetry") or {}, body.get("capacity") or {}
@@ -417,7 +440,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             if not row or row["state"] != "live" or row["node_id"] != nid:
                 continue
             progressed = (a.get("cpu_s", 0) > (row["cpu_s"] or 0) + 0.01 or
-                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing")
+                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing", "uploading")
                           or row["cpu_s"] is None)
             if a.get("phase") and a.get("phase") != row["phase"]:
                 db.x("INSERT OR IGNORE INTO attempt_phases VALUES(?,?,?)", (row["attempt_id"], a["phase"], t))
@@ -427,6 +450,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
                   t + C.LEASE_TTL if progressed else row["expires_at"],
                   t if progressed else row["last_progress_at"], row["attempt_id"]))
         agentbuilds.observe(db, node, body)
+        fleetupdates.observe(db, node, body, heartbeat=True)
         _observe_identity(db, node, body)
         if isinstance(body.get("processes"), list):
             db.x("UPDATE nodes SET processes_json=?, processes_at=?, want_processes=0 WHERE node_id=?",
@@ -444,10 +468,14 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             rep = {"services": [x for x in body["services"][:200] if isinstance(x, dict)],
                    "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
             db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps(rep), t, nid))
+        wl_ack = workloads.observe(db, node, body)       # workloads' state, seats given up, report events
+        _observe_listeners(db, node, body, peer_ip)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         ack = _ingest_journal(db, nid, body.get("journal") or [])
+        cotenancy.ingest(db, node, body.get("ab_runs"), tel)       # harness runs (docs/design/gpu-cotenancy.md)
+        sites.observe(db, node, t)                                # its phases may hold its site (docs/design/sites.md)
         cancel, revoke = jl(node["pending_cancel_json"], []), jl(node["pending_revoke_json"], [])
         db.x("UPDATE nodes SET pending_cancel_json='[]', pending_revoke_json='[]' WHERE node_id=?", (nid,))
         recert = bool(node["want_recertify"])
@@ -464,7 +492,16 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
     d.update(cancel=cancel, revoke=revoke, recertify=recert)
     if ack is not None:
         d["journal_ack"] = ack
+    if wl_ack is not None:
+        d["workload_reports_ack"] = wl_ack
     return d
+
+
+def _observe_listeners(db: DB, node: dict, body: dict, peer_ip: str):
+    """Inbound listeners (docs/design/inbound-listeners.md, "Protocol"): the agent's listeners, router mappings, network
+    view, probe results and top talkers, and the node's public source address (listeners.ingest)."""
+    from . import listeners
+    listeners.ingest(db, node, body, peer_ip)
 
 
 def _ingest_journal(db: DB, node_id: str, records: list) -> int | None:
@@ -893,9 +930,10 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         return rules_cache[cid]
     tel, cap = jl(node.get("telemetry_json"), {}) or {}, jl(node.get("capacity_json"), {}) or {}
     return predicates.NodeView(
+        agent_min=fleetupdates.agent_min(db),
         secrets_unset=unset, settings_unset=settings_unset, campaign_rules=campaign_rules,
         on_battery=bool(tel.get("on_battery")), user_present=bool(cap.get("user_present")),
-        node=node, states=node_modules(node), offered=runs, excluded=excluded,
+        node=node, states=node_modules(node), offered=runs, excluded=excluded, site=sites.claim_view(db, node),
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in runs},
         gpu_apis=predicates.node_gpu_apis(node),
@@ -987,6 +1025,9 @@ def claim(db: DB, node: dict, body: dict) -> dict:
     nid = node["node_id"]
     if not coordmove.accepting_leases(db):          # a coordinator move is draining or frozen: no new leases
         return {"grants": []}
+    from . import coordself
+    if not coordself.admitting(db):                 # a coordinator self-update runs (D58): probation may restore the db
+        return {"grants": []}
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
     offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
@@ -1076,6 +1117,8 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             for p, k in (res.get("pools") or {}).items():
                 nv.pool_use[p] = nv.pool_use.get(p, 0) + int(k)
             nv.gpu_use += modcalls.job_uses_gpu(j["module"], res, node.get("platform"))
+            if nv.site and res.get("network") == "heavy":
+                nv.site["heavy_running"] += 1                 # the site's budget of network-heavy jobs (sites.py)
             nv.granted += 1
             per_campaign[j["campaign_id"]] = per_campaign.get(j["campaign_id"], 0) + 1
             grant = {"attempt_id": aid, "job_id": j["job_id"], "job_key": j["job_key"],
@@ -1856,8 +1899,10 @@ def reap(db: DB):
             _alert(db, "node_offline", n["node_id"], f"{n['hostname']} offline for {int((t - hb) / 60)} min")
         elif hb and t - hb < C.OFFLINE_AFTER:
             _resolve_alert(db, "node_offline", n["node_id"])
-    from . import alerting, protection
+    from . import alerting, listeners, protection
+    listeners.tick(db, t)               # probes expire, statements follow module and grant changes, talkers age out
     protection.check_alerts(db, t)
+    sites.tick(db, t)                   # unrenewed transfer leases expire; a silent node holds its site (sites.py)
     releases.note_awaiting(db)          # releases waiting for the owner's signature (a key pinned, a node gone, ...)
     alerting.promote_pending(db, t)
 

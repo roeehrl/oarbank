@@ -108,9 +108,15 @@ impl Api {
         }
         let mut offset = st["offset"].as_u64().unwrap_or(0);
         let mut f = tokio::fs::File::open(file).await.map_err(io)?;
+        // a bulk upload waits for the site's uplink between chunks (docs/design/sites.md): small chunks while gated, so a
+        // hold stops it within a fraction of a second
+        let up = crate::uplink::global();
+        let mut tr = up.begin("upload", crate::uplink::Dir::Up, Some(size - offset)).await;
+        let chunk_max = if up.gated() { GATED_CHUNK } else { UPLOAD_CHUNK };
         loop {
             f.seek(std::io::SeekFrom::Start(offset)).await.map_err(io)?;
-            let mut chunk = vec![0u8; UPLOAD_CHUNK.min((size - offset) as usize)];
+            let mut chunk = vec![0u8; chunk_max.min((size - offset) as usize)];
+            tr.pace(chunk.len()).await;
             f.read_exact(&mut chunk).await.map_err(io)?;
             let r = self.client.patch(self.url(&path)).header("upload-offset", offset.to_string())
                 .header("content-type", "application/offset+octet-stream").body(chunk)
@@ -135,3 +141,5 @@ impl Api {
 
 /// The size of one PATCH of an upload.
 const UPLOAD_CHUNK: usize = 8 << 20;
+/// ... while the node is at a site or capped.
+const GATED_CHUNK: usize = 1 << 20;

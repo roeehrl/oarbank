@@ -75,6 +75,23 @@ impl fmt::Display for Os {
 /// Every reason `config` cannot run as written on `os` (empty: it can).
 pub fn refusals(config: &ProtectionConfig, os: Os) -> Vec<String> {
     let mut out = vec![];
+    // a delegation names the owner's processes by what a module cannot copy: a code-signing identity on macOS, one
+    // executable's exact path elsewhere (checked at every match: root-owned on Linux, an administrators-only folder on
+    // Windows)
+    for d in &config.delegations {
+        let m = &d.match_;
+        let signed = m.requirement.is_some() || (m.team_id.is_some() && m.identifier.is_some());
+        let path = m.path_prefix.as_deref().is_some_and(|p| !p.ends_with('/') && !p.ends_with('\\'));
+        match os {
+            Os::Darwin if !signed => out.push(format!(
+                "rule {}: on macOS a delegation names a code-signing identity (requirement, or team_id with identifier): a \
+                 path can be copied", d.id)),
+            Os::Linux | Os::Windows if !path || signed => out.push(format!(
+                "rule {}: on {os} a delegation names one executable's exact path (path_prefix), and nothing else identifies \
+                 it ({})", d.id, os.no_signing().unwrap_or("no code-signing identity"))),
+            _ => {}
+        }
+    }
     for r in &config.rules {
         let id = &r.id;
         let m = &r.match_;
@@ -105,6 +122,23 @@ pub fn refusals(config: &ProtectionConfig, os: Os) -> Vec<String> {
                     "rule {id}: match.name {n:?} is longer than the {limit} characters {os} keeps of a process's \
                      name, so it would never match"
                 ));
+            }
+        }
+        if let Some(why) = os.no_signing() {
+            for (n, d) in r.during.iter().enumerate() {
+                let Some((em, _)) = &d.on_exec else { continue };
+                for (key, set) in [
+                    ("requirement", em.requirement.is_some()),
+                    ("team_id", em.team_id.is_some()),
+                    ("identifier", em.identifier.is_some()),
+                ] {
+                    if set {
+                        out.push(format!(
+                            "rule {id}: during[{n}].source.on_exec.match.{key} is a macOS code-signing identity, and \
+                             {why} (match on path_prefix, path_contains, name or argv_regex)"
+                        ));
+                    }
+                }
             }
         }
         if r.protect_metric() == Some("ipc_ratio") && os != Os::Darwin {

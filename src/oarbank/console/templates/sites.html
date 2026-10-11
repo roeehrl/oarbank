@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}Sites · Oarbank{% endblock %}
+{% block body %}
+<h1>Sites</h1>
+<p class="small mut">A site is the nodes that share one internet line. Large transfers from two of them at once slow each other
+down, and a protected program on one of them may have to upload on time. While a protected process at a site is in a phase its
+rule tags <span class="mono">uplink</span> (or that phase cannot be read, or its node stops reporting), network-heavy fleet work
+pauses on <b>every</b> node of the site: dataset staging, uploads (results and checkpoints), and jobs and workloads that
+declare <span class="mono">network = "heavy"</span>. Releases and agent updates are not held. Outside such phases the site's budget limits how many of them run at once.
+A node is at one site at most.</p>
+
+<section class="card wide" aria-labelledby="h-sites">
+<h2 id="h-sites">Your sites</h2>
+<table class="small"><caption class="sr-only">Sites with their budget and state</caption>
+<tr><th scope="col">site</th><th scope="col">members</th><th scope="col">budget</th><th scope="col">now</th><th scope="col">measured</th><th class="actions" scope="col"><span class="sr-only">actions</span></th></tr>
+{% for s in sites %}<tr><td><a href="/sites/{{ s.site_id }}"><b>{{ s.name }}</b></a>{% if s.description %}<div class="mut">{{ s.description }}</div>{% endif %}</td>
+  <td>{{ s.members | join(', ') or '–' }} <span class="mut nowrap">({{ s.members | length }})</span></td>
+  <td>{{ s.max_transfers }} transfer{{ 's' if s.max_transfers != 1 }} · {{ s.max_heavy_jobs }} network-heavy job{{ 's' if s.max_heavy_jobs != 1 }}{% if s.uplink_mbps %} · {{ s.uplink_mbps | num(0) }} Mbit/s{% else %} · no rate limit{% endif %}</td>
+  <td>{% if s.hold %}<span class="chip warn">paused</span> {{ s.why }}{% else %}<span class="chip ok">free</span> {{ s.transfers }} transfer{{ 's' if s.transfers != 1 }}, {{ s.heavy_jobs }} network-heavy job{{ 's' if s.heavy_jobs != 1 }} running{% endif %}</td>
+  <td>{% for d, h in s.hint | dictsort %}{{ d }} {{ h.mbps | num(0) }} Mbit/s <span class="mut">({{ h.n }})</span>{% if not loop.last %} · {% endif %}{% else %}<span class="mut">no large transfers yet</span>{% endfor %}</td>
+  <td class="actions"><a class="btn" href="/sites/{{ s.site_id }}">Open</a></td></tr>
+{% else %}<tr><td colspan="6" class="mut">No sites yet: accept a suggestion below or create one.</td></tr>{% endfor %}
+</table>
+{% if unplaced %}<p class="small mut">At no site: {{ unplaced | join(', ') }}.</p>{% endif %}
+</section>
+
+<section class="card wide" aria-labelledby="h-suggest">
+<h2 id="h-suggest">Suggested sites</h2>
+<p class="small mut">From what the nodes observe of their network: a default gateway they share, or a public address the coordinator
+sees them connect from. Only keyed fingerprints are kept, never an address. A suggestion is a guess: two routers on one line
+(double NAT) look like two sites, so check before you accept.</p>
+<table class="small"><tr><th scope="col">evidence</th><th scope="col">nodes</th><th class="actions" scope="col"><span class="sr-only">actions</span></th></tr>
+{% for g in suggestions %}<tr><td>{{ g.text }} <span class="mut mono">({{ g.label }})</span></td>
+  <td>{% for x in g.nodes %}{{ x.hostname }}{% if x.site %} <span class="mut">(at {{ x.site }})</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</td>
+  <td class="actions">{% if g.sites | length == 1 %}{{ m.op_form("sites.assign", g.sites[0], "Add to " ~ g.sites[0], params={"nodes": g.nodes | map(attribute='node_id') | list, "suggestion": g.key}) }}
+    {% else %}{% call m.op_form("sites.create", "", "Create site…", params={"nodes": g.nodes | map(attribute='node_id') | list, "suggestion": g.key}) %}<label class="small">name <input name="target_input" required pattern="[a-z0-9][a-z0-9._-]{0,62}" size="12"></label>{% endcall %}{% endif %}
+    {{ m.op_form("sites.dismiss", g.key, "Dismiss") }}</td></tr>
+{% else %}<tr><td colspan="3" class="mut">Nothing to suggest: nodes report what they see of their network every few minutes.</td></tr>{% endfor %}
+</table>
+</section>
+
+<section class="card wide" aria-labelledby="h-new">
+<h2 id="h-new">New site</h2>
+{% call m.op_form("sites.create", "", "Review and create…", inline=False) %}
+<div class="form-grid small">
+<label>name <input name="target_input" required pattern="[a-z0-9][a-z0-9._-]{0,62}" placeholder="home"></label>
+<label>nodes <select name="pl.nodes" multiple size="{{ [nodes | length, 6] | min or 1 }}">{% for n in nodes %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select></label>
+<label>transfers at once <input name="p.max_transfers" type="number" min="1" max="32" value="1"></label>
+<label>network-heavy jobs at once <input name="p.max_heavy_jobs" type="number" min="0" max="32" value="1"></label>
+<label>fleet rate, Mbit/s <input name="p.uplink_mbps" type="number" min="0" step="any" placeholder="no limit"></label>
+<label>description <input name="p.description" maxlength="500"></label>
+</div>
+{% endcall %}
+</section>
+{% endblock %}

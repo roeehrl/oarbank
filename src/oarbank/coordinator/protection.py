@@ -259,7 +259,78 @@ def runtime_conditions(tel: dict) -> list[dict]:
     if prot.get("source_error"):
         out.append({"code": "PROTECTION_SOURCE_ERROR", "tone": "bad", "values": {"error": prot["source_error"]},
                     "message": f"the process table cannot be read: {prot['source_error']}"})
+    # owner sources the agent cannot read (D51): a phase then counts as on and a progress source as a violation, so the
+    # condition says which and how to fix it instead of a silent hold
+    unread = [(p.get("rule"), p.get("key"), p.get("reader")) for p in prot.get("phases") or [] if p.get("readable") is False]
+    unread += [(p.get("rule"), p.get("rule"), p.get("reader")) for p in prot.get("progress") or [] if p.get("readable") is False]
+    for rule, key, reader in unread:
+        if reader == "helper":
+            out.append({"code": "PROTECTION_SOURCE_NEEDS_HELPER", "tone": "warn", "values": {"rule": rule, "source": key},
+                        "message": f"rule {rule}: source {key} is in a person's home, which this agent's account may not "
+                                   "read; their session helper reads it while they are logged in. Nobody's helper reports "
+                                   "it now, so protection holds fleet work back as if the phase were on"})
+        else:
+            out.append({"code": "PROTECTION_SOURCE_UNREADABLE", "tone": "warn", "values": {"rule": rule, "source": key},
+                        "message": f"rule {rule}: source {key} cannot be read by the agent (no matching file, or no "
+                                   "permission); protection holds fleet work back until it reads"})
+    budget = prot.get("gpu_budget") or {}
+    if budget.get("not_certified"):
+        rules = ", ".join(budget["not_certified"])
+        out.append({"code": "GPU_NOT_CERTIFIED", "tone": "acc", "values": {"rules": rules},
+                    "message": f"gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet GPU work "
+                               "waits as with when_no_gpu_protected (oarbank protection ab sweep <node> --rule <id>)"})
+    # the duty governor (D50): units it does not trust with a duty, and units whose GPU time it cannot read
+    for d in budget.get("distrusted") or []:
+        out.append({"code": "GPU_DUTY_EXCEEDED", "tone": "warn", "values": {"unit": d.get("unit"), "action": "not trusted"},
+                    "message": f"{d.get('unit')} exceeded its gpu_duty three times within an hour and was stopped; it gets "
+                               f"no duty beside protected GPU work for another {int(d.get('for_s') or 0) // 60} min (does its "
+                               "runner hold gpu_duty? oarbank-sdk conform checks it)"})
+    unread = sorted({str(u.get("id")) for u in budget.get("units") or [] if u.get("why") == "unverified"})
+    if unread:
+        out.append({"code": "GPU_DUTY_UNVERIFIED", "tone": "warn", "values": {"unit": ", ".join(unread), "action": "held"},
+                    "message": f"the GPU time of attempts {', '.join(unread)} cannot be read on this node, so their gpu_duty "
+                               "cannot be checked: they wait beside protected GPU work"})
     return out
+
+
+# ------------------------------------------------------------------ phases across nodes (for per-site aggregation)
+
+PHASES_FRESH_S = 60          # a node silent longer than this reports nothing current: its phases are unknown
+
+
+def node_phases(db: DB, node_ids=None, tag: str | None = None, now: float | None = None) -> dict:
+    """Every node's owner phases as its agent last reported them (`telemetry.protection.phases`), for features that
+    aggregate them over a set of nodes (a site sharing one internet line: is any protected process there in a phase
+    tagged `uplink`?). {node_id: {"fresh": bool, "phases": [phase, ...]}}, each phase as the agent reports it (`key`,
+    `rule`, `block`, `on`, `since`, `readable`, `reader`, `tags`, `immediate`), filtered to `tag` when given. A node
+    whose heartbeat is older than PHASES_FRESH_S is `fresh: False` (its phases are unknown, and a fail-safe consumer
+    treats unknown as on); an unreadable phase is reported `readable: False` (the agent already holds it as on)."""
+    from . import clock
+    t = clock.now() if now is None else now               # the heartbeat's own time source (clock.py)
+    rows = db.q("SELECT node_id, telemetry_json, last_heartbeat_at FROM nodes WHERE lifecycle!='retired'")
+    want = set(node_ids) if node_ids is not None else None
+    out = {}
+    for n in rows:
+        if want is not None and n["node_id"] not in want:
+            continue
+        tel = jl(n["telemetry_json"], {}) or {}
+        phases = [p for p in (tel.get("protection") or {}).get("phases") or []
+                  if isinstance(p, dict) and (tag is None or tag in (p.get("tags") or []))]
+        out[n["node_id"]] = {"fresh": (n["last_heartbeat_at"] or 0) >= t - PHASES_FRESH_S, "phases": phases}
+    return out
+
+
+def any_phase_on(db: DB, node_ids, tag: str, now: float | None = None) -> dict:
+    """Whether any of these nodes is in a phase tagged `tag` now, never looser: on when a phase is on or unreadable,
+    or when a node with such a phase configured has not reported recently. {"on": bool, "why": [...]}."""
+    why = []
+    for nid, d in node_phases(db, node_ids, tag, now).items():
+        for p in d["phases"]:
+            if p.get("on") or p.get("readable") is False:
+                why.append(f"{nid}: {p.get('key')} {'on' if p.get('on') else 'unreadable'}")
+        if d["phases"] and not d["fresh"]:
+            why.append(f"{nid}: not reporting")
+    return {"on": bool(why), "why": why}
 
 
 # ------------------------------------------------------------------ preview
@@ -419,7 +490,13 @@ def status(db: DB, ident: str, history_limit: int = 20) -> dict | None:
             "mode": a["config"]["node"]["mode"], "mode_source": a["mode_source"],
             "mode_locked_by": (a["mode_locked_by"] or {}).get("name"), "sources": a["sources"], "skipped": a["skipped"],
             "conflicts": a["conflicts"], "own": own(snap, "node", n["node_id"]), "history": hist,
-            "live": tel.get("protection") or {}, "guard": tel.get("guard"), "conditions": runtime_conditions(tel)}
+            "live": tel.get("protection") or {}, "guard": tel.get("guard"), "conditions": runtime_conditions(tel),
+            "cotenancy": _cotenancy_card(db, n)}
+
+
+def _cotenancy_card(db: DB, n: dict) -> dict:
+    from . import cotenancy
+    return cotenancy.node_card(db, n)
 
 
 # ------------------------------------------------------------------ alerts (from the journals)

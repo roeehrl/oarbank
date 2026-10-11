@@ -124,12 +124,15 @@ async fn prehash(path: &Path) -> Result<(Sha256, u64)> {
     Ok((h, n))
 }
 
-/// Stream `resp` onto the partial, hashing; true when the digest matches.
-async fn stream_into(resp: reqwest::Response, partial: &Path, mut h: Sha256, append: bool, digest: &str) -> Result<bool> {
+/// Stream `resp` onto the partial, hashing; true when the digest matches. Each chunk waits for the site's uplink
+/// (`tr`: held during an uplink phase, paced to the lease and caps; docs/design/sites.md).
+async fn stream_into(resp: reqwest::Response, partial: &Path, mut h: Sha256, append: bool, digest: &str,
+                     tr: &mut crate::uplink::Transfer) -> Result<bool> {
     let mut f = tokio::fs::OpenOptions::new().create(true).append(append).write(true).truncate(!append).open(partial).await?;
     let mut s = resp.bytes_stream();
     while let Some(c) = s.next().await {
         let c = c?;
+        tr.pace(c.len()).await;
         h.update(&c);
         f.write_all(&c).await?;
     }
@@ -148,6 +151,11 @@ pub async fn fetch_blob(api: &Api, l: &Layout, file: &Value) -> Result<PathBuf> 
         return Ok(dst);
     }
     crate::fsutil::private_dir(dst.parent().unwrap())?;
+    // a bulk download waits for the site's uplink (docs/design/sites.md); a small one goes at once
+    let mut tr = crate::uplink::global().begin("staging", crate::uplink::Dir::Down, file["size"].as_u64()).await;
+    if dst.exists() {
+        return Ok(dst);                   // another transfer of the same blob finished while this one waited
+    }
     let partial = l.cache_tmp().join(format!("{digest}.partial"));
     let origins: Vec<String> = file["origins"].as_array().cloned().unwrap_or_default().iter()
         .filter_map(|o| o.as_str().map(str::to_string)).collect();
@@ -158,8 +166,8 @@ pub async fn fetch_blob(api: &Api, l: &Layout, file: &Value) -> Result<PathBuf> 
                 let (h, have) = prehash(&partial).await?;
                 let r = origin_get(o, have).await?;
                 let ok = match r.status().as_u16() {
-                    206 => stream_into(r, &partial, h, true, digest).await?,
-                    200 => stream_into(r, &partial, Sha256::new(), false, digest).await?,
+                    206 => stream_into(r, &partial, h, true, digest, &mut tr).await?,
+                    200 => stream_into(r, &partial, Sha256::new(), false, digest, &mut tr).await?,
                     416 => {
                         let _ = tokio::fs::remove_file(&partial).await;
                         false
@@ -185,8 +193,8 @@ pub async fn fetch_blob(api: &Api, l: &Layout, file: &Value) -> Result<PathBuf> 
     let r = api.download(&format!("/v1/blobs/{digest}"), have).await
         .map_err(|e| anyhow::anyhow!("coordinator blob {}: {e}{}", &digest[..12],
                                      last_err.map(|x| format!(" (origins: {x})")).unwrap_or_default()))?;
-    let ok = if r.status().as_u16() == 206 { stream_into(r, &partial, h, true, digest).await? }
-             else { stream_into(r, &partial, Sha256::new(), false, digest).await? };
+    let ok = if r.status().as_u16() == 206 { stream_into(r, &partial, h, true, digest, &mut tr).await? }
+             else { stream_into(r, &partial, Sha256::new(), false, digest, &mut tr).await? };
     if !ok {
         let _ = tokio::fs::remove_file(&partial).await;
         bail!("blob {} failed its digest check", &digest[..12]);
@@ -210,8 +218,25 @@ pub async fn manifest(api: &Api, l: &Layout, id: &str) -> Result<Value> {
     Ok(v)
 }
 
+/// Datasets being staged now: one staging per dataset at a time (a prefetch on every heartbeat, a job's staging and a
+/// held transfer would otherwise fetch the same blobs side by side).
+fn staging_lock(id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    let mut m = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    m.retain(|_, v| std::sync::Arc::strong_count(v) > 1);
+    m.entry(id.to_string()).or_default().clone()
+}
+
+/// Whether a dataset is being staged now (a prefetch then leaves it to that staging).
+pub fn staging_now(id: &str) -> bool {
+    staging_lock(id).try_lock().is_err()
+}
+
 /// Stage every file of a dataset; true when it is ready.
 pub async fn stage(api: &Api, l: &Layout, id: &str) -> Result<()> {
+    let lock = staging_lock(id);
+    let _one = lock.lock().await;
     let m = manifest(api, l, id).await?;
     for f in m["files"].as_array().cloned().unwrap_or_default() {
         fetch_blob(api, l, &f).await?;

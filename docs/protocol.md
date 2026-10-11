@@ -153,7 +153,7 @@ their process groups, deletes their workspaces, and does not report them.
                "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
                "budget_cores": 6, "front": "app 812 (lsappinfo)", "source_error": null, "lowering": true}},
  "capacity": { …Capacity… },
- "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused|checkpointing", "cpu_s": 55.2,
+ "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused|checkpointing|uploading", "cpu_s": 55.2,
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
@@ -188,15 +188,44 @@ their process groups, deletes their workspaces, and does not report them.
   latest in `nodes.services_json`; the node page, `oarbank node show` and module pages (the `services` and `nodes` host
   queries) show it.
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
-  `journal_ack`, the highest seq it stored.
+  `journal_ack`, the highest seq it stored. The GPU duty governor journals its budget steps as `kind: "gpu_duty"`
+  (`GPU_DUTY_START`, `_BASELINE`, `_GROW`, `_HALVE`, `_TAKE_BACK`, `_CLAMP`, each with `duty`, `ceiling`, `why`, and
+  `pressure` per rule at an interval's end) and its compliance actions as `kind: "gpu_compliance"` (`GPU_DUTY_EXCEEDED`,
+  `GPU_DUTY_UNVERIFIED`, with `attempt` (a job's) or `workload` (a workload's key), `unit`, `measured`, `duty`,
+  `action: "paused|evicted"`); S28 reads both.
+- **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
+  block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
+  "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:
+  `{"rule", "readable", "reader", "rate"}`), `event_latency` (source event to pause request: `n`, `p50_ms`, `p99_ms`,
+  `max_ms`, `edges_ms`, `buckets`), `gpu_budget` (under `gpu_jobs = certified` while a gating group is active: the
+  duty governor's `{"duty", "ceiling", "rules", "jobs", "per_job", "state": "measuring|running|held|locked|harness",
+  "lockout_s", "baseline": {"<rule>": {"rate", "age_s", "pressure"}}, "units": [{"id": <attempt or workload fleet id>,
+  "unit": "<module>[/<workload>]", "workload": bool, "duty", "measured",
+  "state": "ok|waiting|held|distrusted|cannot_throttle|evicted", "why"?: "exceeded|unverified", "for_s"?}],
+  "distrusted": [{"unit": "<module>[/<name>]", "for_s"}]}`, or `{"duty": 0, "rules", "not_certified": [...], "state":
+  "not_certified"}`) and `identities` (per rule, the protected program's identity a certificate
+  is bound to); `telemetry.cert_context` is what the node's certificates must match (`hardware`, `os_major`,
+  `agent_version`). The coordinator aggregates `phases` across nodes by tag (`protection.node_phases`,
+  `protection.any_phase_on`).
+- **`telemetry.uplink`** is the agent's site uplink gate (docs/design/sites.md): `{"site": "home", "site_id": "site_…",
+  "held": "site home: mini's rule trainer is in an upload phase (trainer#0)", "local_phases": ["trainer#0"],
+  "cap_mbps": 50.0, "leases": 1, "heavy_jobs": [123], "active": [{"kind": "staging|upload", "dir": "down|up", "done":
+  1048576, "total": 1073741824, "paused": true, "why": "…"}]}`; the site's page shows it per member.
+- **`ab_runs`** is the current or last paired on/off harness run (at most one): `{"run_id", "rule", "work", "duty",
+  "state": "pilot|running|done|aborted", "started_at", "target_blocks", "blocks": [{"on_first", "on_rate",
+  "off_rate", "start", "end"}], "excluded": [{"start", "end", "reason"}], "current": {"arm": "on|off",
+  "window_elapsed_s", "on_first", "excluded_reason"}, "outcome": {"decision":
+  "no_slowdown|slowdown|inconclusive|refused|aborted", "reason", "analysis", "min_detectable", "ended_at"}, "identity",
+  "margin", "window_s", "washout_s", "off"}`. A run that ends `no_slowdown` earns a certificate.
 - **`processes`** is the summary the console's process picker uses: the owner's processes by resource use,
   at most 80, the agent's own jobs excluded. The agent sends it every 5 minutes, or on the next heartbeat
   after `send_processes`. `comm` is the kernel's short name (the Windows image name); a null `path` or `argv` could
   not be read (another account's process), and a rule key that needs it counts as holding (a rule's `unreadable`
   counts the processes it matched that way).
 - **Leases.** oarbankd extends `expires_at = now + 60 s` for each listed attempt that is live server-side and
-  shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, it is `paused` by host protection, or it
-  is `checkpointing` (uploading a checkpoint before it releases). The agent bounds a pause at 10 minutes (less with the
+  shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, it is `paused` by host protection or its
+  site, it is `checkpointing` (uploading a checkpoint before it releases), or it is `uploading` its results (an upload
+  its site holds may wait out an uplink phase). The agent bounds a pause at 10 minutes (less with the
   node's protection `[node] max_pause_s`, 10 to 600 s), then releases the attempt: after a checkpoint when the stage
   keeps them (see Checkpoints).
 
@@ -210,7 +239,9 @@ their process groups, deletes their workspaces, and does not report them.
  "modules_disabled": ["example"],
  "statement": {"statement": "{…oarbank.node/v1…}", "signature": null},
  "tool_pins": {"": {"jdk": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"}, "example": {"jdk": "/opt/jdk-21"}},
- "detect_tools": false}
+ "detect_tools": false,
+ "uplink": {"site": {"id": "site_…", "name": "home", "hold": false, "code": null, "why": null, "since": null,
+                     "lease_ttl_s": 20, "poll_s": 2, "lease_mbps": 50.0, "max_transfers": 2}, "salt": "…"}}
 ```
 | Directive | Meaning |
 |---|---|
@@ -220,11 +251,18 @@ their process groups, deletes their workspaces, and does not report them.
 | `revoke` | Another attempt won, or the module was disabled: kill silently, no report. |
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
 | `run_probe` | Run a host-protection pause probe at the next tick (from `protection.probe_now`). |
+| `ab_run` | A harness run to start (`{"run_id", "rule", "work", "duty", "blocks", "window_s", "washout_s", "margin", "off", "pilot_blocks", "max_hours", "seed"}`, from `protection.ab.start` or `.sweep`); `null` when none. The agent starts each run id once, refuses one while another runs or for a rule without a `progress_rate` source (journaled `AB_REFUSED`). |
+| `ab_abort` | Run ids to abort (`protection.ab.abort`). |
+| `ab_ack` | The last run oarbankd stored as ended: the agent stops reporting it. |
+| `certificates` | The node's co-tenancy certificates in force: `[{"id", "rule", "work", "duty", "r", "r_lo", "r_hi", "margin", "run_id", "issued_at", "valid_until", "identity", "context"}]`. The agent checks each (expiry, `context` against its own, `identity` against the rule's live group) before `gpu_jobs = certified` uses it. |
 | `send_processes` | Send a process summary (the rule editor's preview is open). |
 | `modules_disabled` | Modules that must not run on this node: their effective `[module] enabled` is off here (for the fleet: the kill switch, `modules.disable`; or for a group the node is in, or the node itself). Every service of theirs is disabled on the node (stopped, never offered) until they are enabled again; the coordinator grants none of their work there. |
 | `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
 | `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
 | `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
+| `listeners_disabled` | The inbound-listener kill switch for this node or the fleet: close every listener and remove every router mapping (see Inbound listeners). |
+| `listener_probes`, `dial_probes`, `listener_reachability`, `observed_addr`, `send_listener_talkers` | Dial-back probes to expect and to make, their outcomes, the node's public source address, and a request for the listeners' top client addresses (see Inbound listeners). |
+| `uplink` | The node's site (docs/design/sites.md): `site` is `null` at no site, else its id and name, whether it holds network-heavy work now (`hold`, `code` `SITE_UPLINK_BUSY`, `why` in words, `since`) and the lease terms (`lease_ttl_s`, `poll_s`, `lease_mbps`: the pace of each lease, `null` unpaced). `salt` keys the agent's gateway fingerprint (see Site uplink). |
 
 ## Work
 
@@ -415,14 +453,64 @@ nondeterminism takes the results resumed from its checkpoints with it.
 - **Ready.** A dataset is ready when every file is present and verified. `prefetch` names registered datasets to
   stage ahead of need.
 
+## Site uplink
+
+Nodes that share one internet line are one **site** (docs/design/sites.md, PLAN D55). The agent's bulk transfers, each
+of at least 8 MiB or of unknown size (dataset staging from origins and `GET /v1/blobs`, result and checkpoint uploads),
+wait while any of these holds, and resume where they stopped:
+
+- one of this node's protection phases tagged `uplink` is on or cannot be read (seen at once by the agent's watcher);
+- a protection rule caps staging at 0 (`cap_fleet.staging_mbps = 0`);
+- the coordinator says the node's site holds (`uplink.site.hold` in a directive or a renewal).
+
+At a site every bulk transfer also needs a lease:
+
+```text
+POST /v1/agent/uplink/lease    {"kind": "staging|upload", "dir": "down|up", "bytes": 1073741824}
+  → {"granted": true, "lease_id": "ul_…", "mbps": 50.0, "ttl_s": 20, "site": {…}}
+  → {"granted": false, "code": "SITE_UPLINK_BUSY|SITE_UPLINK_BUDGET", "why": "…", "retry_s": 2, "site": {…}}
+  → {"granted": true, "lease_id": null, "site": null}                       (the node is at no site)
+POST /v1/agent/uplink/renew    {"leases": ["ul_…"]}  → {"leases": {"ul_…": "ok|revoked"}, "site": {…}}
+POST /v1/agent/uplink/release  {"lease_id": "ul_…", "kind", "dir", "bytes": 1073741824, "seconds": 41.2, "paced": false}
+POST /v1/agent/uplink/network  {"gateway_fp": "<32 hex>"}
+```
+
+- **The budget.** oarbankd grants at most the site's `max_transfers` live leases, each paced at `uplink_mbps /
+  max_transfers` when the site sets a rate, and none while the site holds. A hold or a budget change revokes every
+  lease (`revoked` at the next renewal). S27 checks it.
+- **Renewal.** While it holds a lease or runs a network-heavy job, the agent renews every `poll_s` (and learns the
+  site's state from each answer). A lease not renewed for `lease_ttl_s` is gone on the coordinator; the agent treats one
+  it could not renew for `lease_ttl_s - 5` seconds, counted from when it sent the last successful renewal, as gone
+  already, so it has stopped before the slot is given to another node.
+- **Pace.** The smallest of the lease's `mbps`, the node's `staging_mbps` cap and a rule's staging cap. While a node
+  is at a site or capped, uploads go in 1 MiB chunks (8 MiB otherwise), so a hold stops one within a fraction of a
+  second.
+- **At once.** When one of its `uplink` phases changes, the agent sends a heartbeat at once instead of waiting for
+  `heartbeat_s`, and oarbankd recomputes the node's site in that heartbeat: the other nodes' transfers stop at their
+  next renewal, within `SITE_HOLD_BOUND_S` (5 s) of the phase source changing.
+- **Network-heavy jobs** (`resources.network = "heavy"` in the spec envelope) are paused while the node's site holds
+  (`pause` in a cooperative runner's control document, or a freeze), and released as `preempt_site` (requeued, never
+  charged) when they can do neither or wait past the node's longest pause. oarbankd admits none at a site while it
+  holds, and at most the site's `max_heavy_jobs` at once.
+- **Network fingerprint.** Every 10 minutes the agent reports `gateway_fp`, an HMAC-SHA256 (keyed with
+  `uplink.salt`) of its default gateway's hardware address read from the OS's route and neighbour tables, truncated to
+  16 bytes; oarbankd also keeps a keyed fingerprint of a public address the node connects from. Neither address is
+  stored or shown; equal fingerprints suggest a site.
+- Releases and agent updates are not held: they are fetched on the agent's control path, and holding them would hold
+  its heartbeats.
+- Journal records: `transfer_paused` (`TRANSFER_PAUSED`, with `transfer`, `dir`, `why`, `done`, `paused_at`) and
+  `transfer_resumed` (`TRANSFER_RESUMED`, with `paused_s`); a frozen network-heavy job's actuation is journaled with
+  `SITE_PAUSE` and `SITE_RESUME`.
+
 ## Node statement
 
 Every node-scope value that grants access on one node travels in that node's **statement**: canonical JSON
 `{"type": "oarbank.node/v1", "fleet_id", "node_id", "seq", "folders": {id: {"access": "read"|"write", "path"}}, "tools":
-[{"id", "module", "path"}], "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
+[{"id", "module", "path"}], "listeners": {"<module>/<listener>": {…}}, "signed_at"}` and a signature, rebuilt with a rising seq whenever its content changes. With
 release signing the agent applies a statement only with a valid signature by the pinned release key (`oarbank node sign
 <node>`, operation `nodes.sign_statement`) and a seq above the last one it applied; in developer mode statements are
-unsigned. The agent keeps the applied statement in `state/folders.json`.
+unsigned. The agent keeps the applied statement in `state/folders.json`. `listeners` are the owner's inbound listeners on the node (see
+Inbound listeners); a statement without the key has none.
 
 ## Folders
 
@@ -554,6 +642,84 @@ canary on chosen nodes (`agent.upload`, `agent.canary`, `agent.promote`, `agent.
 - **Promotion** is refused until every canary node reports running the canary build and has heartbeated in
   the last 120 s. In signing mode canary and promotion need a signed build.
 
+## Fleet updates
+
+A fleet release moves a node's whole package (launcher, helpers, apps, runtime and agent) through the node's root
+update runner, and the coordinator before any node ([design/fleet-updates.md](design/fleet-updates.md); D56–D62,
+S29–S31). While a node has a `node_update` directive, the agent-only `agent_update` above is `null` for it; a node
+without an update runner keeps agent-only self-update.
+
+- **Release.** `oarbank-fleet-<version>.json` names every artifact of a version (`role` node, agent or coordinator;
+  `platform`; `format` pkg, msi, deb, rpm, tar or binary; `sha256`; `size`) with `seq`, `agent_min`, `stops` and
+  `expires`. Its text travels verbatim: everyone hashes those bytes. In signing mode the owner's statement
+  `{"type":"oarbank.fleet-release/v1","version","seq","manifest_sha256","signed_at"}` (sorted keys, `(",", ":")`
+  separators, Ed25519, base64) is checked against the owner key set. The coordinator imports a release from a
+  directory, from files staged through `POST /api/v1/updates/uploads`, or from `update_source`
+  (`<source>/download/v<version>/<asset>`). It checks each artifact's sha256 and size and keeps only the platforms its
+  nodes and itself run.
+- **Report.** hello and heartbeat carry `install: {format, scope, updater, why}` (how the agent was installed and
+  whether the runner's trigger and trust are in place) and `node_update: {state, release, seq, error, at}`. States:
+  `idle`, `unsupported`, `staging`, `staged`, `draining`, `deferred`, `installing`, `confirming`, `done`, `failed`,
+  `rolled_back`, `refused`.
+- **Directive.** While a node's target differs from the version it runs, every reply carries
+  `node_update: {release, seq, go, rollback, drain_timeout_s, artifact: {name, format, sha256, size, url}, manifest,
+  signature | null, owner_anchors | null}`; `null` otherwise. The target is the node's pin (`update_pin`), else none
+  while it is held (`update_hold`), else the governing rollout's release once the node's ring started (or, after the
+  rollout is done, to catch up), else what it runs. It is never newer than the coordinator's own version, and a
+  `stops` version the node has not reached comes first. `owner_anchors` relays the owner key set for the runner's
+  rotation rule.
+- **Artifact.** `GET /v1/updates/artifacts/{sha256}` (agent listener, mTLS) serves only the artifact of the node's
+  current directive (404 otherwise).
+- **Agent.** It stages (downloads under a site transfer lease, checks size, sha256, the manifest's entry for its
+  platform and format, and the signature) and reports `staged`. On `go` it drains: no new claims; running attempts
+  finish. Past `drain_timeout_s` it reports `deferred` and claims again. Drained, it writes its spool request for the
+  runner and reports `installing`; the new agent confirms after its first hello and heartbeat (`confirming`), then
+  `done`. If the runner rolled back, the old agent reports `rolled_back`. A `failed` seq is not retried until the
+  coordinator issues another.
+- **Rollout.** The coordinator first (ring 0: a snapshot, a self-test, the root coordinator runner, probation), then the
+  rings `canary`, `early` and `broad` (`update_ring`). Within a ring at most `max_unavailable` nodes are staged with `go`
+  or between draining and confirming (S29). `go` goes only to a node that is online (heartbeat within 120 s), inside its
+  `update_window`, not held, not pinned elsewhere, with no protected phase on and no workload seat due for renewal (S31;
+  each grant is journaled with these facts). A ring's next starts when it finished and baked: its bake time passed and
+  every node it updated heartbeated 10 times on the new release, healthy (S30). Failures above a ring's budget (0 for
+  canary, 1 after) halt the rollout and, with `auto_rollback`, send the nodes it moved back through the same directive
+  (`rollback: true`). A rollout does not start, nor start a ring, while more than a third of the fleet is unhealthy. A
+  node older than the coordinator's `agent_min` is refused work (`AGENT_TOO_OLD`) until it updates.
+
+## Coordinator self-update
+
+The coordinator updates itself from a stored fleet release ([fleet-updates.md](design/fleet-updates.md), D58). Two
+parties take part: oarbankd, unprivileged, prepares it, and a root runner (`python -m oarbank.coordupdate run`; a
+build's `bin/oarbank-coordupdate`) swaps it.
+
+- **`GET /v1/health`** on the agent listener answers without a client certificate, in every role:
+  `{"version", "started_at", "migrated": true, "ticking": <a background tick within 30 s>, "role"}`. The runner's
+  probation reads it: the new version, migrated and ticking, within 300 s, holding for 60 s.
+- **Request.** oarbankd checks the release's coordinator build for its platform: the sha256, the size, and in
+  signing mode the owner's `oarbank.fleet-release/v1` signature over the manifest. It refuses when:
+  - a move is on, or this coordinator is handed off;
+  - an enrolled, non-retired node that is not held (`update_hold`) runs an agent older than the release's `agent_min`.
+
+  It snapshots the database (`VACUUM INTO updates/snapshots/<from>-<ts>.sqlite3`, plus an integrity check) and runs the
+  new build's `oarbankd --self-test --home <scratch>` on a copy. Only then does it write `coordinator_updates {state:
+  requested}` and the spool request, atomically.
+- **Spool** (`<coordinator home>/updates/`):
+  - `coordinator-request.json`: `{"id", "version", "sha256", "size", "archive": "updates/artifacts/<sha256>",
+    "manifest", "signature", "snapshot", "from_version", "requested_at"}`. Its appearance starts the runner, through
+    the launchd job `dev.codonic.oarbank.oarbankd.update` (`WatchPaths`), the systemd unit
+    `dev.codonic.oarbank.oarbankd.update.path` (`PathExists`), or the SYSTEM task `\Oarbank\CoordinatorUpdate` (every
+    minute). The runner removes the file once it has journaled the request; oarbankd then records `running` and grants
+    no new leases until the outcome.
+  - `coordinator-result.json`: `{"id", "version", "state": "refused|done|rolled_back", "error", "at"}`. The runner
+    writes it, owned by the coordinator's account. oarbankd reads it at start and on every background tick, records
+    `coordinator_update_{done,rolled_back,refused}` (alerting on the last two), and moves the file to `updates/results/`.
+- **Runner.** It reads the request as data. It copies the build from `updates/artifacts/<sha256>` into its own
+  root-only `<system data>/coordinator-update/` and verifies the copy against `trust.json` there. Then it stops both
+  services, takes its own copy of the database (`db-<id>.sqlite3`), unpacks into `PROGRAMS/<v>-<sha12>`, flips
+  `current`, refreshes the services (`install-oarbankd --refresh --installed <build>`) and starts them. It commits, or
+  restores the copy, flips back and starts the old version. Every step is journaled in `journal.json`; a runner that
+  finds an active journal rolls back unless it was committing.
+
 ## Coordinator identity and moves
 
 Agents trust a key, not a URL (design: docs/design/coordinator-move.md).
@@ -633,6 +799,63 @@ A module's services, such as a VM, follow service protocol 1 (the SDK's spec/ser
   enforcement map; a module with an endpoint service is placed only there.
 - **Kill switch.** The services of a module in `modules_disabled` are disabled: stopped once no attempt uses them.
 - **Probes** provide capabilities, such as `java17`, on a period.
+
+## Workloads
+
+A module's workloads (docs/design/workloads.md; the SDK's spec/workload-protocol.md) are long-running processes the
+owner assigns to nodes (`workloads.assign`, T2).
+
+- **Directive** (every hello and heartbeat reply): `workloads: [{key, module, workload, desired, seat_id, fence,
+  lease_s, restart_seq, reason}]`, one entry per assignment of the node. `desired` is `running` only for a workload the
+  node may run now: for a per-node identity, with the seat's lease (`seat_id`, `fence`, and `lease_s`, the lease's end
+  minus the coordinator's now when it wrote the reply); otherwise `stopped` with a reason code (`WORKLOAD_SEAT_ELSEWHERE`,
+  `WORKLOAD_SECRETS_NOT_SET`, `WORKLOAD_IDENTITY_SHARED`, `WORKLOAD_NOT_OFFERED`, `WORKLOAD_NODE_NOT_ACTIVE`). The agent
+  runs exactly what is listed `running` and stops what is not; a workload missing from the list is unassigned. The
+  agent's lease ends at the time it **sent** the request plus `lease_s`, on its boot clock (it counts sleep), and the
+  workload stops then unless a later reply renewed it. A raised `restart_seq` restarts the workload (and lifts a
+  withdrawal).
+- **Report** (hello and heartbeat): `workloads: [{key, state, running, seat_id, fence, release, pid, run, adopted,
+  members, restarts, failures, withdrawn, error, blocked, held, held_code, paused, lowered, threads, cpu_cap, health,
+  lease_left_s, progress, log_tail, ...}]`. `running` is true while anything of the workload may run (starting, running,
+  stopping). `release: true` with `running: false` gives the seat up; the coordinator frees a seat only on such a report
+  from its holder carrying the current fence (an older fence is ignored), else when the lease and a grace of 60 s have
+  passed. `log_tail` is the last 2 KiB of the workload's log, with its secrets' values redacted.
+- **Report events** (heartbeat): `workload_reports: [{key, seat_id, fence, events: [{seq, t, data}]}]`, a workload's
+  `report` events (at most 4 KiB each, 60 a minute); the reply's `workload_reports_ack: {key: seq}` names the highest
+  sequence stored, which the agent then drops. The coordinator delivers them to the module's `workload.report` verb and
+  applies the effects it answers (`coordinator.workload_effects`), with an audit row.
+- **Secrets**: `POST /v1/agent/workloads/secrets {key, seat_id, fence}` answers `{secrets: {name: value}}` only while the
+  node holds the seat with that fence and its lease runs (409 `seat_not_held`, `secrets_not_set`, `identity_shared`,
+  `not_assigned`). The agent asks at each start and keeps the values only in the run's owner-only secrets file.
+- **Adoption**: workloads outlive their agent; the next agent adopts a recorded run (`<home>/state/workloads/`) while its
+  lease runs and its leader is the recorded process, and reports it at hello, which renews the lease.
+
+## Inbound listeners
+
+docs/design/inbound-listeners.md is the full contract; in short:
+
+- **Facts** (hello): `"listeners": {"version": 1, "probe": true}`: the agent runs listeners and can dial back for
+  others.
+- **What the agent runs.** For each statement entry `<module>/<listener>`, a listener when the module version in its
+  release requests that `inbound` listener, an enabled endpoint service or a workload of the module lists it, `listeners_disabled`
+  is off, the policy's `inbound_listeners` is not false and the protection mode is not `strict_yield`; else a refusal
+  (`LISTENER_NOT_GRANTED`, `LISTENER_NO_TARGET`, `MODULE_DISABLED`, `LISTENERS_DISABLED`, `LISTENERS_FORBIDDEN`,
+  `LISTENER_STRICT_YIELD`, `LISTENER_HANDOVER_UNSUPPORTED`, `LISTENER_BIND_FAILED`).
+- **Heartbeat** (when the node has or had listeners): `listeners` (per key: state, bind and external addresses, the
+  announcement, the reachability result with the owner's text and fix, connection counters and refusals by reason,
+  `probe_wanted`, `statement_seq`), `portmaps` (every router mapping it holds: protocol, gateway, external and internal
+  address, lease, expiry, last verification, state, error), `network` (gateway, local addresses, the gateway's
+  external address, the observed address, which mapping protocols answer, the router's other mappings for this node,
+  the firewall), `probe_results` (dial-backs this node made), and `listener_talkers` once after
+  `send_listener_talkers`.
+- **Probes.** The coordinator schedules a dial-back when a report asks (`probe_wanted`) or on `listeners.probe`, at most
+  once a minute per listener: the target gets `listener_probes: [{probe_id, key, nonce, expires_at}]`, the prober
+  `dial_probes: [{probe_id, host, port, nonce}]`; the prober writes `OARBANK-PROBE/1 <probe_id>` and expects
+  `OARBANK-PROBE/1 OK <nonce>` (`SAME`: from the target's own network) and reports `probe_results: [{probe_id, ok,
+  detail, rtt_ms}]`; the target then gets `listener_reachability: {key: {state, at, via, detail}}`.
+- **Mappings** are journaled in `state/portmaps.json` before each request; `oarbank-agent portmap status|release-all`
+  read and empty it; the agent releases its mappings when it stops (its graceful stop), when the coordinator answers
+  `node_retired`, and the launcher's uninstall runs `portmap release-all`.
 
 ## Doctor
 
@@ -776,6 +999,12 @@ lowest wins:
   the node (the fleet's, a group's or the node's value, else the key's default; a key with neither is absent). A module
   appears only when it has such a value, and never sees another module's keys. The agent rewrites a module's file only
   when its content changes, through a temporary file and a rename; a bootstrap job gets `{}`.
+- **Session helpers** (a system install; docs/design/protection.md, "Whose processes") report one JSON line every two
+  seconds to the agent's local endpoint. The agent sends lines back: `{"v": 2, "watch": [{"key", "kind":
+  "progress|phase", "account", "rel", "spec"}]}`, the owner sources under the person's home the helper should read
+  (when the list changes and on each connection; `spec` is the source without its path). The helper's report then
+  carries `"sources": [{"key", "events", "epoch", "on", "readable", "event_t"}]` (counts and phase states, never file
+  contents), and it reports at once when a phase changes (docs/design/gpu-cotenancy.md).
 - **`protection`** is owner-set host protection (schema 1): the node's effective section, which the coordinator
   assembles from the settings chain (`protection.mode`, `protection.rules` from every scope together, `protection.node`;
   a rule the node's OS cannot run is left out). See docs/design/protection.md and docs/design/settings.md,

@@ -128,7 +128,7 @@ def test_bulk_moves_up_one_tier():
 END_REASONS = ["ok", "exit_nonzero", "bad_input", "doctor", "transient", "timeout", "lease_expired", "agent_restart", "agent_stop",
                "release_invalid", "stale_generation", "lost_race", "module_revoked", "module_disabled", "node_quarantined",
                "node_retired", "dispute_party", "fleet_halt", "golden_failed", "superseded", "oom", "preempt_memory",
-               "preempt_protection", "limit_cpu", "limit_mem", "limit_schedule", "user_cancel", "input_invalidated", "placement_rebound",
+               "preempt_protection", "preempt_site", "limit_cpu", "limit_mem", "limit_schedule", "user_cancel", "input_invalidated", "placement_rebound",
                "job_cancelled", "job_quarantined", "attempt_closed", "job_done", "no_metrics", "bad_artifact",
                "artifact_missing", "input_missing", "input_mismatch", "mode_mismatch", "golden_mismatch", "disputed",
                "self_inconsistent"]

@@ -24,6 +24,7 @@ POSTINSTALL = MACOS / "scripts" / "postinstall"
 UNINSTALL = MACOS / "oarbank-uninstall"
 POLICY = MACOS / "dev.codonic.oarbank.agent.policy.plist"
 HELPER_JOB = MACOS / "dev.codonic.oarbank.agent.helper.plist"
+UPDATE_JOB = MACOS / "dev.codonic.oarbank.agent.update.plist"
 NODE_APP = MACOS / "node" / "NodeApp.swift"
 ELEVATION = MACOS / "node" / "Elevation.swift"
 HELPER = MACOS / "node" / "NodeHelper.swift"
@@ -72,7 +73,6 @@ class Mac:
                   "Library/Oarbank/bin", "Applications/Oarbank Node.app/Contents", "Users/" + user + "/Library/LaunchAgents"):
             (self.root / d).mkdir(parents=True, exist_ok=True)
         stubs = {
-            "launchctl": 'echo "launchctl $*" >> "$CALLS"',
             "open": 'echo "open $*" >> "$CALLS"',
             "sudo": 'echo "sudo $1 $2" >> "$CALLS"; shift 2; exec "$@"',
             "chown": "exit 0",
@@ -80,6 +80,9 @@ class Mac:
             "id": '[ "$2" = root ] && echo 0 || { [ "$2" = loginwindow ] && echo 0 || echo 501; }',
             "dscl": f'echo "NFSHomeDirectory: {self.home}"',
             "who": f'echo "{user} console Oct 10 09:00"',
+            # `launchctl print` shows the update runner's job in $RUNNER_STATE (running, not running), if set
+            "launchctl": 'echo "launchctl $*" >> "$CALLS"; [ "$1" = print ] && [ -n "${RUNNER_STATE:-}" ] && '
+                         'printf \'system/x = {\\n\\tstate = %s\\n}\\n\' "$RUNNER_STATE"; exit 0',
         }
         for name, body in stubs.items():
             p = self.root / "stub" / name
@@ -101,11 +104,15 @@ class Mac:
                            ("/usr/local/bin", f"{r}/usr/local/bin"), ("/var/log/", f"{r}/var/log/"),
                            ("/Library/LaunchDaemons", f"{r}/Library/LaunchDaemons"),
                            ("/Library/Managed Preferences", f"{r}/Library/Managed Preferences"),
-                           ("/Library/Oarbank", f"{r}/Library/Oarbank"), ("/Applications/", f"{r}/Applications/")]:
+                           ("/Library/Oarbank", f"{r}/Library/Oarbank"), ("/Applications/", f"{r}/Applications/"),
+                           # the system's Application Support (a person's own is under their home, from dscl)
+                           ('"/Library/Application Support', f'"{r}/Library/Application Support')]:
             text = text.replace(real, fake)
         # nothing left that reaches the real system (the comments aside)
         code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
-        assert not re.search(rf"(?<!{re.escape(r)})(/Library/(LaunchDaemons|Managed|Oarbank)|/usr/local/bin|/var/log)", code)
+        assert not re.search(rf"(?<!{re.escape(r)})(?<!\$uhome)(/Library/(LaunchDaemons|Managed|Oarbank|Application Support)"
+                             r"|/usr/local/bin|/var/log)", code)
+        self.support = self.root / "Library/Application Support/Oarbank"
         self.script = tmp / "postinstall"
         self.script.write_text(text, encoding="utf-8")
 
@@ -185,9 +192,14 @@ def test_an_upgrade_renders_the_service_again_and_restarts_it_in_either_scope(tm
     # again and restarts it (service refresh); only if it cannot is the old job kickstarted on the new launcher
     mac = Mac(tmp_path / "system")
     (mac.root / "Library/LaunchDaemons/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
+    (mac.support / "agent").mkdir(parents=True)
+    (mac.support / "agent/current").symlink_to("versions/2.9.0-0123456789ab/oarbank-agent")
     out, calls = mac.run()
     assert out.returncode == 0 and "open " not in calls
     assert "oarbank-launcher service refresh --system HOME=" in calls
+    # the package is the unit (D57): its agent is made current before the service restarts on it
+    install = f"oarbank-launcher --home {mac.support}/agent install {mac.root}/Library/Oarbank/bin/oarbank-agent HOME="
+    assert install in calls and calls.index(install) < calls.index("service refresh --system")
     assert "kickstart -k system/dev.codonic.oarbank.agent\n" not in calls
     assert "launchctl kickstart -k gui/501/dev.codonic.oarbank.agent.session" in calls
     assert out.stdout.splitlines() == ["Oarbank: upgraded; the service restarted on the new launcher"]
@@ -200,10 +212,72 @@ def test_an_upgrade_renders_the_service_again_and_restarts_it_in_either_scope(tm
     (mac.home / "Library/LaunchAgents/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
     out, calls = mac.run()
     assert out.returncode == 0 and "open " not in calls
-    # as the person, with their HOME (which names their LaunchAgents), in their session (launchctl asuser runs it)
-    assert (f"launchctl asuser 501 {mac.root}/stub/sudo -u pat /usr/bin/env HOME={mac.home} "
-            f"{mac.root}/Library/Oarbank/bin/oarbank-launcher service refresh\n") in calls
+    # as the person, with their HOME (which names their LaunchAgents), in their session (launchctl asuser runs it):
+    # their own home's agent made current, then the LaunchAgent rendered again
+    install = (f"launchctl asuser 501 {mac.root}/stub/sudo -u pat /usr/bin/env HOME={mac.home} "
+               f"{mac.root}/Library/Oarbank/bin/oarbank-launcher --home {mac.home}/Library/Application Support/Oarbank/agent "
+               f"install {mac.root}/Library/Oarbank/bin/oarbank-agent\n")
+    refresh = (f"launchctl asuser 501 {mac.root}/stub/sudo -u pat /usr/bin/env HOME={mac.home} "
+               f"{mac.root}/Library/Oarbank/bin/oarbank-launcher service refresh\n")
+    assert install in calls and refresh in calls and calls.index(install) < calls.index(refresh)
     assert "kickstart" not in calls and "system/dev.codonic.oarbank.agent " not in calls + " "
+
+
+@unix
+def test_a_node_never_set_up_keeps_the_agent_the_package_does_not_install(tmp_path):
+    # no service, no home: nothing to make current (setup does it when the node is set up)
+    out, calls = Mac(tmp_path).run(COMMAND_LINE_INSTALL="1")
+    assert out.returncode == 0 and " install " not in calls
+    # a system job whose home lost its current version: the agent is not installed into a home setup never made
+    mac = Mac(tmp_path / "nohome")
+    (mac.root / "Library/LaunchDaemons/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
+    out, calls = mac.run()
+    assert " install " not in calls and "service refresh --system" in calls
+
+
+@unix
+def test_a_failing_agent_install_says_so_and_the_upgrade_goes_on(tmp_path):
+    mac = Mac(tmp_path)
+    (mac.root / "Library/LaunchDaemons/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
+    (mac.support / "agent").mkdir(parents=True)
+    (mac.support / "agent/current").write_text("", encoding="utf-8")
+    out, calls = mac.run(LAUNCHER_RC="1")
+    assert out.returncode == 0
+    assert "Oarbank: the package's agent could not be made current; the service keeps the agent it had" in out.stdout
+    assert "kickstart -k system/dev.codonic.oarbank.agent\n" in calls
+
+
+@unix
+def test_the_update_runner_job_is_loaded_with_its_trust_and_never_booted_out_while_it_runs(tmp_path):
+    job = "/Library/LaunchDaemons/dev.codonic.oarbank.agent.update.plist"
+    for state in ("", "not running"):
+        mac = Mac(tmp_path / (state.replace(" ", "-") or "unloaded"))
+        out, calls = mac.run(COMMAND_LINE_INSTALL="1", RUNNER_STATE=state)
+        assert out.returncode == 0
+        assert "launchctl print system/dev.codonic.oarbank.agent.update" in calls
+        assert f"launchctl bootstrap system {mac.root}{job}" in calls
+        assert calls.index("bootout system/dev.codonic.oarbank.agent.update") < calls.index(f"bootstrap system {mac.root}{job}")
+        # root's trust pinned from the agent's anchors before the job (whose RunAtLoad starts the runner) loads
+        assert "oarbank-launcher update-trust --from-agent HOME=" in calls
+        assert calls.index("update-trust --from-agent") < calls.index(f"bootstrap system {mac.root}{job}")
+        # its state directory and log directory, root's alone, before launchd creates the log
+        for d in (mac.support / "update", mac.support / "update/logs"):
+            assert d.is_dir() and d.stat().st_mode & 0o777 == 0o700
+    # the runner installing this very pkg: its job stays as it is (booting it out would end the install)
+    mac = Mac(tmp_path / "running")
+    out, calls = mac.run(COMMAND_LINE_INSTALL="1", RUNNER_STATE="running")
+    assert out.returncode == 0
+    assert "dev.codonic.oarbank.agent.update" not in calls.replace("launchctl print system/dev.codonic.oarbank.agent.update", "")
+    assert "Oarbank: the update runner is running; its job reloads at the next restart" in out.stdout
+    assert "update-trust --from-agent" in calls
+
+
+@unix
+def test_a_failing_trust_pin_or_runner_load_never_fails_the_install(tmp_path):
+    mac = Mac(tmp_path)
+    out, calls = mac.run(COMMAND_LINE_INSTALL="1", LAUNCHER_RC="1")
+    assert out.returncode == 0 and "update-trust --from-agent" in calls
+    assert out.stdout.splitlines()[-1] == "Installed. Join this Mac with: sudo oarbank-node join"
 
 
 @unix
@@ -248,10 +322,26 @@ def test_the_helper_job_is_an_on_demand_mach_service_of_root():
     assert 'static let machService = "dev.codonic.oarbank.agent.helper"' in ELEVATION.read_text(encoding="utf-8")
 
 
+def test_the_update_runner_job_runs_update_run_once_on_the_agents_request():
+    with open(UPDATE_JOB, "rb") as f:
+        job = plistlib.load(f)
+    assert job["Label"] == "dev.codonic.oarbank.agent.update" and UPDATE_JOB.name == job["Label"] + ".plist"
+    assert job["ProgramArguments"] == ["/Library/Oarbank/bin/oarbank-launcher", "update-run", "--once"]
+    assert job["WatchPaths"] == ["/Library/Application Support/Oarbank/agent/updates/request.json"]
+    # at load too: a runner interrupted mid-update (a restart) resumes from its journal
+    assert job["RunAtLoad"] is True and "KeepAlive" not in job
+    # root's (no UserName), logs in its root-only state directory
+    assert "UserName" not in job and "GroupName" not in job
+    assert job["StandardOutPath"] == job["StandardErrorPath"] == "/Library/Application Support/Oarbank/update/logs/runner.log"
+    assert job["Umask"] == 0o077
+    text = PACKAGE.read_text(encoding="utf-8")
+    assert "for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper dev.codonic.oarbank.agent.update; do" in text
+
+
 def test_every_node_job_belongs_to_oarbank_node_in_login_items():
     # System Settings, Login Items, Allow in the Background groups launchd jobs by AssociatedBundleIdentifiers: without
     # it they show under the signing team's name, and switching that off silently stops the node
-    for path in (POLICY, HELPER_JOB):
+    for path in (POLICY, HELPER_JOB, UPDATE_JOB):
         with open(path, "rb") as f:
             assert plistlib.load(f)["AssociatedBundleIdentifiers"] == ["dev.codonic.oarbank.node"], path.name
     assert _info_plist()["CFBundleIdentifier"] == "dev.codonic.oarbank.node"
@@ -265,7 +355,7 @@ def test_every_node_job_belongs_to_oarbank_node_in_login_items():
 
 @pytest.mark.skipif(not shutil.which("plutil"), reason="macOS plutil")
 def test_the_policy_job_lints():
-    for job in (POLICY, HELPER_JOB):
+    for job in (POLICY, HELPER_JOB, UPDATE_JOB):
         assert subprocess.run(["plutil", "-lint", str(job)], capture_output=True).returncode == 0, job
 
 
@@ -279,6 +369,11 @@ def test_the_uninstaller_removes_the_app_the_policy_job_and_oarbank_node():
     assert "HELPER=dev.codonic.oarbank.agent.helper" in text
     assert '/bin/launchctl bootout "system/$HELPER"' in text and '/bin/rm -f "/Library/LaunchDaemons/$HELPER.plist"' in text
     assert '"$BIN/oarbank-node-helper" remove-rights' in text
+    # the update runner's job goes before the node does (no update starts on the way out), and its state after it
+    assert "UPDATE=dev.codonic.oarbank.agent.update" in text
+    assert '/bin/launchctl bootout "system/$UPDATE"' in text and '/bin/rm -f "/Library/LaunchDaemons/$UPDATE.plist"' in text
+    assert text.index('bootout "system/$UPDATE"') < text.index("oarbank-launcher\" remove")
+    assert '/bin/rm -rf "/Library/Application Support/Oarbank/update"' in text
     assert text.index("remove-rights") < text.index("/bin/rm -rf /Library/Oarbank")
     # the policy job goes before the node's removal, so no profile joins it again on the way out
     assert text.index("bootout") < text.index("oarbank-launcher\" remove")
@@ -649,7 +744,7 @@ def test_elevate_refuses_before_it_asks_for_anything(tmp_path, node_app):
 def _info_plist() -> dict:
     text = PACKAGE.read_text(encoding="utf-8")
     body = re.search(r'cat > "\$APP/Contents/Info.plist" <<PLIST\n(.*?)\nPLIST\n', text, re.S).group(1)
-    return plistlib.loads(body.replace("$VERSION", "2.9.0").encode())
+    return plistlib.loads(body.replace("$VERSION", "2.10.0").encode())
 
 
 def test_the_app_bundle_registers_oarbank_links_and_hides_from_the_dock():
@@ -688,7 +783,7 @@ def test_the_package_builds_signs_and_ships_the_app_the_join_window_and_the_poli
     assert 'JOIN="$WORK/root/Library/Oarbank/share/join"' in text
     assert "for f in join-window.py join-window.html; do" in text and '"$REPO/deploy/node/$f"' in text
     assert "the package has no join window" in text and "exit 1" in text
-    assert "for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper; do" in text
+    assert "for job in dev.codonic.oarbank.agent.policy dev.codonic.oarbank.agent.helper dev.codonic.oarbank.agent.update; do" in text
     assert 'plutil -lint -s "$REPO/deploy/macos/$job.plist"' in text
     assert 'install -m 644 "$REPO/deploy/macos/$job.plist" "$WORK/root/Library/LaunchDaemons/"' in text
     # root:wheel for the daemon's plist (launchd refuses another owner) and a bundle pinned to /Applications

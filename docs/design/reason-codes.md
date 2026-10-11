@@ -37,7 +37,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `FOLDER_UNAVAILABLE` | Module {module} needs folders this node does not provide (unmapped, another access, refused by the node, or awaiting the owner's signature) | P1 | – | `settings.folders.update` | – |
 | `SANDBOX_BACKEND_MISSING` | The agent on this node cannot sandbox module processes | P1 | – | – | – |
 | `CAPABILITY_NOT_ENFORCED` | The node's sandbox cannot enforce {capability}, which module {module} needs | P1 | – | – | – |
-| `AGENT_TOO_OLD` | Module {module} needs agent {need}; the node runs {have} | P1 | – | `agent.promote` | – |
+| `AGENT_TOO_OLD` | Module {module} needs agent {need}; the node runs {have} | P1 | – | `updates.start`, `agent.promote` | – |
 | `PINNED_ELSEWHERE` | Pinned to node {node} | P1 | – | – | – |
 | `POOL_JOBS_ONLY` | The node is yielding and takes only short pool jobs | P1 | – | – | – |
 | `GPU_BLOCKED` | A GPU job: the node admits no more GPU jobs now (owner setting or a protected process is using the GPU) | P1 | – | – | – |
@@ -47,6 +47,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `DISPUTE_PARTY` | This node is a party to the job's dispute; a third node must break the tie | P1 | – | – | `dispute_party` |
 | `DATASETS_NOT_REGISTERED` | Waiting for {missing} to be registered (a bootstrap job brings a module's pinned datasets) | P1 | – | – | – |
 | `DATASETS_NOT_STAGED` | The node has not staged {missing} yet | P1 | – | – | – |
+| `SITE_UPLINK_BUSY` | Network-heavy: site {site} holds such work while {why} | P1 | – | – | – |
+| `SITE_UPLINK_BUDGET` | Network-heavy: site {site} already runs {running} of its {max} network-heavy jobs | P1 | – | `sites.update` | – |
 
 ## node_admission
 
@@ -61,6 +63,13 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `RELEASE_UNSIGNED` | Release {release} for {platform} is waiting for the owner's signature: oarbank release sign {release} --promote | P1 | – | `releases.attach_signature` | – |
 | `NOT_ADMITTING` | The agent admits no new work: {why} | P1 | – | – | – |
 | `CLOCK_SKEW` | The node's clock is {offset_s} s off the coordinator's: jobs and moves use the coordinator's time, but certificates and update metadata need a correct clock; set the node's time | P3 | – | – | – |
+| `LISTENER_UNAVAILABLE` | Listener {listener} is not open on this node: {why} | P1 | – | `listeners.configure` | – |
+| `PORT_TAKEN` | Listener {listener}: the router forwards its external port to another device: {text} | P3 | – | `listeners.configure` | – |
+| `DOUBLE_NAT` | Listener {listener}: this machine is behind two routers: {text} | P3 | – | – | – |
+| `CGNAT` | Listener {listener}: the provider shares one public address among many customers: {text} | P3 | – | – | – |
+| `NO_MAPPING_PROTOCOL` | Listener {listener}: the router accepts no automatic port mapping: {text} | P3 | – | `listeners.configure` | – |
+| `MAPPED_UNREACHABLE` | Listener {listener}: mapped, but connections from outside do not arrive: {text} | P3 | – | `listeners.probe` | – |
+| `FIREWALL_BLOCKED` | Listener {listener}: this machine's firewall blocks incoming connections: {text} | P3 | – | – | – |
 
 ## protection
 
@@ -84,6 +93,21 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `MEMORY_HARD_FLOOR` | Attempt {attempt} evicted by the memory hard floor ({why}) | P2 | – | – | – |
 | `MEMORY_HARD_FLOOR_SERVICE` | Service {service} stopped by the memory hard floor ({why}); its jobs requeued | P2 | no / no | – | – |
 | `PROTECTION_SERVICE_STOP` | Service {service} stopped by host protection ({reason}); its jobs requeued | P1 | no / no | – | – |
+| `MEMORY_HARD_FLOOR_WORKLOAD` | Workload {workload} stopped by the memory hard floor ({why}) and held until the guard is clear | P2 | – | – | – |
+| `WORKLOAD_PAUSE` | Workload {workload} paused (it tolerates {tolerance_s} s) | P1 | – | – | – |
+| `WORKLOAD_RESUME` | Workload {workload} resumed | P1 | – | – | – |
+| `WORKLOAD_LOWER` | Workload {workload} lowered to background scheduling | P1 | – | – | – |
+| `WORKLOAD_RESTORE` | Workload {workload} restored from background scheduling | P1 | – | – | – |
+| `WORKLOAD_THROTTLE` | Workload {workload} throttled: {threads} threads, a CPU cap of {cpu_cap} cores | P1 | – | – | – |
+| `WORKLOAD_HOLD` | Workload {workload} stopped and held by host protection ({cause}) | P2 | – | – | – |
+| `WORKLOAD_PAUSE_TOLERANCE` | Workload {workload} was paused for its tolerance ({tolerance_s} s): stopped and held while the pause would last | P2 | – | – | – |
+| `WORKLOAD_RELEASE` | Workload {workload} released from its hold ({cause} cleared after {held_s} s) | P1 | – | – | – |
+| `WORKLOAD_STOP` | Workload {workload} stopped by the agent | P1 | – | – | – |
+| `DELEGATE_PAUSE` | Delegated processes of rule {rule} paused ({processes}) | P1 | – | – | – |
+| `DELEGATE_RESUME` | Delegated processes of rule {rule} resumed ({processes}) | P1 | – | – | – |
+| `DELEGATE_LOWER` | Delegated processes of rule {rule} lowered ({processes}) | P1 | – | – | – |
+| `DELEGATE_RESTORE` | Delegated processes of rule {rule} restored ({processes}) | P1 | – | – | – |
+| `DELEGATE_PAUSE_LIMIT` | Delegated processes of rule {rule} were paused for the pause ceiling: resumed and lowered instead (a delegation never stops them) | P2 | – | – | – |
 | `RUNG_0` | Dynamic rung 0: no constraint ({why}) | P1 | – | – | – |
 | `RUNG_1` | Dynamic rung 1: admitting no new work ({why}) | P1 | – | – | – |
 | `RUNG_2` | Dynamic rung 2: the fleet CPU budget is under the allocatable cores ({why}) | P1 | – | – | – |
@@ -104,6 +128,46 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `PROTECTION_NO_LOWERING` | This node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable jobs are paused instead | P3 | – | – | – |
 | `PROTECTION_NO_IPC_COUNTERS` | Rule {rule} protects ipc_ratio, but this node's processes have no instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow | P4 | – | – | – |
 | `PROTECTION_SOURCE_ERROR` | The process table cannot be read: {error} | P3 | – | – | – |
+| `PROTECTION_SOURCE_UNREADABLE` | Rule {rule}: source {source} cannot be read by the agent; protection holds fleet work back until it reads | P3 | – | – | – |
+| `PROTECTION_SOURCE_NEEDS_HELPER` | Rule {rule}: source {source} is in a person's home and no session helper reports it (nobody logged in?); protection holds fleet work back | P3 | – | – | – |
+| `PROTECTION_PHASE_ON` | A phase of rule {rule} began ({via}) | P1 | – | – | – |
+| `PROTECTION_PHASE_OFF` | A phase of rule {rule} ended ({via}) | P1 | – | – | – |
+| `GPU_NOT_CERTIFIED` | gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet GPU work waits | P4 | – | `protection.ab.sweep` | – |
+| `AB_STARTED` | Harness run {run_id} started on rule {rule} ({work}) | P1 | – | `protection.ab.abort` | – |
+| `AB_ON` | Harness run {run_id}: the work under test runs (an ON window) | P1 | – | – | – |
+| `AB_OFF` | Harness run {run_id}: the work under test is held (an OFF window) | P1 | no / no | – | – |
+| `AB_IDLE` | Harness run {run_id} ended: its work runs as protection allows | P1 | – | – | – |
+| `AB_FINISHED` | Harness run {run_id} ended: {decision} ({why}) | P1 | – | – | – |
+| `AB_REFUSED` | Harness run {run_id} refused by the node: {why} | P4 | – | – | – |
+| `GPU_DUTY_START` | GPU duty budget {duty} beside the protected GPU work (certified ceiling {ceiling}): {why} | P1 | – | – | – |
+| `GPU_DUTY_BASELINE` | Fleet GPU work held for a minute to measure the protected program without it ({why}) | P1 | – | – | – |
+| `GPU_DUTY_GROW` | GPU duty budget grown to {duty} after a clean minute (certified ceiling {ceiling}) | P1 | – | – | – |
+| `GPU_DUTY_HALVE` | GPU duty budget halved to {duty}: the protected program slowed to its target | P1 | – | – | – |
+| `GPU_DUTY_TAKE_BACK` | GPU duty budget taken back to 0: {why} | P3 | – | – | – |
+| `GPU_DUTY_CLAMP` | GPU duty budget lowered to the certified ceiling {ceiling} | P1 | – | – | – |
+| `GPU_DUTY_EXCEEDED` | {unit} kept the GPU {measured} busy against a gpu_duty of {duty} for three samples: {action} (the third time within an hour stops it, and it gets no duty for an hour) | P3 | – | – | – |
+| `GPU_DUTY_UNVERIFIED` | The GPU time of {unit} cannot be read, so its gpu_duty cannot be checked: {action} | P4 | – | – | – |
+| `TRANSFER_PAUSED` | A {transfer} transfer paused: {why} | P1 | no / no | – | – |
+| `TRANSFER_RESUMED` | A {transfer} transfer resumed after {paused_s} s | P1 | – | – | – |
+| `SITE_PAUSE` | Network-heavy attempts paused: their site is in an uplink phase | P1 | no / no | – | – |
+| `SITE_RESUME` | Network-heavy attempts resumed: their site's uplink phase ended | P1 | no / no | – | – |
+
+## workload
+
+| Code | Message | Severity | Node / job fault | Remedies | End reasons |
+|---|---|---|---|---|---|
+| `WORKLOAD_UNASSIGNED` | {workload} is not assigned to this node | P1 | – | `workloads.assign` | – |
+| `WORKLOAD_SEAT_ELSEWHERE` | {workload}'s seat (its identity) is held by another node until that node gives it up or its lease ends | P1 | – | `workloads.unassign` | – |
+| `WORKLOAD_SEAT_LEASE_EXPIRED` | {workload}'s seat lease ran out on this node (no word from the coordinator in time): stopped | P2 | – | – | – |
+| `WORKLOAD_HELD` | {workload} is held down by host protection ({reason}) | P1 | – | – | – |
+| `WORKLOAD_WITHDRAWN` | {workload} failed {failures} times in a row and was withdrawn: {error} | P2 | – | `workloads.restart` | – |
+| `WORKLOAD_RESTART` | {workload} restarted by the owner | P1 | – | – | – |
+| `WORKLOAD_SECRETS_NOT_SET` | {workload} receives secrets that have no value for this node | P1 | – | `secrets.set` | – |
+| `WORKLOAD_IDENTITY_SHARED` | {workload} has a per-node identity, and a secret it receives is set for a group or the whole module: set it for each node | P1 | – | `secrets.set` | – |
+| `WORKLOAD_NO_CONTAINMENT` | This node cannot contain a workload ({detail}) | P1 | – | – | – |
+| `WORKLOAD_POLICY_OFF` | This node's workloads setting is off | P1 | – | `settings.apply` | – |
+| `WORKLOAD_NOT_OFFERED` | {workload} cannot run on this node ({detail}) | P1 | – | – | – |
+| `WORKLOAD_NODE_NOT_ACTIVE` | The node is not active (paused or draining): its workloads are stopped | P1 | – | `nodes.resume` | – |
 
 ## attempt_end
 
@@ -127,6 +191,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `OOM` | Killed for memory | P1 | no / yes | – | `oom` |
 | `SANDBOX_ESCAPE` | A process of the attempt ran outside the module sandbox; the attempt was killed | P1 | no / yes | – | `sandbox_escape` |
 | `PREEMPT_MEMORY` | Preempted by the memory guard | P1 | no / no | – | `preempt_memory` |
+| `PREEMPT_SITE` | Released: a network-heavy job that cannot pause, or paused too long, while its site was in an uplink phase; requeued | P1 | no / no | – | `preempt_site` |
 | `RELEASED_CAP_CPU` | Released: the CPU cap was lowered | P1 | no / no | – | `limit_cpu` |
 | `RELEASED_CAP_MEM` | Released: over its declared memory under a memory floor, or the memory cap was lowered | P1 | no / no | – | `limit_mem` |
 | `RELEASED_SCHEDULE` | Released: outside the owner's schedule | P1 | no / no | – | `limit_schedule` |

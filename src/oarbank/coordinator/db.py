@@ -221,10 +221,48 @@ CREATE TABLE IF NOT EXISTS coordinator_moves (
   created_at REAL, not_before REAL, ended_at REAL, actor TEXT, reason TEXT, final_snapshot_json TEXT, report_json TEXT,
   cancel_payload TEXT, cancel_sig TEXT,
   modules_json TEXT, force INT DEFAULT 0);          -- what modules said about the move; the operator's override of blockers
+-- Paired on/off harness runs (D52, cotenancy.py): one per run, the agent's latest report, and how it ended
+CREATE TABLE IF NOT EXISTS ab_runs (
+  run_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, duty REAL,
+  spec_json TEXT NOT NULL, state TEXT NOT NULL,     -- requested|running|done|aborted
+  sweep_id TEXT, actor TEXT, reason TEXT, created_at REAL, started_at REAL, ended_at REAL,
+  report_json TEXT, decision TEXT, cert_id TEXT, abort_requested INT DEFAULT 0, identity TEXT, context_json TEXT);
+CREATE INDEX IF NOT EXISTS ab_runs_node ON ab_runs(node_id, created_at);
+-- A frontier search: harness runs at rising GPU duty levels, stopping at the first that does not pass
+CREATE TABLE IF NOT EXISTS ab_sweeps (
+  sweep_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, levels_json TEXT,
+  spec_json TEXT, state TEXT, certified_duty REAL, actor TEXT, created_at REAL, ended_at REAL);
+-- Co-tenancy certificates (D52): a passing run for one node, rule and fleet configuration; gate gpu_jobs = certified
+CREATE TABLE IF NOT EXISTS certificates (
+  cert_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, rule TEXT NOT NULL, work TEXT NOT NULL, duty REAL,
+  r REAL, r_lo REAL, r_hi REAL, margin REAL, run_id TEXT, issued_at REAL, valid_until REAL, identity TEXT,
+  context_json TEXT, revoked_at REAL, revoked_why TEXT);
+CREATE INDEX IF NOT EXISTS certificates_node ON certificates(node_id, issued_at);
 -- The history of each node's effective protection section (protection.record_if_changed), one row per change
 CREATE TABLE IF NOT EXISTS protection_versions (
   node_id TEXT NOT NULL, version INT NOT NULL, config_json TEXT NOT NULL, config_hash TEXT, actor TEXT, reason TEXT,
   source TEXT, created_at REAL, PRIMARY KEY (node_id, version));
+
+-- Sites (D55, sites.py): nodes sharing one internet line, each node at one site at most, with the owner's uplink budget
+-- and the last computed hold (a protected process at the site in an `uplink` phase); transfer leases under the budget;
+-- large transfers' rates (the measured-capacity hint); keyed network fingerprints for suggestions (never an address)
+CREATE TABLE IF NOT EXISTS sites (
+  site_id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT,
+  uplink_mbps REAL, max_transfers INT NOT NULL DEFAULT 1, max_heavy_jobs INT NOT NULL DEFAULT 1,
+  hold_on INT NOT NULL DEFAULT 0, hold_since REAL, hold_why TEXT,
+  created_by TEXT, created_at REAL, updated_by TEXT, updated_at REAL);
+CREATE TABLE IF NOT EXISTS site_members (node_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, added_by TEXT, added_at REAL);
+CREATE INDEX IF NOT EXISTS site_members_site ON site_members(site_id);
+CREATE TABLE IF NOT EXISTS uplink_leases (
+  lease_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT, dir TEXT, bytes INT, mbps REAL,
+  granted_at REAL, renewed_at REAL, expires_at REAL, peak INT DEFAULT 1,   -- peak: most leases live at the site meanwhile
+  revoked_at REAL);               -- revoked (a hold, a budget change): keeps its slot until given back or expired
+CREATE INDEX IF NOT EXISTS uplink_leases_site ON uplink_leases(site_id);
+CREATE TABLE IF NOT EXISTS uplink_transfers (
+  site_id TEXT, node_id TEXT, kind TEXT, dir TEXT, bytes INT, seconds REAL, mbps REAL, solo INT, paced INT, at REAL);
+CREATE INDEX IF NOT EXISTS uplink_transfers_site ON uplink_transfers(site_id, at);
+CREATE TABLE IF NOT EXISTS node_net (node_id TEXT PRIMARY KEY, gateway_fp TEXT, public_fp TEXT, observed_at REAL);
+CREATE TABLE IF NOT EXISTS site_dismissed (key TEXT PRIMARY KEY, by TEXT, at REAL, why TEXT);
 
 CREATE TABLE IF NOT EXISTS alerts (
   alert_id INTEGER PRIMARY KEY, rule TEXT, subject TEXT, state TEXT, detail TEXT,
@@ -305,16 +343,26 @@ class DB:
             self.conn.execute("PRAGMA foreign_keys=OFF")
             from .access import SCHEMA as ACCESS_SCHEMA
             from .coordbuilds import SCHEMA as COORD_BUILDS_SCHEMA
+            from .coordself import SCHEMA as COORD_SELF_SCHEMA
+            from .fleetupdates import NODE_COLUMNS as UPDATE_COLUMNS
+            from .fleetupdates import SCHEMA as FLEET_SCHEMA
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
+            from .listeners import NODE_COLUMNS as LISTENER_COLUMNS
+            from .listeners import SCHEMA as LISTENER_SCHEMA
+            from .rollouts import SCHEMA as ROLLOUT_SCHEMA
             from .settings import modkeys as settings_modkeys
             from .settings import store as settings_store
+            from .workloads import SCHEMA as WORKLOADS_SCHEMA
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
             self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + settings_modkeys.SCHEMA + ACCESS_SCHEMA
-                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
+                                    + COORD_BUILDS_SCHEMA + COORD_SELF_SCHEMA + JOIN_SCHEMA + LISTENER_SCHEMA + WORKLOADS_SCHEMA
+                                    + FLEET_SCHEMA + ROLLOUT_SCHEMA + "COMMIT;")
             for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
                 _ensure_columns(self.conn, table, cols)
+            _ensure_columns(self.conn, "nodes", LISTENER_COLUMNS)     # inbound listeners (listeners.py)
+            _ensure_columns(self.conn, "nodes", UPDATE_COLUMNS)       # fleet updates: the agent's report (fleetupdates.py)
             settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
         from .settings import migrate as settings_migrate

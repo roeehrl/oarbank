@@ -73,7 +73,9 @@ class NodeView:
     user_present: bool = False        # someone is using the node now (its capacity report)
     granted: int = 0                  # jobs this claim has granted so far (beside `live`)
     campaign_rules: object = None     # (campaign_id) -> {key: value}: what a running campaign holds its jobs to here
+    site: dict | None = None          # sites.claim_view: the node's site, its uplink hold and network-heavy jobs running
     release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
+    agent_min: str | None = None      # the oldest agent this coordinator serves (its fleet release's agent_min, D61)
 
     @property
     def certified(self) -> set:
@@ -189,6 +191,8 @@ def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
         lambda: R("lifecycle = ready", {"quarantined": "NODE_QUARANTINED", "retired": "NODE_RETIRED"}.get(n["lifecycle"])
                   or ("RELEASE_PENDING" if n["lifecycle"] == "ready" else release_code(nv)),
                   n["lifecycle"] == "ready", n["lifecycle"], "ready", "admission"),
+        lambda: R(f"agent >= {nv.agent_min}", "AGENT_TOO_OLD", not agent_too_old(n.get("agent_version"), nv.agent_min),
+                  n.get("agent_version"), nv.agent_min, "admission"),
         lambda: R("release current", "RELEASE_PENDING" if n["release_id"] == nv.current_release else release_code(nv),
                   n["release_id"] == nv.current_release, n["release_id"], nv.current_release, "admission"),
         lambda: R("free cpu > 0", "INSUFFICIENT_CPU", nv.free_cpu > 0, nv.free_cpu, "> 0", "admission"),
@@ -199,6 +203,13 @@ def admission(nv: NodeView, first_fail: bool = False) -> list[PredicateResult]:
                   nv.paused_by, "admission"),
     ]
     return _run(checks, first_fail)
+
+
+def agent_too_old(have: str | None, agent_min: str | None) -> bool:
+    """D61: a node whose agent is older than the coordinator's agent_min is refused work until it updates (an unknown
+    version is not called older)."""
+    from .fleetupdates import newer
+    return bool(agent_min) and newer(agent_min, have)
 
 
 def pauses_all(paused) -> bool:
@@ -212,6 +223,19 @@ def paused_here(paused, gpu: bool) -> bool:
     pause and granted to the same node again."""
     p = set(paused or ())
     return pauses_all(p) or ("gpu" in p if gpu else "cpu" in p)
+
+
+def site_check(nv: NodeView, res: dict) -> PredicateResult:
+    """A network-heavy job (stages[].requires.resources.network = "heavy") at a site (docs/design/sites.md): never
+    while a protected process there is in an uplink phase, and only while the site runs fewer such jobs than its
+    budget. Any other job, or a node at no site, passes."""
+    s = nv.site
+    if (res or {}).get("network") != "heavy" or not s:
+        return R("site uplink", "SITE_UPLINK_BUSY", True, None, None)
+    if s["hold"]:
+        return R(f"site {s['name']}: no uplink phase", "SITE_UPLINK_BUSY", False, s["why"], "no uplink phase at the site")
+    return R(f"site {s['name']}: network-heavy jobs < {s['max_heavy_jobs']}", "SITE_UPLINK_BUDGET",
+             s["heavy_running"] < s["max_heavy_jobs"], s["heavy_running"], s["max_heavy_jobs"])
 
 
 def retry_max(job: dict, platform: str | None) -> int:
@@ -352,6 +376,7 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
                   sorted(set(datasets or []) - nv.ready), "[]"),
         lambda: R("not paused by host protection", "PROTECTION_ACTIVE", not paused_here(nv.paused, gpu), sorted(nv.paused),
                   nv.paused_by),
+        lambda: site_check(nv, res),
         lambda: R(f"cpu({need_cpu:g}) <= free", "INSUFFICIENT_CPU", need_cpu <= nv.free_cpu, nv.free_cpu, need_cpu),
         lambda: R(f"mem_gb({need_mem:g}) <= free", "INSUFFICIENT_MEM", need_mem <= nv.free_mem, nv.free_mem, need_mem),
         pool_checks,

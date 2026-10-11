@@ -121,7 +121,10 @@ def build_version(version: str, dest: Path, extra_env=None) -> tuple[Path, Path]
     """The agent and launcher built as `version` (and `extra_env`, e.g. a vendor TUF root), copied into `dest`. Every
     version builds in one target directory (`rust/target-e2e`), so each build after the first only rebuilds what the
     variables change, and a run keeps one copy of the build tree, not one per version."""
-    env = {**agentbin.cargo_env(), "OARBANK_AGENT_VERSION": version, **(extra_env or {})}
+    # line tables only: Linux keeps the debug info in the binary (macOS and Windows beside it), and a full debug agent
+    # is over the coordinator's 256 MB build limit there
+    env = {**agentbin.cargo_env(), "OARBANK_AGENT_VERSION": version, "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+           **(extra_env or {})}
     r = subprocess.run([CARGO, "build", "-q", "-p", "oarbank-agent", "-p", "oarbank-launcher", "--target-dir",
                         str(REPO / "rust" / "target-e2e")], cwd=REPO / "rust", env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]

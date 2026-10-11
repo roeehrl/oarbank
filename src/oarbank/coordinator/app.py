@@ -70,6 +70,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     """The agent API, served on the mTLS listener: a node is its client certificate (D29)."""
     app = FastAPI(title="oarbankd agent API", docs_url=None, redoc_url=None)
     app.state.puller = puller
+    started_at = clock.now()
 
     @app.exception_handler(core.ApiError)
     async def _h(request, e):
@@ -102,7 +103,7 @@ def agent_app(db: DB, puller=None) -> FastAPI:
         except (DBBusy, sqlite3.OperationalError) as e:      # middleware errors never reach the exception handlers
             return JSONResponse({"error": "busy", "detail": str(e)}, status_code=503, headers={"Retry-After": "2"})
         p = request.url.path
-        open_paths = ("/v1/identity", "/v1/coordinator/", "/v1/move/", "/healthz")
+        open_paths = ("/v1/identity", "/v1/coordinator/", "/v1/move/", "/healthz", "/v1/health")
         if frozen and request.method in ("POST", "PUT") and not p.startswith(open_paths):
             resp = JSONResponse({"error": "coordinator_moving", "detail": "frozen for a coordinator move; retry shortly"},
                                 status_code=503, headers={"Retry-After": "5"})
@@ -235,7 +236,40 @@ def agent_app(db: DB, puller=None) -> FastAPI:
 
     @app.post("/v1/agent/heartbeat")
     async def heartbeat(request: Request, node=Depends(node_dep)):
-        return await run_in_threadpool(core.heartbeat, db, node, await request.json())
+        return await run_in_threadpool(core.heartbeat, db, node, await request.json(), peer(request))
+
+    @app.post("/v1/agent/workloads/secrets")
+    async def workload_secrets(request: Request, node=Depends(node_dep)):
+        """A workload's secrets for this node, only while it holds the seat with that fence (docs/design/workloads.md)."""
+        from . import workloads
+        body = await request.json()
+        try:
+            return await run_in_threadpool(workloads.secrets, db, node, body)
+        except workloads.WorkloadError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+
+    # ---------------- sites: transfer leases under the site's uplink budget (docs/design/sites.md)
+    @app.post("/v1/agent/uplink/lease")
+    async def uplink_lease(request: Request, node=Depends(node_dep)):
+        from . import sites
+        return await run_in_threadpool(sites.lease, db, node, await request.json())
+
+    @app.post("/v1/agent/uplink/renew")
+    async def uplink_renew(request: Request, node=Depends(node_dep)):
+        from . import sites
+        return await run_in_threadpool(sites.renew, db, node, await request.json())
+
+    @app.post("/v1/agent/uplink/release")
+    async def uplink_release(request: Request, node=Depends(node_dep)):
+        from . import sites
+        return await run_in_threadpool(sites.release, db, node, await request.json())
+
+    @app.post("/v1/agent/uplink/network")
+    async def uplink_network(request: Request, node=Depends(node_dep)):
+        """What the node observes of its network, and the public address it connects from (kept only as a keyed
+        fingerprint): the evidence site suggestions rest on."""
+        from . import sites
+        return await run_in_threadpool(sites.observe_network, db, node, await request.json(), peer(request))
 
     @app.post("/v1/agent/claim")
     async def claim(request: Request, node=Depends(node_dep)):
@@ -333,6 +367,15 @@ def agent_app(db: DB, puller=None) -> FastAPI:
             raise core.ApiError(404, "not_found", f"agent build {sha[:12]} is not assigned to this node")
         return FileResponse(r["path"], media_type="application/octet-stream")
 
+    @app.get("/v1/updates/artifacts/{sha}")
+    def fleet_artifact_download(sha: str, node=Depends(node_dep)):
+        """A fleet release's package, only to a node whose current node_update directive names it."""
+        from . import fleetupdates
+        p = fleetupdates.artifact_file(db, node, sha)
+        if p is None:
+            raise core.ApiError(404, "not_found", f"artifact {sha[:12]} is not this node's update")
+        return FileResponse(p, media_type="application/octet-stream")
+
     @app.get("/v1/tuf/{name}")
     def vendor_tuf(name: str, node=Depends(node_dep)):
         from . import vendortuf
@@ -344,6 +387,12 @@ def agent_app(db: DB, puller=None) -> FastAPI:
     @app.get("/healthz")
     def healthz():
         return {"ok": True, "t": clock.now()}
+
+    @app.get("/v1/health")
+    def health():
+        """No authentication: the coordinator update runner's probation reads it (fleet-updates.md, D58)."""
+        from . import coordself
+        return coordself.health(db, started_at)
 
     return app
 
@@ -829,6 +878,22 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         db.event("agent_build_staged", actor=actor, reason=out["sha256"][:12], size=out["size"])
         return {**out, "next": "POST /api/v1/ops/agent.upload {params: {sha256}}"}
 
+    @app.post("/api/v1/updates/uploads")
+    async def api_updates_upload(request: Request, actor=Depends(who), _=Depends(need_admin)):
+        """Stage one file of a fleet release (the manifest or an artifact) for updates.import, content-addressed."""
+        from . import fleetupdates
+        try:
+            out = await run_in_threadpool(fleetupdates.stage, db, await request.body())
+        except fleetupdates.UpdateError as e:
+            raise core.ApiError(400, "bad_update_file", str(e))
+        return {**out, "next": "POST /api/v1/ops/updates.import {params: {manifest: <the manifest's sha256>}}"}
+
+    @app.get("/api/v1/updates")
+    def api_updates(actor=Depends(who)):
+        """Fleet updates: the coordinator, the releases, every node's version and target, the active rollout, history."""
+        from . import fleetupdates
+        return fleetupdates.view(db)
+
     @app.get("/api/v1/coordinator")
     def api_coordinator(actor=Depends(who)):
         return coordmove.status(db)
@@ -916,6 +981,27 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         d = fleet_data()
         return {k: d[k] for k in ("nodes", "enrollments", "campaigns", "alerts", "discovered")}
 
+    @app.get("/api/v1/workloads")
+    def api_workloads(node: str = "", module: str = "", actor=Depends(who)):
+        """Every workload assignment with its seat and the node's latest report (`oarbank workload list`)."""
+        from . import workloads
+        nid = None
+        if node:
+            n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (node, node))
+            if not n:
+                raise core.ApiError(404, "not_found", f"node {node}")
+            nid = n["node_id"]
+        return {"workloads": workloads.listing(db, nid, module or None)}
+
+    @app.get("/api/v1/workloads/{module}/{name}/logs")
+    def api_workload_logs(module: str, name: str, node: str, actor=Depends(who)):
+        """The log tail a node last reported for one workload (`oarbank workload logs`)."""
+        from . import workloads
+        n = db.one("SELECT node_id FROM nodes WHERE node_id=? OR hostname=?", (node, node))
+        if not n:
+            raise core.ApiError(404, "not_found", f"node {node}")
+        return workloads.logs(db, f"{module}/{name}", n["node_id"])
+
     @app.get("/api/v1/campaigns")
     def api_campaigns(module: str = "", state: str = "", actor=Depends(who)):
         rows = db.q("SELECT campaign_id FROM campaigns WHERE (?='' OR module=?) AND (?='' OR state=?) ORDER BY created_at DESC LIMIT 500",
@@ -952,6 +1038,76 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         if d is None:
             raise core.ApiError(404, "not_found", f"node {nid}")
         return d
+
+    # ---------------- inbound listeners (docs/design/inbound-listeners.md): what `oarbank listener list|show|mappings` print
+    @app.get("/api/v1/listeners")
+    def api_listeners(node: str | None = None, actor=Depends(who)):
+        """Every node's listeners, router mappings, network view and reachability (or one node's)."""
+        from . import listeners
+        return listeners.fleet_doc(db, node)
+
+    @app.get("/api/v1/nodes/{nid}/listeners/{key:path}")
+    def api_node_listener(nid: str, key: str, actor=Depends(who)):
+        """One listener of a node. Looking at it asks the node for its top client addresses for the next 10 minutes
+        (`send_listener_talkers`); they show once the node sends them."""
+        from . import listeners
+        n = db.one("SELECT * FROM nodes WHERE node_id=? OR hostname=?", (nid, nid))
+        if n is None:
+            raise core.ApiError(404, "not_found", f"node {nid}")
+        listeners.want_talkers(db, n["node_id"])
+        doc = listeners.node_doc(db, db.one("SELECT * FROM nodes WHERE node_id=?", (n["node_id"],)))
+        row = next((x for x in doc["listeners"] if x["key"] == key), None)
+        if row is None:
+            raise core.ApiError(404, "not_found", f"{n['hostname']} has no listener {key}")
+        return {**{k: v for k, v in doc.items() if k != "listeners"}, "listener": row}
+    # ---------------- sites (docs/design/sites.md; `oarbank sites`)
+    @app.get("/api/v1/sites")
+    def api_sites(actor=Depends(who)):
+        """Every site with its budget and state, the suggestions, and the nodes at no site."""
+        from . import sites
+        return sites.listing(db)
+
+    @app.get("/api/v1/sites/{ref}")
+    def api_site(ref: str, actor=Depends(who)):
+        from . import sites
+        try:
+            return sites.detail(db, ref)
+        except sites.SiteError as e:
+            raise core.ApiError(e.status, e.code, e.detail)
+
+    # ---------------- co-tenancy: harness runs and certificates (docs/design/gpu-cotenancy.md; `oarbank protection ab`)
+    @app.get("/api/v1/protection/ab/runs")
+    def api_ab_runs(node: str | None = None, limit: int = 50, actor=Depends(who)):
+        from . import cotenancy
+        try:
+            return {"runs": cotenancy.list_runs(db, node, max(1, min(limit, 500)))}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
+    @app.get("/api/v1/protection/ab/runs/{run_id}")
+    def api_ab_run(run_id: str, actor=Depends(who)):
+        from . import cotenancy
+        d = cotenancy.run_detail(db, run_id)
+        if d is None:
+            raise core.ApiError(404, "not_found", f"run {run_id}")
+        return d
+
+    @app.get("/api/v1/protection/certificates")
+    def api_certificates(node: str | None = None, actor=Depends(who)):
+        from . import cotenancy
+        try:
+            return {"certificates": cotenancy.list_certificates(db, node)}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
+    @app.get("/api/v1/protection/duty")
+    def api_gpu_duty(node: str | None = None, actor=Depends(who)):
+        """The GPU duty governor per node (D50; `oarbank protection duty`)."""
+        from . import cotenancy
+        try:
+            return {"nodes": cotenancy.duty_view(db, node)}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
 
     @app.get("/api/v1/jobs/{jid}")
     def api_job(jid: int, actor=Depends(who)):
@@ -1163,6 +1319,8 @@ def campaign_loop(db: DB, stop: threading.Event):
                 if db.get_state("move_postflight_pending"):
                     modlife.postflight(db)               # once, on a coordinator that just took over
                 campaigns.tick_all(db)
+                from . import workloads
+                workloads.process_reports(db)            # workloads' report events to their module (module IPC)
                 if clock.now() - last_integrity > 3600:
                     last_integrity = clock.now()
                     modlife.routine(db)                  # each module at most once a day
@@ -1206,10 +1364,24 @@ def _check_invariants(db: DB):
     db.set_state("invariant_conditions", conds)
 
 
+def _updates_tick(db: DB):
+    """Fleet updates (rollouts.py): release readiness, the rollouts' tick, and the update policy."""
+    from . import fleetupdates, rollouts
+    try:
+        with db.tx():
+            fleetupdates.refresh(db)
+        rollouts.tick(db)
+    except Exception as e:
+        db.event("background_error", reason=f"updates: {e!r}"[:300])
+
+
 def background(db: DB, stop: threading.Event):
-    last_disc = last_ckpt = last_audit = last_inv = last_views = 0.0
+    last_disc = last_ckpt = last_audit = last_inv = last_views = last_updates = 0.0
+    from . import coordself
     while not stop.is_set():
         try:
+            coordself.tick(db)                          # GET /v1/health `ticking`
+            coordself.observe_result(db)                # a self-update's outcome, and leases held while one runs
             coordmove.driver_tick(db)
             if not coordmove.serving(db):               # frozen for a move, a standby, or handed off: no writes
                 stop.wait(2)
@@ -1224,6 +1396,9 @@ def background(db: DB, stop: threading.Event):
                 from . import modviews
                 modviews.refresh(db)
                 last_views = t
+            if t - last_updates > 10:
+                _updates_tick(db)
+                last_updates = t
             if t - last_inv > 60:
                 _check_invariants(db)
                 from . import releases

@@ -223,7 +223,7 @@ class PackagingTests(unittest.TestCase):
     def test_install_hook_refreshes_or_migrates_and_never_fails(self):
         text = (DEPLOY / "coordinator-postinstall.sh").read_text()
         code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        self.assertIn('/bin/bash "$ROOT/install-oarbankd.sh" --refresh', code)
+        self.assertIn('/bin/bash "$ROOT/install-oarbankd.sh" --refresh --installed "$ROOT"', code)
         self.assertIn('"$ROOT/bin/oarbank" coordinator migrate --run --from-installer --build "$ROOT"', code)
         self.assertNotIn("set -e", code)
         self.assertTrue(text.rstrip().endswith("exit 0"))

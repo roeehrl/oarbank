@@ -92,7 +92,8 @@ try {
   # 4. entry points, relative to the build so it runs from wherever it is unpacked: a two-line launcher per program
   #    (the compiled core cannot run as `python -m`: its loader has no code objects), and a .cmd for people
   foreach ($e in @(@("oarbankd", "oarbank.coordinator.__main__"), @("oarbank", "oarbank.cli.main"),
-                   @("oarbank-console", "oarbank.console.__main__"), @("oarbank-setup", "oarbank.setup"))) {
+                   @("oarbank-console", "oarbank.console.__main__"), @("oarbank-setup", "oarbank.setup"),
+                   @("oarbank-coordupdate", "oarbank.coordupdate"))) {
     $SetupRoot = if ($e[0] -eq "oarbank-setup") { "from pathlib import Path`nsys.argv[1:1] = ['--root', str(Path(__file__).resolve().parent.parent)]`n" } else { "" }
     Set-Content -Encoding ascii "$Root\bin\$($e[0]).py" "import sys`nfrom $($e[1]) import main`nsys.argv[0] = `"$($e[0])`"`n${SetupRoot}sys.exit(main())"
     Set-Content -Encoding ascii "$Root\bin\$($e[0]).cmd" "@`"%~dp0..\python\python.exe`" -I `"%~dp0$($e[0]).py`" %*"

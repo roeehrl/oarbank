@@ -72,7 +72,9 @@ class Timing(_M):
 class NodeSection(_M):
     mode: Mode = DEFAULT_MODE
     pause: bool = Field(False, description="Local brake: no fleet work at all (local file only needs no coordinator).")
-    gpu_jobs: Literal["never", "when_no_gpu_protected", "always"] = "when_no_gpu_protected"
+    gpu_jobs: Literal["never", "when_no_gpu_protected", "certified", "always"] = Field("when_no_gpu_protected", description=(
+        "Fleet GPU work beside a protected GPU group: never; only while none is active (default); certified: "
+        "cooperative work up to a valid co-tenancy certificate's duty, else as when_no_gpu_protected (D50); always."))
     memory: MemoryGuard = Field(default_factory=MemoryGuard)
     implicit: Implicit = Field(default_factory=Implicit, description="moderate/strict_yield only.")
     defaults: Timing = Field(default_factory=Timing)
@@ -153,13 +155,41 @@ class Evict(_M):
     scope: Scope = "all"
 
 
+class OnExec(_M):
+    """A process trigger: the phase is on while a matching owner process runs."""
+    match: Match
+    tree: Literal["self", "descendants", "same_team"] = "self"
+
+
 class Source(_M):
+    """An owner source (never a module's). A path or glob (`*` in the last component; the newest matching file is
+    followed, and a new one is picked up); `~` is the person's home (a system install's session helper reads it)."""
     jsonl: str | None = None
-    event: str | None = None
-    enter: str | None = None
-    exit: str | None = None
+    event: str | None = Field(None, description="The event type: lines whose event_key field equals it (progress: what "
+                              "is counted; a field phase: the event carrying the field). No event counts every line.")
+    event_key: str | None = Field(None, description="The JSON field naming a line's event type (a dotted path; default "
+                                  "event).")
+    enter: str | list[str] | None = None
+    exit: str | list[str] | None = None
+    enter_soon: str | list[str] | None = Field(None, description="An event announcing the phase: on from then (fleet "
+                                               "work clears before it starts).")
+    field: str | None = Field(None, description="A phase from a field of the event type (a dotted path).")
+    on: str | list[str] | None = Field(None, description="Field values meaning the phase is on.")
+    soon: str | list[str] | None = Field(None, description="Field values announcing it (on from then).")
     log_regex: str | None = None
+    path: str | None = None
     exec: list[str] | None = Field(None, min_length=1, description="Owner-written probe printing a number (never from a module).")
+    on_exec: OnExec | None = None
+
+    def is_phase(self) -> bool:
+        """Whether this source names a phase (a during block's): events, a field, or a process trigger."""
+        if self.on_exec is not None:
+            return True
+        if not self.jsonl:
+            return False
+        if self.field:
+            return bool(self.on or self.soon)
+        return bool((self.enter or self.enter_soon) and self.exit)
 
 
 class Protect(_M):
@@ -196,6 +226,28 @@ ACTION_KEYS = ("reserve", "cap_fleet", "lower_fleet", "pause_fleet", "protect", 
 class During(Actions):
     """Phase-scoped extra actions while an owner-supplied source says a phase is on."""
     source: Source
+    tags: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]*$", max_length=32)]] = Field(
+        default_factory=list, max_length=8, description="Owner labels reported with the phase (uplink: it uses the "
+        "site's internet line); the coordinator aggregates them, the node acts on nothing but the actions.")
+
+    @model_validator(mode="after")
+    def _phase(self):
+        if not self.source.is_phase():
+            raise ValueError("a during source needs jsonl with enter and exit events, jsonl with field and on values, "
+                             "or on_exec")
+        return self
+
+
+class Delegate(_M):
+    """An owner's delegation of a process tree to host protection (docs/design/workloads.md): pause and lower only."""
+    actions: list[Literal["pause", "lower"]] = Field(min_length=1, description="What protection may do (stop is not offered).")
+
+
+def unspoofable(m: dict) -> bool:
+    """A matcher a module cannot claim: a code-signing identity, or one executable's exact path."""
+    p = m.get("path_prefix") or ""
+    return bool(m.get("requirement") or (m.get("team_id") and m.get("identifier"))
+                or (p and not p.endswith(("/", "\\"))))
 
 
 class Rule(Actions):
@@ -207,9 +259,22 @@ class Rule(Actions):
     enter_for_s: NonNeg | None = None
     exit_after_s: NonNeg | None = None
     during: list[During] = Field(default_factory=list)
+    delegate: Delegate | None = Field(None, description=(
+        "The matched tree is the owner's own work that protection may pause or lower as fleet work (with the node "
+        "setting delegated_processes on); no other action goes with it."))
+    immediate: bool = Field(False, description="The rule's during phases act at once, between ticks (the event path; "
+                            "S25), with the phase's own exit as hysteresis, and while its group is present before it is "
+                            "active.")
 
     @model_validator(mode="after")
     def _actions(self):
+        if self.delegate is not None:
+            if self.ignore or self.any() or self.during:
+                raise ValueError(f"rule {self.id}: a delegate rule has no other action")
+            if not unspoofable(self.match.model_dump(exclude_none=True)):
+                raise ValueError(f"rule {self.id}: delegate needs a matcher a module cannot spoof: requirement, or team_id "
+                                 "with identifier (macOS), or path_prefix naming one executable's exact path (Linux, Windows)")
+            return self
         if self.ignore and (self.any() or self.during):
             raise ValueError(f"rule {self.id}: ignore cannot be combined with actions")
         if not self.ignore and not (self.any() or self.during):
@@ -251,7 +316,20 @@ def refusals(config: dict, os: str) -> list[str]:
     equal by shared vectors (fixtures/protection-support-vectors.json). Empty: it can. An unknown OS refuses
     nothing."""
     out = []
-    for r in config.get("rule") or config.get("rules") or []:
+    rules = config.get("rule") or config.get("rules") or []
+    # a delegation names the owner's processes by what a module cannot copy (support.rs, the same words)
+    for r in [r for r in rules if r.get("delegate")]:
+        m = r.get("match") or {}
+        signed = bool(m.get("requirement") or (m.get("team_id") and m.get("identifier")))
+        p = m.get("path_prefix") or ""
+        path = bool(p) and not p.endswith(("/", "\\"))
+        if os == "darwin" and not signed:
+            out.append(f"rule {r.get('id')}: on macOS a delegation names a code-signing identity (requirement, or team_id "
+                       "with identifier): a path can be copied")
+        elif os in ("linux", "windows") and (not path or signed):
+            out.append(f"rule {r.get('id')}: on {os} a delegation names one executable's exact path (path_prefix), and "
+                       f"nothing else identifies it ({NO_SIGNING[os]})")
+    for r in [r for r in rules if not r.get("delegate")]:
         rid, m = r.get("id"), r.get("match") or {}
         why = NO_SIGNING.get(os)
         if why:
@@ -266,6 +344,13 @@ def refusals(config: dict, os: str) -> list[str]:
         if limit and m.get("name") and len(m["name"]) > limit:
             out.append(f"rule {rid}: match.name {m['name']!r} is longer than the {limit} characters {os} keeps of a "
                        "process's name, so it would never match")
+        for n, d in enumerate(r.get("during") or []):
+            em = ((d.get("source") or {}).get("on_exec") or {}).get("match") or {}
+            if why:
+                for key in ("requirement", "team_id", "identifier"):
+                    if em.get(key):
+                        out.append(f"rule {rid}: during[{n}].source.on_exec.match.{key} is a macOS code-signing identity, "
+                                   f"and {why} (match on path_prefix, path_contains, name or argv_regex)")
         if (r.get("protect") or {}).get("metric") == "ipc_ratio" and os in NO_SIGNING:
             out.append(f"rule {rid}: protect.metric = ipc_ratio needs per-process instruction and cycle counters, which "
                        "only macOS gives an unprivileged agent (use progress_rate, cpu_stall or gpu_share)")
