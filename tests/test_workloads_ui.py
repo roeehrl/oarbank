@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from oarbank.cli import main as cli
 from oarbank.console.app import console_app
 from oarbank.console.state import ConsoleState
-from oarbank.coordinator import access, app as coord_app, core, modcalls, modstore, releases
+from oarbank.coordinator import access, app as coord_app, core, modcalls, releases
 
 from helpers import FACTS, enrolled_node, fresh, install, make_db, run_op, sign_in
 from test_console import SECRET, Server
@@ -19,7 +19,6 @@ from test_workloads import identity_module, set_key
 
 @pytest.fixture
 def ui(tmp_path, monkeypatch):
-    monkeypatch.setattr(modstore, "CORE_VERSION", "2.10.0")
     db = make_db(tmp_path / "oarbank.sqlite3", modules=())
     install(db, identity_module(tmp_path))
     modcalls.use(db)

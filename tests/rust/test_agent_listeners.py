@@ -12,10 +12,9 @@ import subprocess
 import sys
 import time
 
-import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import CARGO, REPO, Coordinator, agent_env, free_port, install_module  # noqa: E402
+from conftest import CARGO, REPO, agent_env, free_port, install_module  # noqa: E402
 from agentbin import cargo_env  # noqa: E402
 from test_agent_jobs import node_modules  # noqa: E402
 from test_agent_session import wait  # noqa: E402
@@ -53,20 +52,6 @@ class Gateway:
             self.p.kill()
 
 
-@pytest.fixture
-def coordinator_210(tmp_path):
-    """A coordinator that calls itself 2.10 (publicecho needs core >= 2.10; this branch's core is still numbered for
-    the last release, the release commit raises it)."""
-    site = tmp_path / "site"
-    site.mkdir()
-    (site / "sitecustomize.py").write_text("import oarbank\noarbank.__version__ = '2.10.0'\n", encoding="utf-8")
-    home = tmp_path / "coordinator"
-    home.mkdir()
-    pp = os.pathsep.join([str(site), os.environ.get("PYTHONPATH", "")])
-    with Coordinator(home, extra_env={"PYTHONPATH": pp}) as c:
-        yield c
-
-
 def node_doc(c, nid):
     return c.api("GET", f"/api/v1/listeners?node={nid}")["nodes"][0]
 
@@ -100,8 +85,8 @@ def start_agent(agent_bin, coordinator, home, gw: Gateway):
     return p, nid, env
 
 
-def test_a_public_listener_is_mapped_probed_served_recovered_and_released(agent_bin, coordinator_210, tmp_path):
-    c = coordinator_210
+def test_a_public_listener_is_mapped_probed_served_recovered_and_released(agent_bin, coordinator, tmp_path):
+    c = coordinator
     ext = free_port()
     gw = Gateway({"forward": True, "external": "127.0.0.1", "natpmp": True, "pcp": True, "upnp": True})
     install_module(c, PUBLICECHO, tmp_path, approve=True)

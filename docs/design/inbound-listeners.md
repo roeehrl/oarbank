@@ -1,6 +1,6 @@
 # Inbound listeners: a module accepts connections from the internet
 
-Status: built in **core 2.10** and **oarbank-sdk 1.7** (PLAN D47, D48, D49; invariant S24). See Implementation status
+Status: built, ships in **core 2.10.0** and **oarbank-sdk 1.7.0** (PLAN D47, D48, D49; invariant S24). See Implementation status
 at the end for what the build adds to the design and what remains to verify on real routers.
 
 ## The problem

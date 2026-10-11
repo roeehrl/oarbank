@@ -9,14 +9,13 @@ import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import REPO, Coordinator, agent_env, free_port, install_module  # noqa: E402
+from conftest import REPO, agent_env, free_port, install_module  # noqa: E402
 from procguard import SpawnTree  # noqa: E402
 from test_agent_listeners import Gateway, ask, listener  # noqa: E402
 from test_agent_session import wait  # noqa: E402
@@ -96,18 +95,6 @@ restart = { backoff_initial_s = 1, backoff_max_s = 5, max_failures = 5 }
     return src
 
 
-@pytest.fixture
-def coordinator_210(tmp_path):
-    site = tmp_path / "site"
-    site.mkdir()
-    (site / "sitecustomize.py").write_text("import oarbank\noarbank.__version__ = '2.10.0'\n", encoding="utf-8")
-    home = tmp_path / "coordinator"
-    home.mkdir()
-    pp = os.pathsep.join([str(site), os.environ.get("PYTHONPATH", "")])
-    with Coordinator(home, extra_env={"PYTHONPATH": pp}) as c:
-        yield c
-
-
 def planned(c, name, target, params):
     plan = c.api("POST", f"/api/v1/ops/{name}", json={"target": target, "params": params, "dry_run": True})["plan"]
     return c.api("POST", f"/api/v1/ops/{name}", json={"plan_id": plan["plan_id"], "reason": "e2e"})
@@ -119,8 +106,8 @@ def row(c):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the guard reads the POSIX process table; Windows relays the same way")
-def test_a_public_listener_reaches_a_workload_through_the_relay(agent_bin, coordinator_210, tmp_path):
-    c = coordinator_210
+def test_a_public_listener_reaches_a_workload_through_the_relay(agent_bin, coordinator, tmp_path):
+    c = coordinator
     ext = free_port()
     gw = Gateway({"forward": True, "external": "127.0.0.1", "natpmp": True, "pcp": True, "upnp": True})
     install_module(c, workload_echo(tmp_path), tmp_path, approve=True)

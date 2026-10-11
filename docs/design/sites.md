@@ -1,5 +1,7 @@
 # Sites: nodes that share one internet line
 
+Status: built, ships in **core 2.10.0** and **oarbank-sdk 1.7.0** (PLAN D55; invariant S27).
+
 Nodes behind one internet line slow each other's large transfers down, and the slowdown is not shared fairly with the
 owner's own programs. For example, a large upload that takes about 40 s alone can take four times as long while another
 machine on the same line uploads too. A protected program that must finish an upload by a deadline then misses it

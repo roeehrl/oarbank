@@ -11,13 +11,12 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from conftest import REPO, Coordinator, agent_env, install_module  # noqa: E402
+from conftest import REPO, agent_env, install_module  # noqa: E402
 from procguard import SpawnTree  # noqa: E402
 from test_agent_session import wait  # noqa: E402
 
@@ -89,20 +88,6 @@ health = { period_s = 5, timeout_s = 5 }
     return src
 
 
-@pytest.fixture
-def coordinator_210(tmp_path):
-    """A coordinator that calls itself 2.10 (the module needs core >= 2.10; this branch is still numbered for the last
-    release; the release commit raises it)."""
-    site = tmp_path / "site"
-    site.mkdir()
-    (site / "sitecustomize.py").write_text("import oarbank\noarbank.__version__ = '2.10.0'\n", encoding="utf-8")
-    home = tmp_path / "coordinator"
-    home.mkdir()
-    pp = os.pathsep.join([str(site), os.environ.get("PYTHONPATH", "")])
-    with Coordinator(home, extra_env={"PYTHONPATH": pp}) as c:
-        yield c
-
-
 def planned(c, name, target, params):
     plan = c.api("POST", f"/api/v1/ops/{name}", json={"target": target, "params": params, "dry_run": True})["plan"]
     return c.api("POST", f"/api/v1/ops/{name}", json={"plan_id": plan["plan_id"], "reason": "e2e"})
@@ -140,8 +125,8 @@ def stat(pid: int) -> str:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the synthetic daemon forks (POSIX); Windows contains workloads in a Job Object")
-def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigned(agent_bin, coordinator_210, tmp_path):
-    c = coordinator_210
+def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigned(agent_bin, coordinator, tmp_path):
+    c = coordinator
     install_module(c, workload_toy(tmp_path), tmp_path)
     floors = {"soft_free_pct": 1, "hard_free_pct": 0.5, "swap_growth_soft_mb_min": 1e9, "swap_growth_hard_mb_min": 1e9}
     planned(c, "protection.rules.update", "fleet", {"config": {"schema": 1, "node": {"mode": "fleet_first", "memory": floors}}})

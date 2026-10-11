@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from oarbank.coordinator import clock, core, invariants, modcalls, modstore, ops, releases, workloads as W
+from oarbank.coordinator import clock, core, invariants, modcalls, ops, releases, workloads as W
 
 from helpers import FACTS, enrolled_node, fresh, install, make_db, run_op
 
@@ -28,7 +28,6 @@ def identity_module(tmp_path) -> Path:
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(modstore, "CORE_VERSION", "2.10.0")       # the manifest needs core >= 2.10 (still numbered 2.8)
     d = make_db(tmp_path / "oarbank.sqlite3", modules=())
     install(d, identity_module(tmp_path))
     modcalls.use(d)
@@ -211,7 +210,6 @@ class SeatMachine(RuleBasedStateMachine):
         clock.set_fake(1_900_000_000.0)
         self.tmp = tempfile.TemporaryDirectory()
         tmp = Path(self.tmp.name)
-        modstore.CORE_VERSION, self._core = "2.10.0", modstore.CORE_VERSION
         self.db = make_db(tmp / "oarbank.sqlite3", modules=())
         install(self.db, identity_module(tmp))
         modcalls.use(self.db)
@@ -223,7 +221,6 @@ class SeatMachine(RuleBasedStateMachine):
 
     def teardown(self):
         clock.set_fake(None)
-        modstore.CORE_VERSION = self._core
         modcalls.close_host(self.db)
         self.db.conn.close()
         self.tmp.cleanup()

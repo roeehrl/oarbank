@@ -1,6 +1,6 @@
 # Workloads: supervised long-running daemons that are the work itself
 
-Status: built in **core 2.10** and **oarbank-sdk 1.6** (PLAN D45, D46; invariants S26 and the widened S16). See
+Status: built, ships in **core 2.10.0** and **oarbank-sdk 1.7.0** (PLAN D45, D46; invariants S26 and the widened S16). See
 Implementation status at the end for what each operating system can and cannot do, and what is left to verify.
 
 ## The problem
@@ -434,8 +434,8 @@ Not in this release, or limited:
   restarts (its channel ends with the agent).
 - **GPU duty**: under `gpu_jobs = certified`, a running workload that uses the GPU and declares `cooperative_throttle`
   shares a valid certificate's duty with the cooperative jobs, and the agent writes it as `gpu_duty` in the workload's
-  control document beside `threads` and `pause`. The duty governor that adjusts it while the work runs comes with the
-  GPU duty throttle.
+  control document beside `threads` and `pause`. The duty governor ([gpu-cotenancy.md](gpu-cotenancy.md#the-duty-governor-d50))
+  moves it while the work runs and checks the workload's measured GPU time, as it does for jobs.
 - The end-to-end test sets `OARBANK_TEST_IGNORE_OS_MEMORY_PRESSURE` on its agent, a test-only switch that ignores the
   OS-wide memory-pressure level (the memory floors still apply), because the shared test host's pressure is not the
   test's.

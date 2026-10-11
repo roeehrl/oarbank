@@ -27,7 +27,6 @@ from conftest import REPO, agent_env, install_module  # noqa: E402
 from procguard import SpawnTree  # noqa: E402
 from test_agent_files import HOST, admit_next, db_rows, module_state, op, origin_cert  # noqa: E402
 from test_agent_session import wait  # noqa: E402
-from test_agent_workload_listener import coordinator_210  # noqa: E402,F401 (the fixture: a coordinator that says 2.10)
 
 from oarbank.coordinator import sites  # noqa: E402
 
@@ -204,8 +203,8 @@ def heavy_workload_module(tmp):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the guard reads the POSIX process table")
-def test_a_protected_upload_on_one_node_pauses_a_network_heavy_workload_on_the_other(agent_bin, coordinator_210, tmp_path):
-    c = coordinator_210
+def test_a_protected_upload_on_one_node_pauses_a_network_heavy_workload_on_the_other(agent_bin, coordinator, tmp_path):
+    c = coordinator
     tag = f"fake-uploader-{uuid.uuid4().hex[:8]}"
     data = tmp_path / "uploader"
     data.mkdir()

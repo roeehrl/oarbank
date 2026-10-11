@@ -1,5 +1,9 @@
 # Co-tenancy: measuring harm, event-driven sources, certificates and the GPU duty
 
+Status: built, ships in **core 2.10.0** and **oarbank-sdk 1.7.0** (PLAN D50 to D54; invariants S25 and S28). See
+Verification at the end, and [Running the first measurement against a real protected program](#running-the-first-measurement-against-a-real-protected-program)
+for what the owner verifies.
+
 Fleet work runs beside the owner's own processes, and host protection ([protection.md](protection.md)) keeps it from
 harming them. This document covers the pieces that make that measurable and fast (PLAN D50 to D54):
 

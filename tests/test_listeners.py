@@ -44,7 +44,6 @@ def echo(tmp_path):
 
 @pytest.fixture
 def db(tmp_path, echo, monkeypatch):
-    monkeypatch.setattr(modstore, "CORE_VERSION", "2.10.0")       # the manifest needs core >= 2.10
     d = make_db(tmp_path / "oarbank.sqlite3")
     r = install(d, echo, enable=False)
     modsandbox.approve(d, "publicecho", r["version"], "test", None)

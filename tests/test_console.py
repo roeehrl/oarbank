@@ -636,7 +636,7 @@ def test_node_show_lists_gpu_in_containers_only_with_a_container_runtime_and_doc
     for facts, line in ((colima, "containers: colima installed; the agent's Colima VMs start when a job needs one"),
                         (none, "containers: none (no container runtime installed)")):
         doc = {"node": {"node_id": "n_1", "hostname": "mac", "platform": "darwin-arm64", "lifecycle": "ready",
-                        "desired_state": "active", "online": True, "agent_version": "2.9.0", "quarantine_reason": None},
+                        "desired_state": "active", "online": True, "agent_version": "2.10.0", "quarantine_reason": None},
                "modules": {}, "doctor": doctor, "gpu": detail.gpu(facts, rep), "containers": facts["containers"], "services": [],
                "services_at": None, "folders": [], "sandbox": {"backend": "seatbelt", "capabilities": []}}
         monkeypatch.setattr(cli, "api", lambda method, path, *a, **k: doc)
