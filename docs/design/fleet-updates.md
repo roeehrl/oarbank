@@ -279,18 +279,18 @@ node runs an agent older than the new release's `agent_min`, unless the node is 
 - **Windows:** the SYSTEM task `\Oarbank\CoordinatorUpdate`, every minute, exiting at once without a request.
 
 It then:
-1. Verifies the build against `<record dir>/update-trust.json` (root's, first pinned by the coordinator package's
+1. Verifies the build against `<system data>/coordinator-update/trust.json` (root's, first pinned by the coordinator package's
    postinstall from the home's owner anchors while an administrator installs it).
 2. Stops both services.
-3. Copies `oarbank.sqlite3` with SQLite's backup API to `<record dir>/update/db-<id>.sqlite3` (root's: the coordinator
-   account cannot alter its own restore point).
+3. Copies `oarbank.sqlite3` with SQLite's backup API to `<system data>/coordinator-update/db-<id>.sqlite3` (root's:
+   the coordinator account cannot alter its own restore point).
 4. Unpacks into `PROGRAMS/<v>-<sha12>`, flips `current`, refreshes the service definitions (`install-oarbankd
    --refresh`) and starts the services.
 5. **Probation.** Within 300 s, `GET /v1/health` on the agent port says `{version: <v>, migrated: true, ticking: true}`,
    and it stays so for 60 s.
 6. **Commit:** keep the previous programs and the root copy for 14 days. **Fail:** stop, restore the copy, flip back,
    refresh, start, and check health on the old version.
-7. Either way, it writes `<record dir>/update/result.json`. oarbankd reads it at start, records
+7. Either way, it writes `<home>/updates/coordinator-result.json` (and its own journal). oarbankd reads it at start, records
    `coordinator_update_{done,rolled_back}`, alerts on a rollback, and the rollout continues or halts.
 
 **Moves and D44.** The runner uses the same programs layout and service record as `install-oarbankd`, so a move's
@@ -454,6 +454,102 @@ The parity registry lists each one.
 | Fleet already unhealthy | Ring start gate | The rollout does not proceed |
 | Wrong release started | T2 preview | Halt / roll back |
 | Expired hold or pin | Tick | Flagged; the node rejoins |
+
+## Interfaces
+
+This section is the contract between the coordinator, the agent, the runners and the packages.
+
+### Paths
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| `<system data>` | `/Library/Application Support/Oarbank` | `/var/lib/oarbank` | `%ProgramData%\Oarbank` |
+| Agent home (system scope) | `<system data>/agent` | same | same |
+| Agent spool | `<agent home>/updates/` (the agent's account, 0700) | same | same |
+| Node runner state (root only) | `<system data>/update/` | same | same |
+| Coordinator runner state (root only) | `<system data>/coordinator-update/` | same | same |
+| Coordinator spool | `<coordinator home>/updates/` (`_oarbankd`/`oarbankd`) | same | same |
+
+### Signatures
+
+Owner statements are signed like every other owner statement (`signing.py`): Ed25519 over the UTF-8 bytes of the
+statement text, base64. The statement text is JSON with sorted keys and `(",", ":")` separators.
+
+```json
+{"type":"oarbank.fleet-release/v1","version":"2.10.0","seq":21000,"manifest_sha256":"<hex of the manifest text>","signed_at":1760000000}
+```
+
+The manifest travels as its exact text. Everyone computes `manifest_sha256` over those bytes, so no party ever
+re-serializes it. A signature object is `{"statement": "<text>", "signature": "<b64>"}`.
+
+### The heartbeat directive (`node_update`)
+
+The directive is `null` while the node is where it should be:
+
+```json
+{"release": "2.10.0", "seq": 21000, "go": true, "rollback": false, "drain_timeout_s": 1800,
+ "artifact": {"name": "…", "format": "pkg|msi|deb|rpm|tar", "sha256": "…", "size": 1, "url": "/v1/updates/artifacts/<sha256>"},
+ "manifest": "<text>", "signature": {"statement": "…", "signature": "…"} | null,
+ "owner_anchors": {"statement": "…", "signatures": [{"key": "…", "sig": "…"}]} | null}
+```
+
+`GET /v1/updates/artifacts/{sha256}` serves only the artifact of the node's current directive (404 otherwise). It
+uses the agent listener and mTLS, like `/v1/agent/builds/{sha}`.
+
+### The agent's report (hello and heartbeat)
+
+```json
+"node_update": {"state": "idle|unsupported|staging|staged|draining|deferred|installing|confirming|done|failed|rolled_back|refused",
+                "release": "2.10.0", "seq": 21000, "error": null, "at": 1760000000.0},
+"install": {"format": "pkg|msi|deb|rpm|tar|dev", "scope": "system|personal", "updater": true, "why": null}
+```
+
+### Spool files (agent ↔ node runner)
+
+- **`<agent home>/updates/package`:** the downloaded artifact. The agent writes it, and the runner only copies it.
+- **`<agent home>/updates/request.json`:** `{"id", "release", "seq", "format", "sha256", "size", "manifest",
+  "signature", "owner_anchors", "rollback", "requested_at"}`. The agent writes it last, atomically through a rename;
+  its appearance starts the runner.
+- **`<agent home>/updates/result.json`:** the runner writes it and chowns it to the agent's account.
+  `{"id", "release", "state": "refused|installing|installed|done|rolled_back|failed", "error", "partial", "reboot_pending",
+  "at"}`.
+- **`<agent home>/updates/confirmed`:** `{"id", "release", "agent_version", "at"}`. The new agent writes it after its
+  first hello and heartbeat.
+
+The runner removes `request.json` when it has taken the request (journaled first). It ignores a request whose `id` it
+has already finished.
+
+### Node runner files
+
+- **`trust.json`:** `{"format": 1, "mode": "signed" | "unsigned", "fleet_id", "owner_version", "owner_keys": [b64…],
+  "pinned_at", "pinned_by"}`. `unsigned` is only ever written by `update-trust --unsigned`.
+- **`journal.json`:** `{"format": 1, "committed_seq", "committed_release", "current": {sha256, release, format},
+  "previous": {sha256, release, format} | null, "active": {"id", "release", "seq", "sha256", "format", "rollback",
+  "step": "verified|installing|installed|probation|committing|rolling_back", "deadline", "previous_agent"} | null}`.
+- **`packages/<sha256>`:** two packages are kept.
+
+### Commands
+
+```
+oarbank-launcher update-run   [--agent-home P] [--state P] [--prefix P] [--probation-s N] [--once]
+oarbank-launcher update-trust (--from-agent | --unsigned | --keys K1,K2 [--fleet F]) [--agent-home P] [--state P]
+python -m oarbank.coordupdate run   [--home P] [--state P] [--programs P] [--probation-s N] [--once]
+python -m oarbank.coordupdate trust (--from-home | --unsigned) [--home P] [--state P]
+oarbankd --self-test --home <scratch>      (open, migrate, check invariants, exit 0/1; never listens)
+```
+
+The defaults are the system paths above. `--prefix` is where the `tar` format installs (Linux tarball installs:
+`/opt/oarbank`). `--once` handles at most one request and exits, which the triggers use. Without it, the command
+watches the spool, which the tests use.
+
+### Coordinator health and spool
+
+- **`GET /v1/health`** (agent listener, no authentication): `{"version", "started_at", "migrated": true, "ticking":
+  <a background tick within 30 s>, "role"}`.
+- **`<coordinator home>/updates/coordinator-request.json`:** `{"id", "version", "sha256", "size", "archive":
+  "updates/artifacts/<sha256>", "manifest", "signature", "snapshot", "from_version", "requested_at"}`.
+- **`<coordinator home>/updates/coordinator-result.json`:** `{"id", "version", "state": "refused|done|rolled_back",
+  "error", "at"}`.
 
 ## TLA+ (`specs/OarbankRollout.tla`)
 
