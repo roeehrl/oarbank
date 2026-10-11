@@ -193,6 +193,9 @@ def test_the_fixed_version_installed_beside_it_is_the_next_step_with_its_own_che
     assert steps["built"]["status"] == "waiting" and steps["signed"]["status"] == "waiting"
     why = steps["tools"]["items"][0]["groups"][0]["reasons"][0]
     assert "agent 2.8.0 is older than 2.9.0 and does not report host tools" in why
+    assert "brew install" not in why                       # it may have the tool already: only the update tells
+    fx = tools.fixes(db, fresh(db, mac), name, {"id": "jdk", "version": ">=17"}, {"status": "not_found", "unreported": True})
+    assert [f["label"] for f in fx] == ["Update mac's agent"] and fx[0]["href"] == "/agent"
     modsandbox.approve(db, name, fix["version"], "test", None)
     nx = readiness.module(db, name, version="0.3.1")
     assert next(s for s in nx["steps"] if s["id"] == "enabled")["status"] == "blocked"

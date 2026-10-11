@@ -31,6 +31,7 @@ import time
 
 from oarbank_sdk import toolversion as tv
 
+from . import agentbuilds
 from .db import jl
 
 KINDS = ("jdk", "python", "executable")
@@ -403,7 +404,6 @@ def resolve(insts: list[dict], req: dict, native: str, pin: str | None = None) -
 def unreported_why(node: dict) -> str:
     """Why a node has no tool report: its agent predates host tools (it never sends one: update it), or it has not
     connected since it could."""
-    from . import agentbuilds
     v = node.get("agent_version")
     if agentbuilds.older(v, agentbuilds.HOST_TOOLS_SINCE):
         return (f"the node's agent {v} is older than {agentbuilds.HOST_TOOLS_SINCE} and does not report host tools; "
@@ -506,6 +506,10 @@ def fixes(r, node: dict, module: str, req: dict, res: dict, defs: dict | None = 
     out = []
     if res.get("unknown") or not d:
         return [{"label": f"Define {req['id']} in Settings → Tools", "href": f"/settings?tool={req['id']}#tools"}]
+    if res.get("unreported") and agentbuilds.older(node.get("agent_version"), agentbuilds.HOST_TOOLS_SINCE):
+        # the node may well have the tool: its agent cannot say; installing or re-detecting changes nothing until it updates
+        return [{"label": f"Update {node.get('hostname') or node.get('node_id')}'s agent", "href": "/agent",
+                 "then": "the updated agent reports the tools it finds when it connects"}]
     facts = jl(node.get("facts_json"), {}) or {}
     cmd = install_command(d["kind"], req, os_, (facts.get("platform") or {}).get("distro"))
     if res["status"] in ("not_found", "version_unmet") and cmd:
