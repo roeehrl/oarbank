@@ -95,6 +95,9 @@ CODES: list[ReasonCode] = [
     C("DATASETS_NOT_REGISTERED", "job_pending", "Waiting for {missing} to be registered (a bootstrap job brings a module's "
       "pinned datasets)"),
     C("DATASETS_NOT_STAGED", "job_pending", "The node has not staged {missing} yet"),
+    C("SITE_UPLINK_BUSY", "job_pending", "Network-heavy: site {site} holds such work while {why}"),
+    C("SITE_UPLINK_BUDGET", "job_pending", "Network-heavy: site {site} already runs {running} of its {max} network-heavy jobs",
+      remedies=["sites.update"]),
 
     # ---------------------------------------------------------------- why a node is not admitting work
     C("NODE_PAUSED_BY_ADMIN", "node_admission", "Paused by {actor}: {reason}", remedies=["nodes.resume"]),
@@ -236,6 +239,10 @@ CODES: list[ReasonCode] = [
       "samples: {action} (the third time within an hour stops it, and it gets no duty for an hour)", "P3"),
     C("GPU_DUTY_UNVERIFIED", "protection", "The GPU time of {unit} cannot be read, so its gpu_duty cannot be checked: "
       "{action}", "P4"),
+    C("TRANSFER_PAUSED", "protection", "A {transfer} transfer paused: {why}", node=False, job=False),
+    C("TRANSFER_RESUMED", "protection", "A {transfer} transfer resumed after {paused_s} s"),
+    C("SITE_PAUSE", "protection", "Network-heavy attempts paused: their site is in an uplink phase", node=False, job=False),
+    C("SITE_RESUME", "protection", "Network-heavy attempts resumed: their site's uplink phase ended", node=False, job=False),
 
     # ---------------------------------------------------------------- how an attempt ended
     C("OK", "attempt_end", "Completed", wire=["ok"], node=False, job=False),
@@ -260,6 +267,8 @@ CODES: list[ReasonCode] = [
     C("SANDBOX_ESCAPE", "attempt_end", "A process of the attempt ran outside the module sandbox; the attempt was killed",
       wire=["sandbox_escape"], node=False, job=True),
     C("PREEMPT_MEMORY", "attempt_end", "Preempted by the memory guard", wire=["preempt_memory"], node=False, job=False),
+    C("PREEMPT_SITE", "attempt_end", "Released: a network-heavy job that cannot pause, or paused too long, while its "
+      "site was in an uplink phase; requeued", wire=["preempt_site"], node=False, job=False),
     C("RELEASED_CAP_CPU", "attempt_end", "Released: the CPU cap was lowered", wire=["limit_cpu"], node=False, job=False),
     C("RELEASED_CAP_MEM", "attempt_end", "Released: over its declared memory under a memory floor, or the memory cap was lowered",
       wire=["limit_mem"], node=False, job=False),

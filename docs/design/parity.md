@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 105 operations, 2 explain kinds, 182 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 111 operations, 2 explain kinds, 189 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -87,6 +87,12 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `groups.update` | T2 | yes | `oarbank groups update <group>` | yes |
 | `groups.rank` | T2 | yes | `oarbank groups rank <group> up|down|top|bottom` | yes |
 | `groups.delete` | T2 | yes | `oarbank groups delete <group>` | yes |
+| `sites.create` | T1 | yes | `oarbank sites create <name> [--node N ...] [--mbps M] [--transfers N] [--heavy-jobs N]`<br>`oarbank sites accept <suggestion> [--name <name>]` | yes |
+| `sites.update` | T1 | yes | `oarbank sites update <site> [--name N] [--mbps M] [--transfers N] [--heavy-jobs N]` | yes |
+| `sites.assign` | T1 | yes | `oarbank sites add <site> <node> [<node> ...]`<br>`oarbank sites accept <suggestion> --site <site>` | yes |
+| `sites.unassign` | T1 | yes | `oarbank sites remove <node> [<node> ...]` | yes |
+| `sites.delete` | T2 | yes | `oarbank sites delete <site>` | yes |
+| `sites.dismiss` | T0 | yes | `oarbank sites dismiss <suggestion>` | yes |
 | `nodes.label` | T1 | yes | `oarbank node label <node> <labels> [--remove]` | yes |
 | `tools.define` | T2 | yes | `oarbank tools define <id> --search <os>=<pattern>` | yes |
 | `tools.delete` | T2 | yes | `oarbank tools delete <id>` | yes |
@@ -148,6 +154,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `FOLDER_UNAVAILABLE` | `settings.folders.update` |
 | `AGENT_TOO_OLD` | `agent.promote` |
 | `RETRIES_EXHAUSTED` | `jobs.cancel` |
+| `SITE_UPLINK_BUDGET` | `sites.update` |
 | `NODE_PAUSED_BY_ADMIN` | `nodes.resume` |
 | `NODE_DRAINING` | `nodes.resume` |
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |

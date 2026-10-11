@@ -73,6 +73,7 @@ class NodeView:
     user_present: bool = False        # someone is using the node now (its capacity report)
     granted: int = 0                  # jobs this claim has granted so far (beside `live`)
     campaign_rules: object = None     # (campaign_id) -> {key: value}: what a running campaign holds its jobs to here
+    site: dict | None = None          # sites.claim_view: the node's site, its uplink hold and network-heavy jobs running
     release_of: object = None         # () -> releases.node_release(node): read only when a release check fails
 
     @property
@@ -214,6 +215,19 @@ def paused_here(paused, gpu: bool) -> bool:
     return pauses_all(p) or ("gpu" in p if gpu else "cpu" in p)
 
 
+def site_check(nv: NodeView, res: dict) -> PredicateResult:
+    """A network-heavy job (stages[].requires.resources.network = "heavy") at a site (docs/design/sites.md): never
+    while a protected process there is in an uplink phase, and only while the site runs fewer such jobs than its
+    budget. Any other job, or a node at no site, passes."""
+    s = nv.site
+    if (res or {}).get("network") != "heavy" or not s:
+        return R("site uplink", "SITE_UPLINK_BUSY", True, None, None)
+    if s["hold"]:
+        return R(f"site {s['name']}: no uplink phase", "SITE_UPLINK_BUSY", False, s["why"], "no uplink phase at the site")
+    return R(f"site {s['name']}: network-heavy jobs < {s['max_heavy_jobs']}", "SITE_UPLINK_BUDGET",
+             s["heavy_running"] < s["max_heavy_jobs"], s["heavy_running"], s["max_heavy_jobs"])
+
+
 def retry_max(job: dict, platform: str | None) -> int:
     """The execution attempts the job's stage allows on a node of `platform` (stages[].retry, its variant applied)."""
     r = job["retry"]
@@ -352,6 +366,7 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
                   sorted(set(datasets or []) - nv.ready), "[]"),
         lambda: R("not paused by host protection", "PROTECTION_ACTIVE", not paused_here(nv.paused, gpu), sorted(nv.paused),
                   nv.paused_by),
+        lambda: site_check(nv, res),
         lambda: R(f"cpu({need_cpu:g}) <= free", "INSUFFICIENT_CPU", need_cpu <= nv.free_cpu, nv.free_cpu, need_cpu),
         lambda: R(f"mem_gb({need_mem:g}) <= free", "INSUFFICIENT_MEM", need_mem <= nv.free_mem, nv.free_mem, need_mem),
         pool_checks,

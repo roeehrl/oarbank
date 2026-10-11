@@ -485,6 +485,23 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             return render(request, "error.html", {"message": "the database is busy; reload", "actor": actor}, 503)
         return render(request, "groups.html", {**d, "actor": actor})
 
+    @app.get("/sites", response_class=HTMLResponse)
+    async def sites_list(request: Request):
+        """Sites: nodes that share one internet line, their uplink budgets and holds, and suggested sites."""
+        actor = who(request)
+        d = await drill(views.sites_page)
+        if d is None:
+            return render(request, "error.html", {"message": "the database is busy; reload", "actor": actor}, 503)
+        return render(request, "sites.html", {**d, "actor": actor})
+
+    @app.get("/sites/{ref}", response_class=HTMLResponse)
+    async def site_detail(ref: str, request: Request):
+        actor = who(request)
+        d = await drill(views.site_page, ref)
+        if d is None:
+            return render(request, "error.html", {"message": f"no site {ref} (or the database is busy)", "actor": actor}, 404)
+        return render(request, "site.html", {**d, "actor": actor})
+
     @app.get("/groups/{gid}", response_class=HTMLResponse)
     async def group_detail(gid: str, request: Request):
         actor = who(request)
@@ -1255,7 +1272,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             if any(c.get("scope") in ("fleet", "group", "campaign") for c in cs) or len({c.get("scope_id") for c in cs
                                                                              if c.get("scope") == "node"}) > 1:
                 tier = "T2" if tier in ("T0", "T1") else tier
-        if op in ("settings.promote", "nodes.label", "groups.create") and tier in ("T0", "T1"):
+        if op in ("settings.promote", "nodes.label", "groups.create", "sites.create", "sites.assign", "sites.update") \
+                and tier in ("T0", "T1"):
             tier = "T2"                                   # these always show who they reach before anything changes
         if tier in ("T2", "T3"):
             r = await http.post(f"/api/v1/ops/{op}", json={"target": target, "params": params, "dry_run": True}, headers=headers)

@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools, workloads
+from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, sites, statements, tools, workloads
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -34,7 +34,7 @@ AWAIT_MODULE_TTL = 600.0     # lease held for a completion waiting on a module f
 
 
 NON_FAILURE_RELEASES = {"preempt_memory", "preempt_protection", "user_cancel", "limit_mem", "limit_cpu", "limit_schedule",
-                        "transient", "agent_stop"}
+                        "transient", "agent_stop", "preempt_site"}
 HOST_FAILURES = {"doctor", "mode_mismatch", "oom", "no_metrics"}   # failures that implicate the host first
 
 
@@ -302,6 +302,8 @@ def _node_directives(db: DB, node: dict) -> dict:
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
             # harness runs and co-tenancy certificates (docs/design/gpu-cotenancy.md)
             **cotenancy.directives(db, node),
+            # the node's site (shared internet line): its hold and lease terms, and the gateway salt (docs/design/sites.md)
+            **sites.directives(db, node),
             **coordmove.directives(db), **owner.directives(db),
             # inbound listeners: the kill switch, dial-back probes, reachability, the observed address (listeners.py)
             **_listener_directives(db, node),
@@ -433,7 +435,7 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
             if not row or row["state"] != "live" or row["node_id"] != nid:
                 continue
             progressed = (a.get("cpu_s", 0) > (row["cpu_s"] or 0) + 0.01 or
-                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing")
+                          a.get("log_bytes", 0) > (row["log_bytes"] or 0) or a.get("phase") in ("staging", "paused", "checkpointing", "uploading")
                           or row["cpu_s"] is None)
             if a.get("phase") and a.get("phase") != row["phase"]:
                 db.x("INSERT OR IGNORE INTO attempt_phases VALUES(?,?,?)", (row["attempt_id"], a["phase"], t))
@@ -467,6 +469,7 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         ack = _ingest_journal(db, nid, body.get("journal") or [])
         cotenancy.ingest(db, node, body.get("ab_runs"), tel)       # harness runs (docs/design/gpu-cotenancy.md)
+        sites.observe(db, node, t)                                # its phases may hold its site (docs/design/sites.md)
         cancel, revoke = jl(node["pending_cancel_json"], []), jl(node["pending_revoke_json"], [])
         db.x("UPDATE nodes SET pending_cancel_json='[]', pending_revoke_json='[]' WHERE node_id=?", (nid,))
         recert = bool(node["want_recertify"])
@@ -923,7 +926,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
     return predicates.NodeView(
         secrets_unset=unset, settings_unset=settings_unset, campaign_rules=campaign_rules,
         on_battery=bool(tel.get("on_battery")), user_present=bool(cap.get("user_present")),
-        node=node, states=node_modules(node), offered=runs, excluded=excluded,
+        node=node, states=node_modules(node), offered=runs, excluded=excluded, site=sites.claim_view(db, node),
         excluded_why=modsandbox.exclusion_reasons(db, node, excluded),
         capabilities={m: predicates.node_capabilities(node, m) for m in runs},
         gpu_apis=predicates.node_gpu_apis(node),
@@ -1104,6 +1107,8 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             for p, k in (res.get("pools") or {}).items():
                 nv.pool_use[p] = nv.pool_use.get(p, 0) + int(k)
             nv.gpu_use += modcalls.job_uses_gpu(j["module"], res, node.get("platform"))
+            if nv.site and res.get("network") == "heavy":
+                nv.site["heavy_running"] += 1                 # the site's budget of network-heavy jobs (sites.py)
             nv.granted += 1
             per_campaign[j["campaign_id"]] = per_campaign.get(j["campaign_id"], 0) + 1
             grant = {"attempt_id": aid, "job_id": j["job_id"], "job_key": j["job_key"],
@@ -1887,6 +1892,7 @@ def reap(db: DB):
     from . import alerting, listeners, protection
     listeners.tick(db, t)               # probes expire, statements follow module and grant changes, talkers age out
     protection.check_alerts(db, t)
+    sites.tick(db, t)                   # unrenewed transfer leases expire; a silent node holds its site (sites.py)
     releases.note_awaiting(db)          # releases waiting for the owner's signature (a key pinned, a node gone, ...)
     alerting.promote_pending(db, t)
 

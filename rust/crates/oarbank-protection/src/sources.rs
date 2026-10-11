@@ -100,6 +100,8 @@ pub trait OwnerSources: Send {
     fn attach(&mut self, _journal: Option<Arc<crate::journal::DecisionJournal>>) {}
     /// The agent's fast path for immediate phases (the event path, `events.rs`).
     fn set_fast_path(&mut self, _f: Arc<dyn crate::events::FastPath>) {}
+    /// The agent's listener for every phase change (`events.rs` PhaseListener).
+    fn set_phase_listener(&mut self, _l: Arc<dyn crate::events::PhaseListener>) {}
     /// The event path's measured latencies (source event to pause request), for telemetry.
     fn latency(&self) -> Option<Value> {
         None

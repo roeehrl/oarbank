@@ -45,6 +45,9 @@ Safety (must hold after every committed transaction):
       100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
       the source event)
   S26 at most one node runs a seat of a per-node workload identity at a time (workloads.py; TLA+ OarbankSeat)
+  S27 a site's live (unexpired, unrevoked) transfer leases never number more than its max_transfers, their rates never sum
+      past its uplink_mbps, and none is live while the site holds (a protected process there is in an uplink phase); a
+      grant also leaves room for revoked leases not yet given back
   S28 the GPU duty budget a node journals never exceeds the certified ceiling it journals with it, and every fleet unit
       (a job or a workload) the duty governor holds or stops for exceeding (or for not being able to check) its gpu_duty
       is paused (a workload: paused or held by its ladder) within the S18 window, or has ended (from the decision journal; docs/design/gpu-cotenancy.md, "The duty governor")
@@ -512,6 +515,26 @@ def s26_single_seat(db: DB):
     """S26: at most one node runs a seat of a per-node workload identity at a time (workloads.py)."""
     from .workloads import s26_single_seat as check
     return check(db)
+def s27_site_uplink_budget(db: DB):
+    """S27 (docs/design/sites.md): the live leases a site holds stay within its budget and none is live while it holds
+    (grants also count revoked leases not yet given back, so a lowered budget is reached within one renewal). Leases past their expiry are dead (the agent stopped by its
+    own clock before it) and do not count."""
+    from . import clock
+    t, out = clock.now(), []
+    for s in db.q("SELECT * FROM sites"):
+        # live leases: unexpired and unrevoked (a revoked one keeps its slot for new grants until given back, but a budget
+        # lowered under it revokes it, so it is no longer the site's to count here)
+        rows = db.q("SELECT mbps FROM uplink_leases WHERE site_id=? AND expires_at>=? AND revoked_at IS NULL", (s["site_id"], t))
+        if len(rows) > s["max_transfers"]:
+            out.append(f"S27 site {s['name']}: {len(rows)} live transfer leases, budget {s['max_transfers']}")
+        total = sum(r["mbps"] or 0 for r in rows)
+        if s["uplink_mbps"] and total > s["uplink_mbps"] + 1e-6:
+            out.append(f"S27 site {s['name']}: leases pace at {total:g} Mbit/s together, budget {s['uplink_mbps']:g}")
+        live = db.one("SELECT COUNT(*) n FROM uplink_leases WHERE site_id=? AND expires_at>=? AND revoked_at IS NULL",
+                      (s["site_id"], t))["n"]
+        if s["hold_on"] and live:
+            out.append(f"S27 site {s['name']}: {live} live transfer lease(s) while it holds ({s['hold_why']})")
+    return out
 
 
 SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_generation, s4_no_lost_job,
@@ -522,7 +545,7 @@ SAFETY = [s1_single_canonical, s2_done_has_canonical, s3_canonical_current_gener
           s18_rules_enforced, s20_units_stay_in_their_class, s21_unreplicated_never_compared,
           s22_bootstrap_results_are_pinned, s23_resume_from_own_checkpoint, s24_listeners_granted_and_assigned,
           s25_immediate_phases_pause_at_once, s26_single_seat,
-          s28_gpu_duty_within_ceiling_and_enforced]
+          s28_gpu_duty_within_ceiling_and_enforced, s27_site_uplink_budget]
 
 
 def check_all(db: DB) -> list[str]:

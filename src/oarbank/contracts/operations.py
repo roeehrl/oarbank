@@ -403,6 +403,37 @@ OPS: list[Operation] = [
               summary="Delete a node group with its values and secret values; its members fall back to the next layer down",
               tier="T2", preview=True, min_role="admin", category="remove", idempotency="natural", versioned=True,
               routes=OPR("groups.delete"), gui=CON("groups.delete"), cli=["oarbank groups delete <group>"]),
+    # sites: nodes that share one internet line, with an uplink budget and a site-wide hold (docs/design/sites.md, D55)
+    Operation(id="sites.create", area="nodes",
+              summary="Create a site (nodes that share one internet line) with its uplink budget; a node at another site "
+                      "moves; network-heavy work at the site pauses while a protected process there is in an uplink phase",
+              tier="T1", preview=True, min_role="admin", category="create", reverses="sites.delete", idempotency="natural",
+              versioned=True, routes=OPR("sites.create"), gui=CON("sites.create"),
+              cli=["oarbank sites create <name> [--node N ...] [--mbps M] [--transfers N] [--heavy-jobs N]",
+                   "oarbank sites accept <suggestion> [--name <name>]"]),
+    Operation(id="sites.update", area="nodes",
+              summary="Change a site's name, description or uplink budget (transfers at once, network-heavy jobs at once, "
+                      "the rate the fleet's transfers may use); every lease is renewed at the new terms",
+              tier="T1", preview=True, min_role="admin", category="modify", idempotency="declarative", versioned=True,
+              routes=OPR("sites.update"), gui=CON("sites.update"),
+              cli=["oarbank sites update <site> [--name N] [--mbps M] [--transfers N] [--heavy-jobs N]"]),
+    Operation(id="sites.assign", area="nodes",
+              summary="Put nodes at a site (a node at another site moves there); the preview names each move",
+              tier="T1", preview=True, min_role="admin", category="modify", reverses="sites.unassign", idempotency="declarative",
+              versioned=True, routes=OPR("sites.assign"), gui=CON("sites.assign"),
+              cli=["oarbank sites add <site> <node> [<node> ...]", "oarbank sites accept <suggestion> --site <site>"]),
+    Operation(id="sites.unassign", area="nodes",
+              summary="Take nodes out of their site: their transfers and network-heavy jobs no longer follow any site",
+              tier="T1", preview=True, min_role="admin", category="modify", reverses="sites.assign", idempotency="declarative",
+              versioned=True, routes=OPR("sites.unassign"), gui=CON("sites.unassign"),
+              cli=["oarbank sites remove <node> [<node> ...]"]),
+    Operation(id="sites.delete", area="nodes",
+              summary="Delete a site; its nodes are at no site (no hold, no budget) afterwards",
+              tier="T2", preview=True, min_role="admin", category="remove", idempotency="natural", versioned=True,
+              routes=OPR("sites.delete"), gui=CON("sites.delete"), cli=["oarbank sites delete <site>"]),
+    Operation(id="sites.dismiss", area="nodes", summary="Dismiss a site suggestion (it is not offered again)",
+              tier="T0", min_role="admin", category="modify", idempotency="natural",
+              routes=OPR("sites.dismiss"), gui=CON("sites.dismiss"), cli=["oarbank sites dismiss <suggestion>"]),
     Operation(id="nodes.label", area="nodes",
               summary="Add or remove a node's labels (or several nodes'): a label can move nodes into or out of groups",
               tier="T1", preview=True, min_role="operator", category="modify", idempotency="declarative", versioned=True,
@@ -533,6 +564,9 @@ AGENT_ROUTES = {
     ("POST", "/v1/agent/workloads/secrets"),
     ("POST", "/v1/attempts/{aid}/fail"), ("POST", "/v1/attempts/{aid}/log"), ("POST", "/v1/attempts/{aid}/checkpoint"),
     ("POST", "/v1/uploads/{digest}"), ("PATCH", "/v1/uploads/{digest}"),
+    # a node's transfer leases under its site's uplink budget, and what it observes of its network (docs/design/sites.md)
+    ("POST", "/v1/agent/uplink/lease"), ("POST", "/v1/agent/uplink/renew"), ("POST", "/v1/agent/uplink/release"),
+    ("POST", "/v1/agent/uplink/network"),
     # the coordinator-move channel between the old coordinator and its standby target (coordinator-move.md):
     # authenticated by the pairing code, then a move token plus the target's tailnet identity, or by a
     # signature from the paired coordinator's key; the operations that start and stop a move are audited

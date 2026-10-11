@@ -340,7 +340,9 @@ impl Agent {
 
     pub async fn connect(&mut self) -> Result<()> {
         self.prove_identity().await?;
-        self.api = Some(self.mtls()?);
+        let api = self.mtls()?;
+        crate::uplink::global().set_api(api.clone());                // transfer leases at the node's site
+        self.api = Some(api);
         Ok(())
     }
 
@@ -372,6 +374,10 @@ impl Agent {
                         p.ab_report()),
             None => (None, json!({}), json!([]), None, json!([])),
         };
+        let mut telemetry = telemetry;
+        if telemetry.is_object() {
+            telemetry["uplink"] = crate::uplink::global().report();  // its transfers, holds and leases (sites.md)
+        }
         let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
                               "ab_runs": ab_runs,
@@ -488,6 +494,7 @@ impl Agent {
         if let Some(p) = &self.prot {
             p.ack(d);
         }
+        crate::uplink::global().apply_directive(d);                  // the node's site and its hold (docs/design/sites.md)
         self.observe_moves(d);
         if let Err(e) = self.signing.observe_key(d["release_pubkey"].as_str()) {
             warn!(error = %e, "release key");
@@ -519,7 +526,7 @@ impl Agent {
         }
         if let (Some(api), Some(list)) = (self.api.clone(), d["prefetch"].as_array()) {
             let ready = staging::ready(&self.layout);
-            for did in list.iter().filter_map(Value::as_str).filter(|x| !ready.iter().any(|r| r == x)).take(4) {
+            for did in list.iter().filter_map(Value::as_str).filter(|x| !ready.iter().any(|r| r == x) && !staging::staging_now(x)).take(4) {
                 let (api, l, did) = (api.clone(), Layout::new(self.layout.home.clone()), did.to_string());
                 tokio::spawn(async move {
                     if let Err(e) = staging::stage(&api, &l, &did).await {
@@ -1087,7 +1094,13 @@ impl Agent {
         p.service_pools = pools;
         p.service_reserved_mem_gb = reserved;
         p.services = self.services.as_ref().map(|s| s.lock().unwrap().fleet_view()).unwrap_or_default();
+        // the site's hold pauses this node's network-heavy jobs (docs/design/sites.md)
+        let up = crate::uplink::global();
+        up.retain_heavy(&self.table.lock().unwrap().keys().copied().collect());
+        p.site_hold = up.jobs_held().map(|why| (why, up.heavy()));
         p.tick(&self.directives, &self.table, &self.facts);
+        up.set_local(p.uplink_phases(), p.last.as_ref().and_then(|r| r.constraint.staging_mbps),
+                     self.directives["limits"]["staging_mbps"].as_f64());
         // the services protection stops are held down until it lets them go (their users were released by the tick)
         let stops: std::collections::BTreeMap<String, String> = p.last.as_ref()
             .map(|r| r.service_stops.iter().map(|s| (s.key.clone(), s.reason.clone())).collect()).unwrap_or_default();
@@ -1218,6 +1231,9 @@ impl Agent {
                 caps: runner["capabilities"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
                 bandwidth: runner["bandwidth_class"].as_str().map(str::to_string), threads: None, gpu_duty: None,
                 needs, wake: Default::default(), stop_by: None });
+            if res["network"].as_str() == Some("heavy") {
+                crate::uplink::global().mark_heavy(aid);              // paused with its site (docs/design/sites.md)
+            }
             info!(attempt = aid, kind = g["kind"].as_str().unwrap_or(""), module = g["module"].as_str().unwrap_or(""), "granted");
             tokio::spawn(jobs::run(ctx.clone(), g.clone(), crate::clock::local_deadline(g, received)));
         }
@@ -1369,8 +1385,17 @@ impl Agent {
                     let until = std::time::Instant::now() + Duration::from_secs_f64(self.cfg.heartbeat_s);
                     while std::time::Instant::now() < until {
                         self.protect();
-                        // a stop request ends the wait at once
-                        if sleep_or_stop(&mut ticks, Duration::from_secs(2).min(until.saturating_duration_since(std::time::Instant::now()))).await {
+                        // an uplink phase changed here: report it now, so the rest of the site holds (docs/design/sites.md)
+                        if crate::uplink::global().take_report_now() {
+                            break;
+                        }
+                        // a stop request ends the wait at once, an uplink phase change too
+                        let d = Duration::from_secs(2).min(until.saturating_duration_since(std::time::Instant::now()));
+                        let woke = tokio::select! {
+                            s = sleep_or_stop(&mut ticks, d) => s,
+                            _ = crate::uplink::global().heartbeat_wake.notified() => false,
+                        };
+                        if woke {
                             break;
                         }
                     }

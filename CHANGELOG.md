@@ -18,6 +18,12 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   `gpu_jobs = always`.
 - **Module SDK:** `oarbank_sdk.duty` holds a runner's `gpu_duty`, the conformance kit's duty specs prove it, and
   `examples/llmserve` runs language-model batches on MLX or llama.cpp that hold their duty.
+- **Sites: nodes that share one internet line** (`oarbank sites`, the console's Sites page). While a protected process
+  at a site is in a phase its rule tags `uplink`, the agents' transfers (staging, uploads, checkpoints) and
+  network-heavy jobs and workloads (`resources.network = "heavy"`) pause on every node of the site within 5 s; outside
+  such phases a per-site budget limits transfers and network-heavy work at once. Sites are suggested from keyed
+  network fingerprints, never stored addresses. Explain names `SITE_UPLINK_BUSY` and `SITE_UPLINK_BUDGET`; invariant
+  S27 checks the leases. A node's `staging_mbps` cap is now enforced.
 
 ## 2.9.0 (unreleased)
 

@@ -47,6 +47,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `DISPUTE_PARTY` | This node is a party to the job's dispute; a third node must break the tie | P1 | – | – | `dispute_party` |
 | `DATASETS_NOT_REGISTERED` | Waiting for {missing} to be registered (a bootstrap job brings a module's pinned datasets) | P1 | – | – | – |
 | `DATASETS_NOT_STAGED` | The node has not staged {missing} yet | P1 | – | – | – |
+| `SITE_UPLINK_BUSY` | Network-heavy: site {site} holds such work while {why} | P1 | – | – | – |
+| `SITE_UPLINK_BUDGET` | Network-heavy: site {site} already runs {running} of its {max} network-heavy jobs | P1 | – | `sites.update` | – |
 
 ## node_admission
 
@@ -145,6 +147,10 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `GPU_DUTY_CLAMP` | GPU duty budget lowered to the certified ceiling {ceiling} | P1 | – | – | – |
 | `GPU_DUTY_EXCEEDED` | {unit} kept the GPU {measured} busy against a gpu_duty of {duty} for three samples: {action} (the third time within an hour stops it, and it gets no duty for an hour) | P3 | – | – | – |
 | `GPU_DUTY_UNVERIFIED` | The GPU time of {unit} cannot be read, so its gpu_duty cannot be checked: {action} | P4 | – | – | – |
+| `TRANSFER_PAUSED` | A {transfer} transfer paused: {why} | P1 | no / no | – | – |
+| `TRANSFER_RESUMED` | A {transfer} transfer resumed after {paused_s} s | P1 | – | – | – |
+| `SITE_PAUSE` | Network-heavy attempts paused: their site is in an uplink phase | P1 | no / no | – | – |
+| `SITE_RESUME` | Network-heavy attempts resumed: their site's uplink phase ended | P1 | no / no | – | – |
 
 ## workload
 
@@ -185,6 +191,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `OOM` | Killed for memory | P1 | no / yes | – | `oom` |
 | `SANDBOX_ESCAPE` | A process of the attempt ran outside the module sandbox; the attempt was killed | P1 | no / yes | – | `sandbox_escape` |
 | `PREEMPT_MEMORY` | Preempted by the memory guard | P1 | no / no | – | `preempt_memory` |
+| `PREEMPT_SITE` | Released: a network-heavy job that cannot pause, or paused too long, while its site was in an uplink phase; requeued | P1 | no / no | – | `preempt_site` |
 | `RELEASED_CAP_CPU` | Released: the CPU cap was lowered | P1 | no / no | – | `limit_cpu` |
 | `RELEASED_CAP_MEM` | Released: over its declared memory under a memory floor, or the memory cap was lowered | P1 | no / no | – | `limit_mem` |
 | `RELEASED_SCHEDULE` | Released: outside the owner's schedule | P1 | no / no | – | `limit_schedule` |

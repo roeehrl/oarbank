@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block title %}{{ name }} · Sites · Oarbank{% endblock %}
+{% block body %}
+<p class="small"><a href="/sites">← Sites</a></p>
+<div class="row"><h1>{{ name }}</h1>
+  {% if hold %}<span class="chip warn">paused</span>{% else %}<span class="chip ok">free</span>{% endif %}
+  <span class="chip">{{ members | length }} member{{ 's' if members | length != 1 }}</span>
+  <span class="sp"></span>{{ m.op_form("sites.delete", site_id, "Delete site…", cls="danger") }}</div>
+<p class="small{{ '' if hold else ' mut' }}" role="status">{% if hold %}<b>Network-heavy work at this site is paused</b> because {{ why }}{% if since %} (since {{ since | ago }}){% endif %}.
+  It resumes when the phase ends.{% else %}Free: {{ transfers }} of {{ max_transfers }} transfer{{ 's' if max_transfers != 1 }} and {{ heavy_jobs }} of {{ max_heavy_jobs }} network-heavy job{{ 's' if max_heavy_jobs != 1 }} running{% if mbps_in_use is not none %}, {{ mbps_in_use | num(0) }} of {{ uplink_mbps | num(0) }} Mbit/s leased{% endif %}.{% endif %}
+  {% if description %}<br>{{ description }}{% endif %}</p>
+
+<div class="grid">
+<section class="card" aria-labelledby="h-members">
+<h2 id="h-members">Members</h2>
+<table class="small"><tr><th scope="col">node</th><th scope="col">uplink phases</th><th scope="col">transfers</th><th class="actions" scope="col"><span class="sr-only">actions</span></th></tr>
+{% for x in member_rows %}<tr><td><a href="/nodes/{{ x.node_id }}"><b>{{ x.hostname }}</b></a>{% if not x.online %} <span class="chip warn">not reporting</span>{% endif %}</td>
+  <td>{% for p in x.phases %}<span class="chip{{ ' warn' if p.on or p.readable == false }}">{{ p.key }}: {{ 'on' if p.on else ('unreadable' if p.readable == false else 'off') }}</span> {% else %}<span class="mut">none</span>{% endfor %}</td>
+  <td>{% if x.uplink %}{% set u = x.uplink %}{{ (u.active or []) | length }} active{% if u.held %} · <b>held</b>: {{ u.held }}{% endif %}{% for t in u.active or [] %}<br><span class="mut">{{ t.kind }} {{ t.dir }} {{ ((t.done or 0) / 1048576) | num(0) }} MB{% if t.paused %} · paused{% endif %}</span>{% endfor %}{% else %}<span class="mut">not reported (update its agent)</span>{% endif %}</td>
+  <td class="actions">{{ m.op_form("sites.unassign", x.node_id, "Remove", params={"nodes": [x.node_id]}, return_to="/sites/" ~ site_id) }}</td></tr>
+{% else %}<tr><td colspan="4" class="mut">No members yet.</td></tr>{% endfor %}</table>
+{% if others %}{% call m.op_form("sites.assign", site_id, "Add…", return_to="/sites/" ~ site_id) %}<label class="small">nodes <select name="pl.nodes" multiple size="{{ [others | length, 5] | min }}">{% for n in others %}<option value="{{ n.node_id }}">{{ n.hostname }}</option>{% endfor %}</select></label>{% endcall %}{% endif %}
+</section>
+
+<section class="card" aria-labelledby="h-budget">
+<h2 id="h-budget">Uplink budget</h2>
+<p class="small mut">Each transfer gets a lease: at most {{ max_transfers }} at once{% if lease_mbps %}, each paced at {{ lease_mbps | num(1) }} Mbit/s{% endif %}.
+At most {{ max_heavy_jobs }} network-heavy job{{ 's' if max_heavy_jobs != 1 }} run at once.
+{% for d, h in hint | dictsort %}{% if loop.first %}Large transfers here reached {% endif %}{{ h.mbps | num(0) }} Mbit/s {{ d }} ({{ h.n }} measured){% if not loop.last %}, {% else %}: a ceiling to start from (they may have gone to the coordinator on the LAN).{% endif %}{% endfor %}</p>
+{% call m.op_form("sites.update", site_id, "Save budget…", inline=False, return_to="/sites/" ~ site_id) %}
+<div class="form-grid small">
+<label>transfers at once <input name="p.max_transfers" type="number" min="1" max="32" value="{{ max_transfers }}"></label>
+<label>network-heavy jobs at once <input name="p.max_heavy_jobs" type="number" min="0" max="32" value="{{ max_heavy_jobs }}"></label>
+<label>fleet rate, Mbit/s <input name="p.uplink_mbps" type="number" min="0" step="any" value="{{ uplink_mbps if uplink_mbps else '' }}" placeholder="no limit"></label>
+<label>name <input name="p.name" value="{{ name }}" pattern="[a-z0-9][a-z0-9._-]{0,62}"></label>
+</div>
+{% endcall %}
+</section>
+</div>
+
+<section class="card wide" aria-labelledby="h-leases">
+<h2 id="h-leases">Transfers now</h2>
+<table class="small"><tr><th scope="col">node</th><th scope="col">kind</th><th scope="col">direction</th><th scope="col">size</th><th scope="col">pace</th><th scope="col">for</th></tr>
+{% for l in leases %}<tr><td>{{ l.node }}</td><td>{{ l.kind }}</td><td>{{ l.dir }}</td><td>{{ ((l.bytes or 0) / 1048576) | num(0) }} MB</td><td>{{ (l.mbps | num(1)) ~ ' Mbit/s' if l.mbps else 'unpaced' }}{% if l.revoked %} · <span class="mut">revoked, until given back</span>{% endif %}</td><td>{{ l.age_s | secs }}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">No leased transfer now.</td></tr>{% endfor %}</table>
+<h3 class="small">Recent transfers</h3>
+<table class="small"><tr><th scope="col">when</th><th scope="col">node</th><th scope="col">kind</th><th scope="col">direction</th><th scope="col">size</th><th scope="col">rate</th></tr>
+{% for t in recent_transfers %}<tr><td>{{ t.at | ago }}</td><td>{{ t.hostname or t.node_id }}</td><td>{{ t.kind }}</td><td>{{ t.dir }}</td><td>{{ (t.bytes / 1048576) | num(0) }} MB in {{ t.seconds | secs }}</td><td>{{ t.mbps | num(1) }} Mbit/s{% if not t.solo %} <span class="mut">(shared)</span>{% endif %}{% if t.paced %} <span class="mut">(paced)</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">None yet.</td></tr>{% endfor %}</table>
+<h3 class="small">Holds</h3>
+<ul class="small">{% for e in events %}<li>{{ e.ts | ago }}: {{ e.kind | replace('_', ' ') }} · {{ e.reason }}</li>{% else %}<li class="mut">None yet.</li>{% endfor %}</ul>
+</section>
+{% endblock %}

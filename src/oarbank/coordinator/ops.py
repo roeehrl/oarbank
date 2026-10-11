@@ -2489,3 +2489,4 @@ _register_catalogue()
 
 
 from . import workloads_ops as _workloads_ops  # noqa: E402,F401  (registers the workloads.* handlers)
+from . import sites_ops  # noqa: E402,F401  (the site operations register their handlers: docs/design/sites.md)

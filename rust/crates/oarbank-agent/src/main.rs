@@ -57,6 +57,7 @@ mod tls;
 mod tools;
 mod tuf;
 mod workloads;
+mod uplink;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod wslc;
 

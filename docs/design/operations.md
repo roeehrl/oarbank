@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-105 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+111 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -31,6 +31,12 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `nodes.retire` — Retire a node and revoke its client certificate | T3 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.retire)<br>`POST /do/{op}` (op=nodes.retire) | – |
 | `nodes.set_mode` — Set a node's own protection mode (fleet_first | moderate | strict_yield; a lock above refuses it) | T1 | prompted | – | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.set_mode)<br>`POST /do/{op}` (op=nodes.set_mode) | oarbank node mode <nid> <mode> |
 | `nodes.confirm_identity` — Confirm that a node pinned this coordinator's identity key (compare the fingerprints once) | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=nodes.confirm_identity)<br>`POST /do/{op}` (op=nodes.confirm_identity) | oarbank node confirm-identity <node> |
+| `sites.create` — Create a site (nodes that share one internet line) with its uplink budget; a node at another site moves; network-heavy work at the site pauses while a protected process there is in an uplink phase | T1 | prompted | yes | admin | natural · versioned | sites.delete | `POST /api/v1/ops/{op}` (op=sites.create)<br>`POST /do/{op}` (op=sites.create) | oarbank sites create <name> [--node N ...] [--mbps M] [--transfers N] [--heavy-jobs N]<br>oarbank sites accept <suggestion> [--name <name>] |
+| `sites.update` — Change a site's name, description or uplink budget (transfers at once, network-heavy jobs at once, the rate the fleet's transfers may use); every lease is renewed at the new terms | T1 | prompted | yes | admin | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=sites.update)<br>`POST /do/{op}` (op=sites.update) | oarbank sites update <site> [--name N] [--mbps M] [--transfers N] [--heavy-jobs N] |
+| `sites.assign` — Put nodes at a site (a node at another site moves there); the preview names each move | T1 | prompted | yes | admin | declarative · versioned | sites.unassign | `POST /api/v1/ops/{op}` (op=sites.assign)<br>`POST /do/{op}` (op=sites.assign) | oarbank sites add <site> <node> [<node> ...]<br>oarbank sites accept <suggestion> --site <site> |
+| `sites.unassign` — Take nodes out of their site: their transfers and network-heavy jobs no longer follow any site | T1 | prompted | yes | admin | declarative · versioned | sites.assign | `POST /api/v1/ops/{op}` (op=sites.unassign)<br>`POST /do/{op}` (op=sites.unassign) | oarbank sites remove <node> [<node> ...] |
+| `sites.delete` — Delete a site; its nodes are at no site (no hold, no budget) afterwards | T2 | required | yes | admin | natural · versioned | – | `POST /api/v1/ops/{op}` (op=sites.delete)<br>`POST /do/{op}` (op=sites.delete) | oarbank sites delete <site> |
+| `sites.dismiss` — Dismiss a site suggestion (it is not offered again) | T0 | optional | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=sites.dismiss)<br>`POST /do/{op}` (op=sites.dismiss) | oarbank sites dismiss <suggestion> |
 | `nodes.label` — Add or remove a node's labels (or several nodes'): a label can move nodes into or out of groups | T1 | prompted | yes | operator | declarative · versioned | – | `POST /api/v1/ops/{op}` (op=nodes.label)<br>`POST /do/{op}` (op=nodes.label) | oarbank node label <node> <labels> [--remove] |
 | `tools.detect` — Ask a node's agent to detect its host tools again (Re-detect) | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=tools.detect)<br>`POST /do/{op}` (op=tools.detect) | oarbank tools detect <node> |
 | `nodes.sign_statement` — Attach the owner's signature to a node's statement: its folders, added tool paths and listeners (signing mode) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=nodes.sign_statement)<br>`POST /do/{op}` (op=nodes.sign_statement) | oarbank node sign <node> |
@@ -193,6 +199,10 @@ Machine-to-machine, authenticated by the node's client certificate and fenced by
 - `POST /v1/agent/enroll`
 - `POST /v1/agent/heartbeat`
 - `POST /v1/agent/hello`
+- `POST /v1/agent/uplink/lease`
+- `POST /v1/agent/uplink/network`
+- `POST /v1/agent/uplink/release`
+- `POST /v1/agent/uplink/renew`
 - `POST /v1/agent/workloads/secrets`
 - `POST /v1/attempts/{aid}/checkpoint`
 - `POST /v1/attempts/{aid}/complete`

@@ -100,6 +100,8 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         # host tools: what the node found, and each enabled module's resolution per tool request (tools.py)
         "tools": tools.node_view(r, n),
         "sandbox": enforcement(facts, sorted(mods), manifest_for),
+        # the site it shares an internet line with, its state, and the agent's transfers (docs/design/sites.md)
+        "site": _site(r, n, now),
         # why it has the slots and memory it has, citing the settings it rests on with their source (nodepolicy.py)
         "why": nodepolicy.why(jl(n["capacity_json"], {}), jl(n["telemetry_json"], {}), facts, policy, n.get("os"),
                               n["node_id"], sources),
@@ -113,6 +115,15 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
 def _listeners(r, n: dict, now: float) -> dict:
     from . import listeners
     return listeners.node_doc(r, n, now=now)
+
+
+def _site(r, n: dict, now: float) -> dict | None:
+    from . import sites
+    s = sites.node_site(r, n["node_id"], now)
+    up = (jl(n["telemetry_json"], {}) or {}).get("uplink")
+    if s is not None or isinstance(up, dict):
+        return {**(s or {"name": None, "hold": False, "state": "at no site"}), "uplink": up if isinstance(up, dict) else None}
+    return None
 
 
 def job(r, jid: int) -> dict | None:

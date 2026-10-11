@@ -326,7 +326,8 @@ REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#nod
                 "workloads.unassign": ("/modules/{module}/workloads", "/modules"),
                 "workloads.restart": ("/modules/{module}/workloads", "/modules"),
                 "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
-                "protection.ab.abort": ("/protection/ab/{run_id}", "/")}
+                "protection.ab.abort": ("/protection/ab/{run_id}", "/"),
+                "sites.update": ("/sites", "/sites")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 
@@ -589,6 +590,29 @@ def groups_page(r) -> dict:
     d["owner"] = [g for g in d["groups"] if not g["builtin"]]
     d["builtin"] = [g for g in d["groups"] if g["builtin"]]
     d["all_labels"] = sorted({x for labs in d["labels"].values() for x in labs["all"]})
+    return d
+
+
+def sites_page(r) -> dict:
+    """Sites (docs/design/sites.md): every site with its members, budget and state in words, the suggestions from what
+    nodes observe of their network, the nodes at no site (the new-site form's choices)."""
+    from ..coordinator import sites
+    d = sites.listing(r)
+    d["nodes"] = r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+    return d
+
+
+def site_page(r, ref: str) -> dict | None:
+    """One site: its members with their uplink phases and the agent's transfers, its budget, the leases in force,
+    recent transfers (the measured-capacity hint rests on them) and its holds."""
+    from ..coordinator import sites
+    try:
+        d = sites.detail(r, ref)
+    except sites.SiteError:
+        return None
+    here = {x["node_id"] for x in d["member_rows"]}
+    d["others"] = [n for n in r.q("SELECT node_id, hostname FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+                   if n["node_id"] not in here]
     return d
 
 
