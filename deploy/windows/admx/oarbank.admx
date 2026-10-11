@@ -165,6 +165,28 @@
         <decimal value="0" />
       </disabledValue>
     </policy>
+    <policy name="workloads" class="Machine" displayName="$(string.workloads)" explainText="$(string.workloads_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="workloads">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+    <policy name="delegated_processes" class="Machine" displayName="$(string.delegated_processes)" explainText="$(string.delegated_processes_Help)"
+            key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings" valueName="delegated_processes">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_9" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
     <policy name="max_slots" class="Machine" displayName="$(string.max_slots)" explainText="$(string.max_slots_Help)"
             presentation="$(presentation.max_slots)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
       <parentCategory ref="NodeSettings" />

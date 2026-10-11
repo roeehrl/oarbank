@@ -427,7 +427,7 @@ def test_the_admx_values_are_the_ones_the_agent_reads():
     managed = {m["key"]: m for m in (re.search(r'key: "(?P<key>\w+)".*kind: Kind::(?P<kind>\w+).*min: (?P<min>None|Some\([\d.]+\))'
                                                r'.*choices: &\[(?P<choices>[^\]]*)\]', line).groupdict()
                                      for line in table.splitlines() if "managed: true" in line)}
-    assert len(managed) == 17
+    assert len(managed) == 19
     settings = {p.get("name"): p for p in every if p.get("key") == SETTINGS_KEY}
     assert set(settings) == set(managed)
     _, strings, _ = _strings()

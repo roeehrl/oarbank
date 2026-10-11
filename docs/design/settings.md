@@ -350,7 +350,7 @@ machine" layer, in the safe direction only.
   `/etc/oarbank/policy.json`), keyed by the settings' raw keys ([install.md](../install.md), "MDM").
 - **Which keys.** The registry's `managed` keys: `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` (higher is
   stricter), `mem_in_use_bound`, `screen_sharing_present`, `hard_limits` (on is stricter), `user_present_slots`,
-  `max_slots`, `run_on_battery` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
+  `max_slots`, `run_on_battery`, `workloads` and `delegated_processes` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
   `staging_mbps`: lower) and `enforce` (hard is stricter). Anything else (`job_mem_gb`, a schedule, protection) is
   refused and reported: protection already has its own tighten-only local file.
 - **Enforcement.** The agent applies each managed value only where it is stricter than what the coordinator sends (and
