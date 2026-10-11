@@ -172,6 +172,33 @@ def test_a_module_asking_for_an_unknown_tool_id_needs_a_new_version(db, tmp_path
     assert "a new version (unknown tool java17)" in rd["summary"]
 
 
+def test_the_fixed_version_installed_beside_it_is_the_next_step_with_its_own_checklist(db, tmp_path):
+    """An upgraded fleet: the version in use asks for an unknown tool id, the fix (asking for jdk) is installed but not
+    approved or enabled, and the nodes still run an agent that predates host tools."""
+    r = installed(db, javatoy(tmp_path, '{ id = "java17", trust = "code-exec" }'))
+    name = r["name"]
+    fix = modstore.install(db, bundle(javatoy(tmp_path, version="0.3.1")), actor="test", self_test=False)
+    _, mac = enrolled_node(db, "mac")
+    db.x("UPDATE nodes SET agent_version='2.8.0' WHERE node_id=?", (mac["node_id"],))
+    rd = readiness.module(db, name)
+    assert rd["version"] == "0.3.0" and "0.3.1 (installed), which replaces this version" in rd["summary"]
+    [newer] = [s for s in rd["steps"] if s["id"] == "newer"]
+    assert newer["status"] == "next" and newer["actions"][0]["command"] == f"oarbank module ready {name}@0.3.1"
+    nx = readiness.module(db, name, version="0.3.1")
+    assert nx["version"] == "0.3.1" and not any(s["id"] == "newer" for s in nx["steps"])
+    steps = {s["id"]: s for s in nx["steps"]}
+    assert steps["grants"]["status"] == "blocked" and "approve its grants" in nx["needs"]
+    assert steps["enabled"]["status"] == "waiting" and "not in use (current: 0.3.0)" in steps["enabled"]["reason"]
+    assert "enable 0.3.1" in nx["needs"]
+    assert steps["built"]["status"] == "waiting" and steps["signed"]["status"] == "waiting"
+    why = steps["tools"]["items"][0]["groups"][0]["reasons"][0]
+    assert "agent 2.8.0 is older than 2.9.0 and does not report host tools" in why
+    modsandbox.approve(db, name, fix["version"], "test", None)
+    nx = readiness.module(db, name, version="0.3.1")
+    assert next(s for s in nx["steps"] if s["id"] == "enabled")["status"] == "blocked"
+    assert readiness.module(db, name, version="9.9.9") is None
+
+
 # ------------------------------------------------------------------------------------------------ overrides
 
 def test_choosing_among_what_was_found_is_a_pin_and_adding_a_path_goes_into_the_signed_statement(db, tmp_path):

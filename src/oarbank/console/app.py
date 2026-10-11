@@ -912,7 +912,9 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         over = next((d for d in man.ui.pages if d.slot == "module.overview"), None)
         body = await render_module(name, over, request, actor, ctx_for(request)) if over else \
             '<p class="mut">This module declares no overview page.</p>'
-        rd = await coordinator_json("GET", f"/api/v1/modules/{name}/readiness", actor)
+        version = request.query_params.get("version")
+        rd = await coordinator_json("GET", f"/api/v1/modules/{name}/readiness"
+                                    + (f"?version={quote(version)}" if version else ""), actor)
         return render(request, "module_page.html", {"name": name, "man": man, "body": body, "tab": "overview", "actor": actor,
                                                     "readiness": rd.json() if rd.status_code == 200 else None})
 
