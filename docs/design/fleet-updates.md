@@ -381,7 +381,7 @@ that stop.
 |---|---|---|---|---|
 | `update_auto` | `off` \| `notify` \| `on` | fleet, group, node | `notify` | towards `off`; managed |
 | `update_ring` | `canary` \| `early` \| `broad` | group, node | `broad` | — |
-| `update_window` | schedule | fleet, group, node | none (any time) | — |
+| `update_window` | schedule, in the node's local time (its facts' `utc_offset_s`) | fleet, group, node | none (any time) | — |
 | `update_hold` | `{reason, until}` \| null | group, node | null | managed (a machine may hold itself) |
 | `update_pin` | `{version, reason, until}` \| null | node | null | — |
 | `update_source` | URL | fleet | the project's releases | — |
