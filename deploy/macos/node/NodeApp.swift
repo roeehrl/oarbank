@@ -37,6 +37,7 @@ final class NodeDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWin
     // focus, when there is no status item)
     private var stateItems: [NSMenuItem] = []
     private var detailItems: [NSMenuItem] = []
+    private var updateItems: [NSMenuItem] = []
     private var managedItems: [NSMenuItem] = []
     private var switchedOffItems: [NSMenuItem] = []
     private var joinItems: [NSMenuItem] = []
@@ -111,7 +112,7 @@ final class NodeDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWin
         let menu = NSMenu(); menu.autoenablesItems = false
         let title = NSMenuItem(title: "Oarbank Node", action: nil, keyEquivalent: ""); title.isEnabled = false
         menu.addItem(title)
-        for list in [\NodeDelegate.stateItems, \NodeDelegate.detailItems, \NodeDelegate.managedItems] {
+        for list in [\NodeDelegate.stateItems, \NodeDelegate.detailItems, \NodeDelegate.updateItems, \NodeDelegate.managedItems] {
             let item = NSMenuItem(title: "", action: nil, keyEquivalent: ""); item.isEnabled = false; item.isHidden = true
             self[keyPath: list].append(item); menu.addItem(item)
         }
@@ -161,6 +162,7 @@ final class NodeDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWin
         let switchedOff = switchedOffInLoginItems(nodeJobPlists)
         for item in stateItems { item.title = status.summary }
         for item in detailItems { item.title = status.detail ?? ""; item.isHidden = status.detail == nil }
+        for item in updateItems { item.title = status.updateLine ?? ""; item.isHidden = status.updateLine == nil }
         for item in managedItems { item.title = "Managed by \(organization ?? "")"; item.isHidden = organization == nil }
         for item in switchedOffItems { item.isHidden = !switchedOff }
         for item in joinItems { item.isHidden = status.hasJoinedOrIsJoining || !joinAllowed }
@@ -181,7 +183,8 @@ final class NodeDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWin
         serviceLabel.isHidden = switchedOff
         switchedOffLabel.isHidden = !switchedOff; switchedOffButton.isHidden = !switchedOff
         stateLabel.stringValue = status.summary
-        detailLabel.stringValue = status.detail ?? ""; detailLabel.isHidden = status.detail == nil
+        let details = [status.detail, status.updateLine].compactMap { $0 }
+        detailLabel.stringValue = details.joined(separator: " · "); detailLabel.isHidden = details.isEmpty
         nodeManagedLabel.stringValue = "Managed by \(organization ?? "")"; nodeManagedLabel.isHidden = organization == nil
         joinButton.isHidden = status.hasJoinedOrIsJoining || !joinAllowed
         statusButton.isHidden = !status.hasJoinedOrIsJoining
