@@ -8,10 +8,42 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 Module SDK: **oarbank-sdk 1.7.0**. This release lets fleet work earn beside the people who use the machines: modules
 can accept connections from the internet, run long-lived daemons that are the work itself, and share a GPU with a
-protected program at a measured, certified level. 2.9.0 was not published on its own, so if you run 2.8, read the
-[2.9.0 section](#290-unreleased) as well: its upgrade steps apply.
+protected program at a measured, certified level. It also updates the whole fleet from the coordinator, with one click:
+every node's full package and the coordinator itself, ring by ring, with automatic rollback. 2.9.0 was not published on
+its own, so if you run 2.8, read the [2.9.0 section](#290-unreleased) as well: its upgrade steps apply.
 
 ### What's new
+
+**Fleet updates: every node's whole package, and the coordinator, from one place.** Before 2.10 the coordinator could
+replace only the agent binary on a node; the launcher, helpers, node app, service definitions and Python runtime
+changed only when someone installed the node package on each machine, and the coordinator could not update itself
+([docs/design/fleet-updates.md](docs/design/fleet-updates.md), D56–D62).
+
+- **One signed fleet release per version.** `oarbank-fleet-<version>.json` (written by CI beside the release assets)
+  lists every package, agent binary and coordinator build with its sha256. Import it with its assets (`oarbank update
+  import <dir>`, `oarbank update fetch <version>`, or the console's Updates page), and in signing mode sign it once
+  (`oarbank update sign <version>`).
+- **Full node package updates on macOS, Linux and Windows.** The agent downloads and verifies the package, lets running
+  jobs finish, and hands it to a root update runner that runs outside the agent's service (`oarbank-launcher
+  update-run`, started by a launchd job, a systemd path unit, or the Windows helper as a detached copy). The runner
+  verifies its own copy against owner keys pinned by root, installs it with the OS's tool (`installer`, `msiexec`,
+  `dpkg`, `rpm`, or a tarball), and keeps the new version only once its agent has confirmed itself; otherwise it
+  reinstalls the previous package.
+- **The coordinator updates itself, with a safety net.** It snapshots its database and runs the new build's
+  migrations on a copy first; a root runner then stops the services, keeps its own copy of the database, installs the
+  new build beside the old one and starts it on probation (`GET /v1/health`). If it is not healthy within five minutes
+  the old version and the database copy come back by themselves.
+- **Rollouts in rings.** `oarbank update start <version>` (or **Update fleet** on the Updates page, with a preview of
+  every ring) updates the coordinator first, then the `canary`, `early` and `broad` rings (`update_ring`), a node or
+  two at a time (`max_unavailable`), each ring baked before the next. A failure halts the rollout and rolls back the
+  nodes it moved; `pause`, `resume`, `halt`, `rollback` and `skip` are one click or command away. A node updates only
+  while it is online, inside its `update_window`, not held or pinned elsewhere, with no protected phase on, and never
+  ahead of the coordinator.
+- **Policy.** `update_auto` (`notify` by default; `on` starts a rollout when a signed release is ready), holds and
+  pins with a reason and an expiry (`oarbank update hold|pin`), and managed policy that may hold a machine or turn
+  automatic updates off for it. The menu bar and tray say "Updating to …" and "Update failed: back on …".
+- Invariants S29–S31 (`oarbank verify`) and the TLA+ model `specs/OarbankRollout.tla` check the slot rule, the ring
+  order, the coordinator-first rule and the eligibility of every update.
 
 **Inbound listeners and port mapping.** A module can accept TCP connections from the internet without ever holding a
 socket: the node's agent owns the listener and relays each connection to the module's endpoint service or workload.
@@ -116,6 +148,12 @@ need `requires.core >= 2.10`.
 
 ### What changes when you upgrade
 
+- **A node package install now makes the package's agent current**, on macOS and Linux as on Windows: the package is
+  the unit an update moves, so a manual install and a fleet update can no longer disagree about the agent's version.
+- **Installing 2.10 pins update trust on each machine** (`oarbank-launcher update-trust --from-agent` in the node
+  package, `python -m oarbank.coordupdate trust --from-home` in the coordinator's): the owner keys the node or the
+  coordinator already trusts become root's trust for later updates. A node that joins after its package was installed
+  needs `sudo oarbank-launcher update-trust --from-agent` once.
 - **The coordinator's database gains its new tables by itself** on the first start of 2.10 (from a 2.8 or 2.9 home);
   nothing is converted or removed.
 - **Nodes need the 2.10 agent** for listeners, workloads, delegated processes, event-driven sources, harness runs,
@@ -137,7 +175,9 @@ need `requires.core >= 2.10`.
 
 ### Upgrade steps
 
-Upgrade the coordinator first, then the nodes. Running jobs continue; nodes reconnect by themselves.
+Upgrade the coordinator first, then the nodes. Running jobs continue; nodes reconnect by themselves. This is the last
+release you install machine by machine: from 2.10 on, import the next release and start a rollout from the Updates
+page (or `oarbank update start <version>`).
 
 - **Coordinator:** install `oarbank-coordinator-2.10.0-<os>-<arch>` (macOS pkg, deb or rpm, Windows MSI) over the old
   one. From 2.8, the 2.9.0 steps above apply (the macOS and Linux coordinator moves to a system service once).
@@ -151,6 +191,12 @@ Upgrade the coordinator first, then the nodes. Running jobs continue; nodes reco
 ### Known limitations
 
 Built and tested against simulations and fakes; the owner verifies these on real systems before relying on them:
+
+- **Fleet updates on real machines.** The update runner, the rollout and the rollback run end to end in CI with a
+  tarball install on Linux, and the deb and rpm, MSI and pkg updates have CI jobs on GitHub's runners. Still to see on
+  the owner's machines: a signed and notarized pkg through the runner with the team pin, a coordinator self-update on a
+  copy of the live coordinator including a forced probation failure, and a Windows node's MSI update through the
+  helper. After a coordinator self-update on Windows, a later manual MSI install does not move the `current` junction.
 
 - **Port mapping on real routers.** Every test talks to fake PCP, NAT-PMP and UPnP gateways on loopback. Still to see
   on real networks: a single NAT with UPnP (map, renew, router reboot, network change, sleep, uninstall leaving nothing
