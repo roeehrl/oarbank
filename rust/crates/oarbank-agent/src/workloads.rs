@@ -579,6 +579,8 @@ impl WorkloadManager {
             w.want = Want { running: true, seat, fence, deadline, ..Default::default() };
             w.started_at = run.started_wall;
             w.events.offset = std::fs::metadata(run.run_dir.join("events.ndjson")).map(|m| m.len()).unwrap_or(0);
+            let mut run = run;
+            write_record(&self.layout, &key, &mut run);           // now this agent's (an earlier watchdog lets it be)
             w.run = Some(run);
             lock(&self.shared).w.insert(key, w);
         }
@@ -722,9 +724,9 @@ impl WorkloadManager {
                 (d, _) => d,
             };
             w.want = Want { running, seat, fence, deadline, restart_seq, reason: it["reason"].as_str().map(str::to_string) };
-            if running {
-                w.release = false;
-            }
+            // told to stop, this node gives the seat up once nothing of it runs (the coordinator frees a seat only on such a
+            // release with the current fence: specs/OarbankSeat.tla, finding F1)
+            w.release = !running;
         }
         for (k, w) in sh.w.iter_mut().filter(|(k, _)| !seen.contains(*k)) {
             if w.want.running {
@@ -732,6 +734,7 @@ impl WorkloadManager {
             }
             w.want.running = false;
             w.want.reason = Some("WORKLOAD_UNASSIGNED".into());
+            w.release = true;
         }
     }
 
@@ -1840,7 +1843,41 @@ fn member_usage(pid: i32) -> procs::Usage {
     u
 }
 
-/// `oarbank-agent workloads stop-all`: end every workload this home's records name (an uninstall, a node that leaves
+/// The watchdog of an agent that has ended (runners.rs) keeps the seat leases of the workloads it left: each one still
+/// named by that agent's record when its lease runs out on the boot clock is ended, unless a newer agent adopted it
+/// meanwhile (its record names that agent then). Returns when no record of that agent with a lease is left.
+/// (specs/OarbankSeat.tla: without it an agent that stays down past a lease would leave its workload running after the
+/// seat moved.)
+#[cfg(unix)]
+pub fn guard_leases(layout: &Layout, agent_pid: u32) {
+    loop {
+        let mut next: Option<f64> = None;
+        let now = boot::now_s();
+        let this_boot = boot::id();
+        for e in std::fs::read_dir(layout.state().join("workloads")).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let Some(rec) = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+            if rec["agent_pid"].as_u64() != Some(agent_pid as u64) || rec["boot"].as_str() != Some(this_boot.as_str()) {
+                continue;
+            }
+            let Some(d) = rec["deadline"].as_f64() else { continue };
+            if d <= now {
+                info!(workload = rec["key"].as_str().unwrap_or("?"), "its agent is gone and its seat lease ran out: ended");
+                end_recorded(layout, &rec);
+                let _ = std::fs::remove_file(&p);
+            } else {
+                next = Some(next.map_or(d, |n: f64| n.min(d)));
+            }
+        }
+        let Some(n) = next else { return };
+        std::thread::sleep(Duration::from_secs_f64((n - now).clamp(0.5, 30.0)));
+    }
+}
+
+/// `oarbank-agent stop-workloads`: end every workload this home's records name (an uninstall, a node that leaves
 /// its fleet). Only processes that still have their recorded start times are signalled.
 pub fn stop_all_recorded(layout: &Layout) -> Vec<String> {
     let mut out = vec![];
@@ -2130,5 +2167,34 @@ mod tests {
         m.set_wanted(&json!([{"key": "mod/w", "desired": "running", "restart_seq": 1}]), boot::now_s());
         let r = m.report();
         assert_eq!((r[0]["withdrawn"].as_bool(), r[0]["failures"].as_u64()), (Some(false), Some(0)));
+    }
+
+    /// The watchdog of an agent that died ends the workloads its records name when their leases run out, but not one a
+    /// newer agent adopted (its record names that agent).
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_agents_watchdog_ends_its_workloads_at_their_lease_end() {
+        let tmp = crate::scratch("wl-guard");
+        let layout = Layout::new(tmp.path().to_path_buf());
+        layout.ensure().unwrap();
+        std::fs::create_dir_all(layout.state().join("workloads")).unwrap();
+        let spawn = || {
+            let mut c = std::process::Command::new("/bin/sleep");
+            c.arg("300");
+            crate::sys::spawn_contained(&mut c, true).unwrap()
+        };
+        let (mut a, mut b) = (spawn(), spawn());
+        let rec = |child: &std::process::Child, key: &str, agent: u32| {
+            let pid = child.id() as i32;
+            json!({"key": key, "leader": pid, "start_us": procs::start_time_us(pid).unwrap().to_string(), "members": [],
+                   "deadline": boot::now_s() + 1.0, "boot": boot::id(), "agent_pid": agent, "job": ""})
+        };
+        std::fs::write(record_path(&layout, "m/a"), rec(&a, "m/a", 4_000_000).to_string()).unwrap();
+        std::fs::write(record_path(&layout, "m/b"), rec(&b, "m/b", 4_000_001).to_string()).unwrap();
+        guard_leases(&layout, 4_000_000);
+        assert!(a.wait().is_ok() && !record_path(&layout, "m/a").exists(), "ended at its lease's end");
+        assert!(b.try_wait().unwrap().is_none(), "another agent's workload is left alone");
+        let _ = b.kill();
+        let _ = b.wait();
     }
 }

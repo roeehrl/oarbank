@@ -247,6 +247,8 @@ pub fn watchdog_main(layout: &Layout, agent: (u32, u64)) {
     for line in reap(layout, Whose::Agent(agent.0, agent.1)) {
         info!("{line}");
     }
+    // the workloads that agent left keep running for the next one, but never past their seat leases
+    crate::workloads::guard_leases(layout, agent.0);
 }
 
 #[cfg(test)]
