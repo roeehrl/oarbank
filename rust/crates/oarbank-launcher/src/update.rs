@@ -523,14 +523,16 @@ mod tests {
             h.set_size(agent.len() as u64);
             h.set_mode(0o755);
             h.set_cksum();
-            b.append_data(&mut h, "oarbank-agent-2.10.0-linux-amd64/oarbank-agent", &agent[..]).unwrap();
+            // the agent's name on this OS (`oarbank-agent.exe` on Windows), as a release's tarball for it would hold
+            let name = format!("oarbank-agent-2.10.0/oarbank-agent{}", std::env::consts::EXE_SUFFIX);
+            b.append_data(&mut h, &name, &agent[..]).unwrap();
             b.into_inner().unwrap().finish().unwrap();
         }
         let mut i = OsInstaller { home: Home(home.clone()), prefix: prefix.clone(), logs: tmp.path().join("logs"), format: "tar".into() };
         for _ in 0..2 {
             assert_eq!(i.install("tar", &tgz, "2.10.0", false), InstallOutcome::Installed { reboot_pending: false });
         }
-        assert!(prefix.join("versions/2.10.0/oarbank-agent-2.10.0-linux-amd64/oarbank-agent").is_file());
+        assert!(prefix.join(format!("versions/2.10.0/oarbank-agent-2.10.0/oarbank-agent{}", std::env::consts::EXE_SUFFIX)).is_file());
         assert!(i.point_agent("tar", "2.9.0").unwrap_err().contains("no oarbank-agent"), "2.9.0 was never unpacked");
         // an agent-only update staged before the package came: the package's agent wins
         std::fs::create_dir_all(home.join("state")).unwrap();
