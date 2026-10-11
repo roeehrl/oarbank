@@ -345,7 +345,7 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
     from . import tools as T
     tool_ids = {t.id for t in man.sandbox.tools}
     mine = [n for n in nodes if platforms.node_platform(n) in supported]
-    titems, short, unknown = [], [], []
+    titems, short, unknown, old_agents = [], [], [], set()
     for row in T.resolution(db, name, man, mine):
         need = row["need"]
         if row["unknown"]:
@@ -361,6 +361,8 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
                        "counts": {c: sum(1 for _, _, x in row["failed"] if x == c) for c in sorted({x for _, _, x in row["failed"]})}})
         if not ok_n:
             short.append(row["request"]["id"])
+            if row["old_agents"] and len(row["old_agents"]) == len(row["failed"]):
+                old_agents.update(row["old_agents"])
     if not man.sandbox.tools:
         steps.append(_step("tools", "Host tools on the nodes", "done", "it asks for no host tools"))
     elif unknown:
@@ -371,6 +373,13 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
                            "the fleet's tool definitions (jdk, python, or one an admin defines), not paths; publish a new "
                            "module version that asks for a defined tool with a version constraint",
                            [_act(f"Define {u} in Settings → Tools", href=f"/settings?tool={u}#tools") for u in unknown], titems))
+    elif short and mine and old_agents:
+        needs.append(f"agent updates ({_plural(len(old_agents), 'node')})")
+        steps.append(_step("tools", "Host tools on the nodes", "blocked",
+                           f"no node reports {', '.join(short)}: {', '.join(sorted(old_agents))} "
+                           f"run{'s' if len(old_agents) == 1 else ''} an agent that predates host tools; update "
+                           f"{'it' if len(old_agents) == 1 else 'them'} and each reports the tools it finds when it connects",
+                           [_act("Agent updates", href="/agent")], titems))
     elif short and mine:
         needs.append(f"{', '.join(short)} on a node")
         steps.append(_step("tools", "Host tools on the nodes", "blocked",

@@ -594,7 +594,8 @@ def module_matrix(r, module: str, nodes: list[dict], defs: dict | None = None) -
 def resolution(r, module: str, manifest=None, nodes: list[dict] | None = None) -> list[dict]:
     """Per tool request of a module version (default: its current version), how many of `nodes` (default: every node
     that is not retired) resolve it and why the others do not (the readiness checklist's host tools step):
-    [{request, need, unknown, ok: [hosts], failed: [(host, reason with its fix, code)]}]."""
+    [{request, need, unknown, ok: [hosts], failed: [(host, reason with its fix, code)], old_agents: [hosts whose agent
+    predates host tools]}]."""
     defs = definitions(r)
     if manifest is None:
         manifest = _module_manifests(r, module=module).get(module) or {}
@@ -602,13 +603,16 @@ def resolution(r, module: str, manifest=None, nodes: list[dict] | None = None) -
         nodes = r.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
     out = []
     for req in requests(manifest):
-        row = {"request": req, "need": need_text(req), "unknown": req["id"] not in defs, "ok": [], "failed": []}
+        row = {"request": req, "need": need_text(req), "unknown": req["id"] not in defs, "ok": [], "failed": [],
+               "old_agents": []}
         for n in nodes:
             res = resolve_for(r, n, module, req, defs)
             host = n.get("hostname") or n["node_id"]
             if res["status"] == "ok":
                 row["ok"].append(host)
                 continue
+            if res.get("unreported") and agentbuilds.older(n.get("agent_version"), agentbuilds.HOST_TOOLS_SINCE):
+                row["old_agents"].append(host)
             fx = fixes(r, n, module, req, res, defs)
             cmd = next((f["command"] for f in fx if f.get("label", "").startswith("Install")), None)
             words = {"not_found": "not found", "version_unmet": "", "refused": "refused: "}[res["status"]]
