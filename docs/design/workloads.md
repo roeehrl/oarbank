@@ -375,7 +375,8 @@ moves after an expiry, moves early on a fenced release, and that a restart adopt
 Two findings changed the design. **F1**: freeing a seat on a stop report *without* `release` from a holder that is no
 longer assigned is unsafe (a stale stop report frees a seat its sender runs again after a reboot); the coordinator now
 frees only on `release` with the current fence, and the agent sends `release` whenever it was told to stop (the model's
-alternative, a fence per run, also passes: `OarbankSeat_fence_per_run`). **An agent down past its lease** leaves a
+alternative, a fence per run, keeps S26 too, `OarbankSeat_fence_per_run`, but a stale request then raises the
+fence under a running node and restarts it for nothing). **An agent down past its lease** leaves a
 lasting workload running after the seat moved; the dead agent's watchdog now ends recorded workloads at their leases'
 end. `./run_tlc.sh OarbankSeat` checks every configuration (`QUICK=1` skips the four slow ones); specs/README.md has the
 table of configurations and results.

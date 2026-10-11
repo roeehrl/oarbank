@@ -570,15 +570,17 @@ stated without "once settled" (`EventuallyRuns`, `SeatReGranted`).
 | `_e_adopt_without_lease` | (e) a new agent adopts without checking the lease | `AtMostOneRunning` |
 | `_f_clock_stops_in_sleep` | (f) the lease clock stops while the machine sleeps | `AtMostOneRunning` |
 | `_finding_release_if_unassigned` | finding F1 (below) | `AtMostOneRunning` |
-| `_fence_per_run` | F1's alternative fix: release-if-unassigned plus a fence per run | no violation |
+| `_fence_per_run` | F1's alternative fix: release-if-unassigned plus a fence per run (checks `AtMostOneRunning` only) | no violation |
 | `_agent_down_past_lease` | an agent stays down past its workload's lease | `AtMostOneRunning` |
 
 **F1.** The first design also freed the seat on a stop report *without* `release` from a holder
 that was no longer assigned. A stale stop report (sent before a reboot, delivered after the node
 was assigned again and resumed under its old fence) then frees a seat its sender runs, and a second
 node is granted it. The coordinator now frees only on `release` with the current fence, and the
-agent sends `release` whenever it gave the seat up. Giving every run its own fence also fixes it
-(`_fence_per_run`).
+agent sends `release` whenever it gave the seat up. Giving every run its own fence also keeps
+`AtMostOneRunning` (`_fence_per_run`), but breaks `RunningHasLease`: a stale request, one the agent
+already gave up on, raises the fence under a node that runs, which then runs under an old fence until
+its next heartbeat stops and restarts it. The explicit release has no such needless restart.
 
 **Agent down past its lease.** A workload is a lasting process; if its agent stays down past the
 lease (a crash loop, a long update) nothing stops it at the lease's end and the seat moves while
