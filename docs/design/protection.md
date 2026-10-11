@@ -147,8 +147,9 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
   protected group within a target: `cpu_stall`, `ipc_ratio`, `gpu_share`, `pageins_rate`, or `progress_rate` read from
   an owner-supplied source), and `evict`. `during` adds actions while an owner-supplied source says a phase is on:
   events or a field of one event type in a JSONL file (the newest file of a glob), or a process trigger (`on_exec`);
-  `tags` label a phase for coordinator-side aggregation (`uplink`). A rule marked `immediate` has its phases act
-  between ticks ([gpu-cotenancy.md](gpu-cotenancy.md)). `ignore` only removes processes from the heuristic triggers.
+  `tags` label a phase for coordinator-side aggregation: `uplink` holds network-heavy fleet work on every node of the
+  node's site while the phase is on ([sites.md](sites.md)). A rule marked `immediate` has its phases act between ticks
+  ([gpu-cotenancy.md](gpu-cotenancy.md)). `ignore` only removes processes from the heuristic triggers.
 - **Owner sources** are watched, not polled (kqueue, inotify, a 250 ms poll on Windows), with a rotation- and
   truncation-safe tail. `~` is the person's home: in a system install, sources in a person's home are read by that
   person's session helper and relayed as counts and phase states, never contents. An unreadable progress source is a
@@ -232,6 +233,16 @@ paused      = the pause_fleet scopes of the active rules (no work of theirs is g
   value comes from ("Default · 64 GB RAM", "Fleet", "This node"); Override and Reset to inherited write and delete the
   node's own value through `settings.apply` (`oarbank settings set|reset <key> --node <node>`). The model:
   [settings.md](settings.md).
+
+## Sites: protection beyond one node
+
+A rule acts on its own node only. Nodes that share one internet line slow each other's large transfers, so an owner's
+program that uploads on one machine can be hurt by fleet transfers on another. A **site** ([sites.md](sites.md), PLAN
+D55) groups such nodes: while any member's phase tagged `uplink` is on (or cannot be read, or its node stops reporting),
+the agent's bulk transfers and network-heavy jobs pause on every member, and outside such phases the site's uplink
+budget limits them. On the node itself the agent holds its own transfers the moment its watcher sees the phase begin,
+at a site or not. The node's `staging_mbps` cap and a rule's `cap_fleet.staging_mbps` now pace those transfers (0 holds
+them); before sites the agent computed them but nothing enforced them.
 
 ## The controller
 

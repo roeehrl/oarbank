@@ -8,6 +8,8 @@ fleet's transfers may use together), and the coordinator enforces two things ove
   or a node with one has not reported for 60 s: protection.node_phases, never looser), network-heavy fleet work pauses
   on every node of the site: no transfer lease is granted, every lease is revoked (the agents pause their transfers at
   the next renew, within SITE_HOLD_BOUND_S), network-heavy jobs are not admitted and the agents pause running ones.
+  A revoked lease keeps its slot until its agent, having stopped, gives it back, or until it expires: an answer that
+  granted or renewed it may still be on its way (specs/OarbankSiteUplink.tla found that race).
 - **The budget.** Outside such phases, agents take a lease for each bulk transfer (staging, uploads, checkpoints,
   releases); at most `max_transfers` leases are live at a site, each paced at `uplink_mbps / max_transfers` when a rate
   is set, and at most `max_heavy_jobs` network-heavy jobs (stages[].requires.resources.network = "heavy") run there.
@@ -261,9 +263,11 @@ def refresh(db: DB, site_id: str, t: float | None = None) -> dict:
 
 
 def revoke_leases(db: DB, site_id: str, why: str) -> int:
-    n = db.one("SELECT COUNT(*) n FROM uplink_leases WHERE site_id=?", (site_id,))["n"]
+    """Revoke the site's live leases: each is answered `revoked` at its next renewal, and keeps its slot (and its rate)
+    until its agent gives it back after stopping (release) or it expires."""
+    n = db.one("SELECT COUNT(*) n FROM uplink_leases WHERE site_id=? AND revoked_at IS NULL", (site_id,))["n"]
     if n:
-        db.x("DELETE FROM uplink_leases WHERE site_id=?", (site_id,))
+        db.x("UPDATE uplink_leases SET revoked_at=? WHERE site_id=? AND revoked_at IS NULL", (now(), site_id))
     return n
 
 
@@ -300,7 +304,7 @@ def is_heavy(resources: dict, platform: str | None = None) -> bool:
 def usage(db: DB, site: dict, t: float | None = None) -> dict:
     t = now() if t is None else t
     leases = db.q("SELECT * FROM uplink_leases WHERE site_id=? AND expires_at>=? ORDER BY granted_at", (site["site_id"], t))
-    return {"transfers": len(leases), "max_transfers": site["max_transfers"],
+    return {"transfers": len(leases), "revoked": sum(1 for x in leases if x["revoked_at"]), "max_transfers": site["max_transfers"],
             "mbps": round(sum(x["mbps"] or 0 for x in leases), 2) if site["uplink_mbps"] else None,
             "uplink_mbps": site["uplink_mbps"], "heavy_jobs": heavy_running(db, site["site_id"]),
             "max_heavy_jobs": site["max_heavy_jobs"], "leases": leases}
@@ -339,24 +343,30 @@ def lease(db: DB, node: dict, body: dict, t: float | None = None) -> dict:
         if st["hold"]:
             return {**out, "granted": False, "code": "SITE_UPLINK_BUSY", "why": st["why"], "retry_s": POLL_S}
         db.x("DELETE FROM uplink_leases WHERE site_id=? AND expires_at<?", (site["site_id"], t))
-        n = db.one("SELECT COUNT(*) n FROM uplink_leases WHERE site_id=?", (site["site_id"],))["n"]
+        held = db.q("SELECT mbps FROM uplink_leases WHERE site_id=?", (site["site_id"],))   # revoked ones included
+        n, rate = len(held), lease_rate(site)
         if n >= site["max_transfers"]:
             return {**out, "granted": False, "code": "SITE_UPLINK_BUDGET", "retry_s": POLL_S,
                     "why": f"site {site['name']} runs {n} of its {site['max_transfers']} transfers"}
+        used = sum(x["mbps"] or 0 for x in held)
+        if rate and used + rate > site["uplink_mbps"] + 1e-6:
+            return {**out, "granted": False, "code": "SITE_UPLINK_BUDGET", "retry_s": POLL_S,
+                    "why": f"site {site['name']} has {used:g} of its {site['uplink_mbps']:g} Mbit/s leased"}
         lid = "ul_" + secrets.token_hex(8)
         kind = str(body.get("kind") or "transfer")[:32]
         direction = "up" if body.get("dir") == "up" else "down"
         size = int(body["bytes"]) if isinstance(body.get("bytes"), int) and body["bytes"] >= 0 else None
         db.x("INSERT INTO uplink_leases(lease_id,site_id,node_id,kind,dir,bytes,mbps,granted_at,renewed_at,expires_at,peak) "
              "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-             (lid, site["site_id"], node["node_id"], kind, direction, size, lease_rate(site), t, t, t + LEASE_TTL_S, n + 1))
+             (lid, site["site_id"], node["node_id"], kind, direction, size, rate, t, t, t + LEASE_TTL_S, n + 1))
         db.x("UPDATE uplink_leases SET peak=MAX(peak, ?) WHERE site_id=?", (n + 1, site["site_id"]))
-        return {**out, "granted": True, "lease_id": lid, "mbps": lease_rate(site), "ttl_s": LEASE_TTL_S}
+        return {**out, "granted": True, "lease_id": lid, "mbps": rate, "ttl_s": LEASE_TTL_S}
 
 
 def renew(db: DB, node: dict, body: dict, t: float | None = None) -> dict:
     """POST /v1/agent/uplink/renew {leases: [...]}: each of the node's leases renewed ("ok"), or "revoked" (the site
-    holds, the budget changed, it expired or was never this node's), and the site's state."""
+    holds, the budget changed, it expired or was never this node's), and the site's state. A revoked lease is not
+    deleted here: the answer may be lost, so it keeps its slot until the agent gives it back or it expires."""
     t = now() if t is None else t
     ids = [str(x) for x in (body.get("leases") or []) if isinstance(x, str)][:64]
     with db.tx():
@@ -365,19 +375,22 @@ def renew(db: DB, node: dict, body: dict, t: float | None = None) -> dict:
         res = {}
         for lid in ids:
             row = db.one("SELECT * FROM uplink_leases WHERE lease_id=? AND node_id=?", (lid, node["node_id"]))
-            if row and site and row["site_id"] == site["site_id"] and row["expires_at"] >= t and not st["hold"]:
+            live = row and site and row["site_id"] == site["site_id"] and row["expires_at"] >= t and not row["revoked_at"]
+            if live and not st["hold"]:
                 db.x("UPDATE uplink_leases SET renewed_at=?, expires_at=? WHERE lease_id=?", (t, t + LEASE_TTL_S, lid))
                 res[lid] = "ok"
             else:
-                if row:
+                if row and row["expires_at"] < t:
                     db.x("DELETE FROM uplink_leases WHERE lease_id=?", (lid,))
+                elif live:
+                    db.x("UPDATE uplink_leases SET revoked_at=? WHERE lease_id=?", (t, lid))
                 res[lid] = "revoked"
         return {"site": directive(db, node, st) if site else None, "leases": res}
 
 
 def release(db: DB, node: dict, body: dict, t: float | None = None) -> dict:
-    """POST /v1/agent/uplink/release {lease_id, dir, bytes, seconds, paced}: the transfer ended. Its rate is kept for
-    the site's measured-capacity hint when it was large."""
+    """POST /v1/agent/uplink/release {lease_id, dir, bytes, seconds, paced}: the transfer ended, or its agent stopped
+    using a revoked lease: the slot is free. A large transfer's rate is kept for the measured-capacity hint."""
     t = now() if t is None else t
     lid = str(body.get("lease_id") or "")
     with db.tx():

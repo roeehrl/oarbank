@@ -139,8 +139,8 @@ needs `CAP_NET_ADMIN`, and Windows' process events arrive on a one-second ETW fl
 The heartbeat's `telemetry.protection.phases` lists every `during` block: `{key, rule, block, on, since, readable,
 reader, tags, immediate}`. The coordinator reads it with `protection.node_phases(db, node_ids, tag)` and
 `protection.any_phase_on(db, node_ids, tag)`, which is on, never looser, when any node's tagged phase is on or
-unreadable or a node with such a phase has not reported for 60 s. A feature that groups nodes by shared internet line
-(a site) asks `any_phase_on(site_nodes, "uplink")` and holds network-heavy fleet work at the site while it is on.
+unreadable or a node with such a phase has not reported for 60 s. Sites ([sites.md](sites.md), D55) ask
+`any_phase_on(site_nodes, "uplink")` and hold network-heavy fleet work at the site while it is on.
 
 ## The paired on/off harness (D52)
 

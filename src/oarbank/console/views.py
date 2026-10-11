@@ -293,7 +293,8 @@ REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#nod
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
                 "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings"),
                 "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
-                "protection.ab.abort": ("/protection/ab/{run_id}", "/")}
+                "protection.ab.abort": ("/protection/ab/{run_id}", "/"),
+                "sites.update": ("/sites", "/sites")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 

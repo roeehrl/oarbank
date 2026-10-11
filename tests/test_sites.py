@@ -135,11 +135,16 @@ def test_leases_keep_to_the_budget_and_a_hold_revokes_them(db):
     hb(db, a, [phase(True)])
     out = sites.renew(db, fresh(db, b), {"leases": [r2["lease_id"]]})
     assert out["leases"] == {r2["lease_id"]: "revoked"} and out["site"]["hold"]
-    assert db.one("SELECT COUNT(*) n FROM uplink_leases")["n"] == 0
+    assert db.one("SELECT COUNT(*) n FROM uplink_leases WHERE revoked_at IS NULL")["n"] == 0
     refused = sites.lease(db, fresh(db, b), {"kind": "upload"})
     assert not refused["granted"] and refused["code"] == "SITE_UPLINK_BUSY" and "mini" in refused["why"]
     assert not invariants.s27_site_uplink_budget(db)
     hb(db, a, [phase(False)])
+    # a revoked lease keeps its slot until its agent, stopped, gives it back (its answer may not have arrived)
+    assert sites.renew(db, fresh(db, a), {"leases": [r1["lease_id"]]})["leases"][r1["lease_id"]] == "revoked"
+    assert sites.lease(db, fresh(db, b), {"kind": "upload"})["code"] == "SITE_UPLINK_BUDGET"
+    sites.release(db, fresh(db, a), {"lease_id": r1["lease_id"]})
+    sites.release(db, fresh(db, b), {"lease_id": r2["lease_id"]})
     r4 = sites.lease(db, fresh(db, b), {"kind": "upload", "dir": "up", "bytes": 64 << 20})
     assert r4["granted"]
     # a lease nobody renews is gone after its TTL
@@ -151,6 +156,8 @@ def test_leases_keep_to_the_budget_and_a_hold_revokes_them(db):
     r5 = sites.lease(db, fresh(db, a), {"kind": "staging"})
     run_op(db, "sites.update", "home", {"max_transfers": 1})
     assert sites.renew(db, fresh(db, a), {"leases": [r5["lease_id"]]})["leases"][r5["lease_id"]] == "revoked"
+    assert not sites.lease(db, fresh(db, b), {"kind": "staging"})["granted"]        # r5 keeps its slot until given back
+    sites.release(db, fresh(db, a), {"lease_id": r5["lease_id"]})
     assert sites.lease(db, fresh(db, a), {"kind": "staging"})["mbps"] == 100
     sites.release(db, fresh(db, a), {"lease_id": "nope"})
     assert home["site_id"]

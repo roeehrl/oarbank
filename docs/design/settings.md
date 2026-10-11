@@ -287,6 +287,10 @@ deleting a group deletes its values and its secrets' values) and `nodes.label` (
 for the nodes it moved, runs the effect hooks (a services change re-doctors) and rebuilds node statements. Reads:
 `GET /api/v1/groups`, `GET /api/v1/groups/{id}`, `GET /api/v1/groups/preview?selector=&members=` (the live preview).
 
+**Sites are not groups.** Nodes that share one internet line form a site ([sites.md](sites.md)): a partition the owner
+confirms (a node is at one site at most), with an uplink budget and a hold of its own, managed on the Sites page and
+with `oarbank sites`. A group may select the same nodes for settings; the two do not interact.
+
 ## Locks
 
 A lock is an enforced value at the fleet or a group (`enforce` on a change; a T3 change, typed confirmation). The

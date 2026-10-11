@@ -153,7 +153,7 @@ their process groups, deletes their workspaces, and does not report them.
                "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
                "budget_cores": 6, "front": "app 812 (lsappinfo)", "source_error": null, "lowering": true}},
  "capacity": { …Capacity… },
- "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused|checkpointing", "cpu_s": 55.2,
+ "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused|checkpointing|uploading", "cpu_s": 55.2,
                "log_bytes": 10231, "rss_gb": 0.9}],
  "ready_datasets": ["scene:atrium", …], "doctor": null,
  "folders": {"inputs": {"access": "read", "status": "ok"}, "outbox": {"access": "write", "status": "not a directory"}},
@@ -198,6 +198,10 @@ their process groups, deletes their workspaces, and does not report them.
   is bound to); `telemetry.cert_context` is what the node's certificates must match (`hardware`, `os_major`,
   `agent_version`). The coordinator aggregates `phases` across nodes by tag (`protection.node_phases`,
   `protection.any_phase_on`).
+- **`telemetry.uplink`** is the agent's site uplink gate (docs/design/sites.md): `{"site": "home", "site_id": "site_…",
+  "held": "site home: mini's rule trainer is in an upload phase (trainer#0)", "local_phases": ["trainer#0"],
+  "cap_mbps": 50.0, "leases": 1, "heavy_jobs": [123], "active": [{"kind": "staging|upload", "dir": "down|up", "done":
+  1048576, "total": 1073741824, "paused": true, "why": "…"}]}`; the site's page shows it per member.
 - **`ab_runs`** is the current or last paired on/off harness run (at most one): `{"run_id", "rule", "work", "duty",
   "state": "pilot|running|done|aborted", "started_at", "target_blocks", "blocks": [{"on_first", "on_rate",
   "off_rate", "start", "end"}], "excluded": [{"start", "end", "reason"}], "current": {"arm": "on|off",
@@ -210,8 +214,9 @@ their process groups, deletes their workspaces, and does not report them.
   not be read (another account's process), and a rule key that needs it counts as holding (a rule's `unreadable`
   counts the processes it matched that way).
 - **Leases.** oarbankd extends `expires_at = now + 60 s` for each listed attempt that is live server-side and
-  shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, it is `paused` by host protection, or it
-  is `checkpointing` (uploading a checkpoint before it releases). The agent bounds a pause at 10 minutes (less with the
+  shows progress: `cpu_s` or `log_bytes` advanced, the attempt is `staging`, it is `paused` by host protection or its
+  site, it is `checkpointing` (uploading a checkpoint before it releases), or it is `uploading` its results (an upload
+  its site holds may wait out an uplink phase). The agent bounds a pause at 10 minutes (less with the
   node's protection `[node] max_pause_s`, 10 to 600 s), then releases the attempt: after a checkpoint when the stage
   keeps them (see Checkpoints).
 
@@ -225,7 +230,9 @@ their process groups, deletes their workspaces, and does not report them.
  "modules_disabled": ["example"],
  "statement": {"statement": "{…oarbank.node/v1…}", "signature": null},
  "tool_pins": {"": {"jdk": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"}, "example": {"jdk": "/opt/jdk-21"}},
- "detect_tools": false}
+ "detect_tools": false,
+ "uplink": {"site": {"id": "site_…", "name": "home", "hold": false, "code": null, "why": null, "since": null,
+                     "lease_ttl_s": 20, "poll_s": 2, "lease_mbps": 50.0, "max_transfers": 2}, "salt": "…"}}
 ```
 | Directive | Meaning |
 |---|---|
@@ -244,6 +251,7 @@ their process groups, deletes their workspaces, and does not report them.
 | `statement` | This node's latest statement (its folders and the tool paths added for it) and the owner's signature (`null` in developer mode, or until the owner signs); `null` when nothing is set for this node (see Node statement). |
 | `tool_pins` | Tool paths chosen among what this node found, per module (`""`: every module without values of its own). The agent grants a pinned path only when it names an installation it detected (see Host tools). |
 | `detect_tools` | Detect the host tools again now (`tools.detect`, the console's Re-detect); sent once. |
+| `uplink` | The node's site (docs/design/sites.md): `site` is `null` at no site, else its id and name, whether it holds network-heavy work now (`hold`, `code` `SITE_UPLINK_BUSY`, `why` in words, `since`) and the lease terms (`lease_ttl_s`, `poll_s`, `lease_mbps`: the pace of each lease, `null` unpaced). `salt` keys the agent's gateway fingerprint (see Site uplink). |
 
 ## Work
 
@@ -433,6 +441,55 @@ nondeterminism takes the results resumed from its checkpoints with it.
   The final SHA-256 check guards every blob.
 - **Ready.** A dataset is ready when every file is present and verified. `prefetch` names registered datasets to
   stage ahead of need.
+
+## Site uplink
+
+Nodes that share one internet line are one **site** (docs/design/sites.md, PLAN D55). The agent's bulk transfers, each
+of at least 8 MiB or of unknown size (dataset staging from origins and `GET /v1/blobs`, result and checkpoint uploads),
+wait while any of these holds, and resume where they stopped:
+
+- one of this node's protection phases tagged `uplink` is on or cannot be read (seen at once by the agent's watcher);
+- a protection rule caps staging at 0 (`cap_fleet.staging_mbps = 0`);
+- the coordinator says the node's site holds (`uplink.site.hold` in a directive or a renewal).
+
+At a site every bulk transfer also needs a lease:
+
+```text
+POST /v1/agent/uplink/lease    {"kind": "staging|upload", "dir": "down|up", "bytes": 1073741824}
+  → {"granted": true, "lease_id": "ul_…", "mbps": 50.0, "ttl_s": 20, "site": {…}}
+  → {"granted": false, "code": "SITE_UPLINK_BUSY|SITE_UPLINK_BUDGET", "why": "…", "retry_s": 2, "site": {…}}
+  → {"granted": true, "lease_id": null, "site": null}                       (the node is at no site)
+POST /v1/agent/uplink/renew    {"leases": ["ul_…"]}  → {"leases": {"ul_…": "ok|revoked"}, "site": {…}}
+POST /v1/agent/uplink/release  {"lease_id": "ul_…", "kind", "dir", "bytes": 1073741824, "seconds": 41.2, "paced": false}
+POST /v1/agent/uplink/network  {"gateway_fp": "<32 hex>"}
+```
+
+- **The budget.** oarbankd grants at most the site's `max_transfers` live leases, each paced at `uplink_mbps /
+  max_transfers` when the site sets a rate, and none while the site holds. A hold or a budget change revokes every
+  lease (`revoked` at the next renewal). S27 checks it.
+- **Renewal.** While it holds a lease or runs a network-heavy job, the agent renews every `poll_s` (and learns the
+  site's state from each answer). A lease not renewed for `lease_ttl_s` is gone on the coordinator; the agent treats one
+  it could not renew for `lease_ttl_s - 5` seconds, counted from when it sent the last successful renewal, as gone
+  already, so it has stopped before the slot is given to another node.
+- **Pace.** The smallest of the lease's `mbps`, the node's `staging_mbps` cap and a rule's staging cap. While a node
+  is at a site or capped, uploads go in 1 MiB chunks (8 MiB otherwise), so a hold stops one within a fraction of a
+  second.
+- **At once.** When one of its `uplink` phases changes, the agent sends a heartbeat at once instead of waiting for
+  `heartbeat_s`, and oarbankd recomputes the node's site in that heartbeat: the other nodes' transfers stop at their
+  next renewal, within `SITE_HOLD_BOUND_S` (5 s) of the phase source changing.
+- **Network-heavy jobs** (`resources.network = "heavy"` in the spec envelope) are paused while the node's site holds
+  (`pause` in a cooperative runner's control document, or a freeze), and released as `preempt_site` (requeued, never
+  charged) when they can do neither or wait past the node's longest pause. oarbankd admits none at a site while it
+  holds, and at most the site's `max_heavy_jobs` at once.
+- **Network fingerprint.** Every 10 minutes the agent reports `gateway_fp`, an HMAC-SHA256 (keyed with
+  `uplink.salt`) of its default gateway's hardware address read from the OS's route and neighbour tables, truncated to
+  16 bytes; oarbankd also keeps a keyed fingerprint of a public address the node connects from. Neither address is
+  stored or shown; equal fingerprints suggest a site.
+- Releases and agent updates are not held: they are fetched on the agent's control path, and holding them would hold
+  its heartbeats.
+- Journal records: `transfer_paused` (`TRANSFER_PAUSED`, with `transfer`, `dir`, `why`, `done`, `paused_at`) and
+  `transfer_resumed` (`TRANSFER_RESUMED`, with `paused_s`); a frozen network-heavy job's actuation is journaled with
+  `SITE_PAUSE` and `SITE_RESUME`.
 
 ## Node statement
 

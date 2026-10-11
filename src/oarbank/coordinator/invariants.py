@@ -40,8 +40,9 @@ Safety (must hold after every committed transaction):
   S25 for a rule marked immediate, a phase the agent's event path saw begin is followed by its pause request within
       100 ms (from the decision journal: the first pause of that phase is the event path's, requested within 100 ms of
       the source event)
-  S27 a site's live transfer leases never number more than its max_transfers, their rates never sum past its
-      uplink_mbps, and no lease is live while the site holds (a protected process there is in an uplink phase)
+  S27 a site's unexpired transfer leases (revoked ones until given back) never number more than its max_transfers, their
+      rates never sum past its uplink_mbps, and none is live, unrevoked, while the site holds (a protected process there is
+      in an uplink phase)
 Liveness (checked by the simulator at the end of a run under bounded faults):
   L1  every job reaches done, cancelled or quarantined
 """
@@ -425,8 +426,9 @@ def s23_resume_from_own_checkpoint(db: DB):
 
 
 def s27_site_uplink_budget(db: DB):
-    """S27 (docs/design/sites.md): the leases a site grants stay within its budget and none is live while it holds.
-    Leases past their expiry are dead (the agent stopped by its own clock before it) and do not count."""
+    """S27 (docs/design/sites.md): the leases a site grants stay within its budget (revoked ones keep their slot until
+    given back) and none is live, unrevoked, while it holds. Leases past their expiry are dead (the agent stopped by its
+    own clock before it) and do not count."""
     from . import clock
     t, out = clock.now(), []
     for s in db.q("SELECT * FROM sites"):
@@ -436,8 +438,10 @@ def s27_site_uplink_budget(db: DB):
         total = sum(r["mbps"] or 0 for r in rows)
         if s["uplink_mbps"] and total > s["uplink_mbps"] + 1e-6:
             out.append(f"S27 site {s['name']}: leases pace at {total:g} Mbit/s together, budget {s['uplink_mbps']:g}")
-        if s["hold_on"] and rows:
-            out.append(f"S27 site {s['name']}: {len(rows)} live transfer lease(s) while it holds ({s['hold_why']})")
+        live = db.one("SELECT COUNT(*) n FROM uplink_leases WHERE site_id=? AND expires_at>=? AND revoked_at IS NULL",
+                      (s["site_id"], t))["n"]
+        if s["hold_on"] and live:
+            out.append(f"S27 site {s['name']}: {live} live transfer lease(s) while it holds ({s['hold_why']})")
     return out
 
 

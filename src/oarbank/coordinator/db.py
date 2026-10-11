@@ -255,7 +255,8 @@ CREATE TABLE IF NOT EXISTS site_members (node_id TEXT PRIMARY KEY, site_id TEXT 
 CREATE INDEX IF NOT EXISTS site_members_site ON site_members(site_id);
 CREATE TABLE IF NOT EXISTS uplink_leases (
   lease_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT, dir TEXT, bytes INT, mbps REAL,
-  granted_at REAL, renewed_at REAL, expires_at REAL, peak INT DEFAULT 1);   -- peak: most leases live at the site meanwhile
+  granted_at REAL, renewed_at REAL, expires_at REAL, peak INT DEFAULT 1,   -- peak: most leases live at the site meanwhile
+  revoked_at REAL);               -- revoked (a hold, a budget change): keeps its slot until given back or expired
 CREATE INDEX IF NOT EXISTS uplink_leases_site ON uplink_leases(site_id);
 CREATE TABLE IF NOT EXISTS uplink_transfers (
   site_id TEXT, node_id TEXT, kind TEXT, dir TEXT, bytes INT, seconds REAL, mbps REAL, solo INT, paced INT, at REAL);

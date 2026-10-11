@@ -12,7 +12,8 @@
 //! - **Leased** at a site: the coordinator grants at most the site's `max_transfers` leases, each paced at the site's
 //!   rate share; the agent renews every `poll_s` while it holds one, and treats a lease it could not renew for
 //!   `lease_ttl_s - 5` seconds (counted from when it sent the last successful renewal) as gone, so it has stopped before
-//!   the coordinator frees the slot.
+//!   the coordinator frees the slot. A lease it stops using (revoked, held, gone stale) it gives back once it has
+//!   stopped: a revoked lease keeps its slot on the coordinator until then (specs/OarbankSiteUplink.tla).
 //! - **Paced** at the smallest of the lease's rate, the node's `staging_mbps` cap and a protection rule's staging cap.
 //!
 //! Transfers under [`HEAVY_MIN_BYTES`] (manifests, small results) are none of this's business. A tagged phase changing
@@ -446,9 +447,16 @@ impl Transfer {
                                                                      "done": self.done, "paused_at": t}));
     }
 
+    /// Stop using the lease (between chunks: nothing moves now) and give it back, so a revoked lease's slot frees as
+    /// soon as the coordinator hears it; a lost give-back costs the slot until the lease expires.
     fn drop_lease(&mut self) {
         if let Some(id) = self.lease.take() {
             self.up.lock().leases.remove(&id);
+            if let (Some(api), Ok(h)) = (self.up.api(), tokio::runtime::Handle::try_current()) {
+                h.spawn(async move {
+                    let _ = api.post("/v1/agent/uplink/release", &json!({"lease_id": id})).await;
+                });
+            }
         }
     }
 
