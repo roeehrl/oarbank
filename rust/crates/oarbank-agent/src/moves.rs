@@ -116,50 +116,12 @@ pub fn check_cancel(j: &Value, trust: &Trust, pending: &Statement) -> Result<()>
     Ok(())
 }
 
-/// A verified owner key set.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OwnerSet {
-    pub version: i64,
-    pub keys: Vec<String>,
-    /// Rescue locations: http(s) URLs where the owner publishes a rescue move.
-    pub rescue: Vec<String>,
-}
+pub use oarbank_core::owner::OwnerSet;
 
-/// The owner key set (TUF-style root rotation): version + 1, every new key signs it, and a key of the pinned set too.
+/// The owner key set (TUF-style root rotation): version + 1, every new key signs it, and a key of the pinned set too
+/// (oarbank-core's owner.rs: the node update runner applies the same rule to its own trust).
 pub fn check_owner_anchors(j: &Value, trust: &Trust) -> Result<OwnerSet> {
-    let stmt = j["statement"].as_str().context("owner keys: no statement")?;
-    let doc: Value = serde_json::from_str(stmt)?;
-    if doc["type"].as_str() != Some("oarbank.owner-anchors/v1") || doc["threshold"].as_i64() != Some(1) {
-        bail!("owner keys: malformed set");
-    }
-    if trust.fleet_id.as_deref().is_some_and(|f| doc["fleet_id"].as_str() != Some(f)) {
-        bail!("owner keys: another fleet");
-    }
-    let version = doc["version"].as_i64().context("owner keys: no version")?;
-    if version != trust.owner_version + 1 {
-        bail!("owner keys: version {version} is not {}", trust.owner_version + 1);
-    }
-    let keys: Vec<String> = doc["keys"].as_array().cloned().unwrap_or_default().iter().filter_map(|k| k.as_str().map(str::to_string)).collect();
-    if keys.is_empty() {
-        bail!("owner keys: empty set");
-    }
-    let mut rescue = vec![];
-    for u in doc["rescue"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
-        match u.as_str().filter(|s| s.starts_with("https://") || s.starts_with("http://")) {
-            Some(s) => rescue.push(s.to_string()),
-            None => bail!("owner keys: rescue location {u} is not a URL"),
-        }
-    }
-    let sigs: std::collections::HashMap<String, String> = j["signatures"].as_array().cloned().unwrap_or_default().iter()
-        .filter_map(|s| Some((s["key"].as_str()?.to_string(), s["sig"].as_str()?.to_string()))).collect();
-    for k in &keys {
-        verify_ed25519(k, stmt.as_bytes(), sigs.get(k).map(String::as_str).unwrap_or("")).context("owner keys: every key must sign")?;
-    }
-    if !trust.owner_keys.is_empty()
-        && !trust.owner_keys.iter().any(|k| sigs.get(k).is_some_and(|s| verify_ed25519(k, stmt.as_bytes(), s).is_ok())) {
-        bail!("owner keys: a key of the current set must sign the new set");
-    }
-    Ok(OwnerSet { version, keys, rescue })
+    Ok(oarbank_core::owner::check_owner_anchors(j, trust.fleet_id.as_deref(), trust.owner_version, &trust.owner_keys)?)
 }
 
 /// Whether the target address is a Tailscale address (100.64.0.0/10 or fd7a:115c:a1e0::/48).
