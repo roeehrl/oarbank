@@ -384,6 +384,8 @@ fn main() -> anyhow::Result<()> {
             // a scratch home: opening the live one would point its agent.json at this placeholder coordinator
             let _ = layout;
             let scratch = std::env::temp_dir().join(format!("oarbank-status-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&scratch);           // a dead process's, under a reused id
+            let _scratch_goes = fsutil::RemovedOnDrop(scratch.clone());
             let mut a = agent::Agent::open(paths::Layout::new(scratch.clone()), Some("https://127.0.0.1:7443"))?;
             if a.directives.is_null() {
                 a.directives = serde_json::json!({"desired_state": "active", "lifecycle": "ready", "policy": {}, "limits": {}});
