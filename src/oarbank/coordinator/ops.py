@@ -2330,3 +2330,6 @@ def _register_catalogue():
 
 
 _register_catalogue()
+
+
+from . import workloads_ops as _workloads_ops  # noqa: E402,F401  (registers the workloads.* handlers)

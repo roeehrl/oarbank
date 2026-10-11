@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-94 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+97 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -162,6 +162,14 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `access.login_link` — Mint a one-time console sign-in link (valid 2 minutes) | T1 | prompted | – | admin | natural | – | `POST /api/v1/ops/{op}` (op=access.login_link)<br>`POST /do/{op}` (op=access.login_link) | oarbank console login [--account <name>] |
 | `access.passkeys.remove` — Remove a passkey from an account | T1 | prompted | – | viewer | natural | – | `POST /api/v1/ops/{op}` (op=access.passkeys.remove)<br>`POST /do/{op}` (op=access.passkeys.remove) | – |
 
+## workloads
+
+| Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
+|---|---|---|---|---|---|---|---|---|
+| `workloads.assign` — Assign a module's workload to a node (seat "node") or ask the coordinator to place a count of seats (seat "fleet"); the preview names each node, the secrets it receives, its seat, listeners and the protection rules there | T2 | required | yes | admin | natural | workloads.unassign | `POST /api/v1/ops/{op}` (op=workloads.assign)<br>`POST /do/{op}` (op=workloads.assign) | oarbank workload assign <module>/<workload> --node N<br>oarbank workload assign <module>/<workload> --count C |
+| `workloads.unassign` — Stop running a workload on a node; its seat goes back once the node reports it stopped | T1 | prompted | – | operator | natural | workloads.assign | `POST /api/v1/ops/{op}` (op=workloads.unassign)<br>`POST /do/{op}` (op=workloads.unassign) | oarbank workload unassign <module>/<workload> --node N |
+| `workloads.restart` — Restart a workload on a node (also lifts a withdrawal after repeated failures) | T1 | prompted | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=workloads.restart)<br>`POST /do/{op}` (op=workloads.restart) | oarbank workload restart <module>/<workload> --node N |
+
 ## audit
 
 | Operation | Tier | Reason | Preview | Role | Idempotency | Reverses | Routes | CLI |
@@ -177,6 +185,7 @@ Machine-to-machine, authenticated by the node's client certificate and fenced by
 - `POST /v1/agent/enroll`
 - `POST /v1/agent/heartbeat`
 - `POST /v1/agent/hello`
+- `POST /v1/agent/workloads/secrets`
 - `POST /v1/attempts/{aid}/checkpoint`
 - `POST /v1/attempts/{aid}/complete`
 - `POST /v1/attempts/{aid}/fail`

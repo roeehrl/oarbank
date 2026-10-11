@@ -833,7 +833,9 @@ impl WorkloadManager {
                     continue;
                 }
                 if let Some(h) = w.decl.health {
-                    if w.phase == Phase::Running && !w.health.busy && w.health.last.is_none_or(|t| t.elapsed() >= h.0) {
+                    // never while protection holds it paused: a frozen workload cannot answer (spec/workload-protocol.md)
+                    let paused = run.applied.frozen || run.applied.coop_paused;
+                    if w.phase == Phase::Running && !paused && !w.health.busy && w.health.last.is_none_or(|t| t.elapsed() >= h.0) {
                         w.health.busy = true;
                         w.health.last = Some(Instant::now());
                         health.push(k.clone());

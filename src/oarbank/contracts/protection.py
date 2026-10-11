@@ -198,6 +198,18 @@ class During(Actions):
     source: Source
 
 
+class Delegate(_M):
+    """An owner's delegation of a process tree to host protection (docs/design/workloads.md): pause and lower only."""
+    actions: list[Literal["pause", "lower"]] = Field(min_length=1, description="What protection may do (stop is not offered).")
+
+
+def unspoofable(m: dict) -> bool:
+    """A matcher a module cannot claim: a code-signing identity, or one executable's exact path."""
+    p = m.get("path_prefix") or ""
+    return bool(m.get("requirement") or (m.get("team_id") and m.get("identifier"))
+                or (p and not p.endswith(("/", "\\"))))
+
+
 class Rule(Actions):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$", max_length=64)
     match: Match
@@ -207,9 +219,19 @@ class Rule(Actions):
     enter_for_s: NonNeg | None = None
     exit_after_s: NonNeg | None = None
     during: list[During] = Field(default_factory=list)
+    delegate: Delegate | None = Field(None, description=(
+        "The matched tree is the owner's own work that protection may pause or lower as fleet work (with the node "
+        "setting delegated_processes on); no other action goes with it."))
 
     @model_validator(mode="after")
     def _actions(self):
+        if self.delegate is not None:
+            if self.ignore or self.any() or self.during:
+                raise ValueError(f"rule {self.id}: a delegate rule has no other action")
+            if not unspoofable(self.match.model_dump(exclude_none=True)):
+                raise ValueError(f"rule {self.id}: delegate needs a matcher a module cannot spoof: requirement, or team_id "
+                                 "with identifier (macOS), or path_prefix naming one executable's exact path (Linux, Windows)")
+            return self
         if self.ignore and (self.any() or self.during):
             raise ValueError(f"rule {self.id}: ignore cannot be combined with actions")
         if not self.ignore and not (self.any() or self.during):
@@ -251,7 +273,20 @@ def refusals(config: dict, os: str) -> list[str]:
     equal by shared vectors (fixtures/protection-support-vectors.json). Empty: it can. An unknown OS refuses
     nothing."""
     out = []
-    for r in config.get("rule") or config.get("rules") or []:
+    rules = config.get("rule") or config.get("rules") or []
+    # a delegation names the owner's processes by what a module cannot copy (support.rs, the same words)
+    for r in [r for r in rules if r.get("delegate")]:
+        m = r.get("match") or {}
+        signed = bool(m.get("requirement") or (m.get("team_id") and m.get("identifier")))
+        p = m.get("path_prefix") or ""
+        path = bool(p) and not p.endswith(("/", "\\"))
+        if os == "darwin" and not signed:
+            out.append(f"rule {r.get('id')}: on macOS a delegation names a code-signing identity (requirement, or team_id "
+                       "with identifier): a path can be copied")
+        elif os in ("linux", "windows") and (not path or signed):
+            out.append(f"rule {r.get('id')}: on {os} a delegation names one executable's exact path (path_prefix), and "
+                       f"nothing else identifies it ({NO_SIGNING[os]})")
+    for r in [r for r in rules if not r.get("delegate")]:
         rid, m = r.get("id"), r.get("match") or {}
         why = NO_SIGNING.get(os)
         if why:

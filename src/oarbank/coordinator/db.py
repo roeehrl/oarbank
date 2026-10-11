@@ -309,10 +309,11 @@ class DB:
             from .joincodes import migrate as join_migrate
             from .settings import modkeys as settings_modkeys
             from .settings import store as settings_store
+            from .workloads import SCHEMA as WORKLOADS_SCHEMA
             join_migrate(self.conn)
             # one transaction: a reader (the console) sees the whole schema or none of it
             self.conn.executescript("BEGIN;" + SCHEMA + settings_store.SCHEMA + settings_modkeys.SCHEMA + ACCESS_SCHEMA
-                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + "COMMIT;")
+                                    + COORD_BUILDS_SCHEMA + JOIN_SCHEMA + WORKLOADS_SCHEMA + "COMMIT;")
             for table, cols in {**ADDED_COLUMNS, "node_groups": settings_store.GROUP_COLUMNS}.items():
                 _ensure_columns(self.conn, table, cols)
             settings_store.ensure(self.conn)

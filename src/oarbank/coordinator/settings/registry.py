@@ -146,6 +146,14 @@ SETTINGS = (
             "Jobs over their memory or CPU reservation are stopped where the OS enforces it (Linux cgroups, Windows Job "
             "Objects; macOS has none).", {"type": "boolean"}, default=False, wire="policy", section="jobs", advanced=True,
             tighten="higher", managed=True),
+    Setting("workloads", "Run workloads",
+            "Off: the node runs no module workloads (long-running daemons the owner assigned), and running ones stop.",
+            {"type": "boolean"}, default=True, wire="policy", section="jobs", tighten="lower", managed=True),
+    Setting("delegated_processes", "Delegated processes",
+            "On: owner rules with `delegate` let host protection pause and lower the owner's named processes (by code "
+            "signature or a trusted exact path) for a protected process. Never stopped.",
+            {"type": "boolean"}, default=False, wire="policy", section="protection", danger="T2", tighten="lower",
+            managed=True),
     Setting("services.disabled", "Services that do not run",
             "The module's services by name; a change re-checks and re-certifies the module on the nodes it reaches.",
             {"type": "array", "items": {"type": "string", "pattern": SERVICE_NAME}, "maxItems": 64}, default=[],

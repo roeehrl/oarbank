@@ -19,7 +19,7 @@ from oarbank_sdk import platform as pf
 from . import config as C
 from . import clock
 from .db import DB, jl
-from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools
+from . import agentbuilds, checkpoints, coordmove, datasets, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, statements, tools, workloads
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -300,7 +300,9 @@ def _node_directives(db: DB, node: dict) -> dict:
             "tool_pins": tools.pins(db, node, modstore.enabled_names(db)),
             "detect_tools": bool(node.get("want_detect")),
             "renew_cert": bool(node.get("client_cert_fp") and (node.get("client_cert_not_after") or 0) - now() < _renew_within()),
-            **coordmove.directives(db), **owner.directives(db)}
+            **coordmove.directives(db), **owner.directives(db),
+            # what this node runs of the modules' workloads, with each seat's fence and lease (docs/design/workloads.md)
+            "workloads": workloads.directives(db, node)}
 
 
 def _renew_within() -> float:
@@ -356,6 +358,7 @@ def hello(db: DB, node: dict, body: dict) -> dict:
         agentbuilds.observe(db, node, body)
         _observe_identity(db, node, body)
         _observe_tools(db, node, body)
+        wl_ack = workloads.observe(db, node, body)       # an adopted workload's report renews its lease below
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
         _lifecycle_step(db, node, facts)
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (node["node_id"],))
@@ -366,6 +369,8 @@ def hello(db: DB, node: dict, body: dict) -> dict:
     run_pending_goldens(db, node["node_id"])
     d = _node_directives(db, node)
     d.update(node_id=node["node_id"], kill=kill)
+    if wl_ack is not None:
+        d["workload_reports_ack"] = wl_ack
     return d
 
 
@@ -444,6 +449,7 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
             rep = {"services": [x for x in body["services"][:200] if isinstance(x, dict)],
                    "probes": [x for x in (body.get("probes") or [])[:200] if isinstance(x, dict)]}
             db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps(rep), t, nid))
+        wl_ack = workloads.observe(db, node, body)       # workloads' state, seats given up, report events
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
@@ -464,6 +470,8 @@ def heartbeat(db: DB, node: dict, body: dict) -> dict:
     d.update(cancel=cancel, revoke=revoke, recertify=recert)
     if ack is not None:
         d["journal_ack"] = ack
+    if wl_ack is not None:
+        d["workload_reports_ack"] = wl_ack
     return d
 
 

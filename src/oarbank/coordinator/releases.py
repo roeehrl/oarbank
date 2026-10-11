@@ -134,6 +134,13 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                           **({"gpu": sv.gpu.model_dump()} if sv.gpu.use != "none" or sv.gpu.apis_any else {})}
                          for sv in on(m.services)],
             "probes": [{"name": pr.name, "exec": list(pr.exec), "period_s": pr.period_s} for pr in on(m.probes)],
+            # workloads (docs/design/workloads.md): only when declared, so other entries keep their bytes
+            **({"workloads": [{"name": w.name, "exec": list(w.exec), "seat": w.seat, "identity": w.identity,
+                               "secrets": list(w.secrets), "listeners": list(w.listeners),
+                               "resources": w.resources.model_dump(), "gpu": w.gpu.model_dump(), "control": list(w.control),
+                               "pause_tolerance_s": w.effective_pause_tolerance_s(), "stop_timeout_s": w.stop_timeout_s,
+                               "restart": w.restart.model_dump(), "health": w.health.model_dump() if w.health else None,
+                               "reports": w.reports} for w in on(m.workloads)]} if on(m.workloads) else {}),
             # the module sandbox (spec/sandbox.md): the node-side grants, operator-approved before this version could
             # be enabled, canaried, pinned or promoted (modsandbox); the agent enforces exactly these
             "sandbox": {"contract": sb.contract, "net": {"mode": sb.net.mode, "allow": list(sb.net.allow)},

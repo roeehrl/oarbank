@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 94 operations, 2 explain kinds, 129 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 97 operations, 2 explain kinds, 156 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -97,6 +97,9 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `access.tokens.create` | T2 | yes | `oarbank token create` | yes |
 | `access.tokens.revoke` | T1 | yes | `oarbank op access.tokens.revoke` | yes |
 | `access.login_link` | T1 | yes | `oarbank console login [--account <name>]` | yes |
+| `workloads.assign` | T2 | yes | `oarbank workload assign <module>/<workload> --node N`<br>`oarbank workload assign <module>/<workload> --count C` | yes |
+| `workloads.unassign` | T1 | yes | `oarbank workload unassign <module>/<workload> --node N` | yes |
+| `workloads.restart` | T1 | yes | `oarbank workload restart <module>/<workload> --node N` | yes |
 | `secrets.set` | T1 | yes | `oarbank secret set <module> <name> [--node N]`<br>`oarbank secret set <module> <name> [--group G]` | yes |
 | `secrets.clear` | T1 | yes | `oarbank secret clear <module> <name> [--node N]`<br>`oarbank secret clear <module> <name> [--group G]` | yes |
 | `modules.cli_token` | T1 | yes | `oarbank cli <module> [args...]` | yes |
@@ -142,4 +145,11 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `NODE_QUARANTINED` | `nodes.clear_quarantine` |
 | `NO_RELEASE` | `modules.install`, `modules.enable` |
 | `RELEASE_UNSIGNED` | `releases.attach_signature` |
+| `WORKLOAD_UNASSIGNED` | `workloads.assign` |
+| `WORKLOAD_SEAT_ELSEWHERE` | `workloads.unassign` |
+| `WORKLOAD_WITHDRAWN` | `workloads.restart` |
+| `WORKLOAD_SECRETS_NOT_SET` | `secrets.set` |
+| `WORKLOAD_IDENTITY_SHARED` | `secrets.set` |
+| `WORKLOAD_POLICY_OFF` | `settings.apply` |
+| `WORKLOAD_NODE_NOT_ACTIVE` | `nodes.resume` |
 | `GOLDEN_MISMATCH` | `nodes.recertify` |

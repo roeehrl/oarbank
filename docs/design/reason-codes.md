@@ -84,6 +84,21 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `MEMORY_HARD_FLOOR` | Attempt {attempt} evicted by the memory hard floor ({why}) | P2 | – | – | – |
 | `MEMORY_HARD_FLOOR_SERVICE` | Service {service} stopped by the memory hard floor ({why}); its jobs requeued | P2 | no / no | – | – |
 | `PROTECTION_SERVICE_STOP` | Service {service} stopped by host protection ({reason}); its jobs requeued | P1 | no / no | – | – |
+| `MEMORY_HARD_FLOOR_WORKLOAD` | Workload {workload} stopped by the memory hard floor ({why}) and held until the guard is clear | P2 | – | – | – |
+| `WORKLOAD_PAUSE` | Workload {workload} paused (it tolerates {tolerance_s} s) | P1 | – | – | – |
+| `WORKLOAD_RESUME` | Workload {workload} resumed | P1 | – | – | – |
+| `WORKLOAD_LOWER` | Workload {workload} lowered to background scheduling | P1 | – | – | – |
+| `WORKLOAD_RESTORE` | Workload {workload} restored from background scheduling | P1 | – | – | – |
+| `WORKLOAD_THROTTLE` | Workload {workload} throttled: {threads} threads, a CPU cap of {cpu_cap} cores | P1 | – | – | – |
+| `WORKLOAD_HOLD` | Workload {workload} stopped and held by host protection ({cause}) | P2 | – | – | – |
+| `WORKLOAD_PAUSE_TOLERANCE` | Workload {workload} was paused for its tolerance ({tolerance_s} s): stopped and held while the pause would last | P2 | – | – | – |
+| `WORKLOAD_RELEASE` | Workload {workload} released from its hold ({cause} cleared after {held_s} s) | P1 | – | – | – |
+| `WORKLOAD_STOP` | Workload {workload} stopped by the agent | P1 | – | – | – |
+| `DELEGATE_PAUSE` | Delegated processes of rule {rule} paused ({processes}) | P1 | – | – | – |
+| `DELEGATE_RESUME` | Delegated processes of rule {rule} resumed ({processes}) | P1 | – | – | – |
+| `DELEGATE_LOWER` | Delegated processes of rule {rule} lowered ({processes}) | P1 | – | – | – |
+| `DELEGATE_RESTORE` | Delegated processes of rule {rule} restored ({processes}) | P1 | – | – | – |
+| `DELEGATE_PAUSE_LIMIT` | Delegated processes of rule {rule} were paused for the pause ceiling: resumed and lowered instead (a delegation never stops them) | P2 | – | – | – |
 | `RUNG_0` | Dynamic rung 0: no constraint ({why}) | P1 | – | – | – |
 | `RUNG_1` | Dynamic rung 1: admitting no new work ({why}) | P1 | – | – | – |
 | `RUNG_2` | Dynamic rung 2: the fleet CPU budget is under the allocatable cores ({why}) | P1 | – | – | – |
@@ -104,6 +119,23 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `PROTECTION_NO_LOWERING` | This node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable jobs are paused instead | P3 | – | – | – |
 | `PROTECTION_NO_IPC_COUNTERS` | Rule {rule} protects ipc_ratio, but this node's processes have no instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow | P4 | – | – | – |
 | `PROTECTION_SOURCE_ERROR` | The process table cannot be read: {error} | P3 | – | – | – |
+
+## workload
+
+| Code | Message | Severity | Node / job fault | Remedies | End reasons |
+|---|---|---|---|---|---|
+| `WORKLOAD_UNASSIGNED` | {workload} is not assigned to this node | P1 | – | `workloads.assign` | – |
+| `WORKLOAD_SEAT_ELSEWHERE` | {workload}'s seat (its identity) is held by another node until that node gives it up or its lease ends | P1 | – | `workloads.unassign` | – |
+| `WORKLOAD_SEAT_LEASE_EXPIRED` | {workload}'s seat lease ran out on this node (no word from the coordinator in time): stopped | P2 | – | – | – |
+| `WORKLOAD_HELD` | {workload} is held down by host protection ({reason}) | P1 | – | – | – |
+| `WORKLOAD_WITHDRAWN` | {workload} failed {failures} times in a row and was withdrawn: {error} | P2 | – | `workloads.restart` | – |
+| `WORKLOAD_RESTART` | {workload} restarted by the owner | P1 | – | – | – |
+| `WORKLOAD_SECRETS_NOT_SET` | {workload} receives secrets that have no value for this node | P1 | – | `secrets.set` | – |
+| `WORKLOAD_IDENTITY_SHARED` | {workload} has a per-node identity, and a secret it receives is set for a group or the whole module: set it for each node | P1 | – | `secrets.set` | – |
+| `WORKLOAD_NO_CONTAINMENT` | This node cannot contain a workload ({detail}) | P1 | – | – | – |
+| `WORKLOAD_POLICY_OFF` | This node's workloads setting is off | P1 | – | `settings.apply` | – |
+| `WORKLOAD_NOT_OFFERED` | {workload} cannot run on this node ({detail}) | P1 | – | – | – |
+| `WORKLOAD_NODE_NOT_ACTIVE` | The node is not active (paused or draining): its workloads are stopped | P1 | – | `nodes.resume` | – |
 
 ## attempt_end
 

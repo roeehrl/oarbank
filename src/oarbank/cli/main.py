@@ -175,6 +175,53 @@ def cmd_secret(a):
     print(f"{a.module}/{a.name} set for {res.get('scope') or 'the module'}: fingerprint {res['fingerprint']}")
 
 
+def cmd_workload(a):
+    """Workloads (docs/design/workloads.md): list, assign, unassign, restart, logs [--follow]."""
+    if a.action == "list":
+        q = "&".join(f"{k}={v}" for k, v in (("node", a.node), ("module", a.module)) if v)
+        rows = api("GET", "/api/v1/workloads" + (f"?{q}" if q else ""))["workloads"]
+        if a.json:
+            print(json.dumps(rows, indent=1, default=str))
+            return
+        if not rows:
+            print("no workloads assigned")
+        for r in rows:
+            rep = r["report"] or {}
+            seat = f" seat {r['seat_id']} fence {r['fence']}" if r.get("seat_id") else ""
+            lease = f" lease {rep['lease_left_s']:.0f} s" if rep.get("lease_left_s") is not None else ""
+            extra = [x for x in (rep.get("held") and f"held: {rep['held']}", rep.get("paused") and "paused",
+                                 rep.get("lowered") and "lowered", rep.get("error")) if x]
+            print(f"{r['key']:<28} {r['hostname'] or r['node_id']:<16} {r['state']:<10}"
+                  f"{(' ' + r['reason']) if r.get('reason') else ''}{seat}{lease}"
+                  f"{'  (' + '; '.join(map(str, extra)) + ')' if extra else ''}")
+        return
+    if not a.workload or "/" not in a.workload:
+        sys.exit(f"oarbank workload {a.action} <module>/<workload> --node N")
+    if a.action == "logs":
+        if not a.node:
+            sys.exit("oarbank workload logs <module>/<workload> --node N [--follow]")
+        module, name = a.workload.split("/", 1)
+        seen = None
+        while True:
+            d = api("GET", f"/api/v1/workloads/{module}/{name}/logs?node={a.node}")
+            text = d["log_tail"]
+            if text != seen:
+                new = text
+                if seen:                                 # only what came after the last part already printed
+                    tail = seen[-200:]
+                    at = text.rfind(tail)
+                    new = text[at + len(tail):] if at >= 0 else text
+                print(new, end="" if not new or new.endswith("\n") else "\n")
+                seen = text
+            if not a.follow:
+                return
+            time.sleep(2)
+    params = {"node": a.node} if a.node else ({"count": a.count} if a.count is not None else {})
+    op = {"assign": "workloads.assign", "unassign": "workloads.unassign", "restart": "workloads.restart"}[a.action]
+    res = run_op(op, a.workload, params, a.reason, a.yes, dry_run=a.dry_run)
+    print(json.dumps(res.get("result", res), indent=1, default=str))
+
+
 MARK = {"done": "[done]   ", "blocked": "[BLOCKED]", "waiting": "[waiting]", "next": "[next]   ", "skipped": "[n/a]    "}
 
 
@@ -1719,6 +1766,19 @@ def parser() -> argparse.ArgumentParser:
     mo.add_argument("--yes", action="store_true")
     mo.add_argument("--dry-run", action="store_true")
     mo.set_defaults(fn=cmd_module)
+    wl = sub.add_parser("workload", help="workloads (long-running daemons the owner assigns to nodes): list, assign, unassign, "
+                        "restart, logs [--follow]")
+    wl.add_argument("action", choices=["list", "assign", "unassign", "restart", "logs"])
+    wl.add_argument("workload", nargs="?", help="<module>/<workload>")
+    wl.add_argument("--node", help="a node (hostname or id)")
+    wl.add_argument("--module", help="list: one module's workloads only")
+    wl.add_argument("--count", type=int, help="assign: place this many seats of a seat = \"fleet\" workload")
+    wl.add_argument("--follow", action="store_true", help="logs: keep printing new lines")
+    wl.add_argument("--json", action="store_true")
+    wl.add_argument("--reason")
+    wl.add_argument("--yes", action="store_true")
+    wl.add_argument("--dry-run", action="store_true")
+    wl.set_defaults(fn=cmd_workload)
     se = sub.add_parser("secret", help="module secrets, write-only: set (value from stdin or a no-echo prompt), clear, list")
     se.add_argument("action", choices=["set", "clear", "list"])
     se.add_argument("module")

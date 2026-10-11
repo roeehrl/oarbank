@@ -30,7 +30,7 @@ class Operation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     id: str = Field(pattern=r"^[a-z]+(\.[a-z_]+)+$")
     area: Literal["fleet", "nodes", "jobs", "campaigns", "datasets", "modules", "releases", "agent", "coordinator",
-                  "protection", "alerts", "settings", "audit", "access"]
+                  "protection", "alerts", "settings", "audit", "access", "workloads"]
     summary: str
     tier: Tier
     escalates: str | None = Field(None, description="When the tier rises one level (besides bulk).")
@@ -429,6 +429,22 @@ OPS: list[Operation] = [
     Operation(id="access.login_link", area="access", summary="Mint a one-time console sign-in link (valid 2 minutes)",
               tier="T1", min_role="admin", category="access", idempotency="natural",
               routes=OPR("access.login_link"), cli=["oarbank console login [--account <name>]"], gui=CON("access.login_link")),
+    # workloads (docs/design/workloads.md): the owner assigns a module's workload to nodes; seats and leases follow
+    Operation(id="workloads.assign", area="workloads",
+              summary="Assign a module's workload to a node (seat \"node\") or ask the coordinator to place a count of seats (seat \"fleet\"); the preview names each node, the secrets it receives, its seat, listeners and the protection rules there",
+              tier="T2", preview=True, min_role="admin", category="create", reverses="workloads.unassign", idempotency="natural",
+              routes=OPR("workloads.assign"), gui=CON("workloads.assign"),
+              cli=["oarbank workload assign <module>/<workload> --node N", "oarbank workload assign <module>/<workload> --count C"]),
+    Operation(id="workloads.unassign", area="workloads",
+              summary="Stop running a workload on a node; its seat goes back once the node reports it stopped",
+              tier="T1", min_role="operator", category="remove", reverses="workloads.assign", idempotency="natural",
+              routes=OPR("workloads.unassign"), gui=CON("workloads.unassign"),
+              cli=["oarbank workload unassign <module>/<workload> --node N"]),
+    Operation(id="workloads.restart", area="workloads",
+              summary="Restart a workload on a node (also lifts a withdrawal after repeated failures)",
+              tier="T1", min_role="operator", category="modify", idempotency="natural",
+              routes=OPR("workloads.restart"), gui=CON("workloads.restart"),
+              cli=["oarbank workload restart <module>/<workload> --node N"]),
     Operation(id="secrets.set", area="modules", summary="Set a module secret for the module, a node group or one node (write-only: the value is never shown, only a fingerprint)",
               tier="T1", min_role="admin", category="modify", reverses="secrets.clear", idempotency="declarative",
               routes=OPR("secrets.set"), cli=["oarbank secret set <module> <name> [--node N]", "oarbank secret set <module> <name> [--group G]"],
@@ -480,6 +496,7 @@ for _op in OPS:
 AGENT_ROUTES = {
     ("POST", "/v1/agent/enroll"), ("POST", "/v1/agent/hello"), ("POST", "/v1/agent/heartbeat"),
     ("POST", "/v1/agent/claim"), ("POST", "/v1/agent/cert"), ("POST", "/v1/attempts/{aid}/complete"), ("POST", "/v1/attempts/{aid}/release"),
+    ("POST", "/v1/agent/workloads/secrets"),
     ("POST", "/v1/attempts/{aid}/fail"), ("POST", "/v1/attempts/{aid}/log"), ("POST", "/v1/attempts/{aid}/checkpoint"),
     ("POST", "/v1/uploads/{digest}"), ("PATCH", "/v1/uploads/{digest}"),
     # the coordinator-move channel between the old coordinator and its standby target (coordinator-move.md):
