@@ -216,7 +216,8 @@ def test_a_double_forking_workload_is_assigned_paused_held_adopted_and_unassigne
         # unassigned: everything of it ends, the seat is given back
         c.api("POST", "/api/v1/ops/workloads.unassign", json={"target": "toy/worker", "params": {"node": nid}, "reason": "e2e"})
         wait(lambda: not tree.alive(daemon) and not tree.alive(leader), timeout=60)
-        assert not (home / "state" / "workloads" / "toy.worker.json").exists()
+        # the agent cleans up once it has seen every process gone (its own process-table check can trail ps's)
+        wait(lambda: not (home / "state" / "workloads" / "toy.worker.json").exists(), timeout=30)
         assert not (home / "run" / "workloads" / "toy" / "worker" / "secrets.json").exists()
         # the guard: the agent acted on nothing but this test's own processes
         assert tree.check_journal(home) > 0
