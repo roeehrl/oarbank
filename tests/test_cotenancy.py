@@ -183,3 +183,22 @@ def test_the_statistics_twin_matches_the_shared_vectors():
     rng = abstats.SplitMix(42)
     assert [rng.next() for _ in range(5)] == v["splitmix_42"]
     assert abstats.describe({"n": 1}) == "Not enough blocks to decide."
+
+
+def test_phases_aggregate_across_nodes_by_tag(db, node):
+    """The interface per-site features read (a shared internet line): any node's phase tagged uplink, never looser."""
+    from oarbank.coordinator import protection
+    ph = lambda on, readable=True, tags=("uplink",): {"key": "trainer#0", "rule": "trainer", "block": 0, "on": on,
+                                                        "readable": readable, "reader": "helper", "tags": list(tags)}
+    core.heartbeat(db, fresh(db, node), {"telemetry": {"protection": {"phases": [ph(False), ph(True, tags=("other",))]}}})
+    nid = node["node_id"]
+    d = protection.node_phases(db, [nid], "uplink")[nid]
+    assert d["fresh"] and len(d["phases"]) == 1
+    assert protection.any_phase_on(db, [nid], "uplink") == {"on": False, "why": []}
+    core.heartbeat(db, fresh(db, node), {"telemetry": {"protection": {"phases": [ph(True)]}}})
+    assert protection.any_phase_on(db, [nid], "uplink")["on"]
+    core.heartbeat(db, fresh(db, node), {"telemetry": {"protection": {"phases": [ph(False, readable=False)]}}})
+    assert "unreadable" in protection.any_phase_on(db, [nid], "uplink")["why"][0]
+    core.heartbeat(db, fresh(db, node), {"telemetry": {"protection": {"phases": [ph(False)]}}})
+    db.x("UPDATE nodes SET last_heartbeat_at=? WHERE node_id=?", (time.time() - 600, nid))
+    assert protection.any_phase_on(db, [nid], "uplink")["why"] == [f"{nid}: not reporting"]

@@ -282,6 +282,45 @@ def runtime_conditions(tel: dict) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ phases across nodes (for per-site aggregation)
+
+PHASES_FRESH_S = 60          # a node silent longer than this reports nothing current: its phases are unknown
+
+
+def node_phases(db: DB, node_ids=None, tag: str | None = None, now: float | None = None) -> dict:
+    """Every node's owner phases as its agent last reported them (`telemetry.protection.phases`), for features that
+    aggregate them over a set of nodes (a site sharing one internet line: is any protected process there in a phase
+    tagged `uplink`?). {node_id: {"fresh": bool, "phases": [phase, ...]}}, each phase as the agent reports it (`key`,
+    `rule`, `block`, `on`, `since`, `readable`, `reader`, `tags`, `immediate`), filtered to `tag` when given. A node
+    whose heartbeat is older than PHASES_FRESH_S is `fresh: False` (its phases are unknown, and a fail-safe consumer
+    treats unknown as on); an unreadable phase is reported `readable: False` (the agent already holds it as on)."""
+    t = time.time() if now is None else now
+    rows = db.q("SELECT node_id, telemetry_json, last_heartbeat_at FROM nodes WHERE lifecycle!='retired'")
+    want = set(node_ids) if node_ids is not None else None
+    out = {}
+    for n in rows:
+        if want is not None and n["node_id"] not in want:
+            continue
+        tel = jl(n["telemetry_json"], {}) or {}
+        phases = [p for p in (tel.get("protection") or {}).get("phases") or []
+                  if isinstance(p, dict) and (tag is None or tag in (p.get("tags") or []))]
+        out[n["node_id"]] = {"fresh": (n["last_heartbeat_at"] or 0) >= t - PHASES_FRESH_S, "phases": phases}
+    return out
+
+
+def any_phase_on(db: DB, node_ids, tag: str) -> dict:
+    """Whether any of these nodes is in a phase tagged `tag` now, never looser: on when a phase is on or unreadable,
+    or when a node with such a phase configured has not reported recently. {"on": bool, "why": [...]}."""
+    why = []
+    for nid, d in node_phases(db, node_ids, tag).items():
+        for p in d["phases"]:
+            if p.get("on") or p.get("readable") is False:
+                why.append(f"{nid}: {p.get('key')} {'on' if p.get('on') else 'unreadable'}")
+        if d["phases"] and not d["fresh"]:
+            why.append(f"{nid}: not reporting")
+    return {"on": bool(why), "why": why}
+
+
 # ------------------------------------------------------------------ preview
 
 diff = PM.diff

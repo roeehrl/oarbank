@@ -89,7 +89,7 @@ def test_phases_harness_and_certificates_on_a_real_agent(agent_bin, coordinator,
         # a harness run: short windows; no fleet work runs, so ON and OFF are alike and no slowdown is shown
         run = op(coordinator, "protection.ab.start", nid, {"rule": "trainer", "work": "all", "blocks": 2, "pilot_blocks": 2,
                                                            "window_s": 30, "washout_s": 4, "margin": 0.2, "max_hours": 1})
-        rid = run["result"]["result"]["run_id"]
+        rid = run["result"]["run_id"]
 
         def detail():
             return coordinator.api("GET", f"/api/v1/protection/ab/runs/{rid}")

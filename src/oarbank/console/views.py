@@ -291,7 +291,9 @@ REMEDY_FORMS = {"settings.apply": ("/nodes/{node}/settings#caps", "/settings#nod
                 "tools.define": ("/settings#tools", "/settings"),
                 "settings.folders.update": ("/settings", "/settings"),
                 "agent.promote": ("/agent", "/agent"), "modules.install": ("/modules", "/modules"),
-                "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings")}
+                "modules.enable": ("/modules", "/modules"), "releases.attach_signature": ("/settings#releases", "/settings"),
+                "protection.ab.sweep": ("/nodes/{node}/protection#cotenancy", "/"),
+                "protection.ab.abort": ("/protection/ab/{run_id}", "/")}
 REMEDY_INPUTS = {"jobs.set_priority": "priority"}
 
 

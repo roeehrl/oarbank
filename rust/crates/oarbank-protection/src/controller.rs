@@ -1296,6 +1296,9 @@ impl ProtectionController {
             ("rung", Value::from(self.last_rung)),
             ("dynamic", Value::from(self.last_dynamic.as_str())),
             ("budget_cores", opt_num(self.dynamic.budget())),
+            // owner phases and who reads them: an unreadable one (a person's home with nobody logged in) holds the fleet
+            ("phases", serde_json::to_value(self.sources.phases()).unwrap_or(Value::Null)),
+            ("harness", self.harness.as_ref().map(|h| h.report(crate::sources::wall_now())).unwrap_or(Value::Null)),
         ]))
     }
 
