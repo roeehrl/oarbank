@@ -81,8 +81,24 @@ also unions this with its local protection file, strictest wins.</p>
   </table>
   {% set lat = cot.event_latency or {} %}
   <p class="small">Event path, source event to pause request: {% if lat.n %}p50 {{ lat.p50_ms }} ms · p99 {{ lat.p99_ms }} ms · max {{ lat.max_ms }} ms over {{ lat.n }}{% else %}<span class="mut">no immediate pause yet</span>{% endif %}</p>
-  {% if cot.gpu_budget %}<p class="small">GPU budget beside protected GPU work: {% if cot.gpu_budget.not_certified %}<span class="chip acc">0: not certified for {{ cot.gpu_budget.not_certified | join(', ') }}</span>{% else %}<b>gpu_duty {{ cot.gpu_budget.duty }}</b> for {{ cot.gpu_budget.jobs }} cooperative job{{ 's' if cot.gpu_budget.jobs != 1 }}{% endif %}</p>{% endif %}
 </div>
+{% if cot.gpu_budget %}{% set gb = cot.gpu_budget %}
+<div class="card" id="gpu-duty">
+  <b>GPU duty</b> <span class="small mut">(cooperative GPU work beside protected GPU work: an AIMD budget on the protected program's progress, never above the certificate)</span>
+  {% if gb.not_certified %}<p class="small"><span class="chip acc">0: not certified for {{ gb.not_certified | join(', ') }}</span> GPU work waits until a harness run certifies a duty.</p>
+  {% else %}
+  {% set st = {'running': ('ok', 'running'), 'measuring': ('acc', 'measuring the baseline'), 'locked': ('warn', 'taken back, locked out'), 'held': ('warn', 'held at 0'), 'harness': ('acc', 'a harness run decides'), 'idle': ('', 'idle')}.get(gb.state, ('', gb.state)) %}
+  <p class="small">Budget <b>gpu_duty {{ gb.duty }}</b> of the certified {{ gb.ceiling if gb.ceiling is not none else '–' }} <span class="chip {{ st[0] }}">{{ st[1] }}</span>{% if gb.lockout_s %} <span class="mut">for {{ gb.lockout_s | int }} s more</span>{% endif %} beside <span class="mono">{{ gb.rules | join(', ') }}</span>; {{ gb.jobs }} unit{{ 's' if gb.jobs != 1 }} at {{ gb.per_job }} each.</p>
+  {% for rule, b in (gb.baseline or {}).items() %}<p class="small mut">Baseline of <span class="mono">{{ rule }}</span> without fleet GPU work: {% if b.rate is not none %}{{ b.rate }}/s, {{ b.age_s | int }} s old{% if b.pressure is not none %}; last minute's harm {{ '%.0f' | format(b.pressure * 100) }} % of the target{% endif %}{% else %}not measured yet{% endif %}</p>{% endfor %}
+  <table class="small"><tr><th scope="col">GPU unit</th><th scope="col">gpu_duty asked</th><th scope="col">measured</th><th scope="col">state</th></tr>
+  {% for u in gb.units or [] %}<tr><td class="mono">{{ u.module or '?' }}/{{ u.stage or '?' }} <span class="mut">attempt {{ u.attempt_id }}</span></td>
+    <td>{{ u.duty if u.duty is not none else '–' }}</td><td>{{ u.measured if u.measured is not none else '–' }}</td>
+    <td>{% if u.state == 'ok' %}<span class="chip ok">holds its duty</span>{% elif u.state == 'held' %}<span class="chip warn" title="held for {{ u.for_s | int }} s">held: {{ 'over its duty' if u.why == 'exceeded' else 'GPU time unreadable' }}</span>{% elif u.state == 'distrusted' %}<span class="chip warn">not trusted for an hour</span>{% elif u.state == 'cannot_throttle' %}<span class="chip">cannot throttle: waits</span>{% elif u.state == 'evicted' %}<span class="chip bad">stopped</span>{% else %}<span class="chip">{{ u.state }}</span>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="4" class="mut">no GPU work here now</td></tr>{% endfor %}</table>
+  {% for d in gb.distrusted or [] %}<p class="small"><span class="chip warn">{{ d.unit }}</span> exceeded its gpu_duty three times within an hour: no duty for {{ (d.for_s / 60) | int }} min more.</p>{% endfor %}
+  {% endif %}
+</div>
+{% endif %}
 <div class="card">
   <b>Certificates</b>
   <table class="small"><tr><th scope="col">rule</th><th scope="col">work</th><th scope="col">R (90 % interval)</th><th scope="col">until</th><th scope="col">state</th></tr>

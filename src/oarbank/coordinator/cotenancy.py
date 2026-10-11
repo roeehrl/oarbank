@@ -368,9 +368,49 @@ def node_card(db: DB, node: dict) -> dict:
     prot = tel.get("protection") or {}
     certs = [c for c in list_certificates(db, node["node_id"])]
     last = db.one("SELECT * FROM ab_runs WHERE node_id=? ORDER BY created_at DESC LIMIT 1", (node["node_id"],))
-    return {"gpu_budget": prot.get("gpu_budget"), "event_latency": prot.get("event_latency"),
+    budget = prot.get("gpu_budget")
+    if budget:
+        budget = {**budget, "units": _units(db, budget)}
+    return {"gpu_budget": budget, "event_latency": prot.get("event_latency"),
             "phases": prot.get("phases") or [], "progress": prot.get("progress") or [],
             "certificates": certs[:20], "last_run": _run_doc(db, last, full=False) if last else None}
+
+
+def _units(db: DB, budget: dict) -> list[dict]:
+    """The duty governor's units (`gpu_budget.units`, by attempt id) with the job, module and stage each one runs."""
+    out = []
+    for u in budget.get("units") or []:
+        a = db.one("SELECT a.attempt_id, a.job_id, a.state, j.module, j.stage FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
+                   "WHERE a.attempt_id=?", (u.get("id"),)) or {}
+        out.append({**u, "attempt_id": u.get("id"), "job_id": a.get("job_id"), "module": a.get("module"),
+                    "stage": a.get("stage"), "attempt_state": a.get("state")})
+    return out
+
+
+def duty_view(db: DB, node: str | None = None) -> list[dict]:
+    """The GPU duty governor on each node (one with `node`), as its agent last reported it (`telemetry.protection.
+    gpu_budget`, D50): the budget against the certified ceiling and the governor's state, the gating rules, each GPU
+    unit's requested and measured duty and its compliance state, the units it does not trust, and its journaled
+    budget steps and compliance actions of the last 24 hours. Nodes that report no budget (gpu_jobs is not certified, or
+    no protected group is using the GPU) are left out unless named."""
+    rows = [_node(db, node)] if node else db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+    since = now() - 86400
+    out = []
+    for n in rows:
+        prot = (jl(n.get("telemetry_json"), {}) or {}).get("protection") or {}
+        b = prot.get("gpu_budget")
+        if not b and not node:
+            continue
+        b = b or {}
+        steps = db.q("SELECT t, reason, record_json FROM protection_decisions WHERE node_id=? AND kind IN "
+                     "('gpu_duty','gpu_compliance') AND t>=? ORDER BY t DESC, seq DESC LIMIT 50", (n["node_id"], since))
+        out.append({"node_id": n["node_id"], "hostname": n["hostname"], "duty": b.get("duty"), "ceiling": b.get("ceiling"),
+                    "state": b.get("state") or ("not_certified" if b.get("not_certified") else None),
+                    "rules": b.get("rules") or [], "not_certified": b.get("not_certified") or [],
+                    "per_job": b.get("per_job"), "jobs": b.get("jobs"), "lockout_s": b.get("lockout_s"),
+                    "baseline": b.get("baseline") or {}, "units": _units(db, b), "distrusted": b.get("distrusted") or [],
+                    "events": [{"t": r["t"], "reason": r["reason"], **(jl(r["record_json"], {}) or {})} for r in steps]})
+    return out
 
 
 def gpu_jobs_values() -> tuple[str, ...]:

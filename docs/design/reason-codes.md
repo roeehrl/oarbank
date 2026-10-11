@@ -115,6 +115,14 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `AB_IDLE` | Harness run {run_id} ended: its work runs as protection allows | P1 | – | – | – |
 | `AB_FINISHED` | Harness run {run_id} ended: {decision} ({why}) | P1 | – | – | – |
 | `AB_REFUSED` | Harness run {run_id} refused by the node: {why} | P4 | – | – | – |
+| `GPU_DUTY_START` | GPU duty budget {duty} beside the protected GPU work (certified ceiling {ceiling}): {why} | P1 | – | – | – |
+| `GPU_DUTY_BASELINE` | Fleet GPU work held for a minute to measure the protected program without it ({why}) | P1 | – | – | – |
+| `GPU_DUTY_GROW` | GPU duty budget grown to {duty} after a clean minute (certified ceiling {ceiling}) | P1 | – | – | – |
+| `GPU_DUTY_HALVE` | GPU duty budget halved to {duty}: the protected program slowed to its target | P1 | – | – | – |
+| `GPU_DUTY_TAKE_BACK` | GPU duty budget taken back to 0: {why} | P3 | – | – | – |
+| `GPU_DUTY_CLAMP` | GPU duty budget lowered to the certified ceiling {ceiling} | P1 | – | – | – |
+| `GPU_DUTY_EXCEEDED` | {unit} kept the GPU {measured} busy against a gpu_duty of {duty} for three samples: {action} (the third time within an hour stops it, and it gets no duty for an hour) | P3 | – | – | – |
+| `GPU_DUTY_UNVERIFIED` | The GPU time of {unit} cannot be read, so its gpu_duty cannot be checked: {action} | P4 | – | – | – |
 
 ## attempt_end
 

@@ -118,6 +118,8 @@ struct UnitTrack {
     held_until: f64,
     last_busy: Option<f64>,
     state: &'static str,
+    /// Why it is held: `exceeded` (over its duty) or `unverified` (its GPU time could not be read).
+    held_why: &'static str,
 }
 
 /// The governor's tunables and state (docs/design/gpu-cotenancy.md, "Defaults").
@@ -490,6 +492,7 @@ impl DutyGovernor {
             if t.over >= self.samples {
                 t.over = 0;
                 t.held_until = now + self.hold_s;
+                t.held_why = "exceeded";
                 let log = self.strike_log.entry(u.key.clone()).or_default();
                 log.push(now);
                 if log.len() >= self.strikes || !u.pausable {
@@ -505,6 +508,7 @@ impl DutyGovernor {
             } else if t.unverified >= self.samples {
                 t.unverified = 0;
                 t.held_until = now + self.hold_s;
+                t.held_why = "unverified";
                 let action = if u.pausable { "paused" } else { "evicted" };
                 if !u.pausable {
                     out.evict.push(u.id);
@@ -580,9 +584,14 @@ impl DutyGovernor {
 
     /// The heartbeat's `gpu_budget` beyond what the controller adds (rules, not_certified).
     pub fn telemetry(&self, now: f64) -> Value {
-        let mut units: Vec<Value> = self.units.iter().map(|(id, t)| json!({
-            "id": id, "duty": t.duty_prev.map(round3), "measured": t.last_busy.map(round3), "state": t.state,
-        })).collect();
+        let mut units: Vec<Value> = self.units.iter().map(|(id, t)| {
+            let mut u = json!({"id": id, "duty": t.duty_prev.map(round3), "measured": t.last_busy.map(round3), "state": t.state});
+            if t.state == "held" {
+                u["why"] = Value::from(t.held_why);
+                u["for_s"] = json!(round3((t.held_until - now).max(0.0)));
+            }
+            u
+        }).collect();
         units.sort_by_key(|u| u["id"].as_i64());
         let baseline: serde_json::Map<String, Value> = self.rules.iter()
             .map(|(k, r)| (k.clone(), json!({"rate": r.baseline.map(round3), "age_s": r.baseline.map(|_| round3(now - r.baseline_at)),

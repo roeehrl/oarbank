@@ -279,6 +279,17 @@ def runtime_conditions(tel: dict) -> list[dict]:
         out.append({"code": "GPU_NOT_CERTIFIED", "tone": "acc", "values": {"rules": rules},
                     "message": f"gpu_jobs = certified, but no valid co-tenancy certificate covers {rules}: fleet GPU work "
                                "waits as with when_no_gpu_protected (oarbank protection ab sweep <node> --rule <id>)"})
+    # the duty governor (D50): units it does not trust with a duty, and units whose GPU time it cannot read
+    for d in budget.get("distrusted") or []:
+        out.append({"code": "GPU_DUTY_EXCEEDED", "tone": "warn", "values": {"unit": d.get("unit"), "action": "not trusted"},
+                    "message": f"{d.get('unit')} exceeded its gpu_duty three times within an hour and was stopped; it gets "
+                               f"no duty beside protected GPU work for another {int(d.get('for_s') or 0) // 60} min (does its "
+                               "runner hold gpu_duty? oarbank-sdk conform checks it)"})
+    unread = sorted({str(u.get("id")) for u in budget.get("units") or [] if u.get("why") == "unverified"})
+    if unread:
+        out.append({"code": "GPU_DUTY_UNVERIFIED", "tone": "warn", "values": {"unit": ", ".join(unread), "action": "held"},
+                    "message": f"the GPU time of attempts {', '.join(unread)} cannot be read on this node, so their gpu_duty "
+                               "cannot be checked: they wait beside protected GPU work"})
     return out
 
 

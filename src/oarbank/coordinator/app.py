@@ -975,6 +975,15 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         except cotenancy.CotenancyError as e:
             raise core.ApiError(404, "not_found", str(e))
 
+    @app.get("/api/v1/protection/duty")
+    def api_gpu_duty(node: str | None = None, actor=Depends(who)):
+        """The GPU duty governor per node (D50; `oarbank protection duty`)."""
+        from . import cotenancy
+        try:
+            return {"nodes": cotenancy.duty_view(db, node)}
+        except cotenancy.CotenancyError as e:
+            raise core.ApiError(404, "not_found", str(e))
+
     @app.get("/api/v1/jobs/{jid}")
     def api_job(jid: int, actor=Depends(who)):
         """The job, its attempts, the checkpoint its next attempt resumes from, its results and its explain document."""
