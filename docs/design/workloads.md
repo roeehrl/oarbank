@@ -275,7 +275,10 @@ unchanged):
    The pause probe never pauses a workload.
 5. **Stop and hold** for as long as the cause lasts: the memory guard's victim (held until the guard is clear), a rule's
    `evict` (held while the rule is active), a pause beyond the tolerance (held while the workload would still be
-   paused), GPU work not allowed for a GPU workload that cannot be paused. When the cause clears it starts again after
+   paused), GPU work not allowed for a GPU workload that cannot be paused, a network-heavy workload
+   (`resources.network = "heavy"`) whose site is in an uplink phase and that cannot pause or has paused for its
+   tolerance (cause `site`, released as `preempt_site`: [sites.md](sites.md); such a workload pauses under the site's
+   hold exactly as under a pause scope, and is not started while it lasts). When the cause clears it starts again after
    `restart.backoff_initial_s` (a hold is not a failure).
 
 Every action is journaled with the workload's key (`WORKLOAD_PAUSE`, `WORKLOAD_RESUME`, `WORKLOAD_LOWER`,

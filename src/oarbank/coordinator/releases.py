@@ -139,7 +139,7 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
             # workloads (docs/design/workloads.md): only when declared, so other entries keep their bytes
             **({"workloads": [{"name": w.name, "exec": list(w.exec), "seat": w.seat, "identity": w.identity,
                                "secrets": list(w.secrets), "listeners": list(w.listeners),
-                               "resources": w.resources.model_dump(), "gpu": w.gpu.model_dump(), "control": list(w.control),
+                               "resources": _workload_resources(w), "gpu": w.gpu.model_dump(), "control": list(w.control),
                                "pause_tolerance_s": w.effective_pause_tolerance_s(), "stop_timeout_s": w.stop_timeout_s,
                                "restart": w.restart.model_dump(), "health": w.health.model_dump() if w.health else None,
                                "reports": w.reports} for w in on(m.workloads)]} if on(m.workloads) else {}),
@@ -458,3 +458,12 @@ def promote(db: DB, release_id: str, actor: str):
     db.event("release_promoted", actor=actor, reason=release_id)
     if actor != "build":                  # a build in sync() notes once, after every platform
         note_awaiting(db)
+
+
+def _workload_resources(w) -> dict:
+    """A workload's resources for the release entry; `network` only when it is heavy (docs/design/sites.md), so an entry
+    without it keeps its bytes."""
+    r = w.resources.model_dump()
+    if r.get("network", "normal") == "normal":
+        r.pop("network", None)
+    return r

@@ -290,11 +290,29 @@ def observe(db: DB, node: dict, t: float | None = None) -> None:
 # ------------------------------------------------------------------ the budget
 
 def heavy_running(db: DB, site_id: str) -> int:
-    """Live attempts of network-heavy stages on the site's nodes."""
+    """Network-heavy work running on the site's nodes: live attempts of network-heavy stages, and network-heavy
+    workloads their nodes report running (workloads[].resources.network; owner-assigned, so counted, never refused)."""
     rows = db.q("SELECT j.module, j.resources_json, n.platform FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
                 "JOIN nodes n ON n.node_id=a.node_id JOIN site_members m ON m.node_id=a.node_id "
                 "WHERE a.state='live' AND m.site_id=?", (site_id,))
-    return sum(1 for r in rows if is_heavy(jl(r["resources_json"], {}) or {}, r["platform"]))
+    jobs = sum(1 for r in rows if is_heavy(jl(r["resources_json"], {}) or {}, r["platform"]))
+    return jobs + len(heavy_workloads(db, site_id))
+
+
+def heavy_workloads(db: DB, site_id: str) -> list[str]:
+    """`module/workload@host` for each network-heavy workload running at the site now."""
+    try:
+        rows = db.q("SELECT s.module, s.workload, n.hostname FROM workload_status s JOIN site_members m "
+                    "ON m.node_id=s.node_id JOIN nodes n ON n.node_id=s.node_id WHERE m.site_id=? AND s.running=1", (site_id,))
+    except Exception:                                  # a home without the workloads tables
+        return []
+    from . import workloads
+    out = []
+    for r in rows:
+        d = workloads.decl(r["module"], r["workload"])
+        if d is not None and getattr(d.resources, "network", "normal") == "heavy":
+            out.append(f"{r['module']}/{r['workload']}@{r['hostname']}")
+    return out
 
 
 def is_heavy(resources: dict, platform: str | None = None) -> bool:
@@ -576,7 +594,8 @@ def detail(db: DB, ref: str, t: float | None = None) -> dict:
     u = usage(db, site, t)
     names = _hostnames(db, {x["node_id"] for x in u["leases"]})
     leases = [{"lease_id": x["lease_id"], "node": names.get(x["node_id"], x["node_id"]), "kind": x["kind"], "dir": x["dir"],
-               "bytes": x["bytes"], "mbps": x["mbps"], "age_s": round(t - x["granted_at"], 1)} for x in u["leases"]]
+               "bytes": x["bytes"], "mbps": x["mbps"], "age_s": round(t - x["granted_at"], 1),
+               "revoked": bool(x["revoked_at"])} for x in u["leases"]]
     recent = db.q("SELECT t.*, n.hostname FROM uplink_transfers t LEFT JOIN nodes n ON n.node_id=t.node_id WHERE t.site_id=? "
                   "ORDER BY t.at DESC LIMIT 20", (site["site_id"],))
     events = db.q("SELECT ts, kind, reason FROM events WHERE kind IN ('site_uplink_hold','site_uplink_free','site_created',"

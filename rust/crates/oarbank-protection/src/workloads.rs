@@ -55,6 +55,9 @@ pub struct FleetWorkloadView {
     pub gpu: bool,
     /// The processes of its container: whose GPU time the duty governor checks against its `gpu_duty` (D50).
     pub pids: Vec<i32>,
+    /// It declares `resources.network = "heavy"` and its node's site holds network-heavy work now (an uplink phase at
+    /// the site: docs/design/sites.md). It pauses for its tolerance, or is stopped and held while the hold lasts.
+    pub site_hold: bool,
 }
 
 impl FleetWorkloadView {
@@ -87,6 +90,9 @@ pub enum HoldCause {
     PauseTolerance,
     /// GPU work may not run and it cannot be paused: held until GPU work may run.
     Gpu,
+    /// A network-heavy workload whose site is in an uplink phase, that cannot pause or has paused for its tolerance:
+    /// held until the site's hold ends (docs/design/sites.md).
+    Site,
 }
 
 impl HoldCause {
@@ -96,6 +102,7 @@ impl HoldCause {
             Self::Evict => "evict",
             Self::PauseTolerance => "pause_tolerance",
             Self::Gpu => "gpu",
+            Self::Site => "site",
         }
     }
 }
@@ -198,6 +205,7 @@ impl WorkloadLadder {
                     HoldCause::Evict => !i.evict_active,
                     HoldCause::PauseTolerance => !would_pause,
                     HoldCause::Gpu => i.gpu_allowed,
+                    HoldCause::Site => !w.site_hold,
                 };
                 if clear {
                     let h = self.holds.remove(&w.key).expect("present");
@@ -209,7 +217,10 @@ impl WorkloadLadder {
                     });
                 }
             }
-            let dyn_paused = w.running && w.can_pause() && i.paused_ids.contains(&id);
+            // the site's hold pauses a network-heavy workload as the dynamic controller's pause does (its tolerance
+            // counts the same way), and holds one that cannot pause
+            let site_paused = w.running && w.can_pause() && w.site_hold;
+            let dyn_paused = w.running && w.can_pause() && (i.paused_ids.contains(&id) || w.site_hold);
             if dyn_paused {
                 self.paused_since.entry(w.key.clone()).or_insert(i.now);
             } else {
@@ -224,6 +235,8 @@ impl WorkloadLadder {
                     Some((HoldCause::Evict, "preempt_protection", "WORKLOAD_HOLD"))
                 } else if w.gpu && !i.gpu_allowed && !w.can_pause() {
                     Some((HoldCause::Gpu, "preempt_protection", "WORKLOAD_HOLD"))
+                } else if w.site_hold && (!w.can_pause() || (site_paused && over)) {
+                    Some((HoldCause::Site, "preempt_site", "WORKLOAD_HOLD"))
                 } else if (dyn_paused && over) || (w.can_pause() && i.ceiling_ids.contains(&id)) {
                     Some((HoldCause::PauseTolerance, "preempt_protection", "WORKLOAD_PAUSE_TOLERANCE"))
                 } else {
@@ -249,7 +262,7 @@ impl WorkloadLadder {
             let cap = |x: f64| if w.cpu_cores > 0.0 { x.min(w.cpu_cores) } else { x };
             let a = WorkloadAction {
                 admit: hold.is_none() && !i.no_admit && !would_pause && !i.evict_active && i.guard_clear
-                    && (!w.gpu || i.gpu_allowed),
+                    && (!w.gpu || i.gpu_allowed) && !w.site_hold,
                 lowered,
                 paused,
                 threads: i.threads.filter(|_| throttled && w.cooperative_throttle).map(|t| t.max(1)),
@@ -517,6 +530,32 @@ mod tests {
         i.gpu_allowed = true;
         let a = l.step(&i).0;
         assert!(a["m/g"].hold.is_none() && a["m/g"].admit);
+    }
+
+    /// The site's hold (docs/design/sites.md): a network-heavy workload pauses for its tolerance and is then held, one
+    /// that cannot pause is held at once (`preempt_site`); either is admitted again when the site's hold ends.
+    #[test]
+    fn a_site_hold_pauses_a_network_heavy_workload_then_holds_it_until_the_hold_ends() {
+        let mut l = WorkloadLadder::new();
+        let (none, e, v) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        let ws = vec![FleetWorkloadView { site_hold: true, ..pausable("m/up", 30.0) },
+                      FleetWorkloadView { site_hold: true, ..FleetWorkloadView::new("m/stiff") },
+                      pausable("m/quiet", 30.0)];
+        let (a, ev) = l.step(&inputs(10.0, &ws, &none, &e, &v));
+        assert!(a["m/up"].paused && a["m/up"].hold.is_none() && !a["m/up"].admit);
+        let h = a["m/stiff"].hold.clone().unwrap();
+        assert_eq!((h.cause, h.reason.as_str(), h.code), (HoldCause::Site, "preempt_site", "WORKLOAD_HOLD"));
+        assert!(!a["m/quiet"].paused && a["m/quiet"].admit, "a workload that is not network-heavy runs on");
+        assert!(ev.iter().any(|x| x.reason == "WORKLOAD_PAUSE") && ev.iter().any(|x| x.reason == "WORKLOAD_HOLD"));
+        // past its tolerance the paused one is held too
+        let a = l.step(&inputs(41.0, &ws, &none, &e, &v)).0;
+        assert_eq!(a["m/up"].hold.as_ref().map(|h| h.cause), Some(HoldCause::Site));
+        // the site's hold ends: both are released and admitted
+        let ended: Vec<FleetWorkloadView> = ws.iter().map(|w| FleetWorkloadView { site_hold: false, running: false, ..w.clone() })
+            .collect();
+        let (a, ev) = l.step(&inputs(50.0, &ended, &none, &e, &v));
+        assert!(a["m/up"].hold.is_none() && a["m/up"].admit && a["m/stiff"].hold.is_none() && a["m/stiff"].admit);
+        assert_eq!(ev.iter().filter(|x| x.reason == "WORKLOAD_RELEASE").count(), 2);
     }
 
     #[test]

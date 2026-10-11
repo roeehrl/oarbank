@@ -42,7 +42,7 @@ At most {{ max_heavy_jobs }} network-heavy job{{ 's' if max_heavy_jobs != 1 }} r
 <section class="card wide" aria-labelledby="h-leases">
 <h2 id="h-leases">Transfers now</h2>
 <table class="small"><tr><th scope="col">node</th><th scope="col">kind</th><th scope="col">direction</th><th scope="col">size</th><th scope="col">pace</th><th scope="col">for</th></tr>
-{% for l in leases %}<tr><td>{{ l.node }}</td><td>{{ l.kind }}</td><td>{{ l.dir }}</td><td>{{ ((l.bytes or 0) / 1048576) | num(0) }} MB</td><td>{{ (l.mbps | num(1)) ~ ' Mbit/s' if l.mbps else 'unpaced' }}</td><td>{{ l.age_s | secs }}</td></tr>
+{% for l in leases %}<tr><td>{{ l.node }}</td><td>{{ l.kind }}</td><td>{{ l.dir }}</td><td>{{ ((l.bytes or 0) / 1048576) | num(0) }} MB</td><td>{{ (l.mbps | num(1)) ~ ' Mbit/s' if l.mbps else 'unpaced' }}{% if l.revoked %} · <span class="mut">revoked, until given back</span>{% endif %}</td><td>{{ l.age_s | secs }}</td></tr>
 {% else %}<tr><td colspan="6" class="mut">No leased transfer now.</td></tr>{% endfor %}</table>
 <h3 class="small">Recent transfers</h3>
 <table class="small"><tr><th scope="col">when</th><th scope="col">node</th><th scope="col">kind</th><th scope="col">direction</th><th scope="col">size</th><th scope="col">rate</th></tr>

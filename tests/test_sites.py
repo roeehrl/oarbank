@@ -326,8 +326,31 @@ def test_property_the_budget_is_never_exceeded_and_a_hold_grants_nothing(tmp_pat
                 run_op(db, "sites.update", site["site_id"], {"max_transfers": k, "uplink_mbps": 30 * k})
             assert not invariants.s27_site_uplink_budget(db), (act, invariants.s27_site_uplink_budget(db))
             s = sites.get(db, "home")
-            live = db.q("SELECT mbps FROM uplink_leases WHERE expires_at>=?", (clock.now(),))
+            live = db.q("SELECT mbps FROM uplink_leases WHERE expires_at>=? AND revoked_at IS NULL", (clock.now(),))
             assert len(live) <= s["max_transfers"] and sum(x["mbps"] or 0 for x in live) <= s["uplink_mbps"] + 1e-6
     finally:
         clock.set_fake(None)
         db.conn.close()
+
+
+def test_a_network_heavy_workload_counts_against_its_sites_budget(db, monkeypatch):
+    """A network-heavy workload (workloads[].resources.network) its node reports running counts against the site's
+    network-heavy budget: a network-heavy job then waits (SITE_UPLINK_BUDGET)."""
+    import types
+    from oarbank.coordinator import workloads
+    heavy_relay(monkeypatch)
+    mini = certify(db, enrolled_node(db, "mini")[1])
+    studio = certify(db, enrolled_node(db, "studio")[1])
+    make_site(db, "home", (mini, studio), max_heavy_jobs=1)
+    heavy = types.SimpleNamespace(resources=types.SimpleNamespace(network="heavy"))
+    monkeypatch.setattr(workloads, "decl", lambda m, n: heavy if (m, n) == ("vault", "mirror") else None)
+    db.x("INSERT INTO workload_status(module, workload, node_id, running, report_json, at) VALUES(?,?,?,1,?,?)",
+         ("vault", "mirror", studio["node_id"], json.dumps({"running": True, "state": "running"}), T0))
+    s = sites.get(db, "home")
+    assert sites.heavy_workloads(db, s["site_id"]) == ["vault/mirror@studio"] and sites.heavy_running(db, s["site_id"]) == 1
+    create_study(db, "p", [{"label": "c0", "params": {**PARAMS, "samples": 22}}], list(SCENES[:1]),
+                 {"label": "base", "params": PARAMS})
+    assert not [g for g in core.claim(db, fresh(db, mini), BODY)["grants"] if g["module"] == "relay"]
+    # the workload stops: the job may run
+    db.x("UPDATE workload_status SET running=0 WHERE workload='mirror'")
+    assert [g for g in core.claim(db, fresh(db, mini), BODY)["grants"] if g["module"] == "relay"]

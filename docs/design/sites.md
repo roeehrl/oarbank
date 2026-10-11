@@ -119,11 +119,23 @@ requires = { resources = { cpu = 1, mem_gb = 1.0, network = "heavy" } }
 agent marks the attempt network-heavy at grant. Cores before 2.10 ignore the key (the job runs as any other), so it is
 not core-gated.
 
-**Workloads** (step 2, docs/design/workloads.md on that branch) are long-running and are the most likely network-heavy
-fleet work. The interface for them is the same field on the workload's resources (`resources.network = "heavy"`) and
-the same agent call: the agent pauses a network-heavy workload through its declared control (cooperative pause or
-freeze) while `Uplink::jobs_held()` says the site holds, and the coordinator counts running network-heavy workloads in
-`sites.heavy_running`. That wiring lands when the two branches meet.
+**Workloads** (docs/design/workloads.md) are long-running and the most likely network-heavy fleet work. They declare
+it the same way (`workloads[].resources.network = "heavy"`, SDK; the release entry carries it only when heavy). The
+agent marks such a workload's protection view `site_hold` while `Uplink::jobs_held()` reports a hold (its own uplink
+phase or its site's), and the workload ladder treats it as a pause from the dynamic controller: a workload that can
+pause (`cooperative_pause` or `freeze_ok`) pauses for at most its `pause_tolerance_s`, then is stopped and held; one
+that cannot pause is stopped and held at once (`WORKLOAD_HOLD`, cause `site`, release `preempt_site`); no new start is
+admitted while the hold lasts, and the hold ends with it. The coordinator counts the network-heavy workloads members
+report running in `sites.heavy_running`, so they use the site's network-heavy budget; being owner-assigned, they are
+counted but never refused.
+
+**Inbound listeners** (docs/design/inbound-listeners.md) relay bytes between public clients and the module's service or
+workload, and serving clients uses the uplink. The relay itself is **not** paused by a site hold: cutting or stalling
+connections mid-protocol breaks the clients of a service that is otherwise light, and the bytes a listener carries are
+the serving process's own traffic. A workload whose serving is network-heavy declares `network = "heavy"` and is paused
+or held at the source (a held workload's listeners have nothing to relay to, as for any other hold). Module services
+have no `network` declaration yet; a heavy serving service is a later step (a service-level declaration and a relay
+pace).
 
 ## Suggestions
 
@@ -179,9 +191,10 @@ the coordinator on the LAN, so the page presents it as a ceiling to start the bu
 
 ## Invariant
 
-**S27**: a site's live transfer leases never number more than its `max_transfers`, their rates never sum past its
-`uplink_mbps`, and no lease is live while the site holds. Leases past their expiry are dead (their agent stopped by its
-own clock earlier) and do not count. `oarbank verify` reports it with the others. The number of running network-heavy
+**S27**: a site's live (unexpired, unrevoked) transfer leases never number more than its `max_transfers`, their rates
+never sum past its `uplink_mbps`, and no lease is live while the site holds. Leases past their expiry are dead (their
+agent stopped by its own clock earlier) and do not count; revoked ones are on their way out (a lowered budget revokes
+every lease) and a grant still leaves room for them until they are given back. `oarbank verify` reports it with the others. The number of running network-heavy
 jobs is not an invariant (lowering the budget does not stop running jobs); claim's admission is tested instead.
 
 ## Failure modes
@@ -212,6 +225,7 @@ jobs is not an invariant (lowering the budget does not stop running jobs); claim
 | Property | random sequences of leases, renewals, releases, phases on, off, unreadable and silent, time and budget changes: the leases never exceed the budget, no lease is granted or renewed while a tagged phase is on, unreadable or silent (`tests/test_sites.py`, Hypothesis) |
 | Console | the Sites and site pages, the node's Site card, create and budget forms through the registry (`tests/test_console_sites.py`) |
 | Protection crate | the phase listener hears every change with its tags (`tests/sources.rs`) |
+| Workloads | the workload ladder pauses a network-heavy workload for its tolerance under a site hold, then holds it, holds one that cannot pause at once and releases both when the hold ends (`oarbank-protection` `workloads.rs`); the agent reads the declaration (`workloads.rs`); a running network-heavy workload counts against the site's budget (`tests/test_sites.py`) |
 | Agent | a local phase holds a transfer until it ends, small transfers never wait, a lease not renewed for TTL - 5 s is gone, pacing, the gateway parsers per OS, HMAC vectors (`uplink.rs`); a site hold pauses network-heavy attempts and releases what cannot wait (`prot.rs`) |
 | End to end | two agents at one site: a synthetic protected process's phase enters `uplink` on one; the other's staging (under a lease, from a slow https origin) pauses within the bound, resumes when the phase ends and finishes with the right digest (`tests/rust/test_agent_sites.py`) |
 | TLA+ | `specs/OarbankSiteUplink.tla`: the lease protocol with lost and late messages keeps the budget (`Budget`) and stops every transfer within the bound after a hold (`HoldBound`), 6.5 million states in 37 s; without the agent's margin, without revoking on a hold, or with a revoked lease's slot freed before it is given back, TLC finds a violation (the last was its finding on the first design) |

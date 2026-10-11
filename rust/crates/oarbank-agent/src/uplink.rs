@@ -93,6 +93,8 @@ struct State {
     next: u64,
     /// Attempts of network-heavy stages running here.
     heavy: BTreeSet<i64>,
+    /// A network-heavy workload runs here (the poller then follows the site's hold too).
+    heavy_workloads: bool,
 }
 
 /// Why a transfer may not move now.
@@ -208,6 +210,10 @@ impl Uplink {
         self.lock().heavy.retain(|a| live.contains(a));
     }
 
+    pub fn set_heavy_workloads(&self, any: bool) {
+        self.lock().heavy_workloads = any;
+    }
+
     pub fn heavy(&self) -> BTreeSet<i64> {
         self.lock().heavy.clone()
     }
@@ -318,7 +324,8 @@ impl Uplink {
                 let st = self.lock();
                 let poll = st.site.as_ref().map(|s| s.poll_s).unwrap_or(2.0).clamp(0.5, 10.0);
                 let ids: Vec<String> = st.leases.iter().filter(|(_, l)| !l.revoked).map(|(k, _)| k.clone()).collect();
-                (poll, ids.clone(), st.site.is_some() && (!ids.is_empty() || !st.heavy.is_empty() || !st.transfers.is_empty()))
+                (poll, ids.clone(), st.site.is_some() && (!ids.is_empty() || !st.heavy.is_empty() || st.heavy_workloads
+                                                         || !st.transfers.is_empty()))
             };
             if need {
                 self.renew(ids).await;

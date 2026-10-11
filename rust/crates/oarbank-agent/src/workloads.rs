@@ -118,6 +118,8 @@ pub struct Decl {
     listeners: Vec<String>,
     cpu_cores: f64,
     mem_gb: f64,
+    /// `resources.network = "heavy"`: it pauses (or is held) while its site holds (docs/design/sites.md).
+    network_heavy: bool,
     gpu: bool,
     apis_any: Vec<String>,
     freeze_ok: bool,
@@ -157,6 +159,7 @@ impl Decl {
             listeners: strings(&v["listeners"]),
             cpu_cores: secs(&v["resources"]["cpu_cores"], 1.0, 0.0),
             mem_gb: secs(&v["resources"]["mem_gb"], 0.5, 0.0),
+            network_heavy: v["resources"]["network"].as_str() == Some("heavy"),
             gpu,
             apis_any: if gpu { strings(&v["gpu"]["apis_any"]) } else { vec![] },
             freeze_ok: has("freeze_ok"),
@@ -1031,7 +1034,12 @@ impl WorkloadManager {
     /// can end and a start can be admitted).
     pub fn views(&self) -> Vec<FleetWorkloadView> {
         let hard_cap = crate::sys::can_cap_cpu();
-        lock(&self.shared).w.iter().filter(|(_, w)| w.run.is_some() || (w.want.running && w.blocked.is_none()))
+        // the node's site holds network-heavy work now (its own uplink phase, or the site's): docs/design/sites.md
+        let up = crate::uplink::global();
+        let site_held = up.jobs_held().is_some();
+        let sh = lock(&self.shared);
+        up.set_heavy_workloads(sh.w.values().any(|w| w.decl.network_heavy && w.run.is_some()));
+        sh.w.iter().filter(|(_, w)| w.run.is_some() || (w.want.running && w.blocked.is_none()))
             .map(|(k, w)| FleetWorkloadView {
                 key: k.clone(),
                 running: w.run.is_some() && w.phase == Phase::Running,
@@ -1043,6 +1051,7 @@ impl WorkloadManager {
                 cooperative_throttle: w.decl.coop_throttle,
                 hard_cap,
                 gpu: w.decl.gpu,
+                site_hold: site_held && w.decl.network_heavy,
                 // its container's processes: whose GPU time the duty governor checks (D50)
                 pids: w.run.as_ref().map(|run| {
                     let mut p = vec![run.leader];
@@ -1957,6 +1966,8 @@ mod tests {
         assert_eq!(j.backoff(3, 0.5), 20.0, "full jitter: a uniform draw below the exponential");
         assert_eq!(j.backoff(30, 1.0), 600.0);
         assert!(Decl::parse("m", &json!({"name": "w", "exec": ["x"], "platforms": ["plan9-amd64"]})).is_none());
+        // a network-heavy workload (docs/design/sites.md): paused or held while its site holds
+        assert!(!d.network_heavy && decl(json!({"resources": {"cpu_cores": 1, "network": "heavy"}})).network_heavy);
     }
 
     #[test]
