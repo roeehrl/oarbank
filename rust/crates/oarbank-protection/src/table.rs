@@ -1,6 +1,8 @@
 //! The process table: a platform [`ProcessSource`] for the raw facts, and the caching layer that resolves the
-//! expensive identity (code signing, argv, bundle id) lazily and once per (pid, start time). Read-only:
-//! nothing here can signal or reprioritize a process.
+//! expensive identity (code signing, argv, bundle id) lazily and once per (pid, start time) and executable: an exec
+//! keeps the pid and start time but runs another program, so a new path or short name resolves it again, and the
+//! arguments of a process seen for the first time are read once more on its next sighting (a child listed between its
+//! fork and its exec still has its parent's). Read-only: nothing here can signal or reprioritize a process.
 
 use std::collections::{HashMap, HashSet};
 
@@ -88,6 +90,22 @@ struct Identity {
     requirements: HashMap<String, bool>,
     /// A fact a rule needs (path or arguments) was unreadable when this process was last listed.
     unreadable_seen: bool,
+    /// The executable this identity was resolved for (path, short name): an exec changes them, and everything above
+    /// is then the old program's.
+    path: Option<String>,
+    comm: String,
+    /// The arguments were read on a later sighting than the first: a process listed between its fork and its exec
+    /// still has its parent's arguments (and path and name, which change at the exec), so the first reading is checked
+    /// once more.
+    argv_settled: bool,
+}
+
+impl Identity {
+    /// Whether this identity was resolved for the program the process runs now: an exec changes its short name and
+    /// (when readable) its path.
+    fn same_program(&self, p: &RawProcess) -> bool {
+        self.comm == p.comm && (p.path.is_none() || self.path.is_none() || self.path == p.path)
+    }
 }
 
 fn non_empty(s: &Option<String>) -> Option<String> {
@@ -140,13 +158,32 @@ impl ProcessTable {
         }
     }
 
-    fn identity(&mut self, key: ProcessKey, path: Option<&str>) -> Identity {
+    /// The cached identity of the process, or a new one when it was never resolved or was resolved for another
+    /// program (the process has exec'd since).
+    fn identity(&mut self, key: ProcessKey, p: &RawProcess) -> Identity {
         match self.identities.get(&key) {
-            Some(id) => id.clone(),
-            None => Identity {
-                bundle_id: path.and_then(|p| self.source.bundle_id(p)),
+            Some(id) if id.same_program(p) => id.clone(),
+            old => Identity {
+                bundle_id: p.path.as_deref().and_then(|path| self.source.bundle_id(path)),
+                path: p.path.clone(),
+                comm: p.comm.clone(),
+                unreadable_seen: old.is_some_and(|o| o.unreadable_seen),
                 ..Identity::default()
             },
+        }
+    }
+
+    /// Read the process's arguments when they are not resolved yet, and once more on the sighting after the first
+    /// reading (see `Identity::argv_settled`).
+    fn resolve_argv(&mut self, id: &mut Identity, pid: i32, start_us: u64, fresh: bool) {
+        if id.argv.is_none() {
+            id.argv = self.source.argv(pid, start_us);
+            id.argv_settled = false;
+        } else if !id.argv_settled && !fresh {
+            if let Some(a) = self.source.argv(pid, start_us) {
+                id.argv = Some(a);
+            }
+            id.argv_settled = true;
         }
     }
 
@@ -186,9 +223,10 @@ impl ProcessTable {
         for rp in raw.into_iter().filter(|p| !excluding.contains(&p.pid)) {
             let key = ProcessKey::new(rp.pid, rp.start_us);
             seen.insert(key);
-            let mut id = self.identity(key, rp.path.as_deref());
-            if need_argv && id.argv.is_none() {
-                id.argv = self.source.argv(rp.pid, rp.start_us);
+            let fresh = !self.identities.contains_key(&key);
+            let mut id = self.identity(key, &rp);
+            if need_argv {
+                self.resolve_argv(&mut id, rp.pid, rp.start_us, fresh);
             }
             if need_signing && id.team_id.is_none() && id.signing_id.is_none() {
                 let s = self.source.signing(rp.pid);
@@ -275,15 +313,14 @@ impl ProcessTable {
         let mut out = Vec::with_capacity(rows.len());
         for (p, cores) in rows {
             let key = ProcessKey::new(p.pid, p.start_us);
-            let mut id = self.identity(key, p.path.as_deref());
+            let fresh = !self.identities.contains_key(&key);
+            let mut id = self.identity(key, &p);
             if id.team_id.is_none() && id.signing_id.is_none() {
                 let s = self.source.signing(p.pid);
                 id.team_id = Some(s.team_id.unwrap_or_default());
                 id.signing_id = Some(s.signing_id.unwrap_or_default());
             }
-            if id.argv.is_none() {
-                id.argv = self.source.argv(p.pid, p.start_us);
-            }
+            self.resolve_argv(&mut id, p.pid, p.start_us, fresh);
             out.push(ProcessSummaryRow {
                 pid: p.pid,
                 ppid: p.ppid,

@@ -23,7 +23,8 @@ def _estimated_view(db: DB, node: dict, body: dict | None) -> predicates.NodeVie
         body = {"free_cpu": (float(slots) - float(live_cpu)) if slots is not None else 1e9,
                 "free_mem_gb": cap.get("mem_gb_free") if cap.get("mem_gb_free") is not None else 1e9,
                 "ready_datasets": jl(node["ready_datasets_json"], []) or [],
-                "pool_jobs_only": bool(cap.get("pool_jobs_only")), "gpu_jobs": cap.get("gpu_jobs")}
+                "pool_jobs_only": bool(cap.get("pool_jobs_only")), "gpu_jobs": cap.get("gpu_jobs"),
+                "paused": cap.get("paused") or [], "paused_by": cap.get("paused_by")}
     offered = set(body.get("modules") or modcalls.enabled(db)) - modstore.disabled_names(db, node)
     free_cpu = float(body.get("free_cpu") if body.get("free_cpu") is not None else body.get("free_slots") or 0)
     free_mem = float(body.get("free_mem_gb") if body.get("free_mem_gb") is not None else 1e9)
@@ -120,6 +121,8 @@ def _reason_params(j: dict, r: predicates.PredicateResult, nv: predicates.NodeVi
         v.update(pool=r.predicate.split("(", 1)[-1].split(")", 1)[0], need=r.required)
     elif r.code == "CAMPAIGN_SETTING_HOLDS":
         v.update(setting=r.required, have=r.observed)
+    elif r.code == "PROTECTION_ACTIVE":
+        v["rule"] = str(r.required or "?").removeprefix("rule:")
     elif r.code == "RETRIES_EXHAUSTED":
         v.update(failures=j.get("exec_failures"), max_attempts=predicates.retry_max(j, n.get("platform")))
     return v
@@ -240,6 +243,9 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
     summary += [X.SummaryRow(code=c["code"], detail=c["values"]) for c in protection.runtime_conditions(jl(n["telemetry_json"], {}) or {})]
     head = X.Headline(code="OK", text="Admitting work") if ff is None else \
         X.Headline(code=ff.code, text=f"Not admitting: {ff.predicate} (observed {ff.observed}, required {ff.required})")
+    if ff is not None and ff.code == "PROTECTION_ACTIVE":     # which rule: work comes back once it clears
+        head = X.Headline(code=ff.code, text="Not admitting: " + RC.REGISTRY[ff.code].render(
+            rule=str(ff.required or "?").removeprefix("rule:")) + f" and pauses {', '.join(ff.observed or [])} work")
     if ff is not None and ff.code in RELEASE_CODES:      # say which release, and what lets it through
         rel = nv.release_of() if nv.release_of else {}
         head = X.Headline(code=ff.code, text="Not admitting: " + RC.REGISTRY[ff.code].render(

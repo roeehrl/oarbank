@@ -282,6 +282,18 @@ impl Protection {
         fast.retain(|a, _| t.contains_key(a));
     }
 
+    /// Resume every job protection froze (the agent is stopping them: a frozen process cannot act on a stop request).
+    pub fn thaw_all(&mut self, table: &Table) {
+        let t = table.lock().unwrap();
+        self.fast_paused.lock().unwrap().clear();
+        let frozen = std::mem::take(&mut *self.frozen.lock().unwrap());
+        for aid in frozen {
+            if let Some(pg) = t.get(&aid).and_then(|j| j.pgid) {
+                let _ = self.registry.signal(pg, P::Signal::Cont, "PROTECTION_RESUME");
+            }
+        }
+    }
+
     pub fn journal_out(&self) -> Value {
         serde_json::to_value(self.journal.pending(200)).unwrap_or(json!([]))
     }
@@ -435,7 +447,7 @@ mod caps_tests {
         for &(aid, started_at) in jobs {
             t.lock().unwrap().insert(aid, JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 1.0, gpu: false,
                 pgid: None, stop: None, pause: false, usage: Default::default(), log_bytes: 0, started_at, caps: vec![],
-                bandwidth: None, threads: None, gpu_duty: None, needs: vec![], wake: Default::default() });
+                bandwidth: None, threads: None, gpu_duty: None, needs: vec![], wake: Default::default(), stop_by: None });
         }
         t
     }
@@ -617,7 +629,7 @@ mod e2e {
         JobState { attempt_id: aid, module: "m".into(), phase: "running".into(), cpu: 1.0, mem_gb: 0.1, gpu: false, pgid: Some(pgid), stop: None,
                    pause: false, usage: Default::default(), log_bytes: 0, started_at: crate::doctor::now(),
                    caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, gpu_duty: None, needs: vec![],
-                   wake: Default::default() }
+                   wake: Default::default(), stop_by: None }
     }
 
     /// CPU seconds the container uses over `secs`.

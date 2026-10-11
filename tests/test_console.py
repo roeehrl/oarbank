@@ -631,7 +631,7 @@ def test_node_show_lists_gpu_in_containers_only_with_a_container_runtime_and_doc
     none = {"containers": {"runtime": None, "state": "absent", "gpu": "undetected", "detail": "no container runtime installed"}}
     assert detail.gpu(none, rep) == {"reported": True, "host": ["metal"], "containers": [], "evidence": {}, "mechanism": None}
     why = "dlopen(/x/libchtslib.so): tried: " + "'/x' (no such file), " * 40 + "(mach-o file, but is an incompatible architecture)"
-    doctor = detail.doctor({"at": 1.0, "release_id": "r_1", "capabilities": [], "modules": {"minos-gatk": {
+    doctor = detail.doctor({"at": 1.0, "release_id": "r_1", "capabilities": [], "modules": {"genomics": {
         "health": "undetected", "ran": True, "checks": [{"name": "pysam_import", "ok": False, "detail": why}]}}})
     for facts, line in ((colima, "containers: colima installed; the agent's Colima VMs start when a job needs one"),
                         (none, "containers: none (no container runtime installed)")):

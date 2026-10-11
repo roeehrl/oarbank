@@ -1,6 +1,6 @@
 [project]
 name = "oarbank"
-version = "2.8.0"
+version = "2.9.0"
 description = "Batch orchestrator for a fleet of machines on a tailnet: the coordinator (oarbankd), its console and the admin CLI (oarbank)"
 requires-python = ">=3.12"
 dependencies = [

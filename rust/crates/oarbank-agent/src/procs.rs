@@ -111,6 +111,10 @@ pub fn signal_group(pgid: i32, sig: Sig) -> bool {
 #[cfg(target_os = "linux")]
 pub use oarbank_protection::platform::linux::start_time_us;
 
+/// macOS: the kernel's `pbi_start_tvsec`/`pbi_start_tvusec` (libproc).
+#[cfg(target_os = "macos")]
+pub use oarbank_protection::platform::macos::start_time_us;
+
 /// Windows: the creation time GetProcessTimes reports (100 ns units since 1601).
 #[cfg(windows)]
 pub fn start_time_us(pid: i32) -> Option<u64> {

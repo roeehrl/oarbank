@@ -35,6 +35,8 @@ mod prot;
 mod proxy;
 mod release;
 mod rescue;
+#[cfg(unix)]
+mod runners;
 mod runtime;
 mod sandbox;
 #[cfg(target_os = "linux")]
@@ -203,6 +205,16 @@ enum Cmd {
     /// This node's sandbox backend and what it enforces, as JSON (the coordinator asks it on Linux and Windows).
     #[command(name = "sandbox-status", hide = true)]
     SandboxStatus,
+    /// Wait until the agent with this pid and start time has ended (its end of the pipe on standard input closes),
+    /// then end the runners its records name (internal: the agent's watchdog, runners.rs).
+    #[cfg(unix)]
+    #[command(name = "reap-runners", hide = true)]
+    ReapRunners {
+        #[arg(long)]
+        agent_pid: u32,
+        #[arg(long)]
+        agent_start: u64,
+    },
     /// Apply a sandbox profile to this process, then exec argv (internal: how module processes start).
     #[command(name = "sandbox-exec", hide = true)]
     SandboxExec {
@@ -343,6 +355,11 @@ fn main() -> anyhow::Result<()> {
             println!("{}", sandbox::report());
             Ok(())
         }
+        #[cfg(unix)]
+        Cmd::ReapRunners { agent_pid, agent_start } => {
+            runners::watchdog_main(&layout, (agent_pid, agent_start));
+            Ok(())
+        }
         Cmd::Containers { action } => containers(&layout, action),
         Cmd::Tools { action: ToolsCmd::Detect } => {
             let rel = release::current(&layout);
@@ -416,6 +433,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("test build: crashing on start");
                 std::process::exit(1);
             }
+            // ends this agent's runners should it end without stopping them (killed, crashed): runners.rs
+            #[cfg(unix)]
+            let _watchdog = runners::watchdog(&layout);
             let code = serve(layout, Serve { coordinator, join, join_file, status_file, policy, name, session_hub }).await?;
             if code != 0 {
                 std::process::exit(code);
@@ -522,7 +542,8 @@ struct Serve {
 async fn serve(layout: paths::Layout, o: Serve) -> anyhow::Result<i32> {
     let (tx, rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let why = stop_requested().await;
+        tracing::info!("{why}: stopping (running jobs are stopped and their attempts released)");
         let _ = tx.send(true);
     });
     let mut st = status::Status::new(o.status_file.clone());
@@ -599,6 +620,43 @@ async fn serve(layout: paths::Layout, o: Serve) -> anyhow::Result<i32> {
                 wait(&rx, 5).await;
             }
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The agent is asked to stop: Ctrl-C (SIGINT), SIGTERM (launchd's and systemd's stop, the launcher's, a test's
+/// `terminate()`) or SIGHUP on Unix; on Windows Ctrl-C, Ctrl-Break, the console closing or the system shutting down, or
+/// the launcher's stop event (it sets it when the service manager stops the service, and ends the agent only if it has
+/// not stopped in time). Every one is the same graceful stop (agent.rs `stop_jobs`). Says which.
+async fn stop_requested() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (Ok(mut term), Ok(mut hup), Ok(mut int)) =
+            (signal(SignalKind::terminate()), signal(SignalKind::hangup()), signal(SignalKind::interrupt())) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return "interrupt";
+        };
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = hup.recv() => "SIGHUP",
+            _ = int.recv() => "SIGINT",
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let launcher = sys::launcher_stop_event();
+        let (Ok(mut brk), Ok(mut close), Ok(mut shut)) = (ctrl_break(), ctrl_close(), ctrl_shutdown()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return "Ctrl-C";
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "Ctrl-C",
+            _ = brk.recv() => "Ctrl-Break",
+            _ = close.recv() => "console closed",
+            _ = shut.recv() => "system shutdown",
+            _ = launcher => "stop requested by the launcher",
         }
     }
 }

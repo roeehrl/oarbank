@@ -738,7 +738,7 @@ fn fleet_node(ram: f64, perf: i64, eff: i64, os_reserve: f64, used: f64, present
 
 #[test]
 fn the_budget_never_exceeds_what_is_available() {
-    // tnt-studio, M4 Max 12P + 4E, 64 GB with 46.1 GB in use and its owner at it: the reserves alone said 50 GB
+    // a desktop, 12P + 4E, 64 GB with 46.1 GB in use and someone at it: the reserves alone said 50 GB
     let studio = CapacityModel::compute(&fleet_node(64.0, 12, 4, 6.0, 46.1, true));
     assert_eq!(studio.mem_budget_reserve_gb, 50.0);
     assert!((studio.mem_margin_gb - 8.68).abs() < 1e-9);
@@ -748,22 +748,22 @@ fn the_budget_never_exceeds_what_is_available() {
     assert_eq!((studio.cpu_slots, studio.idle_cpu_slots, studio.mem_slots, studio.slots), (2, 14, 6, 2));
     assert!(studio.user_present);
 
-    // Roees-MacBook-Pro, M5 Max 6P + 12E, 128 GB, 47.9 GB in use, a Screen Sharing session counting as present
+    // a laptop, 6P + 12E, 128 GB, 47.9 GB in use, a Screen Sharing session counting as present
     let mbp = CapacityModel::compute(&fleet_node(128.0, 6, 12, 8.0, 47.9, true));
     assert_eq!(mbp.mem_budget_reserve_gb, 112.0);
     assert!((mbp.host_budget_gb - 63.74).abs() < 1e-9 && mbp.mem_binding == "in_use");
     assert_eq!((mbp.cpu_slots, mbp.idle_cpu_slots), (2, 12));
 
-    // gurus-mm and lurus-mm, M5 Pro 5P + 10E, 24 GB, idle, with 16 and 19 GB in use: 10 CPU slots but memory for 2 and 0 jobs
-    let gurus = CapacityModel::compute(&fleet_node(24.0, 5, 10, 4.0, 16.0, false));
-    assert!((gurus.host_budget_gb - 4.12).abs() < 1e-9);
-    assert_eq!((gurus.cpu_slots, gurus.mem_slots, gurus.slots), (10, 2, 2));
-    assert_eq!(gurus.binding_limit, "memory_in_use");
-    let lurus = CapacityModel::compute(&fleet_node(24.0, 5, 10, 4.0, 19.0, false));
-    assert!((lurus.host_budget_gb - 1.12).abs() < 1e-9);
-    assert_eq!((lurus.slots, lurus.mem_gb_free > 1.0), (0, true));
+    // two small desktops, 5P + 10E, 24 GB, idle, with 16 and 19 GB in use: 10 CPU slots but memory for 2 and 0 jobs
+    let mini_a = CapacityModel::compute(&fleet_node(24.0, 5, 10, 4.0, 16.0, false));
+    assert!((mini_a.host_budget_gb - 4.12).abs() < 1e-9);
+    assert_eq!((mini_a.cpu_slots, mini_a.mem_slots, mini_a.slots), (10, 2, 2));
+    assert_eq!(mini_a.binding_limit, "memory_in_use");
+    let mini_b = CapacityModel::compute(&fleet_node(24.0, 5, 10, 4.0, 19.0, false));
+    assert!((mini_b.host_budget_gb - 1.12).abs() < 1e-9);
+    assert_eq!((mini_b.slots, mini_b.mem_gb_free > 1.0), (0, true));
 
-    // TNT-PC, Core i7-9700 (8 cores, no Hyper-Threading), 15.8 GB, 7.3 GB in use: 11.8 GB by the reserves when idle,
+    // a Windows desktop, 8 cores (no Hyper-Threading), 15.8 GB, 7.3 GB in use: 11.8 GB by the reserves when idle,
     // 3.8 GB while someone is at it (the reserve bound is the smaller then)
     let pc = CapacityModel::compute(&fleet_node(15.8, 8, 0, 4.0, 7.3, false));
     assert!((pc.host_budget_gb - 5.604).abs() < 1e-9 && pc.mem_binding == "in_use");

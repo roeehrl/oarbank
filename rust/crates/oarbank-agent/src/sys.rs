@@ -60,14 +60,29 @@ mod imp {
     /// The child leads a new session and process group and, on Linux with a delegated cgroup, enters a container of
     /// its own (cgroup.rs `Placement`): both between the fork and the exec, so its first instruction, and everything it
     /// starts, are already inside.
-    pub(super) fn new_group(cmd: &mut std::process::Command) {
+    ///
+    /// Linux: a container that must not outlive the agent (`lasting` false: a job's runner, a service's op) also gets
+    /// SIGKILL when the agent's thread that started it ends (`PR_SET_PDEATHSIG`; the runtime's threads live as long as
+    /// the agent), so even a killed agent leaves no runner leader behind; what else of it runs, its cgroup and the
+    /// agent's runner records end (runners.rs).
+    pub(super) fn new_group(cmd: &mut std::process::Command, lasting: bool) {
         use std::os::unix::process::CommandExt;
         #[cfg(target_os = "linux")]
         let placement = crate::cgroup::placement();
+        #[cfg(target_os = "linux")]
+        let parent = std::process::id() as libc::pid_t;
+        let _ = lasting;
         unsafe {
             cmd.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
+                }
+                #[cfg(target_os = "linux")]
+                if !lasting {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+                    if libc::getppid() != parent {
+                        libc::_exit(1);                     // the agent ended before the death signal was set
+                    }
                 }
                 #[cfg(target_os = "linux")]
                 if let Some(p) = &placement {
@@ -268,7 +283,7 @@ mod imp {
     const CHILD_FLAGS: u32 = 0x0000_0200 /* CREATE_NEW_PROCESS_GROUP */ | 0x0000_0008 /* DETACHED_PROCESS */;
 
     /// The child starts suspended: no instruction of it runs before `contain` has put it in its Job Object.
-    pub(super) fn new_group(cmd: &mut std::process::Command) {
+    pub(super) fn new_group(cmd: &mut std::process::Command, _lasting: bool) {
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
         cmd.creation_flags(CHILD_FLAGS | CREATE_SUSPENDED);
@@ -633,13 +648,44 @@ mod imp {
 
 pub use imp::*;
 
+/// The name of the event the launcher sets to ask the agent it started to stop (Windows; the launcher's `stop_now`):
+/// per launcher, so two launchers on one machine never stop each other's agent.
+#[cfg(windows)]
+pub fn launcher_stop_event_name(launcher_pid: &str) -> String {
+    format!("Local\\oarbank-agent-stop-{launcher_pid}")
+}
+
+/// Resolves when the launcher that started this agent asks it to stop (Windows: there is no SIGTERM, and the service
+/// manager's stop reaches the launcher, which sets this event); never without a launcher. Waits on a thread of its own,
+/// which never holds up the process's exit.
+#[cfg(windows)]
+pub async fn launcher_stop_event() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, WaitForSingleObject, INFINITE, SYNCHRONIZATION_SYNCHRONIZE};
+    let Ok(pid) = std::env::var("OARBANK_LAUNCHER_PID") else { return std::future::pending().await };
+    let name: Vec<u16> = launcher_stop_event_name(&pid).encode_utf16().chain([0]).collect();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || unsafe {
+        let h = OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr());
+        if h.is_null() {
+            return;                                        // a launcher without the event: Ctrl-C and the like still stop it
+        }
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+        let _ = tx.send(());
+    });
+    if rx.await.is_err() {
+        std::future::pending::<()>().await
+    }
+}
+
 /// Start `cmd` as the leader of a process container of its own, in it before it runs a line, so nothing it starts is
 /// ever outside: a process group and, on Linux with a delegated cgroup, a cgroup, both entered between fork and exec;
 /// on Windows a Job Object (started suspended, put in the job, resumed). When the container cannot be made the spawn
 /// fails (on Windows the child is killed before it ran).
 /// `lasting`: the container outlives the agent (a module service).
 pub fn spawn_contained(cmd: &mut std::process::Command, lasting: bool) -> std::io::Result<std::process::Child> {
-    imp::new_group(cmd);
+    imp::new_group(cmd, lasting);
     #[allow(unused_mut)]
     let mut child = cmd.spawn()?;
     #[cfg(windows)]
@@ -655,7 +701,7 @@ pub fn spawn_contained(cmd: &mut std::process::Command, lasting: bool) -> std::i
 
 /// `spawn_contained` for a tokio command.
 pub fn spawn_contained_async(cmd: &mut tokio::process::Command, lasting: bool) -> std::io::Result<tokio::process::Child> {
-    imp::new_group(cmd.as_std_mut());
+    imp::new_group(cmd.as_std_mut(), lasting);
     #[allow(unused_mut)]
     let mut child = cmd.spawn()?;
     #[cfg(windows)]
@@ -833,7 +879,7 @@ mod tests {
         let mut cmd = std::process::Command::new(cmd_exe);
         // no quotes: the path has no spaces, and cmd would keep them
         cmd.args(["/c", &format!("echo x> {}", mark.display())]).stdout(std::process::Stdio::null());
-        imp::new_group(&mut cmd);
+        imp::new_group(&mut cmd, false);
         let mut child = cmd.spawn().unwrap();
         let pid = child.id();
         std::thread::sleep(std::time::Duration::from_secs(1));
