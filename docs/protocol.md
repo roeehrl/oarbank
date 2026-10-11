@@ -188,13 +188,20 @@ their process groups, deletes their workspaces, and does not report them.
   latest in `nodes.services_json`; the node page, `oarbank node show` and module pages (the `services` and `nodes` host
   queries) show it.
 - **`journal`** carries unacknowledged host-protection decisions, at most 200; oarbankd answers with
-  `journal_ack`, the highest seq it stored.
+  `journal_ack`, the highest seq it stored. The GPU duty governor journals its budget steps as `kind: "gpu_duty"`
+  (`GPU_DUTY_START`, `_BASELINE`, `_GROW`, `_HALVE`, `_TAKE_BACK`, `_CLAMP`, each with `duty`, `ceiling`, `why`, and
+  `pressure` per rule at an interval's end) and its compliance actions as `kind: "gpu_compliance"` (`GPU_DUTY_EXCEEDED`,
+  `GPU_DUTY_UNVERIFIED`, with `attempt`, `unit`, `measured`, `duty`, `action: "paused|evicted"`); S28 reads both.
 - **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
   block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
   "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:
   `{"rule", "readable", "reader", "rate"}`), `event_latency` (source event to pause request: `n`, `p50_ms`, `p99_ms`,
-  `max_ms`, `edges_ms`, `buckets`), `gpu_budget` (under `gpu_jobs = certified`: `{"duty", "rules", "jobs", "per_job"}`,
-  or `{"duty": 0, "not_certified": [...]}`) and `identities` (per rule, the protected program's identity a certificate
+  `max_ms`, `edges_ms`, `buckets`), `gpu_budget` (under `gpu_jobs = certified` while a gating group is active: the
+  duty governor's `{"duty", "ceiling", "rules", "jobs", "per_job", "state": "measuring|running|held|locked|harness",
+  "lockout_s", "baseline": {"<rule>": {"rate", "age_s", "pressure"}}, "units": [{"id": <attempt>, "duty", "measured",
+  "state": "ok|waiting|held|distrusted|cannot_throttle|evicted", "why"?: "exceeded|unverified", "for_s"?}],
+  "distrusted": [{"unit": "<module>[/<name>]", "for_s"}]}`, or `{"duty": 0, "rules", "not_certified": [...], "state":
+  "not_certified"}`) and `identities` (per rule, the protected program's identity a certificate
   is bound to); `telemetry.cert_context` is what the node's certificates must match (`hardware`, `os_major`,
   `agent_version`). The coordinator aggregates `phases` across nodes by tag (`protection.node_phases`,
   `protection.any_phase_on`).

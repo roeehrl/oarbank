@@ -262,7 +262,10 @@ One pure decision function over signals, configuration and its own state, on the
   step of many GPU trainers), whose passing runs are co-tenancy certificates; the probe is suspended while a harness
   run measures ([gpu-cotenancy.md](gpu-cotenancy.md)).
 - **GPU work beside a protected GPU group:** `gpu_jobs` = `never`, `when_no_gpu_protected` (default: paused while a
-  gating group is active), `certified` (cooperative GPU work runs at a valid certificate's `gpu_duty`, D50) or `always`.
+  gating group is active: a group using more than 5 % of the GPU's time whose rule protects `gpu_share` or
+  `progress_rate`), `certified` (cooperative GPU work runs at the duty governor's budget, never above a valid
+  certificate's `gpu_duty`, and is paused, then stopped, when its measured GPU time exceeds its duty; D50,
+  [gpu-cotenancy.md](gpu-cotenancy.md#the-duty-governor-d50)) or `always`.
 - **The growth gate:** the budget grows only on a validated signal: `progress_rate` for any group, or `ipc_ratio` for a
   group that is not GPU-bound. Otherwise it holds (`L1_HOLD_UNVALIDATED`). Implicit signals only veto.
 - **Implicit signals count only what the fleet adds.** The frontmost-app and owner-stall signals read `cpu_stall` over

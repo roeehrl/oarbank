@@ -155,3 +155,28 @@ def test_the_protection_page_shows_the_gpu_duty_card(env):  # noqa: F811
     core.heartbeat(db, fresh(db, n), {"telemetry": {"protection": {"gpu_budget": {
         "duty": 0.0, "rules": ["trainer"], "not_certified": ["trainer"], "state": "not_certified"}}}})
     assert "0: not certified for trainer" in c.get(f"/nodes/{n['node_id']}/protection").text
+
+
+def test_the_prio_darwin_gpu_experiment_runs_only_by_hand_on_work_it_starts(monkeypatch, capsys):
+    """bench/prio_darwin_gpu.py (owner-run, never shipped behaviour): without --i-understand and a command it does
+    nothing; its reading of the driver's per-process GPU time matches the agent's."""
+    import importlib.util
+    import subprocess as sp
+    from pathlib import Path
+    path = Path(__file__).parents[1] / "bench" / "prio_darwin_gpu.py"
+    spec = importlib.util.spec_from_file_location("prio_darwin_gpu", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    calls = []
+    monkeypatch.setattr(mod, "set_gpu", lambda *a: calls.append(a) or {})
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: calls.append(("spawn", a)) or None)
+    assert mod.main(["--seconds", "1", "--", "true"]) == 2
+    assert mod.main(["--seconds", "1", "--i-understand"]) == 2
+    assert calls == [], "it starts nothing and switches nothing without both"
+    sample = ('+-o AGXDeviceUserClient  <class AGXDeviceUserClient>\n  "AppUsage" = ({"API"="Metal","accumulatedGPUTime"=1500},'
+              '{"API"="Metal","accumulatedGPUTime"=500})\n  "IOUserClientCreator" = "pid 42, python3"\n'
+              '+-o AGXDeviceUserClient  <class AGXDeviceUserClient>\n  "IOUserClientCreator" = "pid 7, other"\n'
+              '  "AppUsage" = ({"API"="Metal","accumulatedGPUTime"=9})\n')
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: sp.CompletedProcess(a, 0, stdout=sample))
+    assert mod.gpu_ns_by_pid() == {42: 2000.0, 7: 9.0}
+    assert (mod.PRIO_DARWIN_GPU, mod.PRIO_DARWIN_GPU_ALLOW, mod.PRIO_DARWIN_GPU_DENY) == (5, 1, 2)
