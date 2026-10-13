@@ -546,6 +546,10 @@ impl Agent {
         if d["run_doctor"].as_bool() == Some(true) && self.doctor.is_none() {
             let policy = self.with_grants(&d["policy"]);
             self.run_doctors(&policy).await;
+            // probes run again after doctor-triggering events too (spec/service-protocol.md, "Probes")
+            if let Some(s) = &self.services {
+                s.lock().unwrap().refresh_now();
+            }
         }
         // a whole-package update (D57) and the agent-only self-update never run at once: a staged agent build goes
         // first, and no agent update starts while a package update is under way
