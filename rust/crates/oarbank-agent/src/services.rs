@@ -196,6 +196,9 @@ struct ModCtx {
     tools_file: PathBuf,
     settings_file: PathBuf,
     limits_file: PathBuf,
+    /// The module's host-tool resolution on this node (tools.rs `granted`) and what the sandbox grants for it: the
+    /// same grants as the module's doctor and runners (spec/sandbox.md, "Host tools").
+    tool_grant: Value,
     tool_paths: Vec<String>,
     roots: Vec<String>,
     node_id: String,
@@ -207,6 +210,16 @@ struct ModCtx {
     proxy: Option<ProxySlot>,
     /// What a listener service's `start` gets: the listening sockets of its `listen_fd` listeners (the listener hub's).
     listen: ListenFds,
+}
+
+impl ModCtx {
+    /// Whether `new` runs the module's executables differently: another bundle or interpreter, other host-tool
+    /// grants, or another sandbox.
+    fn regranted(&self, new: &ModCtx) -> bool {
+        (&self.bundle, &self.python, &self.venv, &self.tool_grant, &self.tool_paths)
+            != (&new.bundle, &new.python, &new.venv, &new.tool_grant, &new.tool_paths)
+            || (&self.net, self.gpu, self.exec_rw) != (&new.net, new.gpu, new.exec_rw)
+    }
 }
 
 /// The listening unix sockets the listener hub made for `listen_fd` listeners, by service key: (listener, descriptor).
@@ -355,7 +368,12 @@ impl Exec {
     /// The module sandbox for this op (spec/service-protocol.md, "Sandbox"): read-only bundle, interpreter, runtime
     /// and approved tools; read-write the module's data directory; the module's network grant; never the broker.
     fn confine(&self, argv: &[String], port: Option<u16>) -> Result<Vec<String>, String> {
-        let exe = argv[0].as_str();
+        let pol = self.policy(&argv[0], port);
+        crate::sandbox::wrap(&pol, &self.ctx.grants.join(format!("{}-{}.sb", self.kind, self.name)), argv)
+    }
+
+    /// The sandbox policy `confine` wraps an op in: the same for a probe as for a service of the module.
+    fn policy(&self, exe: &str, port: Option<u16>) -> oarbank_core::sandbox::Policy {
         let c = &self.ctx;
         let mut pol = oarbank_core::sandbox::Policy::new(c.module_id.clone());
         pol.ro = vec![c.bundle.display().to_string(), c.python.display().to_string(), c.grants.display().to_string()];
@@ -375,7 +393,7 @@ impl Exec {
         pol.exec_rw = c.exec_rw;
         pol.kind = self.kind.into();
         pol.exe = Some(exe.to_string());
-        crate::sandbox::wrap(&pol, &c.grants.join(format!("{}-{}.sb", self.kind, self.name)), argv)
+        pol
     }
 
     /// Run `<exec> <args...>` and wait for it (killing its group after `timeout`). `keep_group`: processes the op
@@ -556,6 +574,8 @@ struct Svc {
     failures: u32,
     next_try: Option<Instant>,
     last_fingerprint: Option<Instant>,
+    /// Fingerprint again as soon as no op is in flight (the module's grants changed, or a doctor-triggering event).
+    refresh: bool,
     idle_since: Option<Instant>,
     users: i64,
     /// After `restart.max_failures` consecutive failures, until a later fingerprint is healthy.
@@ -578,7 +598,7 @@ impl Svc {
     fn new(module: &str, decl: ServiceDecl) -> Svc {
         Svc { module: module.into(), decl, health: Health::Unknown, running: false, ready: false, pools: BTreeMap::new(),
               reserve_mem_gb: 0.0, disabled: false, busy: false, reaping: false, failures: 0, next_try: None,
-              last_fingerprint: None, idle_since: None, users: 0, withdrawn: false, last_error: None, pgid: None,
+              last_fingerprint: None, refresh: false, idle_since: None, users: 0, withdrawn: false, last_error: None, pgid: None,
               last_reap: None, channel: None, held: None, started_at: 0.0, gpu_api_missing: None }
     }
 
@@ -623,6 +643,9 @@ struct ProbeSt {
     attrs: Value,
     busy: bool,
     last_run: Option<Instant>,
+    /// Run again as soon as the run in flight (if any) ends, whatever the period: the module's grants changed, or a
+    /// doctor-triggering event (spec/service-protocol.md, "Probes").
+    refresh: bool,
 }
 
 #[derive(Default)]
@@ -841,13 +864,14 @@ impl ServiceManager {
         if settings.is_null() {
             settings = json!({});
         }
-        let (tools_file, settings_file, tool_paths) = grant_files(&grants, entry, &settings, &policy["tool_grants"][&name])?;
+        let tool_grant = policy["tool_grants"][&name].clone();
+        let (tools_file, settings_file, tool_paths) = grant_files(&grants, entry, &settings, &tool_grant)?;
         let limits_file = grants.join("limits.json");
         std::fs::write(&limits_file, self.limits.to_string())?;
         let net = entry["sandbox"]["net"]["mode"].as_str().unwrap_or("none").to_string();
         let proxy = (net == "egress-allowlist").then(|| self.proxy_for(&name, strings(&entry["sandbox"]["net"]["allow"])));
         Ok(ModCtx { module_id: entry["module_id"].as_str().unwrap_or(&name).to_string(), module: name, bundle, python, venv,
-                    data, grants, tools_file, settings_file, limits_file, tool_paths, roots: self.runtime.roots.clone(),
+                    data, grants, tools_file, settings_file, limits_file, tool_grant, tool_paths, roots: self.runtime.roots.clone(),
                     node_id: self.node_id.clone(), net, gpu: entry["sandbox"]["devices"]["gpu"].as_str().is_some_and(|g| g != "none"),
                     exec_rw: entry["sandbox"]["exec_writable"].as_bool() == Some(true), proxy, listen: self.listen_fds.clone() })
     }
@@ -879,6 +903,15 @@ impl ServiceManager {
                 Err(e) => warn!(module = %name, error = %e, "cannot prepare the module's services"),
             }
         }
+        // a module whose executables or grants changed (a new release, host tools detected, pinned, installed or
+        // removed since): what its probes and services reported was under the old ones, so each runs again now instead
+        // of keeping that outcome for a period
+        let regranted: BTreeSet<String> = modules.iter()
+            .filter(|(m, c)| self.modules.get(*m).is_some_and(|o| o.regranted(c)))
+            .map(|(m, _)| m.clone()).collect();
+        for m in &regranted {
+            info!(module = %m, "the module's release or grants changed: its probes run and its services are fingerprinted again");
+        }
         // then the new state in one hold of the lock: an op that finishes meanwhile writes into the state that stays
         let old_services = {
             let mut sh = lock(&self.shared);
@@ -891,6 +924,7 @@ impl ServiceManager {
                     let mut st = old_services.remove(&key).or_else(|| sh.dropped.remove(&key))
                         .unwrap_or_else(|| Svc::new(&name, d.clone()));
                     st.decl = d;
+                    st.refresh |= regranted.contains(&name);
                     st.disabled = disabled.contains(&key);
                     st.gpu_api_missing = st.gpu_shortfall(&self.gpu_apis);
                     sh.services.insert(key, st);
@@ -899,8 +933,10 @@ impl ServiceManager {
                     let key = format!("{name}/{}", d.name);
                     let mut st = old_probes.remove(&key).or_else(|| sh.dropped_probes.remove(&key))
                         .unwrap_or_else(|| ProbeSt { module: name.clone(), decl: d.clone(), health: Health::Unknown,
-                                                     attrs: Value::Null, busy: false, last_run: None });
+                                                     attrs: Value::Null, busy: false, last_run: None,
+                                                     refresh: false });
                     st.decl = d;
+                    st.refresh |= regranted.contains(&name);
                     sh.probes.insert(key, st);
                 }
             }
@@ -926,12 +962,12 @@ impl ServiceManager {
         }
     }
 
-    /// Fingerprint every service and run every probe on the next tick (after a doctor-triggering event).
-    #[cfg(all(test, unix))]
+    /// Fingerprint every service and run every probe again (after a doctor-triggering event: spec/service-protocol.md,
+    /// "Probes"): on the next tick, or as soon as the op in flight ends, so none keeps an outcome from before the event.
     pub fn refresh_now(&mut self) {
         let mut sh = lock(&self.shared);
-        sh.services.values_mut().for_each(|s| s.last_fingerprint = None);
-        sh.probes.values_mut().for_each(|p| p.last_run = None);
+        sh.services.values_mut().for_each(|s| s.refresh = true);
+        sh.probes.values_mut().for_each(|p| p.refresh = true);
     }
 
     /// Every agent tick: start/stop on demand, idle timeouts, probe periods, backoff, adoption, reaping. `jobs_need`:
@@ -946,8 +982,9 @@ impl ServiceManager {
         let mut sh = lock(&self.shared);
         let halted = sh.halted;
         for (k, p) in sh.probes.iter_mut() {
-            if !p.busy && p.last_run.is_none_or(|t| now.duration_since(t) >= p.decl.period) {
+            if !p.busy && (p.refresh || p.last_run.is_none_or(|t| now.duration_since(t) >= p.decl.period)) {
                 p.busy = true;
+                p.refresh = false;
                 todo.push((k.clone(), Job::Probe));
             }
         }
@@ -980,8 +1017,9 @@ impl ServiceManager {
             if s.busy {
                 continue;
             }
-            if s.last_fingerprint.is_none_or(|t| now.duration_since(t) >= self.fingerprint_every) {
+            if s.refresh || s.last_fingerprint.is_none_or(|t| now.duration_since(t) >= self.fingerprint_every) {
                 s.busy = true;
+                s.refresh = false;
                 todo.push((k.clone(), Job::Fingerprint));
                 continue;
             }
@@ -1995,6 +2033,91 @@ mod tests {
         assert!(tick_until(&mut m, &need(&[("vmpool", 1)]), &[], true, 25.0, both));
         assert_eq!(fx.calls("vm", "start"), 2);
         m.stop_all();
+    }
+
+    /// A probe that checks its host tool: healthy only when it can read the tool's `release` file through the path
+    /// its tools file lists, so under the sandbox only when the probe's profile grants the tool.
+    const TOOL_PROBE: &str = r#"#!/bin/sh
+D="$OARBANK_MODULE_DATA"
+[ "$1" = fingerprint ] || exit 64
+echo "$*" >> "$D/$OARBANK_SERVICE.calls"
+p=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' "$OARBANK_TOOLS_FILE")
+if [ -n "$p" ] && cat "$p/release" > /dev/null 2>> "$D/$OARBANK_SERVICE.err"; then h=healthy; else h=undetected; fi
+printf '{"service_protocol":{"supported":[1]},"health":"%s"}\n' "$h"
+"#;
+
+    /// A module asking for the `jdk` host tool, its probe `TOOL_PROBE`, and the agent's resolution of that request on
+    /// this node (tools.rs `grants`): a fake JDK home outside every other grant.
+    fn tool_fx(tag: &str, services: Value) -> (Fx, PathBuf, Value) {
+        let mut fx = Fx::new(tag, services, json!([{"name": "java17", "exec": ["{bundle}/toolprobe.sh"], "period_s": 3600}]));
+        let probe = fx.release.dir.join("modules/mod/toolprobe.sh");
+        std::fs::write(&probe, TOOL_PROBE).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let jdk = fx.root.join("host-tools/jdk-17");
+        std::fs::create_dir_all(jdk.join("bin")).unwrap();
+        std::fs::write(jdk.join("release"), "JAVA_VERSION=\"17.0.12\"\n").unwrap();
+        fx.release.modules[0]["sandbox"]["tools"] = json!([{"id": "jdk", "version": ">=17", "trust": "code-exec"}]);
+        let path = jdk.display().to_string();
+        let policy = json!({"tool_grants": {"mod": {"tools": {"jdk": [{"path": path, "version": "17.0.12", "arch": "aarch64"}]},
+                                                    "paths": {"jdk": path}}}});
+        (fx, jdk, policy)
+    }
+
+    #[test]
+    fn probes_and_services_get_the_modules_host_tool_grants() {
+        // the same resolution the module's doctor and runners get (doctor.rs and jobs.rs extend their policies with
+        // grant_files' paths): listed in the tools file, and granted read and execute by the sandbox policy
+        let (fx, jdk, policy) = tool_fx("tool-grants", json!([svc("vm", json!({}))]));
+        let m = fx.manager(policy.clone(), false);
+        let ctx = m.modules["mod"].clone();
+        let tools: Value = serde_json::from_slice(&std::fs::read(&ctx.tools_file).unwrap()).unwrap();
+        assert_eq!(tools["jdk"][0]["path"], jdk.display().to_string());
+        for (kind, name) in [("probe", "java17"), ("service", "vm")] {
+            let x = Exec { ctx: ctx.clone(), name: name.into(), kind, exec: vec![json!("{bundle}/svc.sh")], registry: None,
+                           listeners: false };
+            let pol = x.policy("/bin/sh", None);
+            assert_eq!(pol.kind, kind);
+            assert!(pol.ro.contains(&jdk.display().to_string()), "{kind}: {:?}", pol.ro);
+            assert!(!pol.rw.iter().any(|p| Path::new(p).starts_with(&jdk)), "{kind}: {:?}", pol.rw);
+        }
+        // a module that asks for no tool gets none, whatever the node resolved for another request
+        let mut fx = fx;
+        fx.release.modules[0]["sandbox"]["tools"] = json!([]);
+        let m = fx.manager(policy, false);
+        assert!(m.modules["mod"].tool_paths.is_empty());
+        assert_eq!(std::fs::read_to_string(&m.modules["mod"].tools_file).unwrap(), "{}");
+    }
+
+    #[test]
+    fn a_probe_runs_again_when_the_modules_tool_grants_change() {
+        // the probe ran before the node resolved the module's tool (installed, detected or pinned later): its outcome
+        // was under the old grants, so it runs again with the new ones at once, not a period (here an hour) later
+        let (fx, _jdk, policy) = tool_fx("tool-regrant", json!([]));
+        let mut m = fx.manager(json!({}), true);
+        assert!(tick_until(&mut m, &need(&[]), &[], false, 20.0, |_| fx.file("java17.calls").lines().count() == 1));
+        tick_for(&mut m, &need(&[]), &[], false, 0.5);
+        assert!(m.capabilities().is_empty());
+        assert_eq!(m.report()["probes"][0]["health"], "undetected");
+        m.configure(&fx.release, &policy, None);
+        let ok = tick_until(&mut m, &need(&[]), &[], false, 20.0, |m| m.capabilities() == ["java17"]);
+        assert!(ok, "the probe did not run again with its tool: {} {}", m.report(), fx.file("java17.err"));
+        assert_eq!(fx.file("java17.calls").lines().count(), 2);
+        // the same grants again: nothing runs before the period
+        m.configure(&fx.release, &policy, None);
+        tick_for(&mut m, &need(&[]), &[], false, 1.0);
+        assert_eq!(fx.file("java17.calls").lines().count(), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_probe_runs_with_the_modules_host_tool_grants() {
+        let (fx, _jdk, policy) = tool_fx("probe-tools", json!([]));
+        let mut m = fx.manager(policy, true);
+        let ok = tick_until(&mut m, &need(&[]), &[], false, 20.0, |m| m.capabilities() == ["java17"]);
+        assert!(ok, "the probe could not use its tool: {}", fx.file("java17.err"));
     }
 
     #[cfg(target_os = "macos")]
