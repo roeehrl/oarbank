@@ -6,9 +6,11 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ## 2.10.1 (2026-10-13)
 
-2.10.0 was not published: the macOS fleet-update acceptance script exited on an absent result file before the update
-runner could report its state. 2.10.1 tolerates that initial absence while retaining the installed-version and final
-success checks. A regression test exercises the poll under `errexit` and `pipefail`.
+2.10.0 was not published: macOS fleet-update acceptance uncovered two failures. The acceptance script now waits for
+the update runner's first result instead of exiting on an absent file. The updater gives macOS package tools a `.pkg`
+filename for its verified cached package, so the system installer accepts it; digest and signature verification still
+apply to those same bytes. Regression tests cover polling under `errexit` and `pipefail`, and package metadata reads
+through the verified cache path.
 
 The changes below ship in 2.10.1, including the 2.9.0 upgrade steps.
 
