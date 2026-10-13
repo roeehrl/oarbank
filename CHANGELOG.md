@@ -199,10 +199,10 @@ Upgrade the coordinator first, then the nodes. Running jobs continue; nodes reco
 release you install machine by machine: from 2.10 on, import the next release and start a rollout from the Updates
 page (or `oarbank update start <version>`).
 
-- **Coordinator:** install `oarbank-coordinator-2.10.0-<os>-<arch>` (macOS pkg, deb or rpm, Windows MSI) over the old
-  one. From 2.8, the 2.9.0 steps above apply (the macOS and Linux coordinator moves to a system service once).
+- **Coordinator:** install `oarbank-coordinator-2.10.3-<os>-<arch>` (macOS pkg, deb or rpm, Windows MSI) over the old
+  one. From 2.8, the 2.9.0 steps below apply (the macOS and Linux coordinator moves to a system service once).
 - **Nodes:** let the coordinator update the agents (`oarbank agent upload`, `sign`, `canary --node <node>`, `promote`),
-  or install the 2.10.0 node package over the old one. Nothing needs to rejoin.
+  or install the 2.10.3 node package over the old one. Nothing needs to rejoin.
 - **To use the new features:** approve the module versions that ask for them, then assign listeners (`oarbank listener
   set`, and `oarbank node sign` in signing mode) and workloads (`oarbank workload assign`); group nodes on one line into
   sites from the Sites page's suggestions; for GPU co-tenancy, give the protected program a `progress_rate` rule, run
