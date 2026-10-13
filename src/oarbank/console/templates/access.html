@@ -3,18 +3,30 @@
 {% block title %}Access · Oarbank{% endblock %}
 {% block body %}
 <h1>Access</h1>
+<div class="card" role="note"><b>Your account ({{ actor }})</b>: <a href="/account">change your password, passkeys and authenticator code</a> on
+  your account page (also under Account at the top right).</div>
 <p class="small mut">Console accounts sign in with a password and an authenticator code, or a passkey. Nothing is trusted for being
 local: the CLI on the coordinator uses the owner's admin token, and scripts elsewhere use personal access tokens.</p>
 <table class="small">
-  <tr><th>account</th><th>role</th><th>state</th><th class="actions"><span class="sr-only">actions</span></th></tr>
-  {% for a in accounts %}<tr><td>{{ a.name }}</td><td>{{ a.role }}</td><td>{% if a.disabled %}<span class="chip bad">disabled</span>{% else %}<span class="chip ok">enabled</span>{% endif %}</td>
+  <tr><th>account</th><th>role</th><th>state</th><th>sign-in</th><th class="actions"><span class="sr-only">actions</span></th></tr>
+  {% for a in accounts %}<tr><td>{{ a.name }}{% if a.name == actor %} <span class="chip">you</span>{% endif %}</td><td>{{ a.role }}</td><td>{% if a.disabled %}<span class="chip bad">disabled</span>{% else %}<span class="chip ok">enabled</span>{% endif %}</td>
+  <td>{% if a.password_set %}password{% else %}<span class="mut">no password</span>{% endif %}{% if a.totp_set %} + code{% endif %}</td>
   <td class="actions">
+    {% if a.name == actor %}<a href="/account">Change your password</a>{% endif %}
+    {% if role == 'admin' %}
     {{ m.op_form("access.accounts.update", a.name, "Enable…" if a.disabled else "Disable…", params={"disabled": not a.disabled}) }}
     {% call m.op_form("access.accounts.update", a.name, "Set role…") %}<select name="p.role" aria-label="role for {{ a.name }}">{% for r in ('admin', 'operator', 'viewer') %}<option{% if r == a.role %} selected{% endif %}>{{ r }}</option>{% endfor %}</select>{% endcall %}
-    {{ m.op_form("access.accounts.reset_totp", a.name, "New TOTP…") }}
+    {% if a.name != actor %}<details data-set-password="{{ a.name }}"><summary>Set password…</summary>
+      {% call m.op_form("access.accounts.set_password", a.name, "Set password", confirm="Set a new password for " ~ a.name ~ "? Their sessions end.") %}
+        <label class="small">new password for {{ a.name }} (12+ characters) <input type="password" name="p.password" autocomplete="new-password" minlength="12" required></label>
+      {% endcall %}
+    </details>{% endif %}
+    {{ m.op_form("access.accounts.reset_totp", a.name, "New authenticator seed…") }}
     {{ m.op_form("access.login_link", a.name, "Sign-in link") }}
+    {% endif %}
   </td></tr>{% endfor %}
 </table>
+{% if role == 'admin' %}
 <div class="card">
   <b>New account</b>
   {% call m.op_form("access.accounts.create", "", "Review…", inline=False) %}
@@ -23,6 +35,7 @@ local: the CLI on the coordinator uses the owner's admin token, and scripts else
     <label class="small">password (optional, 12+ characters) <input type="password" name="p.password" autocomplete="new-password"></label>
   {% endcall %}
 </div>
+{% endif %}
 <h2>Tokens</h2>
 <table class="small">{% for t in tokens %}<tr><td class="mono">{{ t.token_id }}</td><td>{{ t.account }}</td><td>{{ t.label }}</td><td>{{ t.role }}</td>
   <td class="mut">expires {{ t.expires_at | ts }}</td><td>{% if t.revoked %}revoked{% else %}{{ m.op_form("access.tokens.revoke", t.token_id, "Revoke", confirm="Revoke this token?") }}{% endif %}</td></tr>

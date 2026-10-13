@@ -147,6 +147,44 @@ class NeedLogin(Exception):
     pass
 
 
+class SignInTries:
+    """Failed password sign-ins per account name as this console saw them, to tell the person how many tries are left
+    before oarbankd locks the account (coordinator/access.py: LOCK_AFTER failures in LOCK_WINDOW_S lock it for
+    LOCK_FOR_S). Counted for every name typed, existing or not, so the answer never says whether an account exists; it
+    is a lower bound on what is left (other browsers' failures count at oarbankd too). In memory, bounded."""
+    MAX_NAMES = 10_000
+
+    def __init__(self, lock_after: int, window_s: float, lock_for_s: float):
+        self.lock_after, self.window_s, self.lock_for_s = lock_after, window_s, lock_for_s
+        self.seen: dict[str, tuple[list[float], float]] = {}       # key -> (failure times, locked until)
+
+    @staticmethod
+    def _key(name: str) -> str:
+        return hashlib.sha256((name or "").strip().lower().encode()).hexdigest()[:24]
+
+    def _live(self, key: str, now: float) -> tuple[list[float], float]:
+        fails, until = self.seen.get(key, ([], 0.0))
+        return [t for t in fails if t > now - self.window_s], until
+
+    def failed(self, name: str, now: float | None = None) -> int:
+        """Record a failure; the tries left before the lock (0: locked now)."""
+        now = time.time() if now is None else now
+        key = self._key(name)
+        fails, until = self._live(key, now)
+        if until <= now:                                  # oarbankd counts no failure while the account is locked
+            fails.append(now)
+            if len(fails) >= self.lock_after:
+                until = now + self.lock_for_s
+        self.seen[key] = (fails[-self.lock_after:], until)
+        if len(self.seen) > self.MAX_NAMES:               # drop the stalest names
+            for k in sorted(self.seen, key=lambda k: max(self.seen[k][0] or [self.seen[k][1]]))[:len(self.seen) - self.MAX_NAMES]:
+                del self.seen[k]
+        return 0 if until > now else max(0, self.lock_after - len(fails))
+
+    def succeeded(self, name: str):
+        self.seen.pop(self._key(name), None)
+
+
 SESSION_COOKIE = "oarbank_session"
 TOUCH_EVERY_S = 60
 SESSION_PATHS = ("/login", "/logout", "/static/", "/static-ui/", "/healthz")
@@ -336,10 +374,15 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         except httpx.HTTPError as e:
             return httpx.Response(503, json={"error": "coordinator_unreachable", "detail": type(e).__name__})
 
-    def _login_page(request: Request, error: str = "", status: int = 200):
+    tries = SignInTries(A.LOCK_AFTER, A.LOCK_WINDOW_S, A.LOCK_FOR_S)
+
+    def _login_page(request: Request, error: str = "", status: int = 200, tries_left: int | None = None):
         accounts = state.reader.q("SELECT COUNT(*) n FROM accounts")[0]["n"]
         return T.TemplateResponse(request, "login.html", {"error": error, "next": _next(request, request.query_params.get("next")),
-                                                          "no_accounts": accounts == 0, "meta": state.meta()}, status_code=status)
+                                                          "no_accounts": accounts == 0, "meta": state.meta(),
+                                                          "tries_left": tries_left, "lock_after": A.LOCK_AFTER,
+                                                          "lock_min": int(A.LOCK_FOR_S // 60),
+                                                          "window_min": int(A.LOCK_WINDOW_S // 60)}, status_code=status)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -350,8 +393,14 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         form = await request.form()
         r = await _ceremony("/api/v1/access/login", request, {"name": form.get("name"), "password": form.get("password"),
                                                                "code": form.get("code")})
+        name = str(form.get("name") or "")
+        if r.status_code == 503:
+            return _login_page(request, "The coordinator did not answer, so nothing was checked. Try again in a moment.", 503)
         if r.status_code != 200:
-            return _login_page(request, "Wrong account, password or code, or the account is locked.", 401)
+            # the same answer whichever factor failed and whether or not the account exists (no account enumeration)
+            return _login_page(request, "Sign-in failed: the account name, password or authenticator code is wrong, "
+                                        "or the account is locked.", 401, tries_left=tries.failed(name))
+        tries.succeeded(name)
         return _cookie(RedirectResponse(_next(request, form.get("next")), status_code=303), request, r.json())
 
     @app.get("/login/link")

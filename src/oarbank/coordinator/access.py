@@ -149,7 +149,9 @@ def account(db: DB, name: str) -> dict | None:
 
 
 def accounts(db: DB) -> list[dict]:
-    return [{k: v for k, v in a.items() if k not in ("pw_hash", "totp_secret", "failed_json")}
+    """Every account without its secrets: only whether a password and an authenticator (TOTP) seed are set."""
+    return [{**{k: v for k, v in a.items() if k not in ("pw_hash", "totp_secret", "failed_json")},
+             "password_set": bool(a["pw_hash"]), "totp_set": bool(a["totp_secret"])}
             for a in db.q("SELECT * FROM accounts ORDER BY name")]
 
 

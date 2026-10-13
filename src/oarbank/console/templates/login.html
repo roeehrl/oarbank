@@ -11,7 +11,14 @@
 <body>
 <main class="login">
 <h1>Oarbank</h1>
-{% if error %}<div class="flash bad" role="alert">{{ error }}</div>{% endif %}
+{% if error %}<div class="flash bad" role="alert" id="login-error">{{ error }}
+{% if tries_left is not none %}{% if tries_left > 0 %}{{ tries_left }} attempt{{ 's' if tries_left != 1 }} left: after {{ tries_left }} more failure{{ 's' if tries_left != 1 }}
+within {{ window_min }} minutes, sign-in for this account name is locked for {{ lock_min }} minutes.{% else %}Too many failed attempts: sign-in for this account name is
+locked for {{ lock_min }} minutes.{% endif %}{% endif %}</div>
+{% if tries_left is not none %}<p class="small" id="login-recovery">Locked out, or forgot your password or authenticator? On the coordinator, as
+the account that runs oarbankd, run <span class="mono">oarbank console login</span> (or
+<span class="mono">oarbank console login --account &lt;name&gt;</span>) for a one-time sign-in link, then change your password under
+Account, at the top right of the console.</p>{% endif %}{% endif %}
 {% if no_accounts %}
 <div class="card">
   <p>No console account exists yet. On the coordinator, as the account that runs oarbankd:</p>
