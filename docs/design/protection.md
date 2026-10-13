@@ -245,6 +245,10 @@ slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap
 paused      = the pause_fleet scopes of the active rules (no work of theirs is granted; all or io: admit = false)
 ```
 
+`max_slots` caps the CPU slots (`cpu_slots = min(cpu, max_slots, cap.cpu_cores, protection.cpu_cores)`), the budget
+each running job's `resources.cpu` is drawn from (`free_cpu = cpu_slots − Σ running cpu`), so it bounds cores, not jobs:
+`max_slots 1` keeps every stage declaring `cpu = 2` off the node. `cap.jobs` is what limits the number of jobs.
+
 - **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with
   46 GB in use offered 50 GB to jobs. The in-use bound starts from the memory available now, RAM minus what the host
   signals count as used: on macOS app memory (internal minus purgeable pages), wired and compressed, so free, file
