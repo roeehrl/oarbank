@@ -12,6 +12,7 @@ from collections.abc import Callable
 from . import agentbuilds, checkpoints, folders, nodepolicy, nodeservices, platforms, tools
 from . import config as C
 from .db import jl
+from .failures import failure_view
 
 
 def gpu(facts: dict, doctor: dict | None) -> dict:
@@ -143,6 +144,7 @@ def job(r, jid: int) -> dict | None:
             "exec_failures", "expirations", "target_node", "created_at", "done_at", "depends_on")
     return {"job": {**{k: j[k] for k in keys}, "labels": jl(j["labels_json"], {}) or {},
                     "platforms": jl(j.get("platforms_json")) or None, "images": jl(j.get("images_json")) or []},
+            "failure": failure_view(j.get("failure_json")),
             "attempts": atts,
             "checkpoint": {**{k: ck[k] for k in ("attempt_id", "node_id", "seq", "digest", "size", "at")},
                            "files": len(jl(ck["files_json"], []))} if ck else None,

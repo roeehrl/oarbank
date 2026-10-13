@@ -11,6 +11,7 @@ from ..contracts import explain as X
 from ..contracts import reason_codes as RC
 from . import modstore, core, modcalls, predicates, protection
 from .db import DB, jl
+from .failures import failure_summary, failure_view
 
 
 def _estimated_view(db: DB, node: dict, body: dict | None) -> predicates.NodeView:
@@ -179,8 +180,17 @@ def job_doc(db: DB, job_id: int, bodies: dict | None = None, now: float | None =
             head = X.Headline(code="USER_CANCEL", text="Cancelled")
         else:
             er = (a or {}).get("end_reason") or ""
-            code = RC.WIRE.get(er) or (er if "/" in er else "JOB_QUARANTINED")      # a module's own code renders as itself
-            head = X.Headline(code=code, text=f"{j['state']}: last attempt ended {(a or {}).get('end_reason')}")
+            f = failure_view(j.get("failure_json"), 1000) or {}
+            fc = f.get("code") or ""
+            # a module's own code renders as itself
+            code = fc if "/" in fc else RC.WIRE.get(er) or (er if "/" in er else "JOB_QUARANTINED")
+            text = f"{j['state']}: last attempt ended {(a or {}).get('end_reason')}"
+            if j["state"] == "failed" and f.get("final"):
+                text = ("failed, not retried: its runner declared it can never succeed"
+                        + (" (retryable: false)" if f.get("retryable") is False else " (fault: job)"))
+            if f:
+                text += f"; {failure_summary(f)}"
+            head = X.Headline(code=code, text=text)
         return X.ExplainDocument(subject=subj, as_of=as_of, verdict=j["state"], headline=head, evidence=evidence,
                                  system_actions=actions, remedies=_remedies([head.code, "JOB_QUARANTINED" if j["state"] in ("failed", "quarantined") else ""],
                                                     _job_ids(j)))

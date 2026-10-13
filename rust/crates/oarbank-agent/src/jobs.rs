@@ -202,7 +202,9 @@ const FAILURE_REASONS: [&str; 5] = ["bad_input", "mode_mismatch", "oom", "doctor
 
 enum Outcome {
     Completed(Value),
-    Failed { reason: String, exit_code: Option<i32>, stderr_tail: String, fault: Option<String> },
+    /// `failure`: the runner's own failure.json `{reason, detail, retryable?}` when it wrote one (the coordinator keeps
+    /// it on the job and ends a job that can never succeed at once); None for the agent's own failures.
+    Failed { reason: String, exit_code: Option<i32>, stderr_tail: String, fault: Option<String>, failure: Option<Value> },
     Stopped(Stop),
 }
 
@@ -248,7 +250,7 @@ pub async fn run(ctx: Arc<Ctx>, grant: Value, deadline: Option<Instant>) {
         Ok(o) => o,
         Err(e) => Outcome::Failed { reason: if format!("{e:#}").contains("dataset") || format!("{e:#}").contains("blob") {
                                         "input_missing".into() } else { "exit_nonzero".into() },
-                                    exit_code: None, stderr_tail: format!("{e:#}"), fault: None },
+                                    exit_code: None, stderr_tail: format!("{e:#}"), fault: None, failure: None },
     };
     let images = ran_images.into_inner().unwrap_or_default();
     report(&ctx, aid, &ws, outcome, started.elapsed(), images, &secrets_of(&grant)).await;
@@ -336,7 +338,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
                 return Ok(Outcome::Stopped(s));
             }
             if tokio::time::Instant::now() >= deadline {
-                return Ok(Outcome::Failed { reason: "exit_nonzero".into(), exit_code: None, fault: Some("host".into()),
+                return Ok(Outcome::Failed { reason: "exit_nonzero".into(), exit_code: None, fault: Some("host".into()), failure: None,
                                             stderr_tail: format!("the services providing {needs:?} did not become ready") });
             }
             tokio::select! {
@@ -699,12 +701,13 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     drop(broker);                                              // stops serving and removes this attempt's containers
     drop(connectors);                                          // closes them and tells each service the attempt ended
     if let Some(e) = escaped {
-        return Ok(Outcome::Failed { reason: "sandbox_escape".into(), exit_code: status.code(), fault: Some("job".into()),
+        return Ok(Outcome::Failed { reason: "sandbox_escape".into(), exit_code: status.code(), fault: Some("job".into()), failure: None,
                                     stderr_tail: format!("{e}\n{}", tail(&ws.join(".runner.log"), 2000)) });
     }
     if let Some((s, _, _)) = stopping {
         if s == Stop::Release("timeout".into()) {
-            return Ok(Outcome::Failed { reason: "timeout".into(), exit_code: status.code(), stderr_tail: tail(&ws.join(".runner.log"), 2000), fault: None });
+            return Ok(Outcome::Failed { reason: "timeout".into(), exit_code: status.code(), stderr_tail: tail(&ws.join(".runner.log"), 2000),
+                                        fault: None, failure: None });
         }
         return Ok(Outcome::Stopped(s));
     }
@@ -722,13 +725,33 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         _ => None,
     }));
     if oom {
-        return Ok(Outcome::Failed { reason: "oom".into(), exit_code: code, fault: Some("job".into()),
+        return Ok(Outcome::Failed { reason: "oom".into(), exit_code: code, fault: Some("job".into()), failure: None,
                                     stderr_tail: format!("over its memory limit\n{}", tail(&ws.join(".runner.log"), 2000)) });
     }
     let reason = failure.as_ref().and_then(|f| f["reason"].as_str()).filter(|r| FAILURE_REASONS.contains(r))
         .map(str::to_string).unwrap_or_else(|| "exit_nonzero".into());
     let detail = failure.as_ref().map(|f| format!("{}: {}\n", f["reason"], f["detail"])).unwrap_or_default();
-    Ok(Outcome::Failed { reason, exit_code: code, stderr_tail: detail + &tail(&ws.join(".runner.log"), 2000), fault })
+    let failure = failure.as_ref().map(declared_failure);
+    Ok(Outcome::Failed { reason, exit_code: code, stderr_tail: detail + &tail(&ws.join(".runner.log"), 2000), fault, failure })
+}
+
+/// The runner's failure.json as the coordinator gets it: `reason` and `detail` (at most 4 KiB, runner protocol) as
+/// written, and `retryable` only when it is a boolean.
+fn declared_failure(f: &Value) -> Value {
+    let detail: String = match &f["detail"] {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        v => v.to_string(),
+    };
+    let mut cut = detail.len().min(4096);
+    while !detail.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = json!({"reason": f["reason"].as_str().unwrap_or_default(), "detail": &detail[..cut]});
+    if let Some(r) = f["retryable"].as_bool() {
+        out["retryable"] = json!(r);
+    }
+    out
 }
 
 /// Upload artifacts named by the result (`files[].local`, relative to the work directory, and each file's
@@ -860,10 +883,20 @@ async fn report(ctx: &Ctx, aid: i64, ws: &Path, o: Outcome, ran: Duration, image
             crate::outbox::send(&ctx.api, &ctx.layout, &format!("/v1/attempts/{aid}/complete"), &body).await;
             info!(attempt = aid, ran_s, "completed");
         }
-        Outcome::Failed { reason, exit_code, stderr_tail, fault } => {
+        Outcome::Failed { reason, exit_code, stderr_tail, fault, failure } => {
             let stderr_tail = redact(&stderr_tail, secrets);
             let mut body = json!({"reason": reason, "exit_code": exit_code, "stderr_tail": stderr_tail.chars().rev().take(2000)
                 .collect::<String>().chars().rev().collect::<String>(), "fault": fault});
+            if let Some(mut f) = failure {
+                // the runner's detail is kept on the job: never a secret's value (as for the stderr tail)
+                if let Some(d) = f["detail"].as_str() {
+                    f["detail"] = json!(redact(d, secrets));
+                }
+                if let Some(r) = f["retryable"].as_bool() {
+                    body["retryable"] = json!(r);
+                }
+                body["failure"] = f;
+            }
             if !images.is_empty() {
                 body["images"] = json!(images);
             }
@@ -891,6 +924,17 @@ pub fn attempts(t: &Table) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runners_declared_failure_keeps_its_reason_detail_and_a_boolean_retryable() {
+        let f = declared_failure(&json!({"reason": "mod/config", "detail": "bad key", "fault": "job", "retryable": false}));
+        assert_eq!(f, json!({"reason": "mod/config", "detail": "bad key", "retryable": false}));
+        let f = declared_failure(&json!({"reason": "mod/x", "retryable": "no"}));          // not a boolean: not declared
+        assert_eq!(f, json!({"reason": "mod/x", "detail": ""}));
+        let long = "é".repeat(3000);                                                          // 6000 bytes, cut on a char
+        let f = declared_failure(&json!({"reason": "mod/x", "detail": long}));
+        assert_eq!(f["detail"].as_str().unwrap().len(), 4096);
+    }
 
     #[test]
     fn work_directories_left_by_an_earlier_run_are_removed_at_start() {

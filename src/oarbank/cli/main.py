@@ -1414,6 +1414,12 @@ def print_job(d: dict) -> None:
           + (f"  dataset {j['dataset_id']}" if j["dataset_id"] else "")
           + f"  priority {j['priority'] or 0}  generation {j['generation']}  failures {j['exec_failures']}  "
             f"expirations {j['expirations']}" + (f"  target {j['target_node']}" if j["target_node"] else ""))
+    f = d.get("failure")
+    if f:
+        print(("failure: " if j["state"] in ("failed", "quarantined") else "last failure: ") + (f.get("code") or f.get("reason") or "?")
+              + (f" (fault {f['fault']})" if f.get("fault") else "")
+              + (" - not retried: its runner declared it can never succeed" if f.get("final") else "")
+              + (f"\n  {f['detail']}" if f.get("detail") else ""))
     print("attempts:" + ("" if d["attempts"] else " none yet"))
     for x in d["attempts"]:
         r = x["resume"]

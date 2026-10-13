@@ -379,10 +379,20 @@ throttle a running job, but only as the runner declares it tolerates: `cancellab
   a release without a reason is refused (400 `reason_required`). These are not failures. `agent_stop`: the agent was
   asked to stop (its service stopped or restarted) and stopped the runner first (docs/design/architecture.md,
   "Stopping the agent").
-- `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient", "images"?: [{"set", "image"}]}`.
-  `fault` comes from the runner's `failure.json`: `transient` is no failure at all (the attempt is released and
-  the job retried), `host` implicates this node, `job` never trips its breaker. `doctor`, `mode_mismatch`, `oom` and
-  `no_metrics` implicate the host first.
+- `POST /v1/attempts/{id}/fail` with `{"reason": "exit_nonzero|oom|timeout|no_metrics|mode_mismatch|bad_input|doctor|input_missing", "exit_code": 1, "stderr_tail": "…", "fault": "job|host|transient", "retryable"?: true|false, "failure"?: {"reason", "detail", "retryable"?}, "images"?: [{"set", "image"}]}`.
+  `fault`, `retryable` and `failure` come from the runner's `failure.json` (`failure`: its `reason`, its `detail` cut
+  to 4 KiB with secret values redacted; an agent without it heads `stderr_tail` with `"<reason>": <detail>`, which
+  oarbankd reads instead). `transient`, or `retryable: true` with no fault, is no failure at all (the attempt is
+  released and the job retried); `host` implicates this node; `job` never trips its breaker. `doctor`,
+  `mode_mismatch`, `oom` and `no_metrics` implicate the host first.
+- **A job that can never succeed.** `fault: "job"` (exit 2 with `failure.json`, or `failure.fault`) or
+  `retryable: false` ends the job `failed` at once: it is not retried elsewhere and not quarantined, whatever its
+  stage's retry allows. `retryable: true` with `fault: "job"` keeps the stage's retry (the job's fault, worth another
+  try). The agent's own job attributions, an OOM kill and a sandbox escape, are not a runner's declaration and keep the
+  retry. The failure (`reason`, the runner's `code` and `detail`, `fault`, `retryable`, `final`) stays on the job:
+  `oarbank job show`, explain, the campaign's `failures` and the module's `campaign.tick` and `host.jobs.query` rows
+  (`failure`, for failed and quarantined jobs) show it. A late result for a failed job is refused (`job_failed`). A
+  golden job that can never succeed fails the module's certification on that node at once (`golden_failed`).
 - **Retries.** A failure spends one of the job's attempts when its end reason's code counts against the job
   (docs/design/reason-codes.md; a runner's own reason counts): a host fault does not, and sends the job to another node.
   The job stays pending with backoff while some ready node certified for its module may still try it, its stage's
@@ -935,8 +945,8 @@ timeout, retry and platforms; its envelope names the stage, except the default s
   head's artifact datasets, which are mounted like any dataset.
 - **Checks.** The tail's digest must match its head's (`input_mismatch` otherwise).
 - **Integrity.** Replicas, disputes and convictions apply to head jobs. Demoting a head result (dispute,
-  conviction, retry) requeues its tail and revokes a live tail attempt. When a head job ends cancelled or
-  quarantined, the reaper settles its tail the same way (S12, S13).
+  conviction, retry) requeues its tail and revokes a live tail attempt. When a head job ends cancelled,
+  quarantined or failed, the reaper settles its tail the same way (S12, S13), a failed head's failure with it.
 - **Pools.** `resources.pools` reserves node tokens for the whole job; `resources.needs_pools` only requires
   that the pool exist. Pools provided only by services a node disabled count as 0 there.
 

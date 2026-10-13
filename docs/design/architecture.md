@@ -193,9 +193,10 @@ Object on Windows), pauses `cooperative_pause` runners through `control.json` (a
 node: [datasets-media-checkpoints.md](datasets-media-checkpoints.md)), and lowers jobs through them too
 (background QoS on macOS; on Linux the background CPU quota of the container's `run` leaf, below the container that
 holds the hard limits; the Job Object's idle priority class and EcoQoS on Windows). Exit codes 2, 3 and 75 count only with a `failure.json`, whose
-`fault` (`job`, `host`, `transient`) decides who is charged. A failure spends one of the job's attempts when its end
-reason counts against the job; the job is quarantined once no node that could run it has attempts left under its
-stage's `retry.max_attempts` (the variant for that node's platform).
+`fault` (`job`, `host`, `transient`) decides who is charged. A job fault, or `retryable: false`, means the job can
+never succeed: it ends `failed` at once, with its reason and detail kept for its views and its module. Otherwise a
+failure spends one of the job's attempts when its end reason counts against the job; the job is quarantined once no
+node that could run it has attempts left under its stage's `retry.max_attempts` (the variant for that node's platform).
 
 Every coordinator time a node acts on is relative: a grant carries `issued_at` next to its deadlines and the agent times
 the attempt on its monotonic clock, and move time locks are compared with the coordinator's clock as last seen. A node

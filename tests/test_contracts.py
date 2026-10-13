@@ -129,7 +129,7 @@ END_REASONS = ["ok", "exit_nonzero", "bad_input", "doctor", "transient", "timeou
                "release_invalid", "stale_generation", "lost_race", "module_revoked", "module_disabled", "node_quarantined",
                "node_retired", "dispute_party", "fleet_halt", "golden_failed", "superseded", "oom", "preempt_memory",
                "preempt_protection", "preempt_site", "limit_cpu", "limit_mem", "limit_schedule", "user_cancel", "input_invalidated", "placement_rebound",
-               "job_cancelled", "job_quarantined", "attempt_closed", "job_done", "no_metrics", "bad_artifact",
+               "job_cancelled", "job_quarantined", "job_failed", "attempt_closed", "job_done", "no_metrics", "bad_artifact",
                "artifact_missing", "input_missing", "input_mismatch", "mode_mismatch", "golden_mismatch", "disputed",
                "self_inconsistent"]
 

@@ -13,6 +13,7 @@
   <span class="mut">dataset</span><span class="mono">{{ j.dataset_id or '–' }}</span>
   <span class="mut">generation</span><span>{{ j.generation }} · failures {{ j.exec_failures }} · expirations {{ j.expirations }}</span>
   <span class="mut">target node</span><span>{{ j.target_node or 'any' }}</span>
+  {% if failure %}<span class="mut">{{ 'failure' if j.state in ('failed', 'quarantined') else 'last failure' }}</span><span><span class="mono">{{ failure.code or failure.reason }}</span>{% if failure.fault %} · fault {{ failure.fault }}{% endif %}{% if failure.final %} · <b>not retried</b> (its runner declared it can never succeed){% endif %}{% if failure.detail %}<br><span class="mono small" style="white-space:pre-wrap">{{ failure.detail }}</span>{% endif %}</span>{% endif %}
   {% if spec.expected %}<span class="mut">expected</span><span class="mono">{{ spec.expected }}</span>{% endif %}
 </div>
 <h2>Attempts</h2>

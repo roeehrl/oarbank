@@ -383,7 +383,7 @@ class Simulation:
                 if v:
                     violations = v
                     break
-            if not self.db.one("SELECT COUNT(*) n FROM jobs WHERE campaign_id=? AND state NOT IN ('done','cancelled','quarantined')",
+            if not self.db.one("SELECT COUNT(*) n FROM jobs WHERE campaign_id=? AND state NOT IN ('done','cancelled','quarantined','failed')",
                                (self.sid,))["n"]:
                 break
             clock.advance(dt)
