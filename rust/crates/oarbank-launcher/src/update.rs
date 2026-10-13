@@ -112,6 +112,40 @@ fn run_logged(cmd: &mut Command, log: &Path) -> (Option<i32>, String) {
     (code, tail.into_iter().rev().collect::<Vec<_>>().join("\n"))
 }
 
+/// macOS package tools require a `.pkg` filename. The runner keeps packages under their verified digest, so give
+/// those tools a hard link in the same owner-only directory: exactly the verified bytes, removed after use.
+struct PkgPath {
+    path: PathBuf,
+    linked: bool,
+}
+
+impl PkgPath {
+    fn new(package: &Path) -> std::io::Result<Self> {
+        if !std::fs::symlink_metadata(package)?.is_file() {
+            return Err(std::io::Error::other("the verified package is not a regular file"));
+        }
+        if package.extension() == Some(std::ffi::OsStr::new("pkg")) {
+            return Ok(Self { path: package.to_path_buf(), linked: false });
+        }
+        let path = package.with_extension("pkg");
+        // A runner interrupted during the package tool can leave its link; replace it from the verified cache.
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        std::fs::hard_link(package, &path)?;
+        Ok(Self { path, linked: true })
+    }
+}
+
+impl Drop for PkgPath {
+    fn drop(&mut self) {
+        if self.linked {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// The OS's package tools, and the agent home's `current`.
 pub struct OsInstaller {
     pub home: Home,
@@ -194,7 +228,8 @@ impl Installer for OsInstaller {
     fn check_native(&mut self, format: &str, package: &Path) -> Result<(), String> {
         match (format, TEAM_ID, AUTHENTICODE_SUBJECT) {
             ("pkg", Some(team), _) if !team.is_empty() => {
-                let o = Command::new("pkgutil").arg("--check-signature").arg(package).output().map_err(|e| e.to_string())?;
+                let pkg = PkgPath::new(package).map_err(|e| e.to_string())?;
+                let o = Command::new("pkgutil").arg("--check-signature").arg(&pkg.path).output().map_err(|e| e.to_string())?;
                 let text = String::from_utf8_lossy(&o.stdout);
                 if !o.status.success() || !text.contains("Developer ID Installer:") || !text.contains(&format!("({team})")) {
                     return Err(format!("the package is not signed by the pinned Developer ID Installer team {team}"));
@@ -230,7 +265,11 @@ impl Installer for OsInstaller {
                 self.package_tool(argv, package, release)
             }
             "pkg" => {
-                let (code, tail) = run_logged(Command::new("installer").arg("-pkg").arg(package).args(["-target", "/"]), &self.log("installer", release));
+                let pkg = match PkgPath::new(package) {
+                    Ok(pkg) => pkg,
+                    Err(e) => return InstallOutcome::Failed { error: format!("preparing the verified pkg: {e}"), restored: true },
+                };
+                let (code, tail) = run_logged(Command::new("installer").arg("-pkg").arg(&pkg.path).args(["-target", "/"]), &self.log("installer", release));
                 if code == Some(0) { InstallOutcome::Installed { reboot_pending: false } }
                 else { InstallOutcome::Failed { error: format!("installer failed: {tail}"), restored: false } }
             }
@@ -515,6 +554,54 @@ fn start_detached() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkg_tools_get_the_verified_bytes_with_a_suffix_and_no_leftover_link() {
+        let tmp = tempfile::Builder::new().prefix("oarbank-launcher-pkg-").tempdir().unwrap();
+        for name in ["verified-digest", ".incoming", "already.pkg"] {
+            let cache = tmp.path().join(name);
+            std::fs::write(&cache, b"verified package").unwrap();
+            let view = cache.with_extension("pkg");
+            if view != cache {
+                std::fs::write(&view, b"stale interrupted runner link").unwrap();
+            }
+            {
+                let pkg = PkgPath::new(&cache).unwrap();
+                assert_eq!(pkg.path.extension().unwrap(), "pkg");
+                assert_eq!(std::fs::read(&pkg.path).unwrap(), b"verified package");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let (a, b) = (std::fs::metadata(&cache).unwrap(), std::fs::metadata(&pkg.path).unwrap());
+                    assert_eq!((a.dev(), a.ino(), a.uid(), a.mode()), (b.dev(), b.ino(), b.uid(), b.mode()));
+                }
+            }
+            assert_eq!(std::fs::read(&cache).unwrap(), b"verified package");
+            assert_eq!(view.exists(), view == cache);
+        }
+        assert!(PkgPath::new(&tmp.path().join("missing")).is_err());
+        assert!(PkgPath::new(tmp.path()).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_installer_accepts_a_cached_pkg_through_its_suffixed_view() {
+        let tmp = tempfile::Builder::new().prefix("oarbank-launcher-pkg-info-").tempdir().unwrap();
+        let original = tmp.path().join("fixture.pkg");
+        let built = Command::new("/usr/bin/pkgbuild").args(["--nopayload", "--identifier", "dev.codonic.oarbank.test.pkg-path",
+            "--version", "1.0.0"]).arg(&original).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let cache = tmp.path().join(fleet::sha256_hex(&std::fs::read(&original).unwrap()));
+        std::fs::rename(&original, &cache).unwrap();
+        let info = |path: &Path| Command::new("/usr/sbin/installer").args(["-pkginfo", "-pkg"]).arg(path).output().unwrap();
+        assert!(!info(&cache).status.success());
+        {
+            let pkg = PkgPath::new(&cache).unwrap();
+            let result = info(&pkg.path); // package metadata only: no install, service or administrator access
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+        }
+        assert!(cache.is_file() && !cache.with_extension("pkg").exists());
+    }
 
     /// A tarball unpacks into `<prefix>/versions/<release>/` (again on a resume), and its agent becomes current.
     #[test]
