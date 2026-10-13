@@ -4,10 +4,11 @@
 use crate::signals::PresenceReading;
 
 /// Linux: the login sessions systemd-logind tracks (`loginctl show-session`), and whether a person is using the
-/// machine through one of them: a desktop session (x11, wayland, mir) that is active and whose desktop does not say
-/// idle, or a text session (a local console, or a remote login) that has a terminal with recent input. Sessions
-/// that are not a person at the machine never count: user managers, greeters, lock screens, background and closing
-/// sessions, sessions switched away from on a seat, and ssh commands or automation without a terminal.
+/// machine through one of them: a desktop session (x11, wayland, mir, local or remote) that is active and whose
+/// desktop does not say idle, or a local text console that has a terminal with recent input. Sessions that are not a
+/// person using the machine never count: user managers, greeters, lock screens, background and closing sessions,
+/// sessions switched away from on a seat, and remote text logins (ssh, with a terminal or without: an administrator
+/// or automation, as on macOS, where ssh never counts either).
 pub mod logind {
     use super::*;
 
@@ -94,18 +95,25 @@ pub mod logind {
             self.is_person() && self.active && self.state != "closing"
         }
 
-        /// Whether the platform should read its processes' terminals: a person's text session in front whose input
-        /// time logind does not know.
+        /// A remote text login: an ssh session (OpenSSH's PAM service, which logind does not always mark remote),
+        /// or a text session logind marks remote (a remote host given to PAM).
+        pub fn remote_login(&self) -> bool {
+            !self.graphical() && (self.remote || self.service.starts_with("sshd"))
+        }
+
+        /// Whether the platform should read its processes' terminals: a person's local text session in front whose
+        /// input time logind does not know.
         pub fn needs_terminals(&self) -> bool {
-            self.in_front() && !self.graphical() && self.idle_since_us == 0
+            self.in_front() && !self.graphical() && !self.remote_login() && self.idle_since_us == 0
         }
 
         /// Whether a person is using the machine through this session, and how long since their last input.
-        /// A desktop's idle hint decides a graphical session (IdleSinceHint is when it went idle). A text
-        /// session's last input is its terminal's: the one logind recorded or the leader's controlling terminal
-        /// (logind reports its access time as IdleSinceHint, whether or not it counts as idle yet), else the most
-        /// recently read controlling terminal of its processes. A text session with no terminal is no person at
-        /// the machine (an ssh command, automation); one whose terminal's input time cannot be read is unknown.
+        /// A desktop's idle hint decides a graphical session (IdleSinceHint is when it went idle). A remote text
+        /// login (ssh) is no person using the machine, whatever its terminal says. A local text session's last
+        /// input is its terminal's: the one logind recorded or the leader's controlling terminal (logind reports
+        /// its access time as IdleSinceHint, whether or not it counts as idle yet), else the most recently read
+        /// controlling terminal of its processes. A local text session with no terminal is no person at the
+        /// machine (automation); one whose terminal's input time cannot be read is unknown.
         pub fn activity(&self, now_us: u64) -> Activity {
             if !self.is_person() {
                 return Activity::Ignored(match self.class.as_str() {
@@ -129,6 +137,9 @@ pub mod logind {
                 } else {
                     0.0
                 });
+            }
+            if self.remote_login() {
+                return Activity::Ignored("remote login");
             }
             let theirs = match &self.terminals {
                 Terminals::Read(Some(t)) => Some(t.input_us),
@@ -381,7 +392,7 @@ pub mod wts {
         idle: impl Fn(u32) -> Option<f64>,
         locked_for: impl Fn(u32) -> Option<f64>,
     ) -> PresenceReading {
-        let mut least = f64::INFINITY;
+        let mut least: Option<(f64, &Session)> = None;
         let mut unknown = vec![];
         let mut any = false;
         for s in sessions.iter().filter(|s| s.is_person()) {
@@ -389,7 +400,8 @@ pub mod wts {
             let known =
                 idle(s.id).or_else(|| (s.locked == Some(true)).then(|| locked_for(s.id)).flatten());
             match known {
-                Some(x) => least = least.min(x),
+                Some(x) if least.is_none_or(|(l, _)| x < l) => least = Some((x, s)),
+                Some(_) => {}
                 None => unknown.push(format!("session {} ({})", s.id, s.user)),
             }
         }
@@ -405,28 +417,103 @@ pub mod wts {
                 ),
             );
         }
-        PresenceReading::new(Some(least), "wts")
+        match least {
+            Some((x, s)) => PresenceReading::new(
+                Some(x),
+                format!(
+                    "wts: session {} ({}{})",
+                    s.id,
+                    s.user,
+                    if s.locked == Some(true) {
+                        ", locked"
+                    } else {
+                        ""
+                    }
+                ),
+            ),
+            None => PresenceReading::new(Some(f64::INFINITY), "wts: nobody logged on"),
+        }
     }
 }
 
-/// macOS: the HID system's idle time, and a Screen Sharing session. Someone controlling the Mac remotely may give
-/// it no local input, so by default a running session counts as someone present (`screen_sharing_present` in the
-/// node policy); with that off, only the input idle time decides.
+/// macOS: the HID system's idle time (keyboard, mouse, trackpad, and a Screen Sharing viewer's input), and a Screen
+/// Sharing viewer. Someone watching the Mac remotely may give it no input, so by default a connected viewer counts as
+/// someone present (`screen_sharing_present` in the node policy); with that off, only the input idle time decides.
+/// `screensharingd` merely running is no viewer: once launchd has started it for a session it can stay running
+/// and listening on port 5900 after the viewer leaves. A logged-in console session (an auto-login Mac with nobody
+/// at it) and ssh sessions never count: only input does.
 pub mod hid {
     use super::*;
 
+    /// What Screen Sharing says about a person using the Mac.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ScreenSharing {
+        /// `screensharingd` does not run: no session since it last exited.
+        Off,
+        /// `screensharingd` runs: the viewers connected to it (its established TCP connections); 0 while it only
+        /// listens.
+        Viewers(usize),
+        /// `screensharingd` runs and its connections could not be read: why.
+        Unknown(String),
+    }
+
+    /// The established TCP connections owned by any of `pids` in `netstat -anv -p tcp`'s output, whose `process:pid`
+    /// column names each socket's process (it reads the kernel's socket list, which any account may read). None when
+    /// the output has no such column.
+    pub fn established(netstat: &str, pids: &[i32]) -> Option<usize> {
+        if !netstat.lines().any(|l| l.contains("process:pid")) {
+            return None;
+        }
+        let owned = |t: &str| {
+            t.rsplit_once(':').is_some_and(|(name, pid)| {
+                !name.is_empty() && pid.parse::<i32>().is_ok_and(|p| pids.contains(&p))
+            })
+        };
+        Some(
+            netstat
+                .lines()
+                .map(|l| l.split_whitespace().collect::<Vec<_>>())
+                .filter(|t| {
+                    t.len() > 6
+                        && t[0].starts_with("tcp")
+                        && t[5] == "ESTABLISHED"
+                        && t[6..].iter().any(|x| owned(x))
+                })
+                .count(),
+        )
+    }
+
     pub fn presence(
-        screen_sharing: bool,
+        sharing: &ScreenSharing,
         hid_idle_s: Option<f64>,
         screen_sharing_present: bool,
     ) -> PresenceReading {
-        if screen_sharing && screen_sharing_present {
-            return PresenceReading::new(Some(0.0), "screen sharing");
+        if screen_sharing_present {
+            match sharing {
+                ScreenSharing::Viewers(n) if *n > 0 => {
+                    return PresenceReading::new(
+                        Some(0.0),
+                        format!(
+                            "screen sharing: {n} viewer{} connected",
+                            if *n == 1 { "" } else { "s" }
+                        ),
+                    );
+                }
+                ScreenSharing::Unknown(why) => {
+                    return PresenceReading::new(
+                        None,
+                        format!(
+                            "unknown: screensharingd runs and whether a viewer is connected cannot be read ({why})"
+                        ),
+                    );
+                }
+                _ => {}
+            }
         }
-        let note = if screen_sharing {
-            " (screen sharing not counted)"
-        } else {
-            ""
+        let note = match sharing {
+            ScreenSharing::Off => "",
+            ScreenSharing::Viewers(0) => " (screensharingd runs with no viewer connected)",
+            _ => " (screen sharing not counted)",
         };
         match hid_idle_s {
             Some(s) => PresenceReading::new(Some(s), format!("hid{note}")),
@@ -473,17 +560,26 @@ mod tests {
         Service=gdm-launch-environment\nScope=session-c1.scope\nLeader=1042\nType=wayland\nClass=greeter\nActive=yes\n\
         State=active\nIdleHint=no\nIdleSinceHint=0\nLockedHint=no\n";
 
-    /// The sessions of `SHOW`, their processes' terminals read as the platform reads them: none of the ssh
-    /// command's processes has a terminal, the ssh login's shell is on pts/0, last read 3 s ago.
+    /// The sessions of `SHOW`, with what their processes' terminals would read: none of the ssh command's
+    /// processes has a terminal, the ssh login's shell is on pts/0, last read 3 s ago.
     fn sessions() -> Vec<Session> {
         let mut s = parse_show(SHOW);
-        for x in s.iter_mut().filter(|x| x.needs_terminals()) {
+        for x in s.iter_mut().filter(|x| x.id == "5" || x.id == "10") {
             x.terminals = Terminals::Read((x.id == "10").then(|| Terminal {
                 name: "pts/0".into(),
                 input_us: NOW - 3_000_000,
             }));
         }
         s
+    }
+
+    /// The same session as a local text login at no seat (a serial or container console, `login`'s PAM service),
+    /// whose input time only its processes' terminals tell.
+    fn local(x: Session) -> Session {
+        Session {
+            service: "login".into(),
+            ..x
+        }
     }
 
     fn get(s: &[Session], id: &str) -> Session {
@@ -578,10 +674,16 @@ mod tests {
         // user managers are no person
         assert_eq!(act("1"), Activity::Ignored("user manager"));
         assert_eq!(act("2"), Activity::Ignored("user manager"));
-        // an ssh command (or automation) has no terminal: not a person using the machine
-        assert_eq!(act("5"), Activity::Ignored("no terminal"));
-        // an ssh login with a pty: its shell's terminal had input 3 s ago
-        assert_eq!(act("10"), Activity::Idle(3.0));
+        // ssh is no person using the machine: a command without a terminal, a login whose terminal had input 3 s
+        // ago (an administrator, or automation), and a login logind marks remote, with or without a recorded pty
+        assert_eq!(act("5"), Activity::Ignored("remote login"));
+        assert_eq!(act("10"), Activity::Ignored("remote login"));
+        assert_eq!(act("12"), Activity::Ignored("remote login"));
+        assert!(
+            get(&s, "5").remote_login()
+                && get(&s, "10").remote_login()
+                && get(&s, "12").remote_login()
+        );
         // the desktop says idle since 100 s ago; a desktop that says active is present
         assert_eq!(act("7"), Activity::Idle(100.0));
         let busy = Session {
@@ -589,6 +691,15 @@ mod tests {
             ..get(&s, "7")
         };
         assert_eq!(busy.activity(NOW), Activity::Idle(0.0));
+        // a remote desktop (xrdp, a VNC desktop session) is a person using the machine, by its desktop's idle hint
+        let rdp = Session {
+            remote: true,
+            remote_host: "192.0.2.8".into(),
+            seat: String::new(),
+            ..get(&s, "7")
+        };
+        assert!(!rdp.remote_login());
+        assert_eq!(rdp.activity(NOW), Activity::Idle(100.0));
         // a console switched away from on the seat is in front of nobody
         assert_eq!(act("3"), Activity::Ignored("switched away"));
         // the same console in front: its terminal's last input, whether or not logind calls it idle yet
@@ -598,17 +709,28 @@ mod tests {
             ..get(&s, "3")
         };
         assert_eq!(console.activity(NOW), Activity::Idle(40.0));
-        // a remote login logind recorded the pty of, untouched for two hours
-        assert_eq!(act("12"), Activity::Idle(7200.0));
-        // the most recent of logind's input time and the processes' terminals
+        // a local text login at no seat: its processes' terminal had input 3 s ago, or it has none (automation)
+        assert_eq!(local(get(&s, "10")).activity(NOW), Activity::Idle(3.0));
+        assert_eq!(
+            local(get(&s, "5")).activity(NOW),
+            Activity::Ignored("no terminal")
+        );
+        // a local login logind recorded the terminal of: the most recent of its input time and the processes'
         let both = Session {
+            remote: false,
+            remote_host: String::new(),
             terminals: Terminals::Read(Some(Terminal {
                 name: "pts/4".into(),
                 input_us: NOW - 5_000_000,
             })),
-            ..get(&s, "12")
+            ..local(get(&s, "12"))
         };
         assert_eq!(both.activity(NOW), Activity::Idle(5.0));
+        let stale = Session {
+            terminals: Terminals::NotRead,
+            ..both.clone()
+        };
+        assert_eq!(stale.activity(NOW), Activity::Idle(7200.0));
         // greeters, lock screens, background jobs (cron) and sessions left closing after a logout never count
         for (class, state, what) in [
             ("greeter", "active", "greeter"),
@@ -619,7 +741,7 @@ mod tests {
             let x = Session {
                 class: class.into(),
                 state: state.into(),
-                ..get(&s, "10")
+                ..local(get(&s, "10"))
             };
             assert_eq!(x.activity(NOW), Activity::Ignored(what), "{class} {state}");
             assert!(!x.needs_terminals());
@@ -634,19 +756,27 @@ mod tests {
             "{:?}",
             no_input.activity(NOW)
         );
-        // an ssh session whose processes could not be read: a pty cannot be ruled out
+        // a local login whose processes could not be read: a terminal cannot be ruled out
         let unread = Session {
+            terminals: Terminals::NotRead,
+            ..local(get(&s, "5"))
+        };
+        assert!(matches!(unread.activity(NOW), Activity::Unknown(_)));
+        // an ssh session whose processes could not be read is still no person using the machine
+        let unread_ssh = Session {
             terminals: Terminals::NotRead,
             ..get(&s, "5")
         };
-        assert!(matches!(unread.activity(NOW), Activity::Unknown(_)));
-        // only a person's text session in front without logind's input time needs its processes read
+        assert_eq!(unread_ssh.activity(NOW), Activity::Ignored("remote login"));
+        // only a person's local text session in front without logind's input time needs its processes read: never
+        // an ssh session
         let need: Vec<String> = parse_show(SHOW)
             .into_iter()
+            .map(|x| if x.id == "10" { local(x) } else { x })
             .filter(Session::needs_terminals)
             .map(|x| x.id)
             .collect();
-        assert_eq!(need, ["5", "10"]);
+        assert_eq!(need, ["10"]);
     }
 
     #[test]
@@ -657,34 +787,38 @@ mod tests {
         assert_eq!(r.idle_s, Some(f64::INFINITY));
         assert_eq!(
             r.source,
-            "logind: nobody is using the machine; ignored 3 non-interactive sessions (user manager: 1, 2; no terminal: 5)"
+            "logind: nobody is using the machine; ignored 3 non-interactive sessions (user manager: 1, 2; remote login: 5)"
         );
-        // someone logs in over ssh with a pty and types
-        let r = presence(&pick(&s, &["1", "2", "5", "10"]), NOW);
+        // an administrator logs in over ssh with a pty and types: still nobody using the machine
+        let r = presence(&pick(&s, &["1", "2", "5", "10", "12"]), NOW);
+        assert_eq!(r.idle_s, Some(f64::INFINITY));
+        assert_eq!(
+            r.source,
+            "logind: nobody is using the machine; ignored 5 non-interactive sessions (user manager: 1, 2; remote login: \
+             5, 10, 12)"
+        );
+        // someone types at a local text login
+        let r = presence(&[get(&s, "1"), local(get(&s, "10"))], NOW);
         assert_eq!(r.idle_s, Some(3.0));
         assert_eq!(
             r.source,
-            "logind: session 10 (sshd, pts/0); ignored 3 non-interactive sessions (user manager: 1, 2; no terminal: 5)"
+            "logind: session 10 (login, pts/0); ignored 1 non-interactive session (user manager: 1)"
         );
-        // the least idle of several people: the GNOME desktop beats an ssh login idle for an hour
-        let mut idle_ssh = get(&s, "10");
-        idle_ssh.terminals = Terminals::Read(Some(Terminal {
+        // the least idle of several people: the GNOME desktop beats a local login idle for an hour
+        let mut idle_local = local(get(&s, "10"));
+        idle_local.terminals = Terminals::Read(Some(Terminal {
             name: "pts/0".into(),
             input_us: NOW - 3_600_000_000,
         }));
-        let r = presence(&[idle_ssh, get(&s, "7"), get(&s, "3")], NOW);
+        let r = presence(&[idle_local, get(&s, "7"), get(&s, "3")], NOW);
         assert_eq!(r.idle_s, Some(100.0));
         assert_eq!(
             r.source,
             "logind: session 7 (gdm-password, x11, seat0), the least idle of 2; ignored 1 non-interactive session \
              (switched away: 3)"
         );
-        // a remote login left idle for two hours is far from present
-        let r = presence(&pick(&s, &["12"]), NOW);
-        assert_eq!(r.idle_s, Some(7200.0));
-        assert_eq!(r.source, "logind: session 12 (sshd, pts/1, from 192.0.2.7)");
-        // every session together
-        assert_eq!(presence(&s, NOW).idle_s, Some(3.0));
+        // every session together: the desktop, idle for 100 s
+        assert_eq!(presence(&s, NOW).idle_s, Some(100.0));
         // nobody logged in at all
         let r = presence(&[], NOW);
         assert_eq!(
@@ -696,15 +830,15 @@ mod tests {
         let r = presence(&greeter, NOW);
         assert_eq!(r.idle_s, Some(f64::INFINITY));
         assert!(r.source.ends_with("(greeter: c1)"), "{}", r.source);
-        // an ssh session whose processes could not be read: unknown, which capacity treats as someone present
-        let mut unread = pick(&s, &["1", "5", "7"]);
+        // a local login whose processes could not be read: unknown, which capacity treats as someone present
+        let mut unread = vec![get(&s, "1"), local(get(&s, "5")), get(&s, "7")];
         unread[1].terminals = Terminals::NotRead;
         let r = presence(&unread, NOW);
         assert_eq!(r.idle_s, None);
         assert_eq!(r.effective_idle_s(), 0.0);
         assert!(
             r.source
-                .starts_with("unknown: session 5 (sshd): logind records no terminal"),
+                .starts_with("unknown: session 5 (login): logind records no terminal"),
             "{}",
             r.source
         );
@@ -750,15 +884,19 @@ mod tests {
             |id| (id == 1).then_some(42.0),
             none,
         );
-        assert_eq!((r.idle_s, r.source.as_str()), (Some(42.0), "wts"));
+        assert_eq!(
+            (r.idle_s, r.source.as_str()),
+            (Some(42.0), "wts: session 1 (ada)")
+        );
         // locked: idle at least since the lock was seen
         let locked = Session {
             locked: Some(true),
             ..console.clone()
         };
+        let r = wts::presence(&[locked], none, |_| Some(600.0));
         assert_eq!(
-            wts::presence(&[locked], none, |_| Some(600.0)).idle_s,
-            Some(600.0)
+            (r.idle_s, r.source.as_str()),
+            (Some(600.0), "wts: session 1 (ada, locked)")
         );
         assert_eq!(
             wts::front_session(&[services.clone(), console.clone()], 1).map(|s| s.id),
@@ -838,20 +976,82 @@ mod tests {
         );
     }
 
+    /// What `netstat -anv -p tcp` prints on macOS 27 (columns after the process trimmed): screensharingd (pid 412)
+    /// listening on port 5900 with launchd, an established connection of another process, and, in `VIEWER`, a viewer
+    /// connected to screensharingd.
+    const NETSTAT_IDLE: &str = "Active Internet connections (including servers)\n\
+        Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      txbytes  rhiwat  shiwat          process:pid    state  options\n\
+        tcp4       0      0  198.51.100.4.57887     203.0.113.9.5900       ESTABLISHED    541093958        74810 1796240  131396   Screen Sharing:1320   00002 00000000\n\
+        tcp4       0      0  198.51.100.4.65473     203.0.113.20.443       ESTABLISHED         8824         2275  131072  131860       python3.10:4768   00102 00000000\n\
+        tcp4       0      0  *.5900                 *.*                    LISTEN                 0            0  131072  131072          launchd:1      00080 00000006\n\
+        tcp6       0      0  *.5900                 *.*                    LISTEN                 0            0  131072  131072   screensharingd:412  00080 00000006\n\
+        tcp6       0      0  fe80::1%lo0.5900       fe80::1%lo0.61000      TIME_WAIT              0            0  131072  131072   screensharingd:412  00080 00000006\n";
+
+    const VIEWER: &str = "tcp4       0      0  198.51.100.4.5900      203.0.113.7.56638      ESTABLISHED      3363824   2935481392  131072 1729024   screensharingd:412  00082 00000004\n";
+
     #[test]
-    fn screen_sharing_counts_as_present_unless_the_owner_turns_it_off() {
-        use super::hid::presence;
-        let r = presence(true, Some(900.0), true);
-        assert_eq!((r.idle_s, r.source.as_str()), (Some(0.0), "screen sharing"));
-        let r = presence(true, Some(900.0), false);
+    fn a_screen_sharing_viewer_is_an_established_connection_of_screensharingd() {
+        use super::hid::established;
+        // screensharingd only listening (as it stays after a session ends): no viewer
+        assert_eq!(established(NETSTAT_IDLE, &[412]), Some(0));
+        // a viewer connected
+        let viewer = format!("{NETSTAT_IDLE}{VIEWER}");
+        assert_eq!(established(&viewer, &[412]), Some(1));
+        // another process's connections, even this Mac's own Screen Sharing app viewing another Mac, are no viewer
+        assert_eq!(established(&viewer, &[999]), Some(0));
+        assert_eq!(established(&viewer, &[1320]), Some(1));
+        // a netstat that does not name sockets' processes cannot tell
+        let old = "Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)\n\
+                   tcp4       0      0  198.51.100.4.5900      203.0.113.7.56638      ESTABLISHED\n";
+        assert_eq!(established(old, &[412]), None);
+    }
+
+    #[test]
+    fn presence_on_a_mac_is_input_or_a_connected_screen_sharing_viewer() {
+        use super::hid::{presence, ScreenSharing::*};
+        // a connected viewer counts as someone present, unless the owner turns it off
+        let r = presence(&Viewers(1), Some(900.0), true);
+        assert_eq!(
+            (r.idle_s, r.source.as_str()),
+            (Some(0.0), "screen sharing: 1 viewer connected")
+        );
+        assert_eq!(
+            presence(&Viewers(2), Some(900.0), true).source,
+            "screen sharing: 2 viewers connected"
+        );
+        let r = presence(&Viewers(1), Some(900.0), false);
         assert_eq!(
             (r.idle_s, r.source.as_str()),
             (Some(900.0), "hid (screen sharing not counted)")
         );
-        let r = presence(false, Some(12.0), true);
+        // the headless auto-login Mac: screensharingd still runs from an earlier session, nobody is connected and
+        // nobody has touched it for an hour: nobody is present, and the reading says why
+        let r = presence(&Viewers(0), Some(3600.0), true);
+        assert_eq!(
+            (r.idle_s, r.source.as_str()),
+            (
+                Some(3600.0),
+                "hid (screensharingd runs with no viewer connected)"
+            )
+        );
+        // no Screen Sharing at all: input alone decides
+        let r = presence(&Off, Some(12.0), true);
         assert_eq!((r.idle_s, r.source.as_str()), (Some(12.0), "hid"));
+        // screensharingd runs and its connections cannot be read: unknown (counted as present), unless screen
+        // sharing does not count
+        let r = presence(&Unknown("netstat failed".into()), Some(3600.0), true);
+        assert_eq!(r.idle_s, None);
+        assert!(
+            r.source.starts_with("unknown: screensharingd runs"),
+            "{}",
+            r.source
+        );
+        assert_eq!(
+            presence(&Unknown("netstat failed".into()), Some(3600.0), false).idle_s,
+            Some(3600.0)
+        );
         // unreadable input time stays unknown (counted as present) either way
-        assert_eq!(presence(true, None, false).idle_s, None);
-        assert_eq!(presence(false, None, true).effective_idle_s(), 0.0);
+        assert_eq!(presence(&Viewers(1), None, false).idle_s, None);
+        assert_eq!(presence(&Off, None, true).effective_idle_s(), 0.0);
     }
 }
