@@ -72,7 +72,8 @@ sudo install -m 600 -o "$owner" "$WORK/request.json" "$SPOOL/.request.json.tmp"
 sudo mv "$SPOOL/.request.json.tmp" "$SPOOL/request.json"
 state=""
 for ((i = 0; i < 3000; i++)); do
-    state="$(sudo cat "$SPOOL/result.json" 2>/dev/null | python3 -c 'import json,sys
+    # The runner creates result.json asynchronously; an absent file means keep waiting, even under pipefail.
+    state="$( (sudo cat "$SPOOL/result.json" 2>/dev/null || true) | python3 -c 'import json,sys
 try: r = json.load(sys.stdin)
 except ValueError: r = {}
 print(r.get("state", "") if r.get("id") == sys.argv[1] else "")' "$id")"

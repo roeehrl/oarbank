@@ -213,3 +213,24 @@ def test_ci_updates_each_os_package_through_the_runner():
         assert needle in linux, needle
     win = (REPO / "scripts/ci-fleet-update-windows.ps1").read_text(encoding="utf-8")
     assert 'Step "unconfirmed" $Second $false "rolled_back" $v1' in win and '"--probation-s", "5"' in win
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the macOS runner's shell polling uses POSIX bash")
+@pytest.mark.parametrize("result,want", [
+    (None, ""),
+    ("{", ""),
+    ('{"id":"another-update","state":"installed"}', ""),
+    ('{"id":"ci-update","state":"installing"}', "installing"),
+    ('{"id":"ci-update","state":"installed"}', "installed"),
+])
+def test_macos_update_poll_waits_for_its_result_under_pipefail(tmp_path, result, want):
+    # Exercise the production poll without installing a package or touching a service. A new request's result file
+    # does not exist until launchd starts the runner; errexit must not abort that first poll.
+    if result is not None:
+        (tmp_path / "result.json").write_text(result, encoding="ascii")
+    script = (REPO / "scripts/ci-fleet-update-macos.sh").read_text(encoding="utf-8")
+    poll = script[script.index('    state="$('):script.index('\n    [[ -n "$state"')]
+    shell = 'set -euo pipefail\nsudo() { "$@"; }\nSPOOL="$1"\nid="$2"\n' + poll + '\nprintf "%s" "$state"\n'
+    r = subprocess.run(["bash", "-c", shell, "poll", str(tmp_path), "ci-update"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == want
