@@ -63,14 +63,19 @@ def _plural(n, word, many=None):
     return f"{n} {word if n == 1 else (many or word + 's')}"
 
 
-def _containers_why(facts: dict) -> str:
-    """Why a node offers no `containers` pool, from its facts' `containers` report."""
+def _containers_why(facts: dict, os_: str | None) -> str:
+    """Why a node offers no `containers` pool, with what fixes it, from its facts' `containers` report: each missing
+    piece the agent names (`[{what, detail, fix}]`, docs/protocol.md) with its own fix, else the OS's general fix."""
     c = (facts or {}).get("containers") or {}
-    if c.get("runtime"):
-        state = c.get("state") or "not ready"
-        missing = ", ".join(c.get("missing") or [])
-        return f"no ready container runtime ({c['runtime']} {state}{': missing ' + missing if missing else ''})"
-    return "no container runtime reported"
+    general = CONTAINER_FIX.get(os_, "install a container runtime on it")
+    if not c.get("runtime"):
+        return f"no container runtime reported: {general}"
+    missing = [m for m in c.get("missing") or [] if isinstance(m, dict) and m.get("what")]
+    head = f"no ready container runtime ({c['runtime']} {c.get('state') or 'not ready'}"
+    if not missing:
+        return f"{head}): {general}"
+    return f"{head}: missing {', '.join(m['what'] for m in missing)}): " + "; ".join(
+        f"{m['what']}: {m.get('fix') or m.get('detail') or general}" for m in missing)
 
 
 def _module_reasons(db: DB, man, node: dict, name: str) -> list[str]:
@@ -113,7 +118,7 @@ def _stage_reasons(name: str, stage, node: dict, tool_ids: set, has_release: boo
         if int(pools.get(p, 0)) >= int(k):
             continue
         if p == "containers":
-            out.append(f"{_containers_why(facts)}: {CONTAINER_FIX.get(os_, 'install a container runtime on it')}")
+            out.append(_containers_why(facts, os_))
         else:
             out.append(f"no {p} pool" + (f" ({k} needed)" if k > 1 else ""))
     res = stage.requires.resources
