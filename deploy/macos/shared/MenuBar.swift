@@ -302,6 +302,9 @@ func settingsWindow(title: String, sections: [(String, NSView)], delegate: NSWin
     content.addSubview(stack)
     NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: content.leadingAnchor), stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
                                  stack.topAnchor.constraint(equalTo: content.topAnchor), stack.bottomAnchor.constraint(equalTo: content.bottomAnchor)])
+    // a leading-aligned stack does not hold its trailing inset (its fitting width ends at the widest row), so each group
+    // is pinned to it: the window's right margin matches its left, and fitWindow keeps it
+    NSLayoutConstraint.activate(sections.map { $0.1.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -stack.edgeInsets.right) })
     window.contentView = content
     return window
 }
