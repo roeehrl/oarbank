@@ -193,6 +193,11 @@ their process groups, deletes their workspaces, and does not report them.
   `pressure` per rule at an interval's end) and its compliance actions as `kind: "gpu_compliance"` (`GPU_DUTY_EXCEEDED`,
   `GPU_DUTY_UNVERIFIED`, with `attempt` (a job's) or `workload` (a workload's key), `unit`, `measured`, `duty`,
   `action: "paused|evicted"`); S28 reads both.
+- **`telemetry.protection.session_helpers`** (a system install's service): whether it serves its session helpers,
+  `{"at": "<socket path or pipe name>", "serving": false, "error": "cannot create …: Permission denied (os error 13)",
+  "failures": 4}`. While it does not, the agent tries again every 15 s and the console shows
+  `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes go unread (on macOS unlisted), so rules may miss
+  them. Absent in a personal install.
 - **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
   block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
   "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:

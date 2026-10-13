@@ -227,7 +227,12 @@ such a session's input time cannot be read, never because of an ssh command or a
 only because their path or arguments were unreadable (`PROTECTION_UNREADABLE`), an `ipc_ratio` rule whose processes
 have no instruction or cycle counters (`PROTECTION_NO_IPC_COUNTERS`: a virtual machine; the metric is unknown, so the
 budget does not grow on it), and a node that cannot lower its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused
-instead).
+instead). A system install's service that cannot serve its session helpers (`PROTECTION_SESSION_HELPER_UNAVAILABLE`:
+the socket's directory missing and not the service account's to make, or the pipe's name taken) reads no other
+account's process arguments (on macOS it lists none of their processes), so a rule on a person's program may match
+nothing; the agent makes the socket's directory when it may and tries again every 15 s, the macOS package's upgrade
+and `sudo oarbank-node service refresh --system` make the directory, and `oarbank-node doctor` fails its `helpers` row
+meanwhile.
 
 ## Capacity
 
