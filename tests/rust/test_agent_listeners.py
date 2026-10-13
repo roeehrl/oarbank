@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import pytest
 
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -73,6 +74,44 @@ def ask(addr: str, line: str) -> str:
         return buf.decode().strip()
 
 
+def wait_for_echo(addr: str, line: str, timeout=60) -> str:
+    expected = f"echo {line} {addr}"
+
+    def ready():
+        try:
+            answer = ask(addr, line)
+        except ConnectionRefusedError:
+            return None
+        return answer if answer == expected else None
+
+    return wait(ready, timeout=timeout)
+
+
+def test_echo_readiness_waits_for_forwarding_and_the_expected_reply(monkeypatch):
+    replies = iter([ConnectionRefusedError(), "", "wrong reply", "echo again 127.0.0.1:12345"])
+
+    def delayed(addr, line):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(sys.modules[__name__], "ask", delayed)
+    assert wait_for_echo("127.0.0.1:12345", "again", timeout=2) == "echo again 127.0.0.1:12345"
+
+
+@pytest.mark.parametrize("reply", [ConnectionRefusedError(), "wrong reply"])
+def test_echo_readiness_still_fails_when_forwarding_never_recovers(monkeypatch, reply):
+    def unavailable(addr, line):
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(sys.modules[__name__], "ask", unavailable)
+    with pytest.raises(AssertionError, match="timed out"):
+        wait_for_echo("127.0.0.1:12345", "again", timeout=0.1)
+
+
 def start_agent(agent_bin, coordinator, home, gw: Gateway):
     env = {**agent_env(), "OARBANK_PORTMAP_GATEWAY": gw.addr["pmp"], "OARBANK_PORTMAP_SSDP": gw.addr["ssdp"],
            "OARBANK_PORTMAP_TIMING": "fast", "OARBANK_LISTENER_PROBE_ALLOW_LOCAL": "1"}
@@ -112,14 +151,15 @@ def test_a_public_listener_is_mapped_probed_served_recovered_and_released(agent_
         x = wait(lambda: (lambda x: x if x.get("result") == "REACHABLE" else None)(listener(c, nid)), timeout=180)
         assert x["probe"]["state"] == "reachable" and x["probe"]["via"] == f"fleet:{nid_b}", x
         # a client at the mapped address is served by the module, through the relay; the service knows its address
-        answer = wait(lambda: (lambda r: r if r.endswith(f"127.0.0.1:{ext}") else None)(ask(f"127.0.0.1:{ext}", "hello")), timeout=60)
+        answer = wait_for_echo(f"127.0.0.1:{ext}", "hello")
         assert answer == f"echo hello 127.0.0.1:{ext}"
         wait(lambda: (listener(c, nid).get("conns") or {}).get("accepted", 0) >= 1, timeout=60)
         # the gateway reboots: the epoch goes back, the agent maps again
         time.sleep(3)
         gw.cmd(op="reboot")
         wait(lambda: [m["external_port"] for m in gw.ours()] == [ext], timeout=60)
-        assert ask(f"127.0.0.1:{ext}", "again") == f"echo again 127.0.0.1:{ext}"
+        # The fake gateway reconciles TCP forwarders every 100 ms, after its mapping table changes.
+        assert wait_for_echo(f"127.0.0.1:{ext}", "again") == f"echo again 127.0.0.1:{ext}"
         # the kill switch closes the listener and removes the mapping; resuming brings both back
         c.api("POST", "/api/v1/ops/listeners.disable", json={"target": "fleet", "reason": "e2e"})
         wait(lambda: listener(c, nid).get("refused") == "LISTENERS_DISABLED" and not gw.ours(), timeout=60)
