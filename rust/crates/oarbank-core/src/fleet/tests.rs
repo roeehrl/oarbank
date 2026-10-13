@@ -38,7 +38,9 @@ impl Installer for FakeInstaller {
     fn check_native(&mut self, _: &str, _: &Path) -> Result<(), String> {
         if self.0.borrow().native_fails { Err("the package is not signed by the pinned team".into()) } else { Ok(()) }
     }
-    fn install(&mut self, _format: &str, package: &Path, release: &str, rollback: bool) -> InstallOutcome {
+    fn install(&mut self, format: &str, package: &Path, release: &str, rollback: bool) -> InstallOutcome {
+        // as macOS's `installer -pkg` does, refuse a package whose name does not end in its format's extension
+        assert_eq!(package.extension().and_then(|e| e.to_str()), Some(format), "{}", package.display());
         let sha = sha256_hex(&std::fs::read(package).expect("the runner installs its own kept copy"));
         let mut m = self.0.borrow_mut();
         m.installs.push((sha, release.to_string(), rollback));
@@ -248,7 +250,7 @@ fn an_update_installs_confirms_and_commits() {
     assert_eq!(j.previous, None);
     assert_eq!(w.pointed(), "versions/2.0.0");
     assert_eq!(w.result()["state"], "done");
-    assert!(w.spool().kept(&r2.sha()).is_file() && !w.spool().request().exists() && !w.spool().confirmed().exists());
+    assert!(w.spool().kept(&r2.sha(), w.format).is_file() && !w.spool().request().exists() && !w.spool().confirmed().exists());
     // a second release keeps two packages; the first is the previous one now
     let r3 = rel("3.0.0", 30, "deb");
     w.healthy("3.0.0");
@@ -261,7 +263,7 @@ fn an_update_installs_confirms_and_commits() {
     let j = w.journal();
     assert_eq!((j.current.unwrap().release, j.previous.unwrap().release), ("4.0.0".to_string(), "3.0.0".to_string()));
     let kept: BTreeSet<String> = std::fs::read_dir(w.spool().packages()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
-    assert_eq!(kept, [r3.sha(), r4.sha()].into_iter().collect());
+    assert_eq!(kept, [r3.sha(), r4.sha()].into_iter().map(|s| kept_name(&s, w.format)).collect());
 }
 
 #[test]
@@ -454,7 +456,7 @@ fn a_failed_install_puts_back_the_kept_package_unless_the_os_did() {
     let last = w.m.borrow().installs.last().cloned().unwrap();
     assert_eq!((last.1.as_str(), last.2), ("2.0.0", true), "the kept package went back on");
     assert_eq!((w.pointed(), w.result()["partial"].clone()), ("versions/2.0.0".to_string(), json!(false)));
-    assert!(!w.spool().kept(&r3.sha()).exists());
+    assert!(!w.spool().kept(&r3.sha(), w.format).exists());
     assert_eq!(w.journal().committed_seq, 20);
 
     // MSI 1603: Windows restored the product, nothing is reinstalled

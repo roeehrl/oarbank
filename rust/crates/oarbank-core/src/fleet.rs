@@ -256,6 +256,13 @@ pub struct Pkg {
     pub format: String,
 }
 
+impl Pkg {
+    fn kept_name(&self) -> String { kept_name(&self.sha256, &self.format) }
+}
+
+/// `<sha256>.<format>` (formats are checked against FORMATS before anything is kept).
+pub fn kept_name(sha: &str, format: &str) -> String { format!("{sha}.{format}") }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
@@ -484,7 +491,9 @@ impl Spool {
     pub fn trust(&self) -> PathBuf { self.state.join("trust.json") }
     pub fn journal(&self) -> PathBuf { self.state.join("journal.json") }
     pub fn packages(&self) -> PathBuf { self.state.join("packages") }
-    pub fn kept(&self, sha: &str) -> PathBuf { self.packages().join(sha) }
+    /// The runner's copy of a package, named with its format's extension: macOS's `installer -pkg` refuses a path that
+    /// does not end in `.pkg`.
+    pub fn kept(&self, sha: &str, format: &str) -> PathBuf { self.packages().join(kept_name(sha, format)) }
     pub fn incoming(&self) -> PathBuf { self.packages().join(".incoming") }
 
     pub fn read_journal(&self) -> Result<Journal, Halt> {
@@ -598,10 +607,10 @@ impl Spool {
     }
 
     /// Keep only these packages.
-    fn prune(&self, keep: &[&str]) {
+    fn prune(&self, keep: &[String]) {
         for e in std::fs::read_dir(self.packages()).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if !keep.contains(&name.as_str()) {
+            if !keep.contains(&name) {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -703,7 +712,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
             }
             Ok(v) => {
                 let r = v.req;
-                let kept = self.spool.kept(&r.sha256);
+                let kept = self.spool.kept(&r.sha256, &r.format);
                 std::fs::rename(self.spool.incoming(), &kept).map_err(io)?;
                 self.clock.checkpoint("kept")?;
                 j.active = Some(Active { id: r.id.clone(), release: r.release.clone(), seq: r.seq, sha256: r.sha256.clone(),
@@ -779,7 +788,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
                         }
                     }
                     self.clock.checkpoint("install")?;
-                    let out = self.installer.install(&a.format, &self.spool.kept(&a.sha256), &a.release, false);
+                    let out = self.installer.install(&a.format, &self.spool.kept(&a.sha256, &a.format), &a.release, false);
                     self.clock.checkpoint("installed")?;
                     match out {
                         InstallOutcome::Installed { reboot_pending } => {
@@ -841,7 +850,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
                         Some(c) if c.sha256 != new.sha256 => Some(c.clone()),
                         _ => j.previous.clone(),
                     };
-                    let keep: Vec<&str> = [Some(new.sha256.as_str()), previous.as_ref().map(|p| p.sha256.as_str())].into_iter().flatten().collect();
+                    let keep: Vec<String> = [Some(&new), previous.as_ref()].into_iter().flatten().map(Pkg::kept_name).collect();
                     self.spool.prune(&keep);
                     self.result(Some(&a.id), Some(&a.release), "done", None, false, a.reboot_pending)?;
                     self.clock.checkpoint("done written")?;
@@ -867,9 +876,9 @@ impl<I: Installer, C: Clock> Runner<I, C> {
         let mut error = a.error.clone().unwrap_or_else(|| "rolled back".into());
         if !a.restored {
             match j.current.clone() {
-                Some(cur) if cur.sha256 != a.sha256 && self.spool.kept(&cur.sha256).is_file() => {
+                Some(cur) if cur.sha256 != a.sha256 && self.spool.kept(&cur.sha256, &cur.format).is_file() => {
                     self.clock.checkpoint("reinstall")?;
-                    match self.installer.install(&cur.format, &self.spool.kept(&cur.sha256), &cur.release, true) {
+                    match self.installer.install(&cur.format, &self.spool.kept(&cur.sha256, &cur.format), &cur.release, true) {
                         InstallOutcome::Installed { .. } => {}
                         InstallOutcome::Busy(e) | InstallOutcome::Failed { error: e, .. } => {
                             partial = true;
@@ -894,7 +903,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
         self.clock.checkpoint("pointed back")?;
         let state = a.outcome.clone().unwrap_or_else(|| "rolled_back".into());
         self.result(Some(&a.id), Some(&a.release), &state, Some(&error), partial, false)?;
-        let keep: Vec<&str> = [j.current.as_ref(), j.previous.as_ref()].into_iter().flatten().map(|p| p.sha256.as_str()).collect();
+        let keep: Vec<String> = [j.current.as_ref(), j.previous.as_ref()].into_iter().flatten().map(Pkg::kept_name).collect();
         self.spool.prune(&keep);
         j.active = None;
         j.finish(&a.id);
