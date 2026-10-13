@@ -80,8 +80,10 @@ under the agent's home, its own VM size, its own settings.
   creates the session (`WslcInitSessionSettings`, CPU count, memory, VHD size, the GPU feature when the host has a
   hardware GPU) and holds it for the agent's life. It waits on the session's termination event: when the session ends
   (its VM crashed, WSL was updated or stopped), the host records it and creates the session again. A runtime that is
-  missing something checks again when the agent's doctors run again (a new release, a restart), when a broker request
-  finds it not ready, or when a `wslc` call finds the session gone; nothing polls.
+  missing something checks again when the agent's doctors run again (a new release, a restart, the owner's doctor run
+  or Re-detect), when a broker request finds it not ready, when a `wslc` call finds the session gone, and every 60 s
+  while it is `missing` (`ContainerRuntime::reprobe`; the report stays `missing` until nothing is, so the facts do not
+  change on each look).
 - **Containers through the CLI.** Every container operation is `wslc.exe --session <name> ...` with a fixed shape, as
   the macOS and Linux runtimes run `docker`/`podman`. The SDK's C API has no per-container CPU or memory limit, no
   labels and no listing; the CLI has all three, and a session created through the SDK is reachable by name from the

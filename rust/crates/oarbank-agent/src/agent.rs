@@ -77,6 +77,8 @@ pub struct Agent {
     /// The coordinator's clock as of its last answer: moves' time locks and expiries are in its time (clock.rs).
     pub coord_clock: crate::clock::CoordClock,
     pub containers: Option<crate::container_runtime::Containers>,
+    /// When the container runtimes were last re-probed (`reprobe_runtimes`).
+    runtimes_probed: Option<std::time::Instant>,
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
     images: Option<Arc<crate::imageset::Verifier>>,
     /// The node statement this node applies (folders and added tool paths), and what it found for each folder (folders.rs).
@@ -161,7 +163,7 @@ impl Agent {
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout),
                    node_update: crate::nodeupdate::NodeUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
-                   containers: None, images: None,
+                   containers: None, runtimes_probed: None, images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
@@ -517,6 +519,7 @@ impl Agent {
         }
         if d["detect_tools"].as_bool() == Some(true) {
             self.detect_due = true;
+            self.retry_runtimes();                              // Re-detect: what the runtime missed may be installed now
         }
         if d["statement"].is_object() {
             self.observe_statement(&d["statement"].clone());
@@ -543,9 +546,14 @@ impl Agent {
                 });
             }
         }
-        if d["run_doctor"].as_bool() == Some(true) && self.doctor.is_none() {
-            let policy = self.with_grants(&d["policy"]);
-            self.run_doctors(&policy).await;
+        if d["run_doctor"].as_bool() == Some(true) {
+            // the owner's doctor run: the container runtime looks again first (2.10.3 ran the doctors on its old report,
+            // so a prerequisite installed since stayed `missing` until a restart)
+            self.retry_runtimes();
+            if self.doctor.is_none() {
+                let policy = self.with_grants(&d["policy"]);
+                self.run_doctors(&policy).await;
+            }
         }
         // a whole-package update (D57) and the agent-only self-update never run at once: a staged agent build goes
         // first, and no agent update starts while a package update is under way
@@ -1034,6 +1042,27 @@ impl Agent {
         self.containers.clone()
     }
 
+    /// The owner asked for a fresh look (a doctor run, Re-detect): each runtime the agent has checks again now, whatever
+    /// its backoff (`ContainerRuntime::retry`; one not made yet checks when it is made).
+    fn retry_runtimes(&self) {
+        for rt in self.containers.iter().flat_map(|c| c.all()) {
+            rt.retry();
+        }
+    }
+
+    /// Every RUNTIME_REPROBE, the runtimes re-probe what they miss (`ContainerRuntime::reprobe`: file checks; a missing
+    /// prerequisite installed since brings the runtime up). True when they were asked.
+    fn reprobe_runtimes(&mut self, now: std::time::Instant) -> bool {
+        if self.runtimes_probed.is_some_and(|t| now.saturating_duration_since(t) < crate::container_runtime::RUNTIME_REPROBE) {
+            return false;
+        }
+        self.runtimes_probed = Some(now);
+        for rt in self.containers.iter().flat_map(|c| c.all()) {
+            rt.reprobe();
+        }
+        true
+    }
+
     /// The container set verifier, made once (its index seqs live in the agent's home).
     fn image_verifier(&mut self) -> anyhow::Result<Arc<crate::imageset::Verifier>> {
         if self.images.is_none() {
@@ -1057,6 +1086,7 @@ impl Agent {
     /// One protection tick: sample, decide, actuate, recompute capacity.
     pub fn protect(&mut self) {
         self.listeners.tick();
+        self.reprobe_runtimes(std::time::Instant::now());
         if self.facts.is_null() {
             self.facts = facts::collect(&self.layout.home);
         }
@@ -1282,7 +1312,8 @@ impl Agent {
         }
         // the agent stops (the graceful stop of SIGTERM, SIGHUP, SIGINT or the launcher's stop event) or the node was
         // retired: close the listeners and delete their router mappings
-        let n = self.listeners.shutdown().await;
+        // the VMs stop meanwhile (their jobs' containers ended with the jobs)
+        let (n, ()) = tokio::join!(self.listeners.shutdown(), shutdown_runtimes(self.containers.clone()));
         if n > 0 {
             info!(mappings = n, "router mappings released");
         }
@@ -1512,6 +1543,17 @@ impl Agent {
     }
 }
 
+/// The agent is stopping: its runtimes stop their VMs (macOS), each within VM_STOP_BUDGET and all at once, so the next
+/// agent finds no instance a killed VM left (2.10.3 left the VM to its service's end, which could kill the VM's host agent
+/// and leave a stale instance that every later start failed on).
+async fn shutdown_runtimes(rts: Option<crate::container_runtime::Containers>) {
+    let stops: Vec<_> = rts.iter().flat_map(|c| c.all())
+        .map(|rt| tokio::task::spawn_blocking(move || rt.shutdown(crate::container_runtime::VM_STOP_BUDGET))).collect();
+    for s in stops {
+        let _ = s.await;
+    }
+}
+
 /// Sleep for `d`, or less if a stop is requested meanwhile; true when the agent is to stop.
 async fn sleep_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>, d: Duration) -> bool {
     // (a stop channel whose sender is gone never stops it: that branch is then disabled)
@@ -1625,6 +1667,77 @@ pub mod tests {
         assert_eq!(both(4, Some("microsoft.com/wslc=gpu")), [("containers".to_string(), 4), ("gpu".to_string(), 1)]);
         let cpu: Arc<dyn crate::container_runtime::ContainerRuntime> = Arc::new(PoolRuntime { tokens: 4, gpu: None });
         assert_eq!(container_pools(Some(&crate::container_runtime::Containers { cpu, gpu: None })).len(), 1);
+    }
+
+    /// A runtime that counts how the agent asks it to look again.
+    #[derive(Default)]
+    struct LookRuntime {
+        rechecks: std::sync::atomic::AtomicUsize,
+        retries: std::sync::atomic::AtomicUsize,
+        reprobes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::container_runtime::ContainerRuntime for LookRuntime {
+        fn status(&self) -> Result<crate::container_runtime::RuntimeStatus, String> {
+            Err("unused".into())
+        }
+        fn ensure_started(&self) -> Result<(), String> {
+            Err("missing".into())
+        }
+        fn pull(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn run(&self, _: &crate::container_runtime::RunSpec, _: &std::sync::atomic::AtomicBool)
+               -> Result<crate::container_runtime::RunResult, String> {
+            Err("unused".into())
+        }
+        fn images(&self) -> Vec<String> {
+            vec![]
+        }
+        fn reap(&self) -> Vec<String> {
+            vec![]
+        }
+        fn remove_attempt(&self, _: i64) -> Vec<String> {
+            vec![]
+        }
+        fn recheck(&self) {
+            self.rechecks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn retry(&self) {
+            self.retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn reprobe(&self) {
+            self.reprobes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A prerequisite the runtime missed and the owner installed since is noticed without a restart: the owner's doctor
+    /// run (`run_doctor`, even while a report waits to be sent) and Re-detect (`detect_tools`) make the runtime look
+    /// again at once, whatever its backoff, and the agent re-probes it every RUNTIME_REPROBE by itself. 2.10.3 ran the
+    /// doctors on the runtime's old report and kept `missing` until it restarted.
+    #[tokio::test]
+    async fn the_owners_doctor_run_redetect_and_a_timer_make_the_runtime_look_again() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let tmp = crate::scratch("agent-look");
+        let mut agent = Agent::open(Layout::new(tmp.path().join("agent")), Some("https://127.0.0.1:9")).unwrap();
+        let rt = Arc::new(LookRuntime::default());
+        agent.containers = Some(crate::container_runtime::Containers { cpu: rt.clone(), gpu: None });
+        agent.doctor = Some(json!({"modules": {}}));                // a report not sent yet: the doctors do not run again
+        agent.after_directives(&json!({"run_doctor": true})).await;
+        assert_eq!(rt.retries.load(SeqCst), 1, "a doctor run makes the runtime look again");
+        agent.after_directives(&json!({"detect_tools": true})).await;
+        assert_eq!(rt.retries.load(SeqCst), 2, "so does Re-detect");
+        agent.after_directives(&json!({})).await;
+        assert_eq!(rt.retries.load(SeqCst), 2);
+        let t0 = std::time::Instant::now();
+        assert!(agent.reprobe_runtimes(t0));
+        assert!(!agent.reprobe_runtimes(t0 + Duration::from_secs(30)));
+        assert!(agent.reprobe_runtimes(t0 + crate::container_runtime::RUNTIME_REPROBE));
+        assert_eq!((rt.reprobes.load(SeqCst), rt.rechecks.load(SeqCst)), (2, 0));
+        // no runtime made yet: nothing to ask
+        agent.containers = None;
+        agent.retry_runtimes();
+        assert!(agent.reprobe_runtimes(t0 + crate::container_runtime::RUNTIME_REPROBE * 2));
     }
 
     /// The owner key set a directive carries pins its rescue locations; a rescue move published there is recorded as

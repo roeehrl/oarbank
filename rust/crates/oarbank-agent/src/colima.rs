@@ -393,6 +393,44 @@ pub fn start_args(colima: &str, gpu: bool, arm: bool, cpus: u32, mem_gb: f64, mo
     a
 }
 
+/// A profile's Lima instance directory (`<config>/_lima/colima-<profile>`): the host agent's `ha.sock`, its pid files.
+pub fn instance_dir(config: &Path, profile: &str) -> PathBuf {
+    config.join("_lima").join(format!("colima-{profile}"))
+}
+
+/// What `colima start` prints when the instance an earlier VM left was not cleaned up (its host agent was killed: an
+/// agent restart that took the VM with it): Lima finds the pid files but no host agent socket, e.g. `errors inspecting
+/// instance: [failed to connect to <dir>/ha.sock: stat <dir>/ha.sock: no such file or directory]`. `colima stop
+/// --force` clears it.
+pub fn stale_instance(output: &str) -> bool {
+    let o = output.to_ascii_lowercase();
+    o.contains("errors inspecting instance") || (o.contains("ha.sock") && o.contains("no such file or directory"))
+}
+
+/// An instance directory with a pid file (`vz.pid`, `ha.pid`, `krunkit.pid`) but no host agent socket: what a killed host
+/// agent leaves. Checked only when no start is under way (a starting host agent has its pid files before its socket).
+pub fn stale_files(instance: &Path) -> bool {
+    let pid = std::fs::read_dir(instance).into_iter().flatten().flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".pid"));
+    pid && !instance.join("ha.sock").exists()
+}
+
+/// The VM's host agent is there: its socket exists (a stopping agent stops only such a profile).
+pub fn instance_up(instance: &Path) -> bool {
+    instance.join("ha.sock").exists() || stale_files(instance)
+}
+
+/// How many times in a row the runtime clears a stale instance (`colima stop --force`, then `colima start` again)
+/// before it leaves the profile `failed` for the owner: a start that keeps failing that way has another cause.
+pub const MAX_RECOVERIES: u32 = 3;
+
+/// How long the runtime waits before it starts a failed profile again by itself (a release, a doctor run or the owner's
+/// Re-detect try at once): 10 s after the first failure, doubling, at most 10 minutes. 2.10.3 retried every protection
+/// tick, forever.
+pub fn retry_after(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((10u64 << failures.saturating_sub(1).min(16)).min(600))
+}
+
 /// The helper PATH: the directories the tools were found in (in that order), then the usual ones.
 pub fn helper_path(found: &[&Found]) -> String {
     let mut dirs: Vec<String> = vec![];
@@ -421,15 +459,21 @@ pub fn detect(agent_home: &Path) -> Host {
 /// The same, with Colima kept in `d`.
 #[cfg(target_os = "macos")]
 pub fn detect_with(d: Dirs) -> Host {
-    let dirs_ = search_dirs(std::env::var_os("PATH").as_deref());
+    detect_in(d, &search_dirs(std::env::var_os("PATH").as_deref()), Path::new(ROSETTA_RUNTIME))
+}
+
+/// The same, with the tools looked up in `tools` and Rosetta's runtime at `rosetta` (the runtime's tests point both at a
+/// scratch directory). Every call looks again: plain file checks, cheap enough for the agent's periodic re-probe.
+#[cfg(target_os = "macos")]
+pub fn detect_in(d: Dirs, tools: &[PathBuf], rosetta: &Path) -> Host {
     let runnable = |p: &Path| executable(p);
     Host {
         arm: cfg!(target_arch = "aarch64"),
-        colima: find("colima", &dirs_, &runnable),
-        docker: find("docker", &dirs_, &runnable),
-        limactl: find("limactl", &dirs_, &runnable),
-        krunkit: find("krunkit", &dirs_, &runnable),
-        rosetta: Path::new(ROSETTA_RUNTIME).exists(),
+        colima: find("colima", tools, &runnable),
+        docker: find("docker", tools, &runnable),
+        limactl: find("limactl", tools, &runnable),
+        krunkit: find("krunkit", tools, &runnable),
+        rosetta: rosetta.exists(),
         config_writable: creatable(&d.config),
         owner: d.config.parent().and_then(owner_name),
         dirs: d,
@@ -646,5 +690,35 @@ mod tests {
         let d = Found::Usable("/opt/homebrew/bin/docker".into());
         assert_eq!(helper_path(&[&c, &d, &Found::Absent]), "/opt/local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
         assert_eq!(helper_path(&[]), BASE_PATH);
+    }
+
+    /// The failure an agent restart left on a node (the VM's host agent killed with it): `colima start` cannot inspect the
+    /// instance, and the directory holds a pid file with no host agent socket. A plain failure is neither.
+    #[test]
+    fn a_stale_instance_is_told_from_other_start_failures() {
+        let out = "time=\"x\" level=fatal msg=\"errors inspecting instance: [failed to connect to /a/colima/_lima/colima-oarbank/ha.sock: \
+                   stat /a/colima/_lima/colima-oarbank/ha.sock: no such file or directory]\"\nerror starting vm: error at 'starting': exit status 1";
+        assert!(stale_instance(out));
+        assert!(stale_instance("FATA[0001] Errors inspecting instance"));
+        assert!(!stale_instance("error starting vm: error at 'creating and starting': exit status 1"));
+        assert!(!stale_instance("open /a/disk.img: no such file or directory"));
+        assert_eq!(instance_dir(Path::new("/a/colima"), CPU_PROFILE), PathBuf::from("/a/colima/_lima/colima-oarbank"));
+        let tmp = crate::scratch("colima-stale");
+        let d = instance_dir(tmp.path(), CPU_PROFILE);
+        assert!(!stale_files(&d) && !instance_up(&d), "no instance yet");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("lima.yaml"), "").unwrap();
+        assert!(!stale_files(&d) && !instance_up(&d), "a stopped instance");
+        std::fs::write(d.join("vz.pid"), "4242").unwrap();
+        assert!(stale_files(&d) && instance_up(&d), "a pid file without the host agent's socket");
+        std::fs::write(d.join("ha.sock"), "").unwrap();
+        assert!(!stale_files(&d) && instance_up(&d), "a running host agent");
+    }
+
+    #[test]
+    fn a_failed_start_is_retried_later_and_later() {
+        let s = |n| retry_after(n).as_secs();
+        assert_eq!([s(0), s(1), s(2), s(3), s(6), s(7), s(40)], [10, 10, 20, 40, 320, 600, 600]);
+        assert!(MAX_RECOVERIES >= 1);
     }
 }
