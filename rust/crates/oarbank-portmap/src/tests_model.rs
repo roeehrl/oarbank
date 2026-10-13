@@ -434,3 +434,67 @@ fn an_epoch_check_follows_rfc_6887() {
     assert!(!epoch_ok((1000, 0.0), 1100, 600.0), "advanced far less than the client's clock");
     assert!(!epoch_ok((1000, 0.0), 5000, 600.0), "advanced far more");
 }
+
+/// One sequence, as the property test would run it (each action checked, then drained).
+fn replay(pcp: bool, natpmp: bool, upnp: bool, permanent_only: bool, acts: &[Act]) {
+    rt().block_on(async {
+        let mut w = World::new(pcp, natpmp, upnp, permanent_only);
+        for a in acts {
+            w.apply(a).await;
+        }
+        w.drain().await;
+    });
+}
+
+// Cases the property test found (each made a second mapping of one listener, or left one behind, before the fix)
+
+#[test]
+fn moving_back_to_an_earlier_address_takes_over_its_pcp_mapping_and_nonce() {
+    use Act::*;
+    // the lifecycle came back to .21 with a fresh nonce: PCP refused it (NotAuthorized) and NAT-PMP made a second mapping
+    replay(true, true, false, false, &[Rebind(21), Toggle(2), Step(1), Rebind(22), Crash, Crash, Step(1), Rebind(21), Step(1)]);
+}
+
+#[test]
+fn a_listener_wanted_again_renews_its_lease_that_is_left_to_run_out() {
+    use Act::*;
+    // its old UPnP lease was too close to expiry to be deleted, and a new port was mapped beside it
+    replay(false, false, true, false, &[Step(1), Toggle(2), Foreign(9002), Step(1), Step(417), Step(539), Step(844), Step(840), Toggle(2),
+                                        Silent(true), Step(50), Step(298), Toggle(2), Step(141), Step(251), Step(860), Step(497), Step(23),
+                                        Step(403), Silent(false), Step(178)]);
+}
+
+#[test]
+fn a_listener_wanted_again_renews_its_permanent_mapping_being_released() {
+    use Act::*;
+    replay(false, false, true, true, &[Foreign(9001), Step(1), Silent(true), Step(529), Step(715), Step(706), Step(234), Step(346), Step(365),
+                                       Toggle(1), Step(833), Step(760), Step(488), Toggle(1), Silent(false), Step(23)]);
+}
+
+#[test]
+fn an_unanswered_request_being_released_is_not_taken_for_a_mapping() {
+    use Act::*;
+    // a too broad takeover adopted a request the router never answered, and a permanent mapping was left behind
+    replay(false, false, true, true, &[Toggle(0), Toggle(0), Toggle(0), Toggle(0), Step(1), Silent(true), Rebind(21), Step(1), Toggle(0),
+                                       Step(1), Toggle(0), Step(1)]);
+}
+
+#[test]
+fn a_lost_mapping_is_asked_for_again_at_the_port_it_held() {
+    use Act::*;
+    // a renewal the router applied but whose answer was lost: the lease ran out here, and a request from the start of the
+    // fallback range made a second mapping beside the one the router still held
+    replay(false, false, true, false, &[Foreign(9001), Step(1), Step(1), Toggle(0), Crash, Silent(true), Step(1), DropForeign, Step(12),
+                                        Step(584), Step(641), Step(221), Step(318), Step(360), Silent(false), Step(299), LoseNext, Step(339),
+                                        Step(824)]);
+}
+
+#[test]
+fn a_renewal_is_journaled_before_it_is_sent() {
+    use Act::*;
+    // a renewal the router applied, its answer lost, then a restart: the journal still had the old expiry, took the live
+    // mapping for gone and dropped it, and a second one was made beside it
+    replay(false, false, true, false, &[Step(1), Toggle(1), Step(1), Silent(false), Toggle(1), Reboot, Silent(false), Foreign(9001), Step(643),
+                                        LoseNext, Step(589), Toggle(2), Toggle(1), Toggle(1), Step(171), Toggle(1), Toggle(1), Silent(true),
+                                        Step(447), Step(788), Step(693), Step(396), Step(550), Step(282), Silent(false), Crash, Step(441)]);
+}
