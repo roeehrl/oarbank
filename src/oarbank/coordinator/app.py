@@ -717,7 +717,9 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
 
     def fleet_data():
         nodes = [node_view(n) for n in db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]
-        enr = db.q("SELECT * FROM enrollments WHERE status='pending' ORDER BY created_at")
+        from . import nodeidentity
+        enr = [{**e, "identity": nodeidentity.of_enrollment(db, e)}
+               for e in db.q("SELECT * FROM enrollments WHERE status='pending' ORDER BY created_at")]
         camps = db.q("SELECT * FROM campaigns WHERE state IN ('running','paused') ORDER BY created_at DESC")
         for c in camps:
             c["jobs"] = db.one("SELECT COUNT(*) n, SUM(state='done') d, SUM(state='leased') l, SUM(state IN ('failed','quarantined')) f "

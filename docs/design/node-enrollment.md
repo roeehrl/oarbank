@@ -67,6 +67,30 @@ fingerprint (first 16 hex of the CA key hash) and an 8-letter code from the RFC 
 `BCDFGHJKLMNPQRSTVWXZ` (`WDJB-MJHT`). The owner checks the fingerprint the console shows and enters the code under
 Fleet, "Approve a machine by its code"; that approves the pending enrollment with that code.
 
+## Re-enrolment: a node is its key
+
+A node is the P-256 key its agent generated (D29, D25). The Tailscale binding (protocol.md, "Credentials") is an extra
+that refuses a certificate presented from another tailnet device, so a key copied off a node is useless elsewhere. A
+machine re-added to the tailnet (an admin applies a tag, the device logs in again) is a new Tailscale device with a new
+StableID and address, and the binding refuses its certificate in the same way. The agent then keeps its key and
+enrolls again (`unauthorized`: every agent version does this).
+
+- **Proof.** The new request's CSR is signed by the node's key. When its public key is the one the node's current (or,
+  while renewing, previous) certificate was issued for, the request proves that node. The coordinator records each
+  node's key hash beside its certificate fingerprint at issue and renewal, and learns it from the certificate on the
+  first request of a node enrolled before it did. Retiring a node clears it, so a retired node is never adopted.
+- **Approval keeps the node.** The owner approves as before. The approval keeps the node's id, its node-scoped
+  settings (paused, per-node module switches, caps, protection, labels, groups) and its history. It re-pins the node
+  to the new Tailscale device (`node_tailscale_repinned`) and replaces its certificate, so the old one stops working.
+  The preview says "re-enrolment of <node>" and, when the device changed, "approve only if this machine was re-added
+  to the tailnet". A copied key on another machine looks the same to the coordinator, so this step is never
+  automatic. A multi-use join code that approves automatically leaves the request pending; a single-use code, made by
+  the owner for one machine, approves it.
+- **A lookalike is a new node.** A request that proves no node but reports a known node's host name belongs to a
+  machine that lost its key (reinstalled, or another machine with that name). Approving it makes a new node. The
+  preview, `oarbank status` and the console's waiting card warn that the old node's settings will NOT apply, say
+  whether the hardware facts match too, and offer retiring the old record (`nodes.retire`).
+
 ## The node's states and status document
 
 The agent writes `status/node.json` beside its home (and a `joined` marker file there while it holds a certificate) (`<data root>/status/node.json`; readable by everyone, no secrets):

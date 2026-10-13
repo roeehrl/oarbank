@@ -4,6 +4,17 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+A machine re-added to the tailnet keeps its node. Applying a tag in the Tailscale admin console makes a machine a new
+Tailscale device. The coordinator refused the node's certificate from there, and approving the agent's new enrollment
+made a second node with fleet defaults. The paused state, per-node module switches, caps, protection, labels and
+groups stayed on the old, offline record. The new enrollment's CSR is signed with the node's existing key, and the
+coordinator now recognises it. Approving it keeps the node id, settings and history, and moves the node to the new
+device. A machine that cannot prove a node's key but has a known node's host name still becomes a new node. The
+approval preview, `oarbank status` and the console say so and offer to retire the old record. Nodes that already
+re-enrolled before this fix stay two records: set the new node's settings again, then retire the old one.
+
 ## 2.10.3 (2026-10-13)
 
 2.10.0, 2.10.1 and 2.10.2 were not published. 2.10.2's macOS listener check connected immediately after
