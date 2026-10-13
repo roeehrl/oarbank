@@ -83,7 +83,8 @@ spec/platforms.md):
 {"facts": 2, "hostname": "mini-a",
  "platform": {"os": "darwin", "arch": "arm64", "os_version": "27.0", "os_build": "26A123",
               "kernel": "25.0.0", "distro": null, "libc": null, "libc_version": null},
- "cpu": {"model": "Apple M5 Pro", "perf_cores": 5, "eff_cores": 10, "logical": 15}, "memory_gb": 24.0,
+ "cpu": {"model": "Apple M5 Pro", "perf_cores": 15, "eff_cores": 0, "logical": 15,
+         "levels": [{"name": "Super", "cores": 5}, {"name": "Performance", "cores": 10}]}, "memory_gb": 24.0,
  "gpus": [{"vendor": "apple", "model": "Apple M5 Pro", "vram_gb": null, "unified": true}],
  "sandbox": {"backend": "seatbelt", "enforcement": {"filesystem": "enforced", "ipc": "enforced", "net.none": "enforced",
              "net.egress-allowlist": "enforced", "net.egress-any": "enforced", "no_loopback": "enforced",
@@ -95,7 +96,10 @@ spec/platforms.md):
 ```
 - **CPU.** `perf_cores` and `eff_cores` are physical cores (a core running two hardware threads counts once), the
   same on every OS; a CPU without core classes reports all its cores as `perf_cores` and `eff_cores` 0; `logical` is
-  the logical processors the agent may use. docs/design/protection.md, "Capacity", says how each OS is read.
+  the logical processors the agent may use. `eff_cores` are only the cores capacity counts at half; every other core
+  is in `perf_cores`. `levels` lists the core classes as the OS names them, in its order (Apple silicon's performance
+  levels: `Super` and `Performance` on the M5 Pro and M5 Max, `Performance` and `Efficiency` on M1 to M4), or null
+  where the OS names none. docs/design/protection.md, "Capacity", says how each OS is read.
 - **Power.** `battery` says the machine has a system battery (a laptop; a UPS or a device's battery does not count).
   Node groups may select on it, and it gives the node the `laptop` label "from facts" (docs/design/settings.md,
   "Groups and labels").

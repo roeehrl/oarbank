@@ -259,13 +259,15 @@ paused      = the pause_fleet scopes of the active rules (no work of theirs is g
   `mem_gb_free`, the same figure the console shows. When memory on the in-use bound holds the slots under the cores,
   `binding_limit` is `memory_in_use`.
 - **Cores mean the same on every OS.** Facts report physical cores by class (`perf_cores`, `eff_cores`) beside the
-  logical processors: macOS `hw.perflevel0.physicalcpu` and `hw.perflevel1.physicalcpu` (an Intel Mac's
-  `hw.physicalcpu`); Linux the distinct `topology/core_cpus_list` sets of the online CPUs, classed by Intel hybrid's
-  `cpu_core` and `cpu_atom` thread lists or by Arm's `cpu_capacity` (under 60 % of the largest is an efficiency core),
-  while AMD's compact cores (Zen 4c, 5c) run the same instructions at lower clocks and count as performance cores;
-  Windows one `RelationProcessorCore` record per core from GetLogicalProcessorInformationEx, the highest
-  `EfficiencyClass` being the performance cores. A CPU without classes has only performance cores (`eff_cores` 0);
-  only facts without core counts fall back to logical processors.
+  logical processors: macOS each of `hw.nperflevels` performance levels' `hw.perflevelN.physicalcpu`, classed by its
+  name `hw.perflevelN.name` and never by its position (only `Efficiency` is an efficiency core; `Performance`, the M5
+  Pro and M5 Max's `Super`, and a name not known yet, which the agent logs, are performance cores; facts list the
+  levels by name as `cpu.levels`), or an Intel Mac's `hw.physicalcpu`; Linux the distinct `topology/core_cpus_list`
+  sets of the online CPUs, classed by Intel hybrid's `cpu_core` and `cpu_atom` thread lists or by Arm's `cpu_capacity`
+  (under 60 % of the largest is an efficiency core), while AMD's compact cores (Zen 4c, 5c) run the same instructions
+  at lower clocks and count as performance cores; Windows one `RelationProcessorCore` record per core from
+  GetLogicalProcessorInformationEx, the highest `EfficiencyClass` being the performance cores. A CPU without classes
+  has only performance cores (`eff_cores` 0); only facts without core counts fall back to logical processors.
 - **Someone present** means input within `user_idle_s` (300 s), or presence that cannot be read. On macOS a Screen
   Sharing session counts too, even without input, unless the node policy's `screen_sharing_present` is off; Windows'
   Remote Desktop sessions and Linux's remote logins are sessions with their own input time.

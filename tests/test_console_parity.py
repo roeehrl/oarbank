@@ -170,12 +170,12 @@ def test_settings_commands_do_what_the_settings_pages_do(fleet, capsys):
     assert any(x.split()[0] == "module.relay.tile_size" and "64" in x and "This node" in x for x in out.splitlines()), out
     assert oarbank(capsys, "node", "policy", nid)[0] != 0 and oarbank(capsys, "node", "limits", nid)[0] != 0
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(
-        {"cpu_slots": 10, "idle_cpu_slots": 10, "slots": 10, "mem_gb_free": 14.0, "mem_binding": "in_use", "mem_in_use_gb": 6.0,
+        {"cpu_slots": 15, "idle_cpu_slots": 15, "slots": 15, "mem_gb_free": 14.0, "mem_binding": "in_use", "mem_in_use_gb": 6.0,
          "user_present": False, "admit": True, "binding_limit": "auto"}), nid))
     lines = [x.strip() for x in oarbank(capsys, "node", "show", nid)[1].splitlines()]
-    assert ("why: 10 slots (5 performance cores + 10 efficiency cores at half) · 14 GB free for jobs "
+    assert ("why: 15 slots (5 Super cores + 10 Performance cores) · 14 GB free for jobs "
             "(apps and the system use 6.0 GB)") in lines
-    assert "(5 performance cores + 10 efficiency cores at half)" in oarbank(capsys, "fleet")[1]
+    assert "(5 Super cores + 10 Performance cores)" in oarbank(capsys, "fleet")[1]
 
 
 def test_the_ntfy_token_is_write_only(fleet, capsys, monkeypatch):

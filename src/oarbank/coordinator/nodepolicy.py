@@ -37,6 +37,37 @@ def _held(key: str, tel: dict) -> str:
     return key.replace("_", " ")
 
 
+def is_efficiency(name) -> bool:
+    """A core class the agent counts at half: Apple silicon's `Efficiency` level. `Performance`, the M5 Pro and M5 Max's
+    `Super`, and any name not known yet are full cores (rust/crates/oarbank-agent/src/facts.rs, mac_cores)."""
+    return isinstance(name, str) and name.strip().lower() == "efficiency"
+
+
+def core_levels(cpu: dict) -> list[tuple[str, int]]:
+    """The core classes the OS names, in its order, from the facts' `cpu.levels` (Apple silicon's performance levels):
+    [("Super", 6), ("Performance", 12)]; empty when the agent reports none (another OS, an Intel Mac, an older agent)."""
+    out = []
+    for lv in (cpu or {}).get("levels") or []:
+        if isinstance(lv, dict) and isinstance(lv.get("cores"), int) and lv["cores"] > 0:
+            out.append((str(lv.get("name") or "other").strip() or "other", lv["cores"]))
+    return out
+
+
+def cores_text(cpu: dict) -> str | None:
+    """The cores behind the slots, each class by its name, the ones counted at half saying so:
+    "6 Super cores + 12 Performance cores", "12 Performance cores + 4 Efficiency cores at half"; facts without names
+    say "5 performance cores + 10 efficiency cores at half" or "8 cores"."""
+    levels = core_levels(cpu)
+    if levels:
+        return " + ".join(_plural(n, f"{name} core") + (" at half" if is_efficiency(name) else "") for name, n in levels)
+    perf, eff = (cpu or {}).get("perf_cores"), (cpu or {}).get("eff_cores")
+    if perf and eff:
+        return f"{perf} performance cores + {eff} efficiency cores at half"
+    if perf:
+        return f"{perf} cores"
+    return None
+
+
 CAP_KEYS = {"cap.cpu_cores": "cpu_cores", "cap.mem_gb": "mem_gb", "cap.jobs": "jobs", "cap.staging_mbps": "staging_mbps",
             "cap.mem_gb exceeded": "mem_gb", "outside_schedule": "schedule"}
 
@@ -68,8 +99,7 @@ def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None,
         present = tel["user_idle_s"] < policy["user_idle_s"]
     jobs = cap.get("slots")
     if out["held"] is None:
-        cores = facts.get("cpu") or {}
-        perf, eff = cores.get("perf_cores"), cores.get("eff_cores")
+        cores = cores_text(facts.get("cpu") or {})
         if binding.startswith("cap."):
             s = f"{_plural(cpu, 'slot')}: the owner's cap on {binding[4:].replace('_', ' ')}"
             cite(CAP_KEYS.get(binding, binding[4:]))
@@ -82,10 +112,8 @@ def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None,
             s = f"{_plural(cpu, 'slot')} while {who} {noun} ({idle} when idle)"
             cite("user_present_slots")
             cite("user_idle_s")
-        elif perf and eff:
-            s = f"{_plural(cpu, 'slot')} ({perf} performance cores + {eff} efficiency cores at half)"
-        elif perf:
-            s = f"{_plural(cpu, 'slot')} ({perf} cores)"
+        elif cores:
+            s = f"{_plural(cpu, 'slot')} ({cores})"
         else:
             s = _plural(cpu, "slot")
         if policy.get("max_slots") is not None and cpu == policy["max_slots"] and not binding.startswith(("cap.", "rule:")):

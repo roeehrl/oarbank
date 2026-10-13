@@ -74,10 +74,54 @@ def test_why_says_what_holds_a_node_back_and_how_to_allow_it():
     assert old["line"] == "10 slots (5 performance cores + 10 efficiency cores at half) · 20 GB free for jobs"
 
 
+def levels(*lv):
+    return [{"name": n, "cores": c} for n, c in lv]
+
+
+def test_why_names_each_core_class_as_the_os_does():
+    """Apple silicon's performance levels by the names macOS gives them (hw.perflevelN.name): only `Efficiency` counts
+    at half. The M5 Pro and M5 Max report `Super` and `Performance` cores and have no efficiency cores."""
+    def line(cpu, slots):
+        f = {**facts(64.0), "cpu": cpu}
+        return nodepolicy.why({"cpu_slots": slots, "admit": True, "binding_limit": "auto"}, {}, f, defaults_for(f))["line"]
+    m5max = {"model": "Apple M5 Max", "perf_cores": 18, "eff_cores": 0, "logical": 18,
+             "levels": levels(("Super", 6), ("Performance", 12))}
+    assert line(m5max, 18) == "18 slots (6 Super cores + 12 Performance cores)"
+    m5pro = {"model": "Apple M5 Pro", "perf_cores": 15, "eff_cores": 0, "logical": 15,
+             "levels": levels(("Super", 5), ("Performance", 10))}
+    assert line(m5pro, 15) == "15 slots (5 Super cores + 10 Performance cores)"
+    m4max = {"model": "Apple M4 Max", "perf_cores": 12, "eff_cores": 4, "logical": 16,
+             "levels": levels(("Performance", 12), ("Efficiency", 4))}
+    assert line(m4max, 14) == "14 slots (12 Performance cores + 4 Efficiency cores at half)"
+    m1 = {"model": "Apple M1", "perf_cores": 4, "eff_cores": 4, "logical": 8,
+          "levels": levels(("Performance", 4), ("Efficiency", 4))}
+    assert line(m1, 6) == "6 slots (4 Performance cores + 4 Efficiency cores at half)"
+    # an Intel Mac has no performance levels: its cores
+    intel = {"model": "Intel(R) Core(TM) i7", "perf_cores": 6, "eff_cores": 0, "logical": 12, "levels": None}
+    assert line(intel, 6) == "6 slots (6 cores)"
+    # a name not known yet is a full core, named as reported
+    new = {"perf_cores": 12, "eff_cores": 4, "logical": 16, "levels": levels(("Ultra", 4), ("Performance", 8), ("Efficiency", 4))}
+    assert line(new, 14) == "14 slots (4 Ultra cores + 8 Performance cores + 4 Efficiency cores at half)"
+    assert line({**new, "levels": levels(("Performance", 1))}, 1) == "1 slot (1 Performance core)"
+    # malformed levels fall back to the counts
+    assert line({**m4max, "levels": [{"name": "Efficiency"}, "x"]}, 14) == \
+        "14 slots (12 performance cores + 4 efficiency cores at half)"
+    assert [nodepolicy.is_efficiency(n) for n in ("Efficiency", " efficiency", "Performance", "Super", None)] == \
+        [True, True, False, False, False]
+
+
 def test_hardware_counts_physical_cores():
     assert views.hardware(facts(64.0, perf=12, eff=4, logical=16))["cores"] == "12P + 4E"
     assert views.hardware(facts(15.8, "windows", perf=8, eff=0, logical=8))["cores"] == "8 cores"
     assert views.hardware(facts(16.0, "linux", perf=4, eff=0, logical=8))["cores"] == "4 cores (8 threads)"
     assert views.hardware(facts(32.0, "linux", perf=8, eff=4, logical=20))["cores"] == "8P + 4E (20 threads)"
+    # Apple silicon's levels by name: an M5 Max has Super and Performance cores, no efficiency cores
+    m5max = {**FACTS, "cpu": {"perf_cores": 18, "eff_cores": 0, "logical": 18,
+                              "levels": levels(("Super", 6), ("Performance", 12))}}
+    assert views.hardware(m5max)["cores"] == "6 Super + 12 Performance"
+    assert views.hardware(m5max)["cores_total"] == 18
+    m4max = {**FACTS, "cpu": {"perf_cores": 12, "eff_cores": 4, "logical": 16,
+                              "levels": levels(("Performance", 12), ("Efficiency", 4))}}
+    assert views.hardware(m4max)["cores"] == "12 Performance + 4 Efficiency"
     # facts from an agent that reported no core counts
     assert views.hardware({**FACTS, "cpu": {"perf_cores": None, "eff_cores": None, "logical": 8}})["cores"] == "8 cores"

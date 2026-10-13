@@ -263,10 +263,11 @@ runs each module's doctor and golden jobs, and then takes work. Host protection 
 rules; add rules on the node's Protection page.
 
 **How much work a node takes.** Each node card says why in one line, for example "2 slots while someone is using
-this Mac (14 when idle) · 9.2 GB free for jobs (apps and the system use 46 GB)". A slot is a performance core, or
-two efficiency cores (hardware threads never count). Jobs only get memory the machine has free now, less a margin
-that keeps the memory guard from stepping in, and never more than the memory kept for the system and for the
-person using it allows. The settings behind it are on the node's **Settings** tab, each with the value in effect and
+this Mac (14 when idle) · 9.2 GB free for jobs (apps and the system use 46 GB)". A slot is a full core (on a Mac a
+Performance or Super core), or two efficiency cores (hardware threads never count). Jobs only get memory the machine
+has free now, less a margin that keeps the memory guard from stepping in, and never more than the memory kept for
+the system and for the person using it allows. The settings behind it are on the node's **Settings** tab, each with
+the value in effect and
 where it comes from (this machine's default and why, the fleet's value, a group's, or the node's own); **Override** sets
 a value for that node and **Reset to inherited** takes it back. Fleet-wide defaults are under **Settings → Node
 defaults**, which shows the nodes a change reaches before it saves. From a terminal: `oarbank settings get --node
