@@ -4,21 +4,29 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
-## 2.10.1 (2026-10-13)
+## 2.10.2 (2026-10-13)
 
-2.10.0 was not published: macOS fleet-update acceptance uncovered two failures. The acceptance script now waits for
-the update runner's first result instead of exiting on an absent file. The updater gives macOS package tools a `.pkg`
-filename for its verified cached package, so the system installer accepts it; digest and signature verification still
-apply to those same bytes. Regression tests cover polling under `errexit` and `pipefail`, and package metadata reads
-through the verified cache path.
+2.10.0 and 2.10.1 were not published. 2.10.1's release checks found a port-mapping failure: a listener that moved
+back to an address it had mapped from before asked PCP with a new nonce, was refused, and NAT-PMP made a second
+mapping beside the first. A listener now takes over what the journal holds for it whenever its address or settings
+change, not only after a restart. A search of a million random runs then found four more rare ways one listener
+could end up with two router mappings, or a mapping the node forgot. A releasing lease is renewed when its listener
+is wanted again. A lost mapping is asked for again at its port. A renewal is journaled before it is sent. Each case
+is a deterministic test now.
 
-The changes below ship in 2.10.1, including the 2.9.0 upgrade steps.
+2.10.0 itself was not published because macOS fleet-update acceptance uncovered two failures. The acceptance script now
+waits for the update runner's first result instead of exiting on an absent file. The updater gives macOS package tools a
+`.pkg` filename for its verified cached package, so the system installer accepts it; digest and signature verification
+still apply to those same bytes. Regression tests cover polling under `errexit` and `pipefail`, and package metadata
+reads through the verified cache path.
+
+The changes below ship in 2.10.2, including the 2.9.0 upgrade steps.
 
 Module SDK: **oarbank-sdk 1.7.0**. This release lets fleet work earn beside the people who use the machines: modules
 can accept connections from the internet, run long-lived daemons that are the work itself, and share a GPU with a
 protected program at a measured, certified level. It also updates the whole fleet from the coordinator, with one click:
 every node's full package and the coordinator itself, ring by ring, with automatic rollback. 2.9.0 was not published on
-its own, so if you run 2.8, read the [2.9.0 section](#290-shipped-in-2101) as well: its upgrade steps apply.
+its own, so if you run 2.8, read the [2.9.0 section](#290-shipped-in-2102) as well: its upgrade steps apply.
 
 ### What's new
 
@@ -224,7 +232,7 @@ Built and tested against simulations and fakes; the owner verifies these on real
   delegated process, and multi-node (gang) jobs. On Windows delegated processes are matched by trusted path only, and
   only in the agent's own session. Releases, agent updates and container image pulls are not held by a site.
 
-## 2.9.0 (shipped in 2.10.1)
+## 2.9.0 (shipped in 2.10.2)
 
 Module SDK: **oarbank-sdk 1.6.0**. Read [What changes when you upgrade](#what-changes-when-you-upgrade) before you
 install it: the macOS and Linux coordinator moves to a system service, settings move to a new model by themselves, and

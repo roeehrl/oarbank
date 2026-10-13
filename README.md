@@ -35,13 +35,13 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Release 2.10.1** is out: modules that accept connections from the internet (the node maps its own router port with
+> **Release 2.10.2** is out: modules that accept connections from the internet (the node maps its own router port with
 > PCP, NAT-PMP or UPnP and proves it reachable from outside), long-running workloads with one seat per identity, owner
 > sources that pause fleet work within milliseconds, a paired on/off measurement and co-tenancy certificates, a GPU duty
 > governor that shares a GPU with a protected program, and sites for nodes that share one internet line. See the
 > [changelog](CHANGELOG.md) for what changes on upgrade. Installers (macOS pkg for Apple silicon and Intel, deb and rpm,
 > Windows MSI), one-line installers and native coordinator installers are on the
-> [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.10.1).
+> [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.10.2).
 > [Get started](https://docs.codonic.dev/oarbank/get-started) walks through the setup.
 
 ## What it does
@@ -110,7 +110,7 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Download the packages for your computers from the [2.10.1 release](https://github.com/roeehrl/oarbank/releases/tag/v2.10.1), check the
+Download the packages for your computers from the [2.10.2 release](https://github.com/roeehrl/oarbank/releases/tag/v2.10.2), check the
 [Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
 packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1` for agents;
@@ -184,7 +184,7 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Yes: the [2.10.1 release](https://github.com/roeehrl/oarbank/releases/tag/v2.10.1) has the installers for macOS, Linux and Windows.
+**Can I install it today?** Yes: the [2.10.2 release](https://github.com/roeehrl/oarbank/releases/tag/v2.10.2) has the installers for macOS, Linux and Windows.
 [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the
