@@ -315,8 +315,8 @@ impl<R: Router> Manager<R> {
             }
         }
         for (k, w) in wanted {
-            match self.lcs.get_mut(&k) {
-                Some(lc) if lc.want == w => {}
+            let mut lc = match self.lcs.get_mut(&k) {
+                Some(lc) if lc.want == w => continue,
                 Some(lc) => {
                     let keep = lc.lease().is_some_and(|l| l.internal == w.internal && l.description == w.description
                         && w.mode != Mode::Manual && w.mode != Mode::None
@@ -324,20 +324,21 @@ impl<R: Router> Manager<R> {
                         && (l.family == Family::Ipv6 || w.fallback.accepts(w.external_port, l.external_port)));
                     if keep {
                         lc.want = w;
-                    } else {
-                        let old = lc.clone();
-                        let nonce = lc.nonce;
-                        *lc = Lifecycle::new(w, now);
-                        lc.nonce = nonce;
-                        self.orphan(&old, now);
+                        continue;
                     }
-                }
-                None => {
+                    let old = self.lcs.remove(&k).expect("present");
                     let mut lc = Lifecycle::new(w, now);
-                    self.adopt(&mut lc, now);
-                    self.lcs.insert(k, lc);
+                    lc.nonce = old.nonce;
+                    self.orphan(&old, now);
+                    lc
                 }
-            }
+                None => Lifecycle::new(w, now),
+            };
+            // what the journal holds for this want takes over, after a restart and also when the listener moves to an
+            // address this node mapped from before: that mapping's own nonce (PCP refuses another one for it, and the
+            // request would fall through to another protocol and make a second mapping) and an unexpired lease
+            self.adopt(&mut lc, now);
+            self.lcs.insert(k, lc);
         }
     }
 
@@ -363,9 +364,9 @@ impl<R: Router> Manager<R> {
         s
     }
 
-    /// Take over the journal's entries for this want from before a restart: a held, unexpired lease is adopted (and
-    /// renewed at once, which confirms it); an unanswered request lends its nonce (PCP refuses a second nonce for one
-    /// mapping) and its id.
+    /// Take over the journal's entries for this want (from before a restart, or from when the listener last had this
+    /// address or was last wanted): a held or releasing, unexpired lease is adopted (and renewed at once, which confirms
+    /// it); an unanswered request lends its nonce (PCP refuses a second nonce for one mapping) and its id.
     fn adopt(&mut self, lc: &mut Lifecycle, now: f64) {
         if matches!(lc.phase, Phase::Manual | Phase::NotNeeded) {
             return;
@@ -378,7 +379,13 @@ impl<R: Router> Manager<R> {
         if let Some(e) = mine.first() {
             lc.nonce = e.nonce_bytes();
         }
-        let held = mine.iter().find(|e| e.state == State::Held && e.expires_at.is_none_or(|t| t > now)
+        // a granted lease this node was releasing (the router did not answer the delete, or the lease is left to run out)
+        // is the same listener's mapping: renewed under its own entry rather than a second one made beside it. Only a
+        // granted lease has an expiry or is permanent; a releasing entry with neither may be a request the router never
+        // answered.
+        let held = mine.iter().find(|e| (e.state == State::Held && e.expires_at.is_none_or(|t| t > now)
+                                         || e.state == State::Releasing && (e.permanent || e.expires_at.is_some_and(|t| t > now)))
+                                     && (lc.want.mode == Mode::Auto || lc.want.mode == Mode::Only(e.protocol))
                                      && lc.want.fallback.accepts(lc.want.external_port, e.external_port));
         if let Some(e) = held {
             lc.phase = Phase::Mapped(Lease {
@@ -497,6 +504,11 @@ impl<R: Router> Manager<R> {
         let Some(lc) = self.lcs.get_mut(k) else { return };
         if let Phase::Mapped(l) = &lc.phase {
             let id = l.entry_id.clone();
+            // ask for the port it held again: the router may still hold it (a renewal it applied but whose answer was
+            // lost), and a request for another port would make a second mapping of this listener beside it
+            if let Some(i) = lc.want.fallback.ports(lc.want.external_port).iter().position(|p| *p == l.external_port) {
+                lc.port_idx = i;
+            }
             lc.phase = Phase::Idle { at: now };
             lc.adopted = Some(id);
             lc.changes += 1;
@@ -743,6 +755,22 @@ impl<R: Router> Manager<R> {
         let req = MapReq { family: l.family, internal: l.internal, external_port: l.external_port, any: false,
                            prefer_failure: lc.want.fallback == Fallback::Refuse, lifetime: self.timing.lease(l.proto, l.family),
                            nonce: lc.nonce, description: l.description.clone(), pinhole: l.pinhole };
+        // journaled before it is sent, as every request: the longest the router may hold the mapping once it applies this
+        // renewal, so an answer that is lost (or a restart before it) never lets the journal take a live mapping for gone
+        if let Some(e) = self.journal.get(&l.entry_id).cloned() {
+            let until = now + req.lifetime as f64;
+            if !e.permanent && e.expires_at.is_some_and(|t| t < until) {
+                if let Err(err) = self.journal.put(Entry { expires_at: Some(until), ..e }) {
+                    let lc = self.lcs.get_mut(k).expect("present");
+                    lc.error = Some(err);
+                    if let Phase::Mapped(m) = &mut lc.phase {
+                        m.renew_at = now + self.timing.backoff(lc.attempts).min((m.expires_at - now) / 2.0).max(1.0);
+                        lc.attempts += 1;
+                    }
+                    return;                           // never sent unjournaled
+                }
+            }
+        }
         let r = self.router.map(l.proto, &req).await;
         match r {
             Ok(g) => {
