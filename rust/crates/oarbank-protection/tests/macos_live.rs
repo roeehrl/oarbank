@@ -213,10 +213,20 @@ fn frontmost_detection_returns_the_front_apps_bundle_id() {
 
 #[test]
 fn presence_reads_the_hid_idle_time() {
-    let r = platform::native_presence(None).read();
-    assert!(r.idle_s.is_some_and(|s| s >= 0.0), "{r:?}");
-    assert!(r.source == "hid" || r.source == "screen sharing", "{r:?}");
+    use oarbank_protection::presence::hid::ScreenSharing;
     assert!(macos::hid_idle_s().is_some());
+    // screensharingd's sockets: readable as root and in a launchd daemon; a test binary run from a terminal that
+    // Local Network privacy applies to sees no TCP sockets, and then the reading is unknown (counted as present)
+    let s = macos::screen_sharing();
+    let r = platform::native_presence(None).read();
+    eprintln!("presence {r:?}; screen sharing {s:?}");
+    if let ScreenSharing::Unknown(_) = s {
+        assert!(unsafe { libc::geteuid() } != 0, "root reads every socket: {s:?}");
+        assert!(r.idle_s.is_none() && r.source.starts_with("unknown: screensharingd runs"), "{r:?}");
+        return;
+    }
+    assert!(r.idle_s.is_some_and(|s| s >= 0.0), "{r:?}");
+    assert!(r.source.starts_with("hid") || r.source.starts_with("screen sharing: "), "{r:?}");
 }
 
 /// Whether this Mac has an Apple GPU (the AGX driver's accelerator): a virtual machine's paravirtualized GPU does

@@ -200,7 +200,7 @@ SETTINGS = (
             "Seconds without keyboard or mouse input before it runs at full capacity.",
             NUM_GE0, default=300, unit="s", wire="policy", section="presence", applies="both", tighten="higher", managed=True),
     Setting("screen_sharing_present", "Screen sharing counts as someone using it",
-            "A remote Screen Sharing session holds jobs back like a person at the keyboard, even without input (macOS).",
+            "A connected Screen Sharing viewer holds jobs back like a person at the keyboard, even without input (macOS).",
             {"type": "boolean"}, default=True, wire="policy", section="presence", tighten="higher", managed=True),
     Setting("run_on_battery", "Run jobs on battery", "Off: a laptop on battery power takes no new jobs.",
             {"type": "boolean"}, default=False, wire="policy", section="presence", applies="both", tighten="lower",

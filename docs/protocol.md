@@ -987,8 +987,8 @@ lowest wins:
 ```
 - **Defaults** come from the settings registry; `os_reserve_gb`'s is computed from the node's RAM (4 GB up to 32 GB,
   8 GB from 96 GB, else 6), so it follows the hardware the node reports. Nothing is copied at enrolment.
-- **`screen_sharing_present`** (default `true`): a macOS Screen Sharing session counts as someone using the machine
-  even without input.
+- **`screen_sharing_present`** (default `true`): a connected macOS Screen Sharing viewer counts as someone using the
+  machine even without input (`screensharingd` running with no viewer connected never does).
 - **`mem_in_use_bound`** (default `true`): the memory for jobs never exceeds what the machine has available now (see
   Capacity and host protection); `false` leaves the reserves alone.
 - **`disabled_services`** sets a node's role: `<module>/<service>` for each service a module does not run here, which

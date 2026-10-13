@@ -64,7 +64,7 @@ This value can only make the coordinator's setting stricter on this computer, ne
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="screen_sharing_present">Screen sharing counts as someone using it</string>
-      <string id="screen_sharing_present_Help">Enabled: a remote screen sharing session holds jobs back like a person at the keyboard, even without input. Disabled has no effect: the coordinator's setting applies.
+      <string id="screen_sharing_present_Help">Enabled: a connected screen sharing viewer holds jobs back like a person at the keyboard, even without input. Disabled has no effect: the coordinator's setting applies.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="run_on_battery">Run jobs on battery</string>

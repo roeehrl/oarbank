@@ -808,7 +808,8 @@ def test_the_why_line_explains_slots_and_memory(env):
          (json.dumps(cap), json.dumps({"user_idle_s": 3.0, "presence": "hid"}), n["node_id"]))
     card, page = node_html(env)
     assert_clean(card, page)
-    line = "2 slots while someone is using this Mac (10 when idle) · 4.1 GB free for jobs (apps and the system use 16 GB)"
+    line = ("2 slots while someone is using this Mac: keyboard or mouse input 3 s ago (10 when idle) · 4.1 GB free for jobs "
+            "(apps and the system use 16 GB)")
     assert line in card and line in page
     cap.update(admit=False, why="guard:battery", binding_limit="guard:battery", cpu_slots=0, slots=0, mem_gb_free=0.0)
     db.x("UPDATE nodes SET capacity_json=? WHERE node_id=?", (json.dumps(cap), n["node_id"]))
