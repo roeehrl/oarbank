@@ -14,8 +14,9 @@ RELEASE_SIGNING = os.environ.get("OARBANK_RELEASE_SIGNING", "1") != "0"
 ATTEMPT_LOG_DIR = HOME / "attempt-logs"
 RELEASE_DIR = HOME / "releases"
 
-# oarbank-console (pages, SSE; the `tailscale serve` target) and oarbankd's admin API (JSON + operations),
-# both loopback-only (D10). The console forwards /api/* to the admin API.
+# oarbank-console (pages, SSE; the `tailscale serve` target) and oarbankd's admin API (JSON + operations), loopback
+# (D10). The console forwards /api/* to the admin API. Where else the console listens is the fleet setting
+# `console_listen` (localhost, tailscale, IP addresses or all; consolelisten.py); OARBANKD_CONSOLE_BIND adds targets to it.
 CONSOLE_BIND = os.environ.get("OARBANKD_CONSOLE_BIND", "127.0.0.1")
 CONSOLE_PORT = int(os.environ.get("OARBANKD_CONSOLE_PORT", "7400"))
 ADMIN_BIND = os.environ.get("OARBANKD_ADMIN_BIND", "127.0.0.1")
@@ -39,7 +40,8 @@ SAMPLE_EVERY = 30.0            # store a node sample at most this often
 # the Tailscale CLI of this machine's tailscaled (discovery hints and whois)
 TAILSCALE = os.environ.get("OARBANKD_TAILSCALE") or shutil.which("tailscale") or next(
     (p for p in ("/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale",
-                 "/Applications/Tailscale.app/Contents/MacOS/Tailscale") if os.path.exists(p)), "tailscale")
+                 "/Applications/Tailscale.app/Contents/MacOS/Tailscale", r"C:\Program Files\Tailscale\tailscale.exe")
+     if os.path.exists(p)), "tailscale")
 TAILSCALE_SOCKET = os.environ.get("OARBANKD_TAILSCALE_SOCKET", "")
 
 

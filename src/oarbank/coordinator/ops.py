@@ -2389,7 +2389,28 @@ def _tok_revoke(db, req):
     return _access(fn)(db, req)
 
 
-@handler("access.login_link", target_type="account")
+def _login_bases(db, req) -> list[str]:
+    """The console addresses a sign-in link is printed for: the one asked for (`console`), else localhost and every
+    address of `console_listen` (this machine's Tailscale addresses looked up here, outside the transaction)."""
+    from . import config as C, consolelisten as L
+    from .settings.store import fleet_value
+    if req.params.get("console"):
+        return [str(req.params["console"]).rstrip("/")]
+    try:
+        value = fleet_value(db, "console_listen")
+        wants = L.normalize(value)
+        hosts = L.link_hosts(wants, L.tailscale_ips() if L.TAILSCALE in wants or L.ALL in wants else None)
+    except Exception:                                 # a bad stored value or no Tailscale CLI: localhost still works
+        hosts = [L.LOOPBACK]
+    bases = [f"http://{h}:{C.CONSOLE_PORT}" for h in hosts]
+    try:
+        name = L.magicdns_name(L.tailscale_status()) if fleet_value(db, "console_https") == L.HTTPS_TAILSCALE else None
+    except Exception:
+        name = None
+    return bases[:1] + ([L.https_origin(name, L.CONSOLE_HTTPS_PORT)] if name else []) + bases[1:]
+
+
+@handler("access.login_link", target_type="account", prepare=_login_bases)
 def _login_link(db, req):
     def fn(db, req, A):
         name = req.target or req.params.get("account") or _default_account(db)
@@ -2397,9 +2418,10 @@ def _login_link(db, req):
             raise A.AccessError("no_account", "create one first: oarbank account create <name>", 404)
         t = A.new_login_link(db, name)
         from . import config as C
-        base = (req.params.get("console") or f"http://127.0.0.1:{C.CONSOLE_PORT}").rstrip("/")
+        bases = req.prepared or [f"http://127.0.0.1:{C.CONSOLE_PORT}"]
         db.event("login_link_issued", actor=req.actor, reason=name)
-        return {"account": name, "url": f"{base}/login/link?t={t}", "expires_in_s": A.LINK_TTL_S}
+        urls = [f"{b}/login/link?t={t}" for b in bases]
+        return {"account": name, "url": urls[0], "urls": urls, "expires_in_s": A.LINK_TTL_S}
     return _access(fn)(db, req)
 
 
