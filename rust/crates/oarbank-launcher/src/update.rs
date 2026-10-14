@@ -25,7 +25,10 @@ const TEAM_ID: Option<&str> = option_env!("OARBANK_TEAM_ID");
 /// The Authenticode subject an MSI must be signed by, when the build pins one.
 const AUTHENTICODE_SUBJECT: Option<&str> = option_env!("OARBANK_AUTHENTICODE_SUBJECT");
 
-pub const USAGE_RUN: &str = "usage: oarbank-launcher update-run [--agent-home P] [--state P] [--prefix P] [--probation-s N] [--once]";
+pub const USAGE_RUN: &str = "usage: oarbank-launcher update-run [--agent-home P] [--state P] [--prefix P] [--probation-s N] [--pin-wait-s N] [--once]";
+/// How long a runner started with a pin pending waits for the agent's owner keys: a join the owner approves by hand
+/// can take minutes. It holds nothing up: without a trust no update can come.
+const PIN_WAIT: Duration = Duration::from_secs(15 * 60);
 pub const USAGE_TRUST: &str = "usage: oarbank-launcher update-trust (--from-agent | --unsigned | --keys K1,K2 [--fleet F] [--owner-version N]) \
                                [--agent-home P] [--state P]";
 
@@ -376,18 +379,32 @@ pub fn update_run(opts: &[String]) -> Result<i32> {
         None => fleet::PROBATION_S,
     };
     let once = has(opts, "--once");
+    let pin_wait = match flag(opts, "--pin-wait-s") {
+        Some(s) => Duration::from_secs(s.parse().ok().context(USAGE_RUN)?),
+        None => PIN_WAIT,
+    };
     ensure_state(&state)?;
     let Some(_lock) = lock(&state)? else {
         eprintln!("oarbank-launcher: another update runner is running");
         return Ok(0);
     };
+    crate::handle_stop_requests();
+    // an administrator's install or join left a pin pending (the agent had no owner keys yet): pin them once it has
+    if pending(&state) {
+        match settle(&agent_home, &state, pin_wait) {
+            Ok(FromAgent::Pinned(t)) => eprintln!("oarbank-launcher: update trust pinned from the agent: owner key set version {}{}",
+                                                  t.owner_version, t.fleet_id.as_deref().map(|f| format!(" of {f}")).unwrap_or_default()),
+            Ok(FromAgent::Already(_)) => {}
+            Ok(FromAgent::NotYet) => eprintln!("oarbank-launcher: the agent has no owner keys yet; the update trust stays pending"),
+            Err(e) => eprintln!("oarbank-launcher: pinning the update trust from the agent failed: {e:#}"),
+        }
+    }
     // an explicit prefix is a tarball install (Linux /opt/oarbank, and the tests)
     let format = if explicit_prefix.is_some() { "tar".to_string() } else { detect_format() };
     let installer = OsInstaller { home: Home(agent_home.clone()), prefix: explicit_prefix.unwrap_or_else(default_prefix),
                                   logs: state.join("logs"), format };
     let mut runner = Runner::new(Spool::new(&agent_home, &state), installer, SystemClock);
     runner.probation_s = probation_s;
-    crate::handle_stop_requests();
     loop {
         match runner.run_once() {
             Ok(Ran::Idle) => {
@@ -457,25 +474,123 @@ pub fn pin(state: &Path, t: &Trust) -> Result<()> {
     Ok(())
 }
 
+/// The file an administrator's install or join leaves in the runner's state directory while the agent has no owner
+/// keys to pin yet (a fresh install: the package installs before the node joins): root's runner pins them as soon as
+/// the agent has them, and deletes it (docs/design/fleet-updates.md, "Trust").
+const PENDING: &str = "pin-pending";
+
+/// What pinning from the agent came to.
+#[derive(Debug, PartialEq)]
+pub enum FromAgent {
+    /// pinned now: the trust written
+    Pinned(Trust),
+    /// a trust was pinned already (by an earlier pin, `--keys` or `--unsigned`): left as it is
+    Already(Trust),
+    /// the agent has pinned no owner keys yet (not joined yet, or a fleet that is not in signing mode)
+    NotYet,
+}
+
+/// The owner keys the agent pinned (D35's trust on first use), as a trust to pin: None while it has none.
+fn agent_trust(agent_home: &Path, how: &str) -> Option<Trust> {
+    let cfg: Value = serde_json::from_slice(&std::fs::read(agent_home.join("agent.json")).ok()?).ok()?;
+    let ct = &cfg["coordinator_trust"];
+    let keys: Vec<String> = ct["owner_keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    (!keys.is_empty()).then(|| Trust::signed(ct["fleet_id"].as_str().map(str::to_string), ct["owner_version"].as_i64().unwrap_or(1),
+                                             keys, now(), &pinned_by(how)))
+}
+
+/// Pin the owner keys the agent pinned, unless a trust is pinned already; a pin, or one found, settles a pending pin.
+pub fn pin_from_agent(agent_home: &Path, state: &Path, how: &str) -> Result<FromAgent> {
+    let r = if let Some(t) = Spool::new(agent_home, state).read_trust() {
+        FromAgent::Already(t)
+    } else if let Some(t) = agent_trust(agent_home, how) {
+        pin(state, &t)?;
+        FromAgent::Pinned(t)
+    } else {
+        return Ok(FromAgent::NotYet);
+    };
+    let _ = std::fs::remove_file(state.join(PENDING));
+    Ok(r)
+}
+
+/// Leave a pending pin (an administrator's install or join, before the agent has owner keys): root's runner pins them
+/// once the agent has them. Nothing when a trust is pinned already.
+pub fn arm(agent_home: &Path, state: &Path, how: &str) -> Result<()> {
+    if Spool::new(agent_home, state).read_trust().is_some() {
+        return Ok(());
+    }
+    ensure_state(state)?;
+    let p = state.join(PENDING);
+    fleet::write_durable(&p, json!({"format": 1, "armed_at": now(), "by": pinned_by(how)}).to_string().as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn pending(state: &Path) -> bool {
+    state.join(PENDING).is_file()
+}
+
+/// A pending pin, settled: the agent's owner keys pinned as soon as it has them, polled for up to `wait`. Nothing
+/// (NotYet) when no pin is pending.
+pub fn settle(agent_home: &Path, state: &Path, wait: Duration) -> Result<FromAgent> {
+    let started = Instant::now();
+    loop {
+        if !pending(state) {
+            return Ok(FromAgent::NotYet);
+        }
+        match pin_from_agent(agent_home, state, "an administrator's install or join, pinned by the update runner")? {
+            FromAgent::NotYet if started.elapsed() < wait && !crate::STOP.load(std::sync::atomic::Ordering::SeqCst) => {
+                std::thread::sleep(Duration::from_millis(500).min(wait));
+            }
+            r => return Ok(r),
+        }
+    }
+}
+
+/// Start root's update runner now, so it settles a pending pin as soon as the node joins (setup, after it staged a
+/// code or an address at system scope): macOS's launchd job, Linux's oneshot unit (not waited for). Windows' elevated
+/// helper looks for a pending pin itself (`watch_spool`). Best effort: the runner also settles it when it next starts.
+pub fn kick_runner() {
+    let quiet = |c: &mut Command| { let _ = c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+                                             .stderr(std::process::Stdio::null()).status(); };
+    if cfg!(target_os = "macos") {
+        if Path::new(&format!("/Library/LaunchDaemons/{RUNNER}.plist")).is_file() {
+            // never `-k`: a running runner may be installing a package
+            quiet(Command::new("/bin/launchctl").args(["kickstart", &format!("system/{RUNNER}")]));
+        }
+    } else if cfg!(target_os = "linux") && Path::new("/run/systemd/system").is_dir() {
+        quiet(Command::new("systemctl").args(["start", "--no-block", &format!("{RUNNER}.service")]));
+    }
+}
+
+pub use fleet::TRUST_REMEDY;
+
+/// The runner's job: the launchd label, the systemd unit's name.
+const RUNNER: &str = "dev.codonic.oarbank.agent.update";
+
 /// `update-trust`: pin the owner keys the runner verifies releases against (first pin from the agent's own TOFU pin,
-/// at an administrator's install), explicit keys, or `unsigned` (test fleets; an administrator's explicit choice).
+/// at an administrator's install or join), explicit keys, or `unsigned` (test fleets; an administrator's explicit
+/// choice). `--from-agent` before the agent has owner keys leaves the pin pending: the runner makes it once it has.
 pub fn update_trust(opts: &[String]) -> Result<()> {
     let agent_home = flag(opts, "--agent-home").map(PathBuf::from).unwrap_or_else(default_agent_home);
     let state = flag(opts, "--state").map(PathBuf::from).unwrap_or_else(default_state);
     let t = if has(opts, "--from-agent") {
-        if let Some(t) = Spool::new(&agent_home, &state).read_trust() {
-            println!("update trust already pinned ({}, {} keys); unchanged", t.pinned_by, t.owner_keys.len());
-            return Ok(());
+        match pin_from_agent(&agent_home, &state, "update-trust --from-agent")? {
+            FromAgent::Already(t) => {
+                println!("update trust already pinned ({}, {} keys); unchanged", t.pinned_by, t.owner_keys.len());
+                return Ok(());
+            }
+            FromAgent::Pinned(t) => t,
+            FromAgent::NotYet => {
+                arm(&agent_home, &state, "update-trust --from-agent")?;
+                bail!("the agent has pinned no owner keys yet: the update runner pins them once the node has joined and its \
+                       agent has them. A fleet that is not in signing mode has none: pin with --keys, or --unsigned for a test fleet");
+            }
         }
-        let cfg: Value = serde_json::from_slice(&std::fs::read(agent_home.join("agent.json"))
-            .with_context(|| format!("no agent.json in {}: join the node first", agent_home.display()))?)?;
-        let ct = &cfg["coordinator_trust"];
-        let keys: Vec<String> = ct["owner_keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
-        if keys.is_empty() {
-            bail!("the agent has pinned no owner keys (the fleet is not in signing mode): pin with --keys, or --unsigned for a test fleet");
-        }
-        Trust::signed(ct["fleet_id"].as_str().map(str::to_string), ct["owner_version"].as_i64().unwrap_or(1), keys, now(),
-                      &pinned_by("update-trust --from-agent"))
     } else if has(opts, "--unsigned") {
         Trust::unsigned(now(), &pinned_by("update-trust --unsigned"))
     } else if let Some(k) = flag(opts, "--keys") {
@@ -510,14 +625,20 @@ pub fn update_trust(opts: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Windows: the elevated helper (LocalSystem) watches the agent's spool and starts the runner for a request, or for
-/// an update the journal says is in progress (after a reboot), from a copy of the launcher in the runner's own
+/// Windows: the elevated helper (LocalSystem) settles a pending pin, and watches the agent's spool and starts the runner
+/// for a request, or for an update the journal says is in progress (after a reboot), from a copy of the launcher in the runner's own
 /// directory, detached and out of the helper's job: the MSI it runs replaces the launcher and restarts the helper.
 #[cfg(windows)]
 pub fn watch_spool() {
     let (spool, journal) = (default_agent_home().join("updates").join("request.json"), default_state().join("journal.json"));
     let mut started: Option<Instant> = None;
     while !crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        // an administrator's install or join left a pin pending: the agent's owner keys, pinned once it has them
+        if pending(&default_state()) {
+            if let Err(e) = pin_from_agent(&default_agent_home(), &default_state(), "an administrator's install or join, pinned by the helper") {
+                eprintln!("oarbank-launcher: pinning the update trust from the agent failed: {e:#}");
+            }
+        }
         let active = std::fs::read(&journal).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).is_some_and(|j| !j["active"].is_null());
         if (spool.exists() || active) && started.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
             match start_detached() {
@@ -655,11 +776,14 @@ mod tests {
             a.iter().map(|s| s.to_string()).chain(["--agent-home".into(), home.display().to_string(), "--state".into(), state.display().to_string()]).collect()
         };
         assert!(update_trust(&args(&["--from-agent"])).is_err(), "no agent.json");
+        assert!(pending(&state), "a pin from the agent before it has keys is left pending");
         std::fs::write(home.join("agent.json"), json!({"coordinator_trust": {"owner_keys": [], "owner_version": 0}}).to_string()).unwrap();
         assert!(update_trust(&args(&["--from-agent"])).is_err(), "no owner keys");
+        assert!(!state.join("trust.json").exists() && !state.join("available").exists());
         let k = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=";
         std::fs::write(home.join("agent.json"), json!({"coordinator_trust": {"owner_keys": [k], "owner_version": 3, "fleet_id": "fleet_a"}}).to_string()).unwrap();
         update_trust(&args(&["--from-agent"])).unwrap();
+        assert!(!pending(&state), "pinning settles the pending pin");
         let t = Spool::new(&home, &state).read_trust().unwrap();
         assert_eq!((t.mode, t.owner_version, t.owner_keys.clone(), t.fleet_id.as_deref()), (fleet::Mode::Signed, 3, vec![k.to_string()], Some("fleet_a")));
         let marker: Value = serde_json::from_slice(&std::fs::read(state.join("available")).unwrap()).unwrap();
@@ -674,5 +798,75 @@ mod tests {
         update_trust(&args(&["--unsigned"])).unwrap();
         assert_eq!(Spool::new(&home, &state).read_trust().unwrap().mode, fleet::Mode::Unsigned);
         assert!(update_trust(&args(&[])).is_err());
+    }
+
+    /// A fresh install: the package's pin runs before the node joined, so it is left pending; root's runner (or the
+    /// join itself) pins the agent's owner keys as soon as the agent has them, once, and only when a pin is pending.
+    #[test]
+    fn a_pending_pin_is_made_once_the_agent_has_owner_keys() {
+        let tmp = tempfile::Builder::new().prefix("oarbank-launcher-pending-").tempdir().unwrap();
+        let (home, state) = (tmp.path().join("agent"), tmp.path().join("update"));
+        std::fs::create_dir_all(&home).unwrap();
+        // nothing pending: the runner pins nothing, whatever the agent has
+        let k = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=";
+        let keys = json!({"coordinator_trust": {"owner_keys": [k], "owner_version": 1, "fleet_id": "fleet_a"}}).to_string();
+        std::fs::write(home.join("agent.json"), &keys).unwrap();
+        assert_eq!(settle(&home, &state, Duration::ZERO).unwrap(), FromAgent::NotYet);
+        assert!(Spool::new(&home, &state).read_trust().is_none());
+        std::fs::remove_file(home.join("agent.json")).unwrap();
+        // the package's install (or a join) before the node joined: pending, root's alone
+        arm(&home, &state, "test").unwrap();
+        assert!(pending(&state));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(state.join(PENDING)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert_eq!(settle(&home, &state, Duration::from_millis(300)).unwrap(), FromAgent::NotYet);
+        assert!(pending(&state), "still pending until the agent has keys");
+        // the node joins: the first directive brings the owner key set while the runner waits
+        let writer = {
+            let (home, keys) = (home.clone(), keys.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(700));
+                std::fs::write(home.join("agent.json"), keys).unwrap();
+            })
+        };
+        let r = settle(&home, &state, Duration::from_secs(30)).unwrap();
+        writer.join().unwrap();
+        let FromAgent::Pinned(t) = r else { panic!("{r:?}") };
+        assert_eq!((t.mode, t.owner_version, t.owner_keys.clone(), t.fleet_id.as_deref()), (fleet::Mode::Signed, 1, vec![k.to_string()], Some("fleet_a")));
+        assert_eq!(Spool::new(&home, &state).read_trust(), Some(t));
+        let marker: Value = serde_json::from_slice(&std::fs::read(state.join("available")).unwrap()).unwrap();
+        assert_eq!((marker["mode"].as_str(), marker["fleet_id"].as_str()), (Some("signed"), Some("fleet_a")));
+        assert!(!pending(&state), "settled");
+        // pinned: arming again leaves nothing pending, and a later key set never replaces the pin from here
+        arm(&home, &state, "test").unwrap();
+        assert!(!pending(&state));
+        std::fs::write(home.join("agent.json"), json!({"coordinator_trust": {"owner_keys": [k], "owner_version": 7}}).to_string()).unwrap();
+        assert!(matches!(pin_from_agent(&home, &state, "test").unwrap(), FromAgent::Already(t) if t.owner_version == 1));
+        // a trust an administrator pinned some other way (--unsigned) settles a pending pin without changing it
+        std::fs::remove_file(state.join("trust.json")).unwrap();
+        arm(&home, &state, "test").unwrap();
+        update_trust(&["--unsigned".into(), "--agent-home".into(), home.display().to_string(), "--state".into(), state.display().to_string()]).unwrap();
+        assert!(matches!(settle(&home, &state, Duration::ZERO).unwrap(), FromAgent::Already(t) if t.mode == fleet::Mode::Unsigned));
+        assert!(!pending(&state));
+    }
+
+    /// The runner started with a pin pending (setup started it as the node joined) pins the agent's keys, then runs.
+    #[test]
+    fn the_runner_settles_a_pending_pin() {
+        let tmp = tempfile::Builder::new().prefix("oarbank-launcher-runner-pin-").tempdir().unwrap();
+        let (home, state) = (tmp.path().join("agent"), tmp.path().join("update"));
+        std::fs::create_dir_all(&home).unwrap();
+        arm(&home, &state, "test").unwrap();
+        let k = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=";
+        std::fs::write(home.join("agent.json"), json!({"coordinator_trust": {"owner_keys": [k], "owner_version": 2}}).to_string()).unwrap();
+        let run = |extra: &[&str]| update_run(&["--agent-home", &home.display().to_string(), "--state", &state.display().to_string(),
+                                               "--prefix", &tmp.path().join("prefix").display().to_string(), "--once"]
+                                              .iter().chain(extra).map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+        assert_eq!(run(&["--pin-wait-s", "5"]), 0);
+        assert_eq!(Spool::new(&home, &state).read_trust().map(|t| t.owner_version), Some(2));
+        assert!(!pending(&state));
     }
 }

@@ -214,6 +214,19 @@ pub fn verify_release(signature: &Value, manifest_text: &str, m: &Manifest, owne
 
 // ---- the runner's files ----
 
+/// The command that pins the update trust by hand on this OS, exactly as a person types it: the launcher's own path on
+/// macOS (the pkg links only `oarbank-node` onto PATH, which runs the same launcher), `oarbank-launcher` on a Linux
+/// package's PATH, `oarbank-node` on Windows' (the launcher under its second name). `--from-agent` copies the owner keys
+/// the agent pinned when it joined; a bare `update-trust` only prints its usage. The coordinator shows the same per
+/// package format (fleetupdates.py, TRUST_REMEDY).
+pub const TRUST_REMEDY: &str = if cfg!(target_os = "macos") {
+    "sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent"
+} else if cfg!(windows) {
+    "oarbank-node update-trust --from-agent (in an elevated prompt)"
+} else {
+    "sudo oarbank-launcher update-trust --from-agent"
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -736,7 +749,7 @@ impl<I: Installer, C: Clock> Runner<I, C> {
         if m.expires.is_some_and(|e| self.clock.now() > e) {
             return Err(format!("release {} expired", m.version));
         }
-        let mut trust = self.spool.read_trust().ok_or("no update trust is pinned (oarbank-launcher update-trust)")?;
+        let mut trust = self.spool.read_trust().ok_or_else(|| format!("no update trust is pinned ({TRUST_REMEDY})"))?;
         if trust.mode == Mode::Signed {
             // a newer owner key set the agent relays: rotated here only by the pinned set's own rule
             if r.owner_anchors.is_object() {

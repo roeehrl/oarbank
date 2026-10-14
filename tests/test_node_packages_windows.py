@@ -6,6 +6,7 @@ import itertools
 import re
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -552,6 +553,10 @@ def test_the_package_build_makes_the_node_parts():
     assert '$Admx = "$Out\\oarbank-agent-$Version-windows-admx.zip"' in text
     sums = text[text.index("$Sums ="):text.index("SHA256SUMS-agent-")]
     assert "$Admx" in sums
+    # written by the reproducible zipper (both architectures' jobs build it: test_the_admx_zip_is_reproducible)
+    zipper = next(l for l in text.splitlines() if "pack-zip.py" in l and not l.startswith("#"))
+    assert zipper.endswith('$Admx "$Repo\\deploy\\windows\\admx" oarbank.admx en-US/oarbank.adml')
+    assert "tar.exe" not in text and "Compress-Archive" not in text
 
 
 def test_the_msi_workflow_adds_the_ui_extension_and_watches_the_join_window():
@@ -585,3 +590,40 @@ def test_the_msi_ci_installs_with_containers_and_checks_the_task():
     assert "no WSL installation began inside the agent's" in text
     assert 'Msi "/x" $First "uninstall-containers.log"' in text
     assert "the uninstall removes the container support task and its record" in text
+
+
+def _pack_zip(out: Path, root: Path) -> bytes:
+    r = subprocess.run([sys.executable, "-I", "-B", str(REPO / "scripts" / "pack-zip.py"), str(out), str(root),
+                        "oarbank.admx", "en-US/oarbank.adml"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return out.read_bytes()
+
+
+def test_the_admx_zip_is_reproducible(tmp_path):
+    """The x64 and arm64 jobs each zip the Group Policy template, and one copy is published under both sums files: the
+    zip's bytes depend on the files' contents only, not on their times, modes, the checkout's path or the job."""
+    import io
+    import os
+    import zipfile
+    a, b = tmp_path / "a", tmp_path / "elsewhere" / "b"
+    shutil.copytree(WINDOWS / "admx", a)
+    shutil.copytree(WINDOWS / "admx", b)
+    for i, f in enumerate(sorted(p for p in b.rglob("*") if p.is_file())):
+        os.utime(f, (1_700_000_000 + i, 1_800_000_000 + i))
+        f.chmod(0o600 if i % 2 else 0o755)
+    first, second = _pack_zip(tmp_path / "1.zip", a), _pack_zip(tmp_path / "2.zip", b)
+    assert first == second
+    with zipfile.ZipFile(io.BytesIO(first)) as z:
+        assert z.namelist() == ["oarbank.admx", "en-US/oarbank.adml"]
+        for zi in z.infolist():
+            assert (zi.date_time, zi.extra, zi.compress_type, zi.create_system, zi.external_attr >> 16) == \
+                ((2000, 1, 1, 0, 0, 0), b"", zipfile.ZIP_STORED, 3, 0o100644)
+        assert z.read("oarbank.admx") == ADMX.read_bytes() and z.read("en-US/oarbank.adml") == ADML.read_bytes()
+    # a changed template is a changed zip
+    (a / "oarbank.admx").write_bytes(ADMX.read_bytes() + b"\n")
+    assert _pack_zip(tmp_path / "3.zip", a) != first
+    # a missing file fails rather than ship a partial template
+    (a / "en-US" / "oarbank.adml").unlink()
+    r = subprocess.run([sys.executable, "-I", "-B", str(REPO / "scripts" / "pack-zip.py"), str(tmp_path / "4.zip"), str(a),
+                        "oarbank.admx", "en-US/oarbank.adml"], capture_output=True, text=True)
+    assert r.returncode == 1 and not (tmp_path / "4.zip").exists()

@@ -432,8 +432,10 @@ def observe_result(db: DB) -> dict | None:
             db.event("coordinator_update_running", reason=f"{s['from_version']} -> {s['version']} ({s['update_id']})")
         elif clock.now() - (s["requested_at"] or 0) > REQUEST_TTL_S:
             (d / REQUEST).unlink(missing_ok=True)
+            from ..coordupdate import trust_command
             _finish(db, s["update_id"], "failed", "no update runner took the request (is its trigger installed? "
-                                                  "install-oarbankd --refresh, then `coordupdate trust`)")
+                                                  f"install-oarbankd --refresh; then, if no update trust is pinned: "
+                                                  f"{trust_command()})")
             db.event("coordinator_update_failed", reason=f"{s['update_id']}: the request was not taken")
     elif s and s["state"] == "running" and clock.now() - (s["requested_at"] or 0) > RESULT_TTL_S:
         _finish(db, s["update_id"], "failed", "the update runner wrote no result")

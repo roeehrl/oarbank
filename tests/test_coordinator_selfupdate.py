@@ -633,6 +633,53 @@ def test_the_trust_pin_comes_from_the_home_once(tmp_path):
     assert coordupdate.pin_trust(state, home, True, "admin")["mode"] == "unsigned"  # an explicit choice replaces it
 
 
+def test_a_pin_from_a_home_without_owner_keys_is_made_by_the_runner_at_the_first_request(machine):
+    """The pkg's postinstall (a fresh install, a migration whose copied database the new build has not opened yet) pins
+    from a home with no owner keys: the pin is left pending, and the runner makes it from the home when a request comes
+    (the coordinator signs releases by then). Until then a request is refused with the command that pins it."""
+    key, pub = keypair()
+    m = machine(trust="none")
+    with pytest.raises(SystemExit, match="no owner keys"):
+        coordupdate.main(["trust", "--from-home", "--home", str(m.home), "--state", str(m.state)])
+    assert (m.state / coordupdate.PENDING).is_file() and not (m.state / "trust.json").exists()
+    m.request(uid="cu_p0", signature=lambda text: sign(key, text, "2.11.0", 21100))
+    assert m.runner().once() == "refused"
+    err = m.result()["error"]
+    assert "no update trust on this machine" in err and "trust --from-home" in err and "coordupdate trust" in err, err
+    if os.name == "posix":
+        assert "sudo " in err
+    assert f"--home {m.home}" in err and f"--state {m.state}" in err             # not the defaults: named
+    assert (m.state / coordupdate.PENDING).is_file()
+    # the coordinator pinned its owner keys: the next request pins them, then verifies against them
+    c = sqlite3.connect(m.home / "oarbank.sqlite3")
+    c.execute("CREATE TABLE system_state (key TEXT PRIMARY KEY, value_json TEXT)")
+    c.executemany("INSERT INTO system_state VALUES (?, ?)", [("release_pubkey", json.dumps(pub)), ("fleet_id", json.dumps("fleet_abc"))])
+    c.commit()
+    c.close()
+    m.before = m.dump()
+    m.request(uid="cu_p1", signature=lambda text: sign(key, text, "2.11.0", 21100))
+    assert m.runner().once() == "done", m.result()
+    t = json.loads((m.state / "trust.json").read_text())
+    assert t["mode"] == "signed" and t["owner_keys"] == [pub] and "update runner" in t["pinned_by"]
+    assert not (m.state / coordupdate.PENDING).exists()
+
+
+def test_the_trust_hint_is_a_command_that_runs(tmp_path, monkeypatch):
+    """The hint names the build's own runner (on macOS inside Oarbank Coordinator.app, on no PATH), quoted, with sudo."""
+    if os.name != "posix":
+        pytest.skip("POSIX layout")
+    build = tmp_path / "Oarbank Coordinator.app" / "Contents" / "Resources" / "coordinator"
+    (build / "python" / "bin").mkdir(parents=True)
+    (build / "bin").mkdir()
+    (build / "bin" / "oarbank-coordupdate").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "executable", str(build / "python" / "bin" / "python3.12"))
+    assert coordupdate.trust_command() == f'sudo "{build}/bin/oarbank-coordupdate" trust --from-home'
+    assert coordupdate.trust_command(coordupdate.paths.coordinator_home(), coordupdate.default_state()) == \
+        f'sudo "{build}/bin/oarbank-coordupdate" trust --from-home'
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "venv" / "bin" / "python"))
+    assert coordupdate.trust_command() == f"sudo {tmp_path}/venv/bin/python -m oarbank.coordupdate trust --from-home"
+
+
 @posix_only
 def test_coordself_and_the_runner_end_to_end(db, v, tmp_path, machine):
     """oarbankd's request, the runner's swap (recorded services), the result read back by oarbankd."""
