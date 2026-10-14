@@ -66,6 +66,10 @@ The keys, by section:
   (https on the machine's MagicDNS name through `tailscale serve`, for passkeys); `console_hosts`, a typed list of extra
   host names (an optional `:port`). See admin-console.md, "Listen addresses and https".
 - **Data and verification** (fleet only): `replica_rate`, 0 to 1, which a module may raise for its own work.
+- **New machines** (fleet only): `new_node_state` (`active`, the default, or `paused`) and `new_node_modules` (`all`,
+  the default, or `none`: the approval turns every installed module off on the new node, as its own value). A new
+  node's approval applies them in its own transaction unless it chooses otherwise ([node-enrollment.md](node-enrollment.md),
+  "Admission").
 - **Written by their own operations** (fleet only): `folder_registry`, `dataset_origins`.
 - **Every module's core keys** (`[module] <key>`): `enabled`, `services.disabled`, `pipeline`, and `replica_rate`
   qualified ([Module settings](#module-settings)).

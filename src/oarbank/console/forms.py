@@ -253,10 +253,66 @@ def join_code(form) -> dict:
             "system": bool(form.get("system")), "containers": bool(form.get("containers"))}
 
 
+def admission(form) -> dict:
+    """The approve dialog's options (templates/_admit_options.html; docs/design/node-enrollment.md, "Admission"):
+    `state` (empty: the fleet's policy), a `mod.<module>` field per installed module (`on`/`off`; the default the
+    dialog drew is `dflt.<module>`, so only a changed one is sent), `settings` one `key=value` per line (`<module>:key=value`
+    for a module's own), `labels`, `groups` (a multi-select), and `adopt` (the old node, when "the same machine" is
+    ticked). The coordinator checks every value; this only reads the form."""
+    from ..coordinator.settings import REGISTRY
+    out: dict = {}
+    if form.get("params"):
+        return json.loads(form["params"])
+    if (form.get("state") or "").strip():
+        out["state"] = form.get("state").strip()
+    mods = {}
+    for k in form.keys():
+        if k.startswith("mod."):
+            name, v = k[4:], form.get(k)
+            if v in ("on", "off") and v != form.get(f"dflt.{name}"):
+                mods[name] = v == "on"
+    if mods:
+        out["modules"] = mods
+    sets, errors = [], []
+    for line in (form.get("settings") or "").splitlines():
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        key, eq, raw = line.partition("=")
+        if not eq or not key.strip():
+            errors.append({"key": line.strip()[:60], "message": "one setting per line: key=value (<module>:key=value)"})
+            continue
+        mod, colon, name = key.strip().partition(":")
+        mod, name = (mod.strip(), name.strip()) if colon else ("", mod.strip())
+        raw = raw.strip()
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = raw
+        d = REGISTRY.get(name)
+        if d is not None and d.schema.get("type") == "string" and not isinstance(value, str):
+            value = raw                                       # a text setting keeps its text (as `oarbank settings set`)
+        sets.append({"key": name, "value": value, **({"module": mod} if mod else {})})
+    if errors:
+        raise ValueError("; ".join(f"{e['key']}: {e['message']}" for e in errors))
+    if sets:
+        out["settings"] = sets
+    labels = [x.strip() for x in (form.get("labels") or "").replace(",", " ").split() if x.strip()]
+    if labels:
+        out["labels"] = labels
+    getlist = getattr(form, "getlist", None)
+    groups = [g for g in (getlist("groups") if getlist else [form.get("groups")] if form.get("groups") else []) if g]
+    if groups:
+        out["groups"] = groups
+    if (form.get("adopt") or "").strip():
+        out["adopt_settings_from"] = form.get("adopt").strip()
+    return out
+
+
 MAPPERS = {
     "nodes.join_code": lambda f, ctx: join_code(f),
     # a device code stays a string (WDJB-MJHT); the coordinator folds case and dashes
-    "nodes.admit_code": lambda f, ctx: {"user_code": (f.get("user_code") or "").strip()},
+    "nodes.admit_code": lambda f, ctx: {"user_code": (f.get("user_code") or "").strip(), **admission(f)},
+    "nodes.admit": lambda f, ctx: admission(f),
     "settings.apply": lambda f, ctx: settings_changes(f),
     "groups.create": lambda f, ctx: group_params(f),
     "groups.update": lambda f, ctx: group_params(f),

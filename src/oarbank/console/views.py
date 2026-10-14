@@ -176,7 +176,18 @@ def fleet_data(r, now: float | None = None) -> dict:
     return {"nodes": nodes, "enrollments": enr, "campaigns": camps, "alerts": alerts, "alerts_pending": pending, "discovered": discovered,
             "events": events, "now": now, "fleet_state": r.get_state("fleet_state", "active"),
             "modules_disabled": r.get_state("modules_disabled", []) or [], "join_codes": codes,
-            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None)), "releases_awaiting": rel["awaiting"]}
+            "ca_fingerprint": ca_fingerprint(getattr(r, "home", None)), "releases_awaiting": rel["awaiting"],
+            "admit_choices": admit_choices(r) if enr else None}
+
+
+def admit_choices(r) -> dict:
+    """What the approve dialog offers (templates/_macros.html admit_options): the modules with a current version, the
+    owner groups, and the fleet's onboarding policy the defaults follow (coordinator/admission.py)."""
+    from ..coordinator import admission
+    from ..coordinator.settings import store
+    return {"modules": [x["name"] for x in r.q("SELECT name FROM module_channels WHERE current IS NOT NULL ORDER BY name")],
+            "groups": [{"id": g["id"], "name": g["name"]} for g in store.groups(r) if not g["builtin"]],
+            "policy": admission.policy(r)}
 
 
 def release_state(r) -> dict:
@@ -230,7 +241,13 @@ def join_code_status(r, code_id: str, now: float | None = None) -> dict:
     refused = r.q("SELECT ts, actor, reason FROM events WHERE kind='join_code_refused' AND ts>=? "
                   "AND json_extract(payload_json, '$.join_code_id')=? ORDER BY event_id DESC LIMIT 20",
                   (jc["created_at"] or 0, code_id))
-    return {"jc": jc, "refused": refused, "now": now}
+    from ..coordinator import nodeidentity
+    for e in jc["enrollments"]:
+        if e.get("status") == "pending":
+            full = r.one("SELECT * FROM enrollments WHERE enrollment_id=?", (e["enrollment_id"],))
+            e["identity"] = nodeidentity.of_enrollment(r, full) if full else {}
+    pending = any(e.get("status") == "pending" for e in jc["enrollments"])
+    return {"jc": jc, "refused": refused, "now": now, "admit_choices": admit_choices(r) if pending else None}
 
 
 def node_page(r, nid: str, now: float, manifest_for) -> dict | None:

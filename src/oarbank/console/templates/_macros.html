@@ -17,6 +17,45 @@
 </form>
 {%- endmacro %}
 
+{# The approve dialog's options (coordinator/admission.py; docs/design/node-enrollment.md, "Admission"): what the node
+   starts as, written in the approval's own transaction, so it is never granted a job or a golden before them. "Review…"
+   previews it (the plan page). `ch`: views.admit_choices. A lookalike enrollment offers "the same machine". #}
+{% macro admit_options(e, ch, return_to="", newtab=False) -%}
+{% if ch %}{% set looks = (e.identity or {}).lookalikes or [] %}{% set off_default = ch.policy.modules == 'none' %}
+<details class="admit-options small" id="admit-{{ e.enrollment_id }}" hx-preserve><summary>Approve with options…</summary>
+{% call op_form("nodes.admit", e.enrollment_id, "Review…", cls="pri", inline=False, return_to=return_to, newtab=newtab) %}
+<div class="stack">
+<label>It starts <select name="state">
+  <option value="">as the fleet says ({{ ch.policy.state }})</option>
+  <option value="active">active: takes work once certified</option>
+  <option value="paused">paused: no jobs, no certification goldens, until you resume it</option>
+  <option value="draining">draining: no new work</option></select></label>
+{% if ch.modules %}<fieldset><legend>Modules on this node{% if off_default %} <span class="mut">(the fleet starts new nodes with every module off)</span>{% endif %}</legend>
+  {% for mod in ch.modules %}<input type="hidden" name="dflt.{{ mod }}" value="{{ 'off' if off_default else 'on' }}">
+  <label class="row"><select name="mod.{{ mod }}" aria-label="{{ mod }} on this node">
+    <option value="on"{% if not off_default %} selected{% endif %}>runs</option>
+    <option value="off"{% if off_default %} selected{% endif %}>off</option></select> <span class="mono">{{ mod }}</span></label>
+  {% endfor %}</fieldset>{% endif %}
+<label>Its own settings <span class="mut">(one per line, <span class="mono">key=value</span>; a module's: <span class="mono">module:key=value</span>)</span>
+  <textarea name="settings" rows="2" class="mono" spellcheck="false" placeholder="max_slots=4"></textarea></label>
+<label>Labels <input name="labels" placeholder="lab, gpu" autocomplete="off" spellcheck="false"></label>
+{% if ch.groups %}<label>Groups that list it <select name="groups" multiple size="{{ [ch.groups | length, 4] | min }}">
+  {% for g in ch.groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select></label>{% endif %}
+{% if looks %}<fieldset class="same-machine"><legend>Same machine?</legend>
+  {% if looks | length == 1 %}{% set o = looks[0] %}
+  <label><input type="checkbox" name="adopt" value="{{ o.node_id }}"> This is the same machine: carry over its settings and retire the old record
+    (<a href="/nodes/{{ o.node_id }}">{{ o.hostname }}</a>{% if o.same_hardware %}, same hardware{% endif %})</label>
+  {% else %}
+  <label><input type="radio" name="adopt" value="" checked> A new machine: nothing carried over</label>
+  {% for o in looks %}<label><input type="radio" name="adopt" value="{{ o.node_id }}"> This is the same machine as {{ o.hostname }} ({{ o.node_id }}{% if o.same_hardware %}, same hardware{% endif %}): carry over its settings and retire the old record</label>{% endfor %}
+  {% endif %}
+  <div class="mut">Only if you know it is: its state, module switches, settings, protection, holds and pins, labels and groups move to the new node, and the old record is retired. The old node must be offline; you type its name to confirm. Nothing of its credentials or secrets is carried.</div></fieldset>{% endif %}
+</div>
+{% endcall %}
+</details>
+{% endif %}
+{%- endmacro %}
+
 {# Releases waiting for the owner's signature (releases.awaiting): no new module code reaches those nodes until the owner
    signs each one offline with the owner key. An empty release (no module for its platform) needs no signature and is
    never listed. Shown on the Fleet, Modules and Settings pages. #}
