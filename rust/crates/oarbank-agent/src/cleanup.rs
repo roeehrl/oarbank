@@ -310,6 +310,20 @@ pub fn remove_images(rts: Option<&crate::container_runtime::Containers>, images:
     (gone, left)
 }
 
+/// An `image rm`'s outcome (the runtimes' `remove_image`): an image that is not there (any more) counts as removed.
+pub fn removed(r: Result<crate::container_runtime::Exec, String>) -> Result<(), String> {
+    let r = r?;
+    let err = r.stderr_tail(500);
+    let low = err.to_ascii_lowercase();
+    if r.ok() || ["no such image", "image not known", "not found"].iter().any(|x| low.contains(x)) { Ok(()) } else { Err(err) }
+}
+
+/// The size an `image inspect --format {{.Size}}` printed (the runtimes' `image_size`).
+#[cfg_attr(windows, allow(dead_code))]
+pub fn inspected_size(r: Result<crate::container_runtime::Exec, String>) -> Option<u64> {
+    r.ok().filter(|r| r.ok()).and_then(|r| String::from_utf8_lossy(&r.stdout).trim().parse().ok())
+}
+
 /// `oarbank-agent remove-images` (an uninstall with `--purge`, a node leaving its fleet): remove every container image the
 /// node's modules pulled, through the runtimes that run now (a Linux host's engine keeps its images outside the agent's
 /// home). Windows deletes its containers session whole (`containers remove`). Returns what to print.

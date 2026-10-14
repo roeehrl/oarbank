@@ -763,7 +763,7 @@ mod imp {
             if let Ok(x) = &r {
                 self.noticed(x);
             }
-            crate::container_runtime::removed(r)
+            crate::cleanup::removed(r)
         }
 
         fn pool_tokens(&self) -> u32 {

@@ -174,20 +174,6 @@ pub trait ContainerRuntime: Send + Sync {
     }
 }
 
-/// An `image rm`'s outcome: an image that is not there (any more) counts as removed.
-pub fn removed(r: Result<Exec, String>) -> Result<(), String> {
-    let r = r?;
-    let err = r.stderr_tail(500);
-    let low = err.to_ascii_lowercase();
-    if r.ok() || ["no such image", "image not known", "not found"].iter().any(|x| low.contains(x)) { Ok(()) } else { Err(err) }
-}
-
-/// The size an `image inspect --format {{.Size}}` printed.
-#[cfg_attr(windows, allow(dead_code))]
-pub fn inspected_size(r: Result<Exec, String>) -> Option<u64> {
-    r.ok().filter(|r| r.ok()).and_then(|r| String::from_utf8_lossy(&r.stdout).trim().parse().ok())
-}
-
 /// How often the agent re-probes a runtime that is missing a prerequisite (or, on macOS, whose start failed and whose
 /// backoff has run out): `ContainerRuntime::reprobe`.
 pub const RUNTIME_REPROBE: Duration = Duration::from_secs(60);
@@ -1046,11 +1032,11 @@ impl ContainerRuntime for ColimaRuntime {
     }
 
     fn remove_image(&self, image: &str) -> Result<(), String> {
-        removed(self.cli(&["image", "rm", image], 120))
+        crate::cleanup::removed(self.cli(&["image", "rm", image], 120))
     }
 
     fn image_size(&self, image: &str) -> Option<u64> {
-        inspected_size(self.cli(&["image", "inspect", "--format", "{{.Size}}", image], 30))
+        crate::cleanup::inspected_size(self.cli(&["image", "inspect", "--format", "{{.Size}}", image], 30))
     }
 
     /// The GPU VM's guest passes its render node through, offered while the report offers the GPU.
@@ -1268,11 +1254,11 @@ impl ContainerRuntime for NativeRuntime {
     }
 
     fn remove_image(&self, image: &str) -> Result<(), String> {
-        removed(self.cli(&["image", "rm", &qualified(image)], 120))
+        crate::cleanup::removed(self.cli(&["image", "rm", &qualified(image)], 120))
     }
 
     fn image_size(&self, image: &str) -> Option<u64> {
-        inspected_size(self.cli(&["image", "inspect", "--format", "{{.Size}}", &qualified(image)], 30))
+        crate::cleanup::inspected_size(self.cli(&["image", "inspect", "--format", "{{.Size}}", &qualified(image)], 30))
     }
 
     fn pool_tokens(&self) -> u32 {
