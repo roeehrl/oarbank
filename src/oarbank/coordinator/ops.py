@@ -355,10 +355,20 @@ for _op, _st in (("fleet.pause", "paused"), ("fleet.halt", "halted"), ("fleet.re
 
 # ------------------------------------------------------------------ nodes
 
+def _admit_impact(db, e: dict | None) -> dict:
+    """The enrollment, and whether approving it keeps a known node or makes a new one (warning when it looks like a
+    known node it cannot prove it is: nodeidentity.py)."""
+    from . import nodeidentity
+    if not e:
+        return {"enrollment": None}
+    full = db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (e["enrollment_id"],))
+    return {"enrollment": e, **nodeidentity.impact(db, full)}
+
+
 @handler("nodes.admit", target_type="enrollment",
          snapshot=lambda db, r: db.one("SELECT enrollment_id, status, hostname FROM enrollments WHERE enrollment_id=?", (r.target,)),
-         impact=lambda db, r: {"enrollment": db.one("SELECT enrollment_id, hostname, peer_ip, status FROM enrollments "
-                                                    "WHERE enrollment_id=?", (r.target,))})
+         impact=lambda db, r: _admit_impact(db, db.one("SELECT enrollment_id, hostname, peer_ip, status FROM enrollments "
+                                                       "WHERE enrollment_id=?", (r.target,))))
 def _admit(db, req):
     return core.approve_enrollment(db, req.target, req.actor)
 
@@ -423,7 +433,8 @@ def _retire_impact(db, r) -> dict:
          impact=_retire_impact)
 def _retire(db, req):
     nid = _nid(db, req)
-    db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL WHERE node_id=?", (nid,))
+    db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL, client_key_sha256=NULL,"
+         " client_key_prev_sha256=NULL WHERE node_id=?", (nid,))
     # work pinned to this node (a run_all job, its golden jobs) can never run anywhere else: settle it, or its campaign
     # stays running for ever
     pinned = _pinned_open(db, nid)
@@ -2496,7 +2507,7 @@ def _user_code_enrollment(db, r):
 
 
 @handler("nodes.admit_code", target_type="enrollment",
-         impact=lambda db, r: {"enrollment": _user_code_enrollment(db, r)})
+         impact=lambda db, r: _admit_impact(db, _user_code_enrollment(db, r)))
 def _admit_code(db, req):
     return core.admit_by_user_code(db, req.params.get("user_code") or req.target or "", req.actor)
 

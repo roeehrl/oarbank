@@ -55,12 +55,34 @@ def _load_key(path: Path):
 
 
 def spki_sha256(cert: x509.Certificate) -> str:
-    return hashlib.sha256(cert.public_key().public_bytes(serialization.Encoding.DER,
-                                                         serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+    return _key_sha256(cert.public_key())
 
 
 def fingerprint(der: bytes) -> str:
     return hashlib.sha256(der).hexdigest()
+
+
+def _key_sha256(public_key) -> str:
+    return hashlib.sha256(public_key.public_bytes(serialization.Encoding.DER,
+                                                  serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+
+
+def key_of_cert(der: bytes) -> str | None:
+    """The SHA-256 of a client certificate's public key (SPKI): the node key it was issued for, or None."""
+    try:
+        return _key_sha256(x509.load_der_x509_certificate(der).public_key())
+    except ValueError:
+        return None
+
+
+def key_of_csr(csr_pem: str) -> str | None:
+    """The SHA-256 of the public key (SPKI) a certificate request was signed with, or None when the request is not a
+    PEM CSR whose signature verifies (it then proves possession of nothing)."""
+    try:
+        csr = x509.load_pem_x509_csr((csr_pem or "").encode())
+        return _key_sha256(csr.public_key()) if csr.is_signature_valid else None
+    except ValueError:
+        return None
 
 
 def ensure_ca(home, fleet_id: str) -> x509.Certificate:
@@ -172,7 +194,7 @@ def issue_client(home, csr_pem: str, node_id: str, days: int = CLIENT_DAYS) -> d
                  ExtendedKeyUsageOID.CLIENT_AUTH)
     der = cert.public_bytes(serialization.Encoding.DER)
     return {"cert_pem": cert.public_bytes(serialization.Encoding.PEM).decode(), "fingerprint": fingerprint(der),
-            "not_after": cert.not_valid_after_utc.timestamp(), "ca_pem": ca_pem(home)}
+            "key_sha256": _key_sha256(pk), "not_after": cert.not_valid_after_utc.timestamp(), "ca_pem": ca_pem(home)}
 
 
 def node_of(der: bytes) -> str | None:

@@ -341,6 +341,7 @@ def host_callbacks(db) -> dict:
         return {"nodes": out}
 
     def jobs_query(module, p):
+        from .failures import TICK_FAILURE_DETAIL, failure_view
         d = _db()
         cid = p.get("campaign_id")
         c = d.one("SELECT module FROM campaigns WHERE campaign_id=?", (cid,))
@@ -348,7 +349,7 @@ def host_callbacks(db) -> dict:
             return {"jobs": []}
         states = p.get("states") or []
         rows = d.q("SELECT j.job_id, j.job_key, j.state, j.kind, j.stage, j.dataset_id, j.labels_json, j.target_node, j.group_key, "
-                   "r.value, r.digest, r.fields_json, r.node_id, r.platform FROM jobs j "
+                   "j.failure_json, r.value, r.digest, r.fields_json, r.node_id, r.platform FROM jobs j "
                    "LEFT JOIN results r ON r.result_id=j.canonical_result_id "
                    "WHERE j.campaign_id=? AND j.module=? ORDER BY j.job_id LIMIT ?",
                    (cid, module, min(int(p.get("limit") or 5000), 50000)))
@@ -360,7 +361,9 @@ def host_callbacks(db) -> dict:
                         "stage": r["stage"], "dataset_id": r["dataset_id"], "labels": json.loads(r["labels_json"] or "{}"),
                         "target_node": r["target_node"], "value": r["value"], "digest": r["digest"],
                         "fields": json.loads(r["fields_json"] or "{}") if r["fields_json"] else None, "node_id": r["node_id"],
-                        "platform": r["platform"], "group": r["group_key"]})
+                        "platform": r["platform"], "group": r["group_key"],
+                        **({"failure": failure_view(r["failure_json"], TICK_FAILURE_DETAIL)}
+                           if r["state"] in ("failed", "quarantined") and r["failure_json"] else {})})
         return {"jobs": out}
 
     def files_list(module, p):

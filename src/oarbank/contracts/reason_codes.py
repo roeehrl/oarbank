@@ -284,6 +284,8 @@ CODES: list[ReasonCode] = [
     C("PLACEMENT_REBOUND", "attempt_end", "Its unit of work moved to another platform class", wire=["placement_rebound"], node=False, job=False),
     C("JOB_CANCELLED", "attempt_end", "The job was cancelled", wire=["job_cancelled"], node=False, job=False),
     C("JOB_QUARANTINED", "attempt_end", "The job was quarantined", wire=["job_quarantined"], node=False, job=False),
+    C("JOB_FAILED", "attempt_end", "The job failed: its runner declared it can never succeed (not retried)",
+      wire=["job_failed"], node=False, job=False),
     C("ATTEMPT_CLOSED", "attempt_end", "The attempt was already closed", wire=["attempt_closed"], node=False, job=False),
     C("JOB_DONE", "attempt_end", "The job was already done", wire=["job_done"], node=False, job=False),
 

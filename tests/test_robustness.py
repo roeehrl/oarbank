@@ -606,13 +606,14 @@ def test_a_single_node_quarantines_after_the_stages_attempts(db, monkeypatch):
     mini = certify(db, enrolled_node(db, "mini")[1])
     study(db, SCENES[:1])
     jid = db.one("SELECT job_id FROM jobs WHERE module='relay' AND kind='eval' ORDER BY job_id LIMIT 1")["job_id"]
-    assert _fail(db, mini, jid, fault="job")["state"] == "quarantined"
+    assert _fail(db, mini, jid, fault="job", retryable=True)["state"] == "quarantined"
     assert ok(db)
 
 
 def test_transient_and_host_faults_never_spend_a_jobs_retries(db, monkeypatch):
     """fault = transient is no failure at all; a host fault (a missing dependency) sends the node back to its doctor and
-    the job elsewhere, without spending the job's retries; a job fault spends one."""
+    the job elsewhere, without spending the job's retries; a retryable job fault spends one (a job fault that is not
+    retryable ends the job at once: test_job_failures.py)."""
     _relay_with(monkeypatch, stage_variants={"darwin": {"retry": {"max_attempts": 1}}})
     n1, n2 = certified_fleet(db, ("n1", "n2"))
     study(db, SCENES[:1])
@@ -622,5 +623,5 @@ def test_transient_and_host_faults_never_spend_a_jobs_retries(db, monkeypatch):
     j = _fail(db, n1, jid, fault="host", reason="doctor")
     assert (j["state"], j["exec_failures"]) == ("pending", 0)
     assert db.one("SELECT want_doctor FROM nodes WHERE node_id=?", (n1["node_id"],))["want_doctor"] == 1
-    assert _fail(db, n2, jid, fault="job")["state"] == "quarantined"
+    assert _fail(db, n2, jid, fault="job", retryable=True)["state"] == "quarantined"
     assert ok(db)

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   processes_json TEXT, processes_at REAL,          -- the agent's process summary (the rule editor's picker and preview)
   assigned_release TEXT,
   client_cert_fp TEXT, client_cert_prev_fp TEXT, client_cert_not_after REAL,   -- D29: the current (and, renewing, previous) certificate
+  client_key_sha256 TEXT, client_key_prev_sha256 TEXT,   -- the public keys (SPKI SHA-256) of those certificates (nodeidentity.py)
   agent_build TEXT, agent_update_json TEXT,         -- agent self-update: the binary the agent runs, and its update state
   cik_pinned TEXT, cik_confirmed TEXT, cik_confirmed_by TEXT, cik_confirmed_at REAL,   -- the coordinator key the agent pinned
   install_coordinator_json TEXT, coordinator_move_json TEXT,
@@ -103,7 +104,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   dispute_json TEXT,    -- {"nodes": [...], "results": [...], "scope", "class"}: replicas disagreed, awaiting a tie-break
   spec_version INT,
   placement_unit TEXT, platforms_json TEXT, group_key TEXT,   -- D33: its unit of work, its platforms, its group
-  images_json TEXT);    -- the container set images its runner may run (jobs.enqueue images)
+  images_json TEXT,     -- the container set images its runner may run (jobs.enqueue images)
+  failure_json TEXT);   -- its last counted failure: {reason, code, detail, fault, retryable, attempt_id, node_id, at}
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, priority);
 CREATE INDEX IF NOT EXISTS jobs_dispatch ON jobs(state, priority DESC, subpriority DESC, job_id);
 CREATE INDEX IF NOT EXISTS jobs_target ON jobs(target_node, state) WHERE target_node IS NOT NULL;
@@ -310,10 +312,12 @@ class _TimedLock:
 
 # Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
 ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
+                 "jobs": {"failure_json": "TEXT"},
                  "nodes": {"settings_json": "TEXT", "settings_digest": "TEXT",
                            "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
                            "tools_json": "TEXT", "want_detect": "INT DEFAULT 0", "settings_changed_at": "REAL",
-                           "settings_managed_json": "TEXT", "detect_requested_at": "REAL"}}
+                           "settings_managed_json": "TEXT", "detect_requested_at": "REAL",
+                           "client_key_sha256": "TEXT", "client_key_prev_sha256": "TEXT"}}
 
 
 def _ensure_columns(conn, table: str, cols: dict) -> None:

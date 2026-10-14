@@ -147,8 +147,30 @@ pub trait ContainerRuntime: Send + Sync {
         None
     }
     /// Check the runtime's prerequisites again when it is not ready (the agent's doctors run again: a release, a restart).
+    /// A runtime that backs off after failed starts keeps its backoff here.
     fn recheck(&self) {}
+    /// The owner asked for a fresh look (a `run_doctor` directive, Re-detect): as `recheck`, whatever backoff the runtime
+    /// keeps after failed starts.
+    fn retry(&self) {
+        self.recheck()
+    }
+    /// The agent's periodic re-probe (`RUNTIME_REPROBE`): a runtime missing a prerequisite looks for it again, since the
+    /// owner may have installed it since (2.10.3 looked only at a release or restart). Cheap: file checks.
+    fn reprobe(&self) {
+        if self.report().is_some_and(|r| r["state"] == "missing") {
+            self.recheck()
+        }
+    }
+    /// The agent is stopping: leave the runtime so the next agent can start it (macOS: stop the VMs, within `budget`).
+    fn shutdown(&self, _budget: Duration) {}
 }
+
+/// How often the agent re-probes a runtime that is missing a prerequisite (or, on macOS, whose start failed and whose
+/// backoff has run out): `ContainerRuntime::reprobe`.
+pub const RUNTIME_REPROBE: Duration = Duration::from_secs(60);
+/// What a stopping agent gives its VMs to stop (graceful, then forced), within the service managers' 60 s stop timeout
+/// after the runners' STOP_GRACE and STOP_REPORT (agent.rs).
+pub const VM_STOP_BUDGET: Duration = Duration::from_secs(25);
 
 /// The node's container runtimes: `cpu` runs every container, `gpu` the containers of jobs that reserved the agent's
 /// `gpu` pool (the same runtime on Linux, the krunkit VM on macOS; None where containers cannot get the GPU).
@@ -510,6 +532,17 @@ pub struct MacShared {
     agent_home: PathBuf,
     /// Write the state file (the agent; a CLI's probe leaves the running agent's report alone).
     publish: bool,
+    retry: Mutex<Retry>,
+}
+
+/// The CPU profile's failed starts since it was last ready: when the runtime tries by itself again
+/// (crate::colima::retry_after), and how many stale instances it cleared (crate::colima::MAX_RECOVERIES).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default)]
+struct Retry {
+    failures: u32,
+    not_before: Option<Instant>,
+    recoveries: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -526,6 +559,42 @@ impl MacShared {
             let _ = crate::fsutil::write_private(&crate::colima::report_file(&self.agent_home),
                                                  &serde_json::to_vec_pretty(&g.state_json()).unwrap_or_default());
         }
+    }
+
+    fn new(report: crate::colima::Report, agent_home: PathBuf, publish: bool) -> MacShared {
+        MacShared { report: Mutex::new(report), agent_home, publish, retry: Mutex::new(Retry::default()) }
+    }
+
+    fn retry(&self) -> std::sync::MutexGuard<'_, Retry> {
+        self.retry.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A start failed: the next one by itself waits longer. Returns that wait.
+    fn failed(&self) -> Duration {
+        let mut r = self.retry();
+        r.failures += 1;
+        let wait = crate::colima::retry_after(r.failures);
+        r.not_before = Some(Instant::now() + wait);
+        wait
+    }
+
+    /// The profile is ready, or the owner asked: no backoff, and stale instances may be cleared again.
+    fn reset(&self) {
+        *self.retry() = Retry::default();
+    }
+
+    /// Whether a failed profile may be started again by itself now.
+    fn retry_due(&self) -> bool {
+        self.retry().not_before.is_none_or(|t| Instant::now() >= t)
+    }
+
+    /// One more stale-instance recovery, unless MAX_RECOVERIES in a row were tried already.
+    fn take_recovery(&self) -> Option<u32> {
+        let mut r = self.retry();
+        (r.recoveries < crate::colima::MAX_RECOVERIES).then(|| {
+            r.recoveries += 1;
+            r.recoveries
+        })
     }
 }
 
@@ -548,6 +617,10 @@ pub struct ColimaRuntime {
     pub vm_mem_gb: f64,
     /// Apple silicon (Rosetta, krunkit).
     pub arm: bool,
+    /// Where colima, docker, limactl and krunkit are looked up (Homebrew's directories, then PATH's; tests: a scratch
+    /// directory of fakes), and the file whose presence means Rosetta 2 is installed.
+    tools: Vec<PathBuf>,
+    rosetta: PathBuf,
     start_lock: std::sync::Arc<Mutex<()>>,
     shared: std::sync::Arc<MacShared>,
 }
@@ -573,8 +646,7 @@ impl ColimaRuntime {
     #[cfg(test)]
     pub fn new(layout: &crate::paths::Layout, profile: Profile) -> Self {
         let host = crate::colima::detect(&layout.home);
-        let shared = std::sync::Arc::new(MacShared { report: Mutex::new(crate::colima::Report::of(&host, crate::colima::State::Absent)),
-                                                     agent_home: layout.home.clone(), publish: false });
+        let shared = std::sync::Arc::new(MacShared::new(crate::colima::Report::of(&host, crate::colima::State::Absent), layout.home.clone(), false));
         Self::with(layout, profile, host.dirs, shared)
     }
 
@@ -586,15 +658,15 @@ impl ColimaRuntime {
         ColimaRuntime {
             profile, dirs, work: layout.work(), modules_data: layout.module_data(), docker_config: layout.run().join("docker"),
             log: layout.logs().join(format!("colima-{}.log", profile.name())), vm_cpus: cpus, vm_mem_gb: mem,
-            arm: cfg!(target_arch = "aarch64"), start_lock: std::sync::Arc::new(Mutex::new(())), shared,
+            arm: cfg!(target_arch = "aarch64"), tools: crate::colima::search_dirs(std::env::var_os("PATH").as_deref()),
+            rosetta: PathBuf::from(crate::colima::ROSETTA_RUNTIME), start_lock: std::sync::Arc::new(Mutex::new(())), shared,
         }
     }
 
     /// Both profiles of this agent with one report, which `publish` writes to the agent's state file.
     pub fn pair(layout: &crate::paths::Layout, publish: bool) -> (ColimaRuntime, ColimaRuntime) {
         let host = crate::colima::detect(&layout.home);
-        let shared = std::sync::Arc::new(MacShared { report: Mutex::new(crate::colima::Report::of(&host, crate::colima::State::Absent)),
-                                                     agent_home: layout.home.clone(), publish });
+        let shared = std::sync::Arc::new(MacShared::new(crate::colima::Report::of(&host, crate::colima::State::Absent), layout.home.clone(), publish));
         (Self::with(layout, Profile::Cpu, host.dirs.clone(), shared.clone()), Self::with(layout, Profile::Gpu, host.dirs, shared))
     }
 
@@ -603,8 +675,9 @@ impl ColimaRuntime {
         tokens(self.vm_mem_gb)
     }
 
+    /// What this Mac has now (looked up again on every call: what was installed since counts).
     fn host(&self) -> crate::colima::Host {
-        crate::colima::detect_with(self.dirs.clone())
+        crate::colima::detect_in(self.dirs.clone(), &self.tools, &self.rosetta)
     }
 
     /// Replace the shared report (tests).
@@ -615,7 +688,7 @@ impl ColimaRuntime {
 
     /// colima, docker, krunkit as found now (installed since the agent started counts).
     fn tool(&self, name: &str) -> PathBuf {
-        let found = crate::colima::find(name, &crate::colima::search_dirs(std::env::var_os("PATH").as_deref()), &|p: &Path| executable(p));
+        let found = crate::colima::find(name, &self.tools, &|p: &Path| executable(p));
         found.usable().map(Path::to_path_buf).unwrap_or_else(|| Path::new(crate::colima::BREW_DIRS[0]).join(name))
     }
 
@@ -722,14 +795,85 @@ impl ColimaRuntime {
             crate::fsutil::private_dir(c).map_err(|e| format!("{}: {e}", c.display()))?;
         }
         crate::fsutil::private_dir(&self.docker_config).map_err(|e| e.to_string())?;
+        let Err((e, out)) = self.colima_start() else { return Ok(()) };
+        // an instance an earlier VM left behind (its host agent was killed, e.g. with an agent restart): Colima cannot
+        // inspect it and fails every start until it is force-stopped
+        let instance = crate::colima::instance_dir(&self.dirs.config, self.profile.name());
+        if !crate::colima::stale_instance(&out) && !crate::colima::stale_files(&instance) {
+            return Err(e);
+        }
+        let Some(n) = self.shared.take_recovery() else {
+            tracing::warn!(profile = self.profile.name(), "the Colima instance is stale again: not force-stopping it a {}th time in a row",
+                           crate::colima::MAX_RECOVERIES + 1);
+            return Err(format!("{e} (a stale instance: {} force stops in a row did not clear it)", crate::colima::MAX_RECOVERIES));
+        };
+        tracing::warn!(profile = self.profile.name(), attempt = n, of = crate::colima::MAX_RECOVERIES,
+                       "colima start found a stale instance (an earlier VM was not shut down cleanly): force-stopping it and starting again");
+        if let Err(stop) = self.colima_stop(true, Duration::from_secs(60)) {
+            tracing::warn!(profile = self.profile.name(), error = %stop, "colima stop --force failed");
+        }
+        match self.colima_start() {
+            Ok(()) => {
+                tracing::info!(profile = self.profile.name(), "the stale Colima instance was cleared and the profile started");
+                Ok(())
+            }
+            Err((e, _)) => Err(e),
+        }
+    }
+
+    /// One `colima start <profile>` (600 s: the first downloads the VM image), its output in the profile's log. Err: why,
+    /// and what this start wrote to the log.
+    fn colima_start(&self) -> Result<(), (String, String)> {
+        let from = std::fs::metadata(&self.log).map(|m| m.len()).unwrap_or(0);
         let (o, e) = (self.log_file(), self.log_file());
         let r = exec(&self.start_args(), &self.colima_env(), Duration::from_secs(600), o, e, &AtomicBool::new(false),
-                     Duration::from_secs(10))?;
-        if !r.ok() {
-            return Err(format!("colima start {} failed ({}{}); see {}: {}", self.profile.name(), r.code,
-                               if r.timed_out { ", timeout" } else { "" }, self.log.display(), self.log_tail()));
+                     Duration::from_secs(10)).map_err(|e| (e, String::new()))?;
+        if r.ok() {
+            return Ok(());
         }
-        Ok(())
+        let out = std::fs::read(&self.log).ok().and_then(|b| b.get(from as usize..).map(|b| String::from_utf8_lossy(b).into_owned()))
+            .unwrap_or_default();
+        Err((format!("colima start {} failed ({}{}); see {}: {}", self.profile.name(), r.code, if r.timed_out { ", timeout" } else { "" },
+                     self.log.display(), self.log_tail()), out))
+    }
+
+    /// `colima stop [--force] <profile>` within `timeout`, its output in the profile's log. `--force` also clears what a
+    /// killed host agent left (its pid files).
+    fn colima_stop(&self, force: bool, timeout: Duration) -> Result<(), String> {
+        let mut args = vec!["stop"];
+        if force {
+            args.push("--force");
+        }
+        args.push(self.profile.name());
+        let (o, e) = (self.log_file(), self.log_file());
+        let r = exec(&self.colima_cmd(&args), &self.colima_env(), timeout, o, e, &AtomicBool::new(false), Duration::from_secs(2))?;
+        if r.ok() {
+            Ok(())
+        } else {
+            Err(format!("colima {} failed ({}{})", args.join(" "), r.code, if r.timed_out { ", timeout" } else { "" }))
+        }
+    }
+
+    /// Stop the profile's VM if it has one: gracefully within most of `budget`, else forced, so no stale instance is
+    /// left for the next agent (a VM still up when the agent's service ends may be killed with it).
+    fn stop_vm(&self, budget: Duration) {
+        let instance = crate::colima::instance_dir(&self.dirs.config, self.profile.name());
+        if !self.installed() || !crate::colima::instance_up(&instance) {
+            return;
+        }
+        // each stop may take its timeout and exec's 2 s grace after it
+        let force_s = Duration::from_secs(5).min(budget / 2);
+        let t = Instant::now();
+        tracing::info!(profile = self.profile.name(), "stopping the Colima VM");
+        match self.colima_stop(false, budget.saturating_sub(force_s + Duration::from_secs(4))) {
+            Ok(()) => tracing::info!(profile = self.profile.name(), secs = t.elapsed().as_secs_f64(), "the Colima VM stopped"),
+            Err(e) => {
+                tracing::warn!(profile = self.profile.name(), error = %e, "the Colima VM did not stop in time: forcing it");
+                if let Err(e) = self.colima_stop(true, force_s) {
+                    tracing::warn!(profile = self.profile.name(), error = %e, "colima stop --force failed");
+                }
+            }
+        }
     }
 
     /// Bring the CPU profile up (docs/design/macos-containers.md, "Bring-up"): check the prerequisites (missing: the
@@ -764,6 +908,13 @@ impl ColimaRuntime {
             (r.missing, r.colima_home) = (vec![], now.colima_home.clone());
         });
         let started = self.start_profile();
+        match &started {
+            Ok(()) => self.shared.reset(),
+            Err(_) => {
+                let wait = self.shared.failed();
+                tracing::warn!(profile = self.profile.name(), retry_in_s = wait.as_secs(), "colima start failed: trying again later by itself");
+            }
+        }
         self.shared.update(|r| match &started {
             Ok(()) => (r.state, r.detail, r.platforms) = (State::Ready, None, crate::colima::platforms(host.arm)),
             Err(e) => (r.state, r.detail, r.platforms) = (State::Failed, Some(e.clone()), vec![]),
@@ -882,15 +1033,27 @@ impl ContainerRuntime for ColimaRuntime {
     }
 
     /// The CPU profile comes up when a release first wants containers (the agent calls this when it makes the runtime)
-    /// and again after a release or restart while it is not ready: in the background, so the agent's loop goes on. The
-    /// GPU profile only checks krunkit again and forgets a failed start (its VM starts with the first GPU job).
+    /// and again after a release, a doctor run or a re-probe while it is not ready: in the background, so the agent's
+    /// loop goes on. While `missing`, the prerequisites are looked at again here first (file checks): still missing,
+    /// the report's pieces are brought up to date and nothing starts; all there, it comes up. A `failed` profile starts
+    /// again once its backoff ran out (`retry` clears it). The GPU profile only checks krunkit again and forgets a
+    /// failed start (its VM starts with the first GPU job).
     fn recheck(&self) {
-        use crate::colima::{GpuState, State};
+        use crate::colima::{GpuState, Report, State};
         match self.profile {
             Profile::Cpu => {
-                let st = self.shared.snapshot().state;
-                if matches!(st, State::Ready | State::Starting) {
-                    return;
+                match self.shared.snapshot().state {
+                    State::Ready | State::Starting => return,
+                    State::Missing => {
+                        let now = Report::of(&self.host(), State::Starting);
+                        if now.state == State::Missing {
+                            self.shared.update(|r| r.missing = now.missing.clone());
+                            return;
+                        }
+                        tracing::info!(profile = self.profile.name(), "the container runtime's missing prerequisites are there now: bringing it up");
+                    }
+                    State::Failed if !self.shared.retry_due() => return,
+                    State::Failed | State::Absent => {}
                 }
                 self.shared.update(|r| (r.state, r.detail) = (State::Starting, None));
                 let me = self.clone();
@@ -911,6 +1074,31 @@ impl ContainerRuntime for ColimaRuntime {
                 });
             }
         }
+    }
+
+    /// The owner asked: a failed CPU profile starts at once, and a stale instance may be cleared again.
+    fn retry(&self) {
+        if self.profile == Profile::Cpu {
+            self.shared.reset();
+        }
+        self.recheck()
+    }
+
+    /// Every RUNTIME_REPROBE: the CPU profile looks for missing prerequisites again, or starts again once a failed
+    /// start's backoff ran out; the GPU profile looks for krunkit again while it is unavailable (a failed GPU start
+    /// stays failed until a release or a doctor run).
+    fn reprobe(&self) {
+        use crate::colima::{GpuState, State};
+        let r = self.shared.snapshot();
+        match self.profile {
+            Profile::Cpu if matches!(r.state, State::Missing | State::Failed) => self.recheck(),
+            Profile::Gpu if r.gpu_state == GpuState::Unavailable => self.recheck(),
+            _ => {}
+        }
+    }
+
+    fn shutdown(&self, budget: Duration) {
+        self.stop_vm(budget)
     }
 }
 
@@ -1610,6 +1798,249 @@ pub mod tests {
         c.recheck();                                    // in the background: missing again, nothing started
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(c.report().unwrap()["state"], "missing");
+    }
+
+    /// The trait's re-probe: a runtime that keeps its own report (Windows) checks again only while it is `missing`.
+    #[test]
+    fn the_default_reprobe_rechecks_only_a_missing_runtime() {
+        struct R(&'static str, std::sync::atomic::AtomicUsize);
+        impl ContainerRuntime for R {
+            fn status(&self) -> Result<RuntimeStatus, String> { Err("unused".into()) }
+            fn ensure_started(&self) -> Result<(), String> { Ok(()) }
+            fn pull(&self, _: &str, _: &str) -> Result<(), String> { Ok(()) }
+            fn run(&self, _: &RunSpec, _: &AtomicBool) -> Result<RunResult, String> { Err("unused".into()) }
+            fn images(&self) -> Vec<String> { vec![] }
+            fn reap(&self) -> Vec<String> { vec![] }
+            fn remove_attempt(&self, _: i64) -> Vec<String> { vec![] }
+            fn report(&self) -> Option<serde_json::Value> { Some(serde_json::json!({"state": self.0})) }
+            fn recheck(&self) { self.1.fetch_add(1, Ordering::SeqCst); }
+        }
+        for (state, n) in [("missing", 1), ("ready", 0), ("starting", 0), ("failed", 0)] {
+            let r = R(state, Default::default());
+            r.reprobe();
+            r.retry();
+            assert_eq!(r.1.load(Ordering::SeqCst), n + 1, "{state}");
+        }
+    }
+
+    /// A fake Colima (a shell script) in a short scratch directory, with docker and limactl beside it and the file
+    /// that means Rosetta is installed: `calls` records each call; `vz.pid` without `ha.sock` in the instance makes
+    /// `colima start` fail as a node did after an agent restart (`stale` keeps it failing so); `fail` fails every start.
+    /// Nothing real is started: the runtime looks only in this directory.
+    #[cfg(target_os = "macos")]
+    struct FakeColima {
+        _tmp: tempfile::TempDir,
+        dir: PathBuf,
+        rt: ColimaRuntime,
+    }
+
+    #[cfg(target_os = "macos")]
+    const FAKE_COLIMA: &str = r#"#!/bin/sh
+d=$(dirname "$0")
+echo "$*" >> "$d/calls"
+cmd=$1; shift
+force=
+if [ "$1" = "--force" ]; then force=1; shift; fi
+p=$1
+i="$COLIMA_HOME/_lima/colima-$p"
+case "$cmd" in
+status)
+  if [ -e "$COLIMA_HOME/$p/running" ]; then echo '{"memory": 8589934592}'; exit 0; fi
+  echo "colima $p is not running" >&2; exit 1;;
+start)
+  if [ -e "$d/stale" ] || { [ -e "$i/vz.pid" ] && [ ! -e "$i/ha.sock" ]; }; then
+    echo "time=x level=fatal msg=\"errors inspecting instance: [failed to connect to $i/ha.sock: stat $i/ha.sock: no such file or directory]\"" >&2
+    echo "error starting vm: error at 'starting': exit status 1" >&2
+    exit 1
+  fi
+  if [ -e "$d/fail" ]; then echo "error starting vm: exit status 1" >&2; exit 1; fi
+  mkdir -p "$i" "$COLIMA_HOME/$p" && echo 1 > "$i/vz.pid" && : > "$i/ha.sock" && : > "$COLIMA_HOME/$p/running"; exit 0;;
+stop)
+  if [ -z "$force" ] && [ -e "$d/hang" ]; then sleep 30; fi
+  rm -f "$COLIMA_HOME/$p/running" "$i/ha.sock" "$i/vz.pid"; exit 0;;
+esac
+exit 2
+"#;
+
+    #[cfg(target_os = "macos")]
+    impl FakeColima {
+        /// Colima, docker and Rosetta present; `limactl` and Rosetta as asked.
+        fn new(lima: bool, rosetta: bool) -> FakeColima {
+            // Lima's sockets must fit in 104 bytes: a short directory, removed when the test ends
+            let tmp = tempfile::Builder::new().prefix("oarbank-fc-").tempdir_in("/private/tmp").unwrap();
+            let dir = tmp.path().to_path_buf();
+            let tools = dir.join("bin");
+            std::fs::create_dir_all(&tools).unwrap();
+            let f = FakeColima { rt: Self::runtime(&dir, &tools), _tmp: tmp, dir };
+            f.install("colima", FAKE_COLIMA);
+            f.install("docker", "#!/bin/sh\nexit 0\n");
+            if lima {
+                f.install("limactl", "#!/bin/sh\nexit 0\n");
+            }
+            if rosetta {
+                f.rosetta();
+            }
+            f.rt.set_report(crate::colima::Report::of(&f.rt.host(), crate::colima::State::Absent));
+            f
+        }
+
+        fn runtime(dir: &Path, tools: &Path) -> ColimaRuntime {
+            let l = crate::paths::Layout::new(dir.join("a"));
+            let (mut c, _) = ColimaRuntime::pair(&l, true);
+            c.dirs = crate::colima::dirs(&l.home, None);
+            (c.tools, c.rosetta) = (vec![tools.to_path_buf()], dir.join("libRosettaRuntime"));
+            c
+        }
+
+        fn install(&self, name: &str, script: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let p = self.dir.join("bin").join(name);
+            std::fs::write(&p, script).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn rosetta(&self) {
+            std::fs::write(&self.rt.rosetta, "").unwrap();
+        }
+
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.join("bin/calls")).unwrap_or_default().lines().map(str::to_string)
+                .filter(|l| !l.starts_with("status")).collect()
+        }
+
+        fn instance(&self) -> PathBuf {
+            crate::colima::instance_dir(&self.rt.dirs.config, crate::colima::CPU_PROFILE)
+        }
+
+        fn state(&self) -> String {
+            self.rt.report().unwrap()["state"].as_str().unwrap().to_string()
+        }
+
+        /// The state once the background bring-up settled.
+        fn settled(&self) -> String {
+            let until = Instant::now() + Duration::from_secs(20);
+            while self.state() == "starting" && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            self.state()
+        }
+    }
+
+    /// A prerequisite reported missing (Rosetta, as on a node; Lima too) and installed later is noticed without a
+    /// restart: by the agent's periodic re-probe and by the owner's doctor run (`retry`), and the runtime then comes up.
+    /// While it is still missing, a re-probe looks without starting anything and keeps the report as found now.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_prerequisite_installed_later_is_picked_up_by_the_reprobe_and_the_doctor_run() {
+        let arm = cfg!(target_arch = "aarch64");
+        let f = FakeColima::new(false, false);
+        f.rt.recheck();                                         // a release wants containers
+        assert_eq!(f.settled(), "missing");
+        let whats = |f: &FakeColima| f.rt.report().unwrap()["missing"].as_array().unwrap().iter()
+            .map(|m| m["what"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(whats(&f), if arm { vec!["lima", "rosetta"] } else { vec!["lima"] });
+        assert_eq!(crate::colima::facts(&f.rt.shared.agent_home, || unreachable!())["state"], "missing");
+        // Lima installed, Rosetta not yet: a re-probe sees it at once (no bring-up) and still reports what is missing
+        f.install("limactl", "#!/bin/sh\nexit 0\n");
+        f.rt.reprobe();
+        if arm {
+            assert_eq!((f.state(), whats(&f)), ("missing".to_string(), vec!["rosetta".to_string()]));
+            assert!(f.calls().is_empty(), "nothing started while missing: {:?}", f.calls());
+            f.rosetta();
+            f.rt.reprobe();
+        }
+        assert_eq!(f.settled(), "ready");
+        assert!(f.calls().iter().any(|c| c.starts_with("start oarbank --vm-type vz")), "{:?}", f.calls());
+        assert_eq!(crate::colima::facts(&f.rt.shared.agent_home, || unreachable!())["state"], "ready");
+        f.rt.reprobe();                                         // ready: nothing to do
+        assert_eq!(f.calls().len(), 1);
+
+        // the owner's doctor run after installing it
+        let g = FakeColima::new(true, !arm);
+        g.rt.recheck();
+        if arm {
+            assert_eq!(g.settled(), "missing");
+            g.rosetta();
+        }
+        g.rt.retry();
+        assert_eq!(g.settled(), "ready");
+    }
+
+    /// An agent restart that took the VM's host agent with it leaves an instance Colima cannot inspect (a `vz.pid`, no
+    /// `ha.sock`): every `colima start` fails. The runtime clears it once per start (`colima stop --force`, then start
+    /// again) and is ready, logging both; a stale instance that keeps coming back is cleared at most MAX_RECOVERIES times
+    /// in a row, then the profile stays `failed`, and a failed start is retried by itself only after a backoff (2.10.3
+    /// retried every ~10 s, forever), the owner's doctor run at once.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_stale_instance_is_force_stopped_once_and_started_again_with_bounded_retries() {
+        use crate::colima::MAX_RECOVERIES;
+        let f = FakeColima::new(true, true);
+        std::fs::create_dir_all(f.instance()).unwrap();
+        std::fs::write(f.instance().join("vz.pid"), "4242").unwrap();     // what the killed host agent left
+        f.rt.recheck();
+        assert_eq!(f.settled(), "ready");
+        let calls = f.calls();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(calls[0].starts_with("start oarbank ") && calls[2].starts_with("start oarbank "), "{calls:?}");
+        assert_eq!(calls[1], "stop --force oarbank");
+
+        // stale every time: one force stop per start, MAX_RECOVERIES in a row, then failed without another
+        let forced = |g: &FakeColima| g.calls().iter().filter(|c| *c == "stop --force oarbank").count();
+        let g2 = FakeColima::new(true, true);
+        std::fs::write(g2.dir.join("bin/stale"), "").unwrap();
+        g2.rt.recheck();
+        assert_eq!(g2.settled(), "failed");
+        let r = g2.rt.report().unwrap();
+        assert!(r["detail"].as_str().unwrap().contains("colima start oarbank failed (1)"), "{r}");
+        for _ in 0..MAX_RECOVERIES + 2 {
+            g2.rt.shared.retry().not_before = None;            // the backoff ran out
+            g2.rt.reprobe();
+            assert_eq!(g2.settled(), "failed");
+        }
+        assert_eq!(forced(&g2), MAX_RECOVERIES as usize, "bounded: {:?}", g2.calls());
+        assert!(g2.rt.report().unwrap()["detail"].as_str().unwrap().contains("force stops in a row did not clear it"));
+        // the backoff: a failed profile is not started again by itself before it ran out
+        let n = g2.calls().len();
+        g2.rt.recheck();
+        g2.rt.reprobe();
+        assert_eq!((g2.state(), g2.calls().len()), ("failed".to_string(), n), "backing off");
+        // the owner's doctor run tries at once, and may clear a stale instance again; fixed, it is ready
+        std::fs::remove_file(g2.dir.join("bin/stale")).unwrap();
+        g2.rt.retry();
+        assert_eq!(g2.settled(), "ready");
+
+        // a plain start failure is not a stale instance: no force stop
+        let h = FakeColima::new(true, true);
+        std::fs::write(h.dir.join("bin/fail"), "").unwrap();
+        h.rt.recheck();
+        assert_eq!(h.settled(), "failed");
+        assert_eq!(h.calls().len(), 1, "{:?}", h.calls());
+    }
+
+    /// A stopping agent stops its VM (gracefully; forced when that takes longer than its budget) so no stale instance
+    /// is left; a profile without a VM is left alone.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_stopping_agent_stops_its_vm_within_its_budget() {
+        let f = FakeColima::new(true, true);
+        f.rt.shutdown(Duration::from_secs(10));
+        assert!(f.calls().is_empty(), "no VM, nothing to stop");
+        f.rt.recheck();
+        assert_eq!(f.settled(), "ready");
+        f.rt.shutdown(Duration::from_secs(10));
+        assert_eq!(f.calls()[1..], ["stop oarbank"]);
+        assert!(!crate::colima::instance_up(&f.instance()));
+        // a stop that hangs: forced within the budget
+        let g = FakeColima::new(true, true);
+        g.rt.recheck();
+        assert_eq!(g.settled(), "ready");
+        std::fs::write(g.dir.join("bin/hang"), "").unwrap();
+        let t = Instant::now();
+        g.rt.shutdown(Duration::from_secs(10));
+        assert!(t.elapsed() < Duration::from_secs(11), "{:?}", t.elapsed());
+        assert_eq!(g.calls()[1..], ["stop oarbank", "stop --force oarbank"]);
+        assert!(!crate::colima::instance_up(&g.instance()));
     }
 
     /// A Mac with krunkit: starts (never stops) the agent's own `oarbank-gpu` profile, builds the Vulkan compute probe

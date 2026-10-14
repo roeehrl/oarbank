@@ -153,4 +153,7 @@ The coordinator suite starts real module processes, and those always run confine
   certificate, and a node can only complete its own attempts.
 - Certificate binding to a tailnet node fails open: if `tailscale whois` itself fails, a certificate presented from a
   new tailnet address is accepted and the address re-pinned. This favours availability; the event log records it.
+  When whois answers with another device, the certificate is refused, and the node's re-enrolment, which proves its
+  key, waits for the owner: the coordinator cannot tell a machine re-added to the tailnet from a copied key
+  (`tests/test_reenroll.py`).
 - The alert-precision review needs a week of live alerts, and the console a manual screen-reader pass.

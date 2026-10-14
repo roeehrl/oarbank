@@ -20,6 +20,7 @@ from . import config as C
 from . import clock
 from .db import DB, jl
 from . import agentbuilds, checkpoints, coordmove, cotenancy, datasets, fleetupdates, folders, identity, modcalls, modstore, owner, placement, platforms, predicates, releases, sites, statements, tools, workloads
+from .failures import AGENT_JOB_FAULTS, declared_failure, declared_retryable, failure_summary
 from .modcalls import ModuleError, ModuleUnavailable
 from ..common import sha256_hex
 
@@ -143,6 +144,13 @@ def enroll(db: DB, hostname: str, facts: dict, peer_ip: str, csr: str, join: str
     if not jc["approve"]:
         db.event("join_code_pending", actor=hostname, reason=peer_ip, enrollment_id=eid, join_code_id=jc["code_id"])
         return {"enrollment_id": eid, "status": "pending", "join": "pending_approval"}
+    from . import nodeidentity
+    ident = nodeidentity.of_enrollment(db, db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,)))
+    if ident["ts_changed"] and jc["max_uses"] != 1:
+        # a multi-use code admits machines, it does not move a node to another Tailscale device: the owner decides
+        db.event("join_code_pending", actor=hostname, reason=f"re-enrolment of {ident['node_id']} from another Tailscale "
+                 f"device ({peer_ip})", enrollment_id=eid, join_code_id=jc["code_id"])
+        return {"enrollment_id": eid, "status": "pending", "join": "pending_approval"}
     label = jc["label"] if jc["max_uses"] == 1 else None
     approve_enrollment(db, eid, f"join:{jc['created_by']}", label=label)
     return {"enrollment_id": eid, "status": "approved", "join": "approved"}
@@ -174,9 +182,12 @@ def enroll_status(db: DB, eid: str) -> dict:
 
 
 def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -> dict:
-    """Approve an enrollment: the node (a known Tailscale node keeps its node_id) gets its client certificate. Its name
+    """Approve an enrollment: the node gets its client certificate. A request that proves a node's key (its CSR is
+    signed by the key of the node's current or previous certificate), else one from the node's Tailscale device, keeps
+    that node's id, settings and history, and re-pins it to the request's Tailscale device (nodeidentity.py). Its name
     is `label` (a join code's), else a label it already had, else the hostname it reported; a labelled node keeps its
     name when its agent reports another one (hello)."""
+    from . import nodeidentity
     label = (label or "").strip() or None
     with db.tx():
         e = db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,))
@@ -184,14 +195,16 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
             raise ApiError(409, "not_pending", eid)
         label = label or e["requested_name"]
         facts = jl(e["facts_json"], {})
-        # Re-enrolment of a known Tailscale node keeps its node_id (and history).
-        node = db.one("SELECT node_id FROM nodes WHERE ts_node_id=? AND ts_node_id IS NOT NULL",
-                      (e["ts_node_id"],)) if e["ts_node_id"] else None
-        node_id = node["node_id"] if node else "n_" + secrets.token_hex(4)
-        if node:
+        # Re-enrolment of a known node (by its key, else its Tailscale device) keeps its node_id, settings and history.
+        ident = nodeidentity.of_enrollment(db, e)
+        node_id = ident["node_id"] or "n_" + secrets.token_hex(4)
+        if ident["node_id"]:
             db.x("UPDATE nodes SET lifecycle='enrolled', facts_json=?, hostname=COALESCE(?, label, ?), label=COALESCE(?, label),"
-                 " ts_ip=?, quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
-                 (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], node_id))
+                 " ts_ip=?, ts_node_id=COALESCE(?, ts_node_id), quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
+                 (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], e["ts_node_id"], node_id))
+            if ident["ts_changed"]:
+                db.event("node_tailscale_repinned", actor=actor, node_id=node_id, enrollment_id=eid,
+                         reason=f"{ident['old_ts_node_id']} -> {e['ts_node_id']} (re-enrolment proved the node key)")
         else:
             # nothing of its settings is copied: it inherits the defaults, the fleet's and its groups' values (settings/)
             db.x("INSERT INTO nodes(node_id,ts_node_id,hostname,label,ts_ip,facts_json,lifecycle,desired_state,created_at)"
@@ -205,11 +218,15 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
             cert = tlsca.issue_client(Path(db.path).parent, e["csr_pem"], node_id)
         except tlsca.CAError as err:
             raise ApiError(400, "bad_csr", str(err))
-        db.x("UPDATE nodes SET client_cert_fp=?, client_cert_prev_fp=NULL, client_cert_not_after=? WHERE node_id=?",
-             (cert["fingerprint"], cert["not_after"], node_id))
+        db.x("UPDATE nodes SET client_cert_fp=?, client_cert_prev_fp=NULL, client_cert_not_after=?, client_key_sha256=?,"
+             " client_key_prev_sha256=NULL WHERE node_id=?",
+             (cert["fingerprint"], cert["not_after"], cert["key_sha256"], node_id))
         db.x("UPDATE enrollments SET status='approved', node_id=?, decided_at=?, decided_by=?, cert_json=? WHERE enrollment_id=?",
              (node_id, now(), actor, json.dumps(cert), eid))
-        db.event("enroll_approved", actor=actor, node_id=node_id, enrollment_id=eid)
+        db.event("enroll_approved", actor=actor, node_id=node_id, enrollment_id=eid,
+                 reason=f"re-enrolment ({ident['via']})" if ident["node_id"] else
+                 ("new node; looks like " + ", ".join(n["node_id"] for n in ident["lookalikes"]))
+                 if ident["lookalikes"] else None)
     releases.ensure(db, platforms.facts_platform(facts)["platform"])
     return {"node_id": node_id}
 
@@ -238,7 +255,11 @@ def auth_cert(db: DB, der: bytes | None, peer_ip: str) -> dict:
     if not node:
         raise ApiError(401, "unauthorized", "unknown or replaced client certificate")
     if fp == node["client_cert_fp"] and node["client_cert_prev_fp"]:     # the renewed certificate is in use: retire the old
-        db.x("UPDATE nodes SET client_cert_prev_fp=NULL WHERE node_id=?", (node["node_id"],))
+        db.x("UPDATE nodes SET client_cert_prev_fp=NULL, client_key_prev_sha256=NULL WHERE node_id=?", (node["node_id"],))
+    col = "client_key_sha256" if fp == node["client_cert_fp"] else "client_key_prev_sha256"
+    if not node.get(col):
+        # a certificate issued before the coordinator recorded keys: learn its key, so a re-enrolment can prove it
+        db.x(f"UPDATE nodes SET {col}=? WHERE node_id=?", (tlsca.key_of_cert(der), node["node_id"]))
     return _node_checks(db, node, peer_ip)
 
 
@@ -250,8 +271,9 @@ def renew_cert(db: DB, node: dict, csr: str) -> dict:
         cert = tlsca.issue_client(Path(db.path).parent, csr, node["node_id"])
     except tlsca.CAError as e:
         raise ApiError(400, "bad_csr", str(e))
-    db.x("UPDATE nodes SET client_cert_prev_fp=client_cert_fp, client_cert_fp=?, client_cert_not_after=? WHERE node_id=?",
-         (cert["fingerprint"], cert["not_after"], node["node_id"]))
+    db.x("UPDATE nodes SET client_cert_prev_fp=client_cert_fp, client_cert_fp=?, client_cert_not_after=?,"
+         " client_key_prev_sha256=client_key_sha256, client_key_sha256=? WHERE node_id=?",
+         (cert["fingerprint"], cert["not_after"], cert["key_sha256"], node["node_id"]))
     db.event("node_cert_renewed", node_id=node["node_id"], actor=node["hostname"], reason=cert["fingerprint"][:16])
     return {"cert_pem": cert["cert_pem"], "ca_pem": cert["ca_pem"], "cert_not_after": cert["not_after"]}
 
@@ -265,7 +287,15 @@ def _node_checks(db: DB, node: dict, peer_ip: str) -> dict:
         if peer_ip != node["ts_ip"]:
             who = tailscale_whois(peer_ip)
             if who and who["ts_node_id"] != node["ts_node_id"]:
-                raise ApiError(401, "unauthorized", "certificate/node mismatch")
+                # `unauthorized` makes every agent version enroll again with a CSR for the same key, which proves the
+                # node: the owner's approval then keeps its node_id and re-pins it to this device (nodeidentity.py)
+                if not db.one("SELECT 1 FROM events WHERE kind='node_cert_other_device' AND node_id=? AND ts>?",
+                              (node["node_id"], now() - 3600)):          # once an hour: a refused agent may retry
+                    db.event("node_cert_other_device", node_id=node["node_id"], actor=node["hostname"],
+                             reason=f"{node['ts_node_id']} -> {who['ts_node_id']} ({peer_ip})")
+                raise ApiError(401, "unauthorized", "certificate/node mismatch: the certificate was presented from "
+                               "another Tailscale device; a machine re-added to the tailnet enrolls again and keeps "
+                               "its node once the owner approves")
             db.x("UPDATE nodes SET ts_ip=? WHERE node_id=?", (peer_ip, node["node_id"]))
             db.event("node_ip_repinned", node_id=node["node_id"],
                      reason=f"{node['ts_ip']} -> {peer_ip} (whois {'confirmed' if who else 'unavailable'})")
@@ -1144,21 +1174,37 @@ def claim(db: DB, node: dict, body: dict) -> dict:
 
 
 # ---------------------------------------------------------------- attempt outcomes
-def _end_attempt(db: DB, attempt_id: int, state: str, reason: str, count_failure: bool):
+def _end_attempt(db: DB, attempt_id: int, state: str, reason: str, count_failure: bool, failure: dict | None = None):
+    """End an attempt and move its job on. `failure` (fail()): the runner's declared failure, kept on the job; with
+    `final` set the job can never succeed and ends `failed` at once, whatever retries its stage has left."""
     a = db.one("SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,))
     if not a:
         return None
     db.x("UPDATE attempts SET state=?, end_reason=?, ended_at=? WHERE attempt_id=?", (state, reason, now(), attempt_id))
     j = db.one("SELECT * FROM jobs WHERE job_id=?", (a["job_id"],))
+    current = bool(j and a["generation"] == j["generation"] and j["state"] in ("pending", "leased"))
+    if count_failure and failure and current:
+        db.x("UPDATE jobs SET failure_json=? WHERE job_id=?", (json.dumps(failure), j["job_id"]))
+    final = bool(count_failure and failure and failure.get("final") and current)
     if count_failure and j and j["kind"] == "golden":
         # a golden job only ever runs on one host, so the >=2-hosts job quarantine never applies; count
         # failures per (node, module) across golden sets instead (TLA+ review F6)
         st = node_modules(db.one("SELECT modules_json FROM nodes WHERE node_id=?", (a["node_id"],))).get(j["module"], {})
         gf = int(st.get("golden_failures") or 0) + 1
+        # a golden the module's own runner says can never succeed fails certification here at once: retrying it cannot
+        # pass, and ending it quietly would let a module skip its goldens (a host fault keeps the per-node count)
+        if final and failure.get("fault") != "host":
+            db.x("UPDATE jobs SET state='failed', generation=generation+1 WHERE job_id=?", (j["job_id"],))
+            _golden_failed(db, a["node_id"], j["module"], gf, f"{failure.get('code') or reason}, which it declares "
+                           "can never succeed")
+            return a
         if gf >= C.MAX_GOLDEN_FAILURES:
             _golden_failed(db, a["node_id"], j["module"], gf, reason)
             return a
         _set_module_state(db, a["node_id"], j["module"], golden_failures=gf)
+    if final and j["kind"] != "golden":
+        _fail_job(db, j, failure)
+        return a
     if j and j["state"] == "leased":
         others = db.one("SELECT COUNT(*) n FROM attempts WHERE job_id=? AND state='live'", (j["job_id"],))["n"]
         if not others:
@@ -1179,6 +1225,19 @@ def _end_attempt(db: DB, attempt_id: int, state: str, reason: str, count_failure
                 extra = ", expirations=expirations+1" if state == "expired" else ""
                 db.x(f"UPDATE jobs SET state='pending'{extra} WHERE job_id=?", (j["job_id"],))
     return a
+
+
+def _fail_job(db: DB, j: dict, failure: dict):
+    """The runner declared that the job can never succeed (failure.json `fault: "job"`, or `retryable: false`): the job
+    ends `failed` now instead of spending its stage's retry on other nodes. Any other live attempt of it is revoked."""
+    db.x("UPDATE jobs SET state='failed', exec_failures=exec_failures+1, generation=generation+1 WHERE job_id=?",
+         (j["job_id"],))
+    for o in db.q("SELECT attempt_id, node_id FROM attempts WHERE job_id=? AND state='live'", (j["job_id"],)):
+        db.x("UPDATE attempts SET state='revoked', end_reason='job_failed', ended_at=? WHERE attempt_id=?",
+             (now(), o["attempt_id"]))
+        _push(db, o["node_id"], "revoke", o["attempt_id"])
+    db.event("job_failed", job_id=j["job_id"], campaign_id=j["campaign_id"], module=j["module"],
+             reason=failure_summary(failure)[:300])
 
 
 def counts_against_job(reason: str) -> bool:
@@ -1214,16 +1273,26 @@ def release(db: DB, node: dict, attempt_id: int, reason: str) -> dict:
 
 
 def fail(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
-    """A failed attempt. `fault` comes from the runner's failure.json (runner protocol, "Exit codes"): `transient` is
-    no failure at all (the attempt is released and the job retried), `host` implicates this node (re-doctor), `job`
-    is the job's own fault (it never trips this node's breaker)."""
+    """A failed attempt. `fault` and `retryable` come from the runner's failure.json (runner protocol, "Exit codes"):
+    - `transient` (or `retryable: true` with no fault) is no failure at all: the attempt is released, the job retried;
+    - `host` implicates this node (re-doctor) and sends the job elsewhere without spending its retries;
+    - `job` means the job can never succeed: it never trips this node's breaker and the job ends `failed` at once,
+      not retried and not quarantined (unless `retryable: true`, which keeps the stage's retry);
+    - `retryable: false` ends the job `failed` at once whoever is at fault.
+    The failure's reason and detail are kept on the job (failure_json) for its views and the module's campaign.tick."""
     _record_images(db, node, attempt_id, body)
-    fault = body.get("fault")
-    if fault == "transient":
+    fault = body.get("fault") if body.get("fault") in ("job", "host", "transient") else None
+    retryable = declared_retryable(body)
+    if fault == "transient" or (retryable is True and fault is None):
         return release(db, node, attempt_id, "transient")
     reason = body.get("reason") or "exit_nonzero"
     if fault == "host" and reason not in HOST_FAILURES:
         reason = "doctor"
+    final = retryable is False or (retryable is None and fault == "job" and reason not in AGENT_JOB_FAULTS)
+    code, detail = declared_failure(body)
+    failure = {"reason": reason, "code": code, "detail": detail or (body.get("stderr_tail") or "")[-1000:],
+               "fault": fault, "retryable": retryable, "final": final, "attempt_id": attempt_id,
+               "node_id": node["node_id"], "at": now()}
     tripped = False
     with db.tx():
         a = db.one("SELECT * FROM attempts WHERE attempt_id=? AND node_id=?", (attempt_id, node["node_id"]))
@@ -1232,9 +1301,9 @@ def fail(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
         j = db.one("SELECT module FROM jobs WHERE job_id=?", (a["job_id"],))
         # a job that already failed on another host is the job's fault (e.g. a parameter combination
         # that crashes the tool), not this host's: it must not trip the breaker on healthy nodes
-        job_fault = fault == "job" or (reason not in HOST_FAILURES and bool(db.one(
+        job_fault = fault == "job" or (final and fault != "host") or (reason not in HOST_FAILURES and bool(db.one(
             "SELECT 1 FROM attempts WHERE job_id=? AND node_id!=? AND state='failed'", (a["job_id"], node["node_id"]))))
-        _end_attempt(db, attempt_id, "failed", reason, count_failure=True)
+        _end_attempt(db, attempt_id, "failed", reason, count_failure=True, failure=failure)
         n = db.one("SELECT breaker_failures b FROM nodes WHERE node_id=?", (node["node_id"],))["b"] + (0 if job_fault else 1)
         db.x("UPDATE nodes SET breaker_failures=? WHERE node_id=?", (n, node["node_id"]))
         tripped = n >= C.BREAKER_K or reason in HOST_FAILURES
@@ -1249,7 +1318,8 @@ def fail(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             _revoke_quiet(db, node["node_id"], j["module"], f"breaker: {reason}")
             db.x("UPDATE nodes SET want_doctor=1, breaker_failures=0 WHERE node_id=?", (node["node_id"],))
     db.event("attempt_failed", node_id=node["node_id"], attempt_id=attempt_id, job_id=a["job_id"],
-             reason=reason + (" (job fault: failed on another host too)" if job_fault else ""),
+             reason=reason + (f" ({code})" if code and code != reason else "")
+             + (" (job fault: not retried)" if final else " (job fault: failed on another host too)" if job_fault else ""),
              exit_code=body.get("exit_code"), stderr_tail=(body.get("stderr_tail") or "")[-2000:])
     if tripped:
         db.event("breaker_tripped", node_id=node["node_id"], reason=reason)
@@ -1647,9 +1717,9 @@ def complete(db: DB, node: dict, attempt_id: int, body: dict) -> dict:
             # failed / released / revoked attempts are closed; only a live or merely expired (e.g. slept)
             # attempt may deliver a result (found by the Hypothesis state machine)
             reason, accepted = "attempt_closed", 0
-        elif j["state"] in ("cancelled", "quarantined"):
+        elif j["state"] in ("cancelled", "quarantined", "failed"):
             # a settled job is not revived by a late result (TLA+ finding F2, stranded-dispute case)
-            reason, accepted = {"cancelled": "job_cancelled", "quarantined": "job_quarantined"}[j["state"]], 0
+            reason, accepted = {"cancelled": "job_cancelled", "quarantined": "job_quarantined", "failed": "job_failed"}[j["state"]], 0
         elif node["node_id"] in _dispute_parties(j):
             # a party to the job's dispute never casts the tie-break vote (TLA+ finding F2)
             reason, accepted = "dispute_party", 0
@@ -1862,10 +1932,13 @@ def reap(db: DB):
             if not _eligible_nodes(db, rj, set(rd.get("nodes", []))):
                 db.x("UPDATE jobs SET state='cancelled', generation=generation+1 WHERE job_id=?", (rj["job_id"],))
                 db.event("replica_dropped", job_id=rj["job_id"], reason="no other eligible node")
-        # a score job whose call can never finish (cancelled / quarantined) settles the same way (liveness)
-        for dj in db.q("SELECT j.job_id, j.campaign_id, d.state dstate FROM jobs j JOIN jobs d ON d.job_id=j.depends_on "
-                       "WHERE j.state='pending' AND d.state IN ('cancelled','quarantined')"):
-            db.x("UPDATE jobs SET state=?, generation=generation+1 WHERE job_id=? AND state='pending'", (dj["dstate"], dj["job_id"]))
+        # a score job whose call can never finish (cancelled / quarantined / failed) settles the same way (liveness)
+        for dj in db.q("SELECT j.job_id, j.campaign_id, d.state dstate, d.failure_json dfailure FROM jobs j "
+                       "JOIN jobs d ON d.job_id=j.depends_on "
+                       "WHERE j.state='pending' AND d.state IN ('cancelled','quarantined','failed')"):
+            # the call's failure is the evaluation's: its views and the module's campaign.tick show why
+            db.x("UPDATE jobs SET state=?, generation=generation+1, failure_json=COALESCE(?, failure_json) "
+                 "WHERE job_id=? AND state='pending'", (dj["dstate"], dj["dfailure"], dj["job_id"]))
             db.event("job_" + dj["dstate"], job_id=dj["job_id"], campaign_id=dj["campaign_id"], reason=f"its call job was {dj['dstate']}")
         checkpoints.reap(db)
         stranded = _stranded_disputes(db)
@@ -1981,7 +2054,7 @@ def retry_job(db: DB, job_id: int, actor: str):
     never more than one canonical result per job."""
     with db.tx():
         own = [r["result_id"] for r in db.q("SELECT result_id FROM results WHERE job_id=? AND canonical=1", (job_id,))]
-        n = db.x("UPDATE jobs SET state='pending', generation=generation+1, exec_failures=0, not_before=0, "
+        n = db.x("UPDATE jobs SET state='pending', generation=generation+1, exec_failures=0, not_before=0, failure_json=NULL, "
                  "canonical_result_id=NULL, done_at=NULL WHERE job_id=? AND state IN ('failed','quarantined','cancelled','done')",
                  (job_id,))
         db.x("UPDATE results SET canonical=0 WHERE job_id=?", (job_id,))
