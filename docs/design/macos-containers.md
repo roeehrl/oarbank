@@ -96,11 +96,23 @@ access from a daemon. If either fails, the fallback is below.
    GPU APIs follow.
 4. The `containers` pool is offered **only while the runtime is ready**, as on Windows; a node whose runtime is missing
    something is not offered container work.
-5. A release or restart while `missing` or `failed` tries again (`recheck`). A container job whose VM stopped starts it
-   again (`ensure_started`).
-6. The VM is expected to keep running when the agent restarts or updates (Colima runs in a process group of its own,
-   and launchd kills only the job's group when the job exits; checklist item 5); the next agent finds it running and
-   is ready at once.
+5. A release, a restart, the owner's doctor run (`run_doctor`) or Re-detect (`detect_tools`) while `missing` or
+   `failed` tries again (`recheck`, `retry`). While `missing`, the agent also re-probes every 60 s
+   (`ContainerRuntime::reprobe`, `RUNTIME_REPROBE`): the prerequisites are file checks, so a piece the owner installed
+   (Rosetta, say) brings the runtime up within a minute, with no restart (2.10.3 looked only at a release or restart,
+   and ran an owner's doctor on its old report). A `failed` start is tried again by itself only after a backoff (10 s,
+   doubling, at most 10 minutes; 2.10.3 retried on every protection tick, forever); a release, doctor run or Re-detect
+   tries at once. A container job whose VM stopped starts it again (`ensure_started`).
+6. **A stale instance is cleared.** A VM whose host agent was killed (an agent restart that took it along) leaves pid
+   files and no `ha.sock` in `<colima home>/_lima/colima-<profile>`, and every `colima start` then fails with `errors
+   inspecting instance: [failed to connect to .../ha.sock ...]`. When a start fails so (that message, or a pid file
+   without `ha.sock`), the runtime runs `colima stop --force <profile>` and starts once more, logging both; at most 3
+   times in a row (`MAX_RECOVERIES`, reset once ready or when the owner asks), then the profile stays `failed`.
+7. **A stopping agent stops its VMs** (`ContainerRuntime::shutdown`): after its jobs ended, each profile with a VM gets
+   `colima stop`, forced when that takes longer than its share of `VM_STOP_BUDGET` (25 s, beside the runners' 25 s
+   within the 60 s service stop timeout). 2.10.3 left the VM running across restarts, expecting launchd to spare it;
+   on a node its host agent did not survive a `launchctl kickstart -k`, which left the stale instance above. The next
+   agent starts the VM again (`starting`, then `ready`).
 
 ### The GPU profile
 
@@ -183,8 +195,8 @@ On a Mac (system install, Colima and docker in `/opt/homebrew/bin`, Rosetta inst
    `Library/Caches`; nothing appeared in `/Library/Application Support/Oarbank` itself or in any person's home.
 4. An amd64 image runs (a job of a module with an amd64 image; or the probe with `--platform linux/amd64`), so Rosetta
    works in the daemon's VM.
-5. Restart the agent (`sudo launchctl kickstart -k system/dev.codonic.oarbank.agent`): the VM keeps running and the
-   report is `ready` again within seconds.
+5. Restart the agent (`sudo launchctl kickstart -k system/dev.codonic.oarbank.agent`): the agent's log shows `the
+   Colima VM stopped`, and the report is `starting`, then `ready` again (no `failed` with `errors inspecting instance`).
 6. A Mac with krunkit: `containers.gpu` is `undetected` while `starting`, `virtio-gpu:venus` once `ready`;
    `containers doctor --probe --gpu` starts `oarbank-gpu` and passes `gpu_run` (this is the reverse-sshfs mount with a
    space in its path, and krunkit's Metal from a daemon).
@@ -203,4 +215,7 @@ On a Mac (system install, Colima and docker in `/opt/homebrew/bin`, Rosetta inst
 - Tests: `colima::tests` (lookup and runnable vs present, directories and socket lengths, each missing piece's fix,
   the report's GPU rule, facts from the state file), `container_runtime::tests` (environment and start arguments,
   GPU device only from a ready runtime with krunkit, pool only when ready, a missing piece stops the bring-up and is
-  published to the facts). Live (`--ignored`, `OARBANK_LIVE_COLIMA=1`): the existing tiny-container and Vulkan tests.
+  published to the facts; against a fake `colima` script: a prerequisite installed later is picked up by the re-probe
+  and the doctor run, a stale instance is force-stopped once and started again with bounded recoveries and a backoff,
+  a stopping agent stops its VM within its budget). `agent::tests`: the doctor run and Re-detect make the runtime look
+  again, and the re-probe's 60 s timer. Live (`--ignored`, `OARBANK_LIVE_COLIMA=1`): the existing tiny-container and Vulkan tests.
