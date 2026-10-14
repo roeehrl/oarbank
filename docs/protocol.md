@@ -197,6 +197,11 @@ their process groups, deletes their workspaces, and does not report them.
   `pressure` per rule at an interval's end) and its compliance actions as `kind: "gpu_compliance"` (`GPU_DUTY_EXCEEDED`,
   `GPU_DUTY_UNVERIFIED`, with `attempt` (a job's) or `workload` (a workload's key), `unit`, `measured`, `duty`,
   `action: "paused|evicted"`); S28 reads both.
+- **`telemetry.protection.session_helpers`** (a system install's service): whether it serves its session helpers,
+  `{"at": "<socket path or pipe name>", "serving": false, "error": "cannot create …: Permission denied (os error 13)",
+  "failures": 4}`. While it does not, the agent tries again every 15 s and the console shows
+  `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes go unread (on macOS unlisted), so rules may miss
+  them. Absent in a personal install.
 - **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
   block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
   "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:
@@ -991,8 +996,8 @@ lowest wins:
 ```
 - **Defaults** come from the settings registry; `os_reserve_gb`'s is computed from the node's RAM (4 GB up to 32 GB,
   8 GB from 96 GB, else 6), so it follows the hardware the node reports. Nothing is copied at enrolment.
-- **`screen_sharing_present`** (default `true`): a macOS Screen Sharing session counts as someone using the machine
-  even without input.
+- **`screen_sharing_present`** (default `true`): a connected macOS Screen Sharing viewer counts as someone using the
+  machine even without input (`screensharingd` running with no viewer connected never does).
 - **`mem_in_use_bound`** (default `true`): the memory for jobs never exceeds what the machine has available now (see
   Capacity and host protection); `false` leaves the reserves alone.
 - **`disabled_services`** sets a node's role: `<module>/<service>` for each service a module does not run here, which

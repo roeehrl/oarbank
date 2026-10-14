@@ -19,7 +19,8 @@
 #     the package is the unit, D57: the launcher, helpers, app, runtime and agent move together), renders the service's
 #     job again with the new launcher's keys (`oarbank-launcher service refresh`: a 2.8 job has no ExitTimeOut, so
 #     launchd would kill the agent 20 s into stopping its jobs) and restarts it on the new launcher, and restarts a
-#     system install's session helpers on the new agent binary.
+#     system install's session helpers on the new agent binary. A system install's session helpers get their socket's
+#     directory (/Library/Application Support/Oarbank/run, the service account's) if it is missing.
 #   - Otherwise a double-click install (Installer.app: COMMAND_LINE_INSTALL unset; `installer` and MDM set it to 1)
 #     with someone at the console and no managed code or address opens Oarbank Node at its join window, as that
 #     person. Anything else says how to join from a terminal.
@@ -98,6 +99,14 @@ if [ -f "/Library/LaunchDaemons/$LABEL.plist" ]; then
             echo "Oarbank: the package's agent could not be made current; the service keeps the agent it had"
         fi
     fi
+    # the session helpers' socket directory, the service account's and everyone's to enter (svc_launchd.rs): only the
+    # first install made it, and a node without it served no helper, so rules missed the people's processes. Made
+    # before the service restarts; `service refresh` makes it too
+    acct=$(/usr/bin/plutil -extract UserName raw -o - "/Library/LaunchDaemons/$LABEL.plist" 2>/dev/null)
+    [ -n "$acct" ] || acct=_oarbank
+    /bin/mkdir -p "$SUPPORT/run"
+    /usr/sbin/chown "$acct:$acct" "$SUPPORT/run" 2>/dev/null || /usr/sbin/chown "$acct" "$SUPPORT/run" 2>/dev/null
+    /bin/chmod 755 "$SUPPORT/run"
     "$BIN/oarbank-launcher" service refresh --system >/dev/null 2>&1 \
         || /bin/launchctl kickstart -k "system/$LABEL" 2>/dev/null
     for u in $(/usr/bin/who | /usr/bin/awk '$2 == "console" {print $1}' | /usr/bin/sort -u); do

@@ -121,10 +121,17 @@ plan, `--refresh` writes the services again from the record of the install, `--u
 home. A developer runs `oarbankd` from the checkout's virtualenv directly, with `OARBANKD_HOME` pointing at a scratch
 home.
 
-**The console from another device.** By default it answers only on 127.0.0.1. To reach it remotely, put it behind
-something that terminates TLS for a name you control (`tailscale serve`, your own reverse proxy) and add that name
-to **Settings → Access → Console host names** (`oarbank settings set console_hosts oarbank.example.ts.net`). Passkeys
-need such a name; TOTP works everywhere.
+**The console from another device.** By default it answers only on 127.0.0.1. In **Settings → Access**, choose
+where it listens (**Console listen addresses**): add `tailscale` to reach it at this machine's Tailscale addresses
+(`oarbank settings set console_listen localhost,tailscale`), or an IP address of this machine; `all` (every interface)
+asks you to type the setting's name and is best avoided. The console rebinds within seconds; every address still asks
+for a sign-in. For passkeys from another device, set **Console over https (Tailscale)** to `tailscale`
+(`oarbank settings set console_https tailscale`): the console is then served at `https://<this machine's MagicDNS
+name>/` through `tailscale serve` (turn on MagicDNS and HTTPS certificates in the tailnet first; on Linux, the
+Settings page names two commands to run once as root unless the coordinator's account is Tailscale's operator).
+Another name in front of the console (your own reverse proxy) goes in **Console host names** (`console_hosts`).
+`oarbank console login` prints a link for each address. Passkeys need a host name (http://localhost or an https name);
+a password with TOTP works everywhere.
 
 ## 2. Nodes
 
@@ -272,7 +279,9 @@ where it comes from (this machine's default and why, the fleet's value, a group'
 a value for that node and **Reset to inherited** takes it back. Fleet-wide defaults are under **Settings → Node
 defaults**, which shows the nodes a change reaches before it saves. From a terminal: `oarbank settings get --node
 <node>`, `oarbank settings set <key> <value> [--node <node>]`, `oarbank settings reset <key> --node <node>`. On a Mac,
-a Screen Sharing session counts as someone using it unless you turn off "Screen sharing counts as someone using it". `oarbank-agent discover` lists coordinators announcing themselves
+a connected Screen Sharing viewer counts as someone using it unless you turn off "Screen sharing counts as someone
+using it". Being logged in does not count, nor does ssh: a headless machine logged in at the console counts as in use
+only while it has keyboard or mouse input, and the line says which signal it saw ("keyboard or mouse input 12 s ago"). `oarbank-agent discover` lists coordinators announcing themselves
 on the local network, a hint for the URL only.
 
 **Local Network privacy (macOS 15 and later).** The personal scope's LaunchAgent is not exempt: a macOS that applies

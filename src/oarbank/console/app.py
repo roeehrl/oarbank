@@ -20,6 +20,7 @@ import json
 import re
 import time
 import uuid
+from typing import Any, Callable
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -147,13 +148,55 @@ class NeedLogin(Exception):
     pass
 
 
+class SignInTries:
+    """Failed password sign-ins per account name as this console saw them, to tell the person how many tries are left
+    before oarbankd locks the account (coordinator/access.py: LOCK_AFTER failures in LOCK_WINDOW_S lock it for
+    LOCK_FOR_S). Counted for every name typed, existing or not, so the answer never says whether an account exists; it
+    is a lower bound on what is left (other browsers' failures count at oarbankd too). In memory, bounded."""
+    MAX_NAMES = 10_000
+
+    def __init__(self, lock_after: int, window_s: float, lock_for_s: float):
+        self.lock_after, self.window_s, self.lock_for_s = lock_after, window_s, lock_for_s
+        self.seen: dict[str, tuple[list[float], float]] = {}       # key -> (failure times, locked until)
+
+    @staticmethod
+    def _key(name: str) -> str:
+        return hashlib.sha256((name or "").strip().lower().encode()).hexdigest()[:24]
+
+    def _live(self, key: str, now: float) -> tuple[list[float], float]:
+        fails, until = self.seen.get(key, ([], 0.0))
+        return [t for t in fails if t > now - self.window_s], until
+
+    def failed(self, name: str, now: float | None = None) -> int:
+        """Record a failure; the tries left before the lock (0: locked now)."""
+        now = time.time() if now is None else now
+        key = self._key(name)
+        fails, until = self._live(key, now)
+        if until <= now:                                  # oarbankd counts no failure while the account is locked
+            fails.append(now)
+            if len(fails) >= self.lock_after:
+                until = now + self.lock_for_s
+        self.seen[key] = (fails[-self.lock_after:], until)
+        if len(self.seen) > self.MAX_NAMES:               # drop the stalest names
+            for k in sorted(self.seen, key=lambda k: max(self.seen[k][0] or [self.seen[k][1]]))[:len(self.seen) - self.MAX_NAMES]:
+                del self.seen[k]
+        return 0 if until > now else max(0, self.lock_after - len(fails))
+
+    def succeeded(self, name: str):
+        self.seen.pop(self._key(name), None)
+
+
 SESSION_COOKIE = "oarbank_session"
 TOUCH_EVERY_S = 60
 SESSION_PATHS = ("/login", "/logout", "/static/", "/static-ui/", "/healthz")
 
 
 def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
-                module_origin: str = "http://127.0.0.1:7402") -> FastAPI:
+                module_origin: "str | Callable[[Request], str]" = "http://127.0.0.1:7402",
+                listening: "Callable[[], Any] | None" = None) -> FastAPI:
+    """`module_origin`: the module origin, or a function of the request (the host the console was opened at, on the
+    frames port: __main__.origins). `listening()`: the process's Listeners (console/serve.py: the addresses the Host
+    allowlist takes and the Settings page shows), None in tests."""
     from oarbank_sdk.render import CSS_PATH, HERE as RENDER_HERE, console_csp, render_page
     from oarbank_sdk import ui as U
     from . import modpages
@@ -162,7 +205,15 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     from .media import Tokens
     tokens = Tokens()
     caches = {"ops": ({}, 0.0), "mods": 0.0}
-    policy = console_csp(module_origin)
+    origin_of = module_origin if callable(module_origin) else (lambda request: module_origin)
+    policies: dict[str, str] = {}
+
+    def policy_for(mo: str) -> str:
+        if mo not in policies:
+            if len(policies) > 64:
+                policies.clear()
+            policies[mo] = console_csp(mo)
+        return policies[mo]
     @contextlib.asynccontextmanager
     async def lifespan(app):
         state.bind_loop(asyncio.get_running_loop())
@@ -214,10 +265,14 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         if A.via_funnel(request.headers):
             return JSONResponse({"error": "forbidden", "detail": "requests from Tailscale Funnel are refused"}, status_code=403)
         port = (request.scope.get("server") or (None, None))[1]
-        if not A.host_ok(request.headers.get("host"), A.allowed_hosts(port, fleet_value(state.reader, "console_hosts") or [])
-                         | A.TEST_HOSTS):
+        lis = listening() if listening else None
+        if not A.host_ok(request.headers.get("host"), A.allowed_hosts(port, (fleet_value(state.reader, "console_hosts") or [])
+                                                                      + (lis.names() if lis else []),
+                                                                      lis.hosts() if lis else ())
+                         | A.TEST_HOSTS, any_ip_port=port if lis and lis.everywhere() else None):
             return JSONResponse({"error": "bad_host", "detail": "this host name is not allowed (Settings → Access: console_hosts)"},
                                 status_code=421)
+        request.state.module_origin = origin_of(request)
         path = request.url.path
         sid = request.cookies.get(SESSION_COOKIE)
         if sid and sid not in touching and (s := session(request)) and time.time() - s["last_seen"] > TOUCH_EVERY_S:
@@ -239,7 +294,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
             if not site and origin and origin.split("://", 1)[-1] != host:
                 return JSONResponse({"error": "csrf", "detail": f"origin {origin}"}, status_code=403)
         resp = await call_next(request)
-        resp.headers.setdefault("Content-Security-Policy", policy)
+        resp.headers.setdefault("Content-Security-Policy", policy_for(request.state.module_origin))
         resp.headers.setdefault("X-Frame-Options", "DENY")
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("Referrer-Policy", "same-origin")
@@ -336,10 +391,15 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         except httpx.HTTPError as e:
             return httpx.Response(503, json={"error": "coordinator_unreachable", "detail": type(e).__name__})
 
-    def _login_page(request: Request, error: str = "", status: int = 200):
+    tries = SignInTries(A.LOCK_AFTER, A.LOCK_WINDOW_S, A.LOCK_FOR_S)
+
+    def _login_page(request: Request, error: str = "", status: int = 200, tries_left: int | None = None):
         accounts = state.reader.q("SELECT COUNT(*) n FROM accounts")[0]["n"]
         return T.TemplateResponse(request, "login.html", {"error": error, "next": _next(request, request.query_params.get("next")),
-                                                          "no_accounts": accounts == 0, "meta": state.meta()}, status_code=status)
+                                                          "no_accounts": accounts == 0, "meta": state.meta(),
+                                                          "tries_left": tries_left, "lock_after": A.LOCK_AFTER,
+                                                          "lock_min": int(A.LOCK_FOR_S // 60),
+                                                          "window_min": int(A.LOCK_WINDOW_S // 60)}, status_code=status)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -350,8 +410,14 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         form = await request.form()
         r = await _ceremony("/api/v1/access/login", request, {"name": form.get("name"), "password": form.get("password"),
                                                                "code": form.get("code")})
+        name = str(form.get("name") or "")
+        if r.status_code == 503:
+            return _login_page(request, "The coordinator did not answer, so nothing was checked. Try again in a moment.", 503)
         if r.status_code != 200:
-            return _login_page(request, "Wrong account, password or code, or the account is locked.", 401)
+            # the same answer whichever factor failed and whether or not the account exists (no account enumeration)
+            return _login_page(request, "Sign-in failed: the account name, password or authenticator code is wrong, "
+                                        "or the account is locked.", 401, tries_left=tries.failed(name))
+        tries.succeeded(name)
         return _cookie(RedirectResponse(_next(request, form.get("next")), status_code=303), request, r.json())
 
     @app.get("/login/link")
@@ -848,6 +914,8 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         mods = await coordinator_json("GET", "/api/v1/modules", actor)
         d["modules"] = mods.json() if mods.status_code == 200 else []
         d["explain"] = request.query_params.get("explain") or ""
+        lis = listening() if listening else None
+        d["listen"] = lis.status() if lis else None
         _saved(d, request)
         for sec in d["fs"]["node_defaults"] + d["fs"]["fleet"]:
             sec.setdefault("form_errors", [])
@@ -908,7 +976,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
 
         def run(r):
             return render_page(page or catalog.page(name, decl),
-                               modpages.build_host(catalog, name, ctx, ops.get, module_origin, r, tokens))
+                               modpages.build_host(catalog, name, ctx, ops.get, request.state.module_origin, r, tokens))
         try:
             return await drill(run) or '<p class="mut">module page unavailable (database busy)</p>'
         except (ValueError, OSError) as e:
@@ -1052,7 +1120,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         except ValueError:
             return JSONResponse({"error": "not an artifact reference"}, status_code=400)
         from . import media
-        hit = await drill(lambda r: media.urls(r, tokens, name, module_origin, ref_doc, kind))
+        hit = await drill(lambda r: media.urls(r, tokens, name, request.state.module_origin, ref_doc, kind))
         return JSONResponse(hit) if hit else JSONResponse({"error": "not this module's artifact"}, status_code=404)
 
     @app.get("/m/{name}/_bridge/{frame}/link")
@@ -1167,8 +1235,10 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
     @app.get("/healthz")
     async def healthz():
         from ..desktop import setup_state
+        lis = listening() if listening else None
         return {"ok": True, **{k: v for k, v in state.meta().items() if k != "oarbankd"}, "renders": state.renders,
-                "coordinator_setup": setup_state(Path(state.db_path).parent)}
+                "coordinator_setup": setup_state(Path(state.db_path).parent),
+                **({"listening": lis.status()["listeners"]} if lis else {})}
 
     # ------------------------------------------------------------------ SSE (resync-first)
     @app.get("/sse")
@@ -1367,7 +1437,7 @@ def console_app(state: ConsoleState, attempt_log_dir: Path | None = None,
         return JSONResponse(body, status_code=r.status_code)
 
     SECRET_RESULTS = {"access.accounts.create": ("totp_secret", "otpauth"), "access.accounts.reset_totp": ("totp_secret", "otpauth"),
-                      "access.tokens.create": ("token",), "access.login_link": ("url",), "modules.cli_token": ("token",)}
+                      "access.tokens.create": ("token",), "access.login_link": ("url", "urls"), "modules.cli_token": ("token",)}
 
     async def _result(op, r, return_to, request=None):
         body = r.json() if r.text else {}

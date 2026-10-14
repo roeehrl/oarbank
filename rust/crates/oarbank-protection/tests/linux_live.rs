@@ -38,8 +38,8 @@ fn gpu_time_comes_from_drm_fdinfo() {
     );
 }
 
-/// Presence is a person using the machine: this test's own session counts when the test runs on a terminal (an ssh
-/// login with a pty, a console) and never when it runs as an ssh command or automation without one.
+/// Presence is a person using the machine: this test's own session counts when the test runs on a local terminal (a
+/// console) and never when it runs over ssh (a login with a pty or a command) or as automation without a terminal.
 #[test]
 #[ignore = "reads the live logind sessions"]
 fn presence_comes_from_logind() {
@@ -65,8 +65,11 @@ fn presence_comes_from_logind() {
     let tty = linux::reader().stat(std::process::id() as i32).unwrap().tty_nr;
     let a = s.activity(now);
     eprintln!("own session {id}, controlling terminal {tty:#x}: {a:?}");
-    if tty != 0 {
-        assert!(matches!(a, Activity::Idle(x) if x >= 0.0), "on a terminal: a person's session, {a:?}");
+    if s.remote_login() {
+        assert_eq!(a, Activity::Ignored("remote login"));
+        assert!(!r.source.contains(&format!("session {id} (")), "{r:?}");
+    } else if tty != 0 {
+        assert!(matches!(a, Activity::Idle(x) if x >= 0.0), "on a local terminal: a person's session, {a:?}");
     }
     if a == Activity::Ignored("no terminal") {
         assert_eq!(tty, 0);

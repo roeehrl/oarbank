@@ -3,6 +3,7 @@ publishes it to the tailnet through `tailscale serve`). Both share one DB and ba
 import asyncio
 import hmac
 import os
+import re
 import json
 import sqlite3
 import uuid
@@ -594,7 +595,9 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
         return {**sess, "role": a["role"]}
 
     def _refused(request: Request, name: str, e: Exception):
-        audit.append(db, actor=name or "?", source="gui", operation="access.sign_in", category="access",
+        name = (name or "").strip().lower()[:64]           # as typed: the audit records it only if it can be a name
+        name = name if re.fullmatch(r"[a-z0-9._%+@-]+", name) else "?"
+        audit.append(db, actor=name, source="gui", operation="access.sign_in", category="access",
                      target_type="account", target_id=name or "?", outcome="denied", request_id=audit.request_id(),
                      error=str(e)[:300], user_agent=request.headers.get("x-oarbank-user-agent"))
 

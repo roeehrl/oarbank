@@ -65,9 +65,9 @@ impl Protection {
         let hub = session_hub.then(P::session::SessionHub::new);
         let hub_keep = hub.clone();
         if let Some(h) = &hub {
-            if let Err(e) = P::platform::serve_sessions(h.clone()) {
-                tracing::warn!(error = %e, "cannot serve session helpers: other accounts' paths, arguments, display and input stay unreadable");
-            }
+            // tried again until it serves (an upgraded node may lack the socket's directory until its installer makes
+            // it): the heartbeat says meanwhile that rules may miss other accounts' processes
+            P::platform::supervise_sessions(h.clone(), P::platform::SERVE_RETRY, log_serving);
         }
         let ctrl = P::ProtectionController::new(Some(journal.clone()), P::platform::native_host(hub.clone()));
         // the owner's local protection file sits beside the agent's home (docs/protocol.md, "Agent config")
@@ -78,6 +78,12 @@ impl Protection {
                      service_pools: Default::default(), service_reserved_mem_gb: 0.0, services: vec![], workloads: vec![],
                      workload_pids: vec![], workload_reserved: (0.0, 0.0), delegated: Default::default(), hub: hub_keep,
                      site_hold: None, site_paused: Default::default() }
+    }
+
+    /// Whether the session helpers are served (a system install's service), for the heartbeat and the status document:
+    /// `{at, serving, error, failures}`. None: this agent serves none.
+    pub fn session_helpers(&self) -> Option<Value> {
+        self.hub.as_ref()?.serving().and_then(|s| serde_json::to_value(s).ok())
     }
 
     /// Give the controller the event path's fast pause over the agent's job table (D51): an immediate rule's phase
@@ -262,6 +268,9 @@ impl Protection {
             "protection": serde_json::to_value(self.ctrl.telemetry(&r)).unwrap_or(Value::Null),
             "cert_context": serde_json::to_value(cert_context(facts)).unwrap_or(Value::Null),
         });
+        if let Some(serving) = self.session_helpers() {
+            self.telemetry["protection"]["session_helpers"] = serving;
+        }
         self.capacity = Some(cap);
         self.last = Some(r);
         let _ = fleet_pids;
@@ -433,6 +442,17 @@ impl Protection {
 }
 
 /// What a co-tenancy certificate is bound to on this node: the hardware, the OS major version and this agent.
+/// Each change in whether the session helpers are served: a warning while they are not (once per reason, not per retry).
+fn log_serving(s: &P::session::Serving) {
+    if s.serving {
+        tracing::info!(at = %s.at, "serving session helpers");
+    } else {
+        tracing::warn!(at = %s.at, error = s.error.as_deref().unwrap_or(""), retry_s = P::platform::SERVE_RETRY.as_secs(),
+                       "cannot serve session helpers: other accounts' paths, arguments, display and input stay unreadable, \
+                        and protection rules may not match their processes; trying again");
+    }
+}
+
 fn cert_context(facts: &Value) -> P::CertContext {
     let cpu = &facts["cpu"];
     let os = &facts["platform"];
@@ -783,6 +803,31 @@ mod e2e {
                    pause: false, usage: Default::default(), log_bytes: 0, started_at: crate::doctor::now(),
                    caps: caps.iter().map(|c| c.to_string()).collect(), bandwidth: None, threads: None, gpu_duty: None, needs: vec![],
                    wake: Default::default(), stop_by: None }
+    }
+
+    /// A system service that cannot serve its session helpers says so in the heartbeat, where the console turns it into
+    /// a node condition (`PROTECTION_SESSION_HELPER_UNAVAILABLE`): rules may miss other accounts' processes, which on
+    /// an upgraded Mac without the socket's directory matched none. A personal install reports nothing of the kind.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_service_that_cannot_serve_session_helpers_says_so_in_its_heartbeat() {
+        let tmp = crate::scratch("prot-hub");
+        let l = Layout::new(tmp.path().join("home"));
+        l.ensure().unwrap();
+        // the socket's directory can never be made (a device stands where it goes), so the hub's retries, which outlive
+        // the test, never write anywhere (this test binary's only hub)
+        let socket = std::path::PathBuf::from("/dev/null/run/session.sock");
+        std::env::set_var("OARBANK_SESSION_SOCKET", &socket);
+        let mut p = Protection::new(&l, true);
+        let d = json!({"desired_state": "active", "limits": {}, "policy": {}});
+        p.tick(&d, &Table::default(), &json!({"cpu": {"logical": 4}}));
+        let h = &p.telemetry["protection"]["session_helpers"];
+        assert_eq!((h["serving"].as_bool(), h["at"].as_str()), (Some(false), socket.to_str()), "{h}");
+        assert!(h["error"].as_str().is_some_and(|e| e.contains("Not a directory")), "{h}");
+        assert_eq!(p.session_helpers().as_ref(), Some(h));
+        let mut personal = Protection::new(&l, false);
+        personal.tick(&d, &Table::default(), &json!({"cpu": {"logical": 4}}));
+        assert!(personal.telemetry["protection"].get("session_helpers").is_none() && personal.session_helpers().is_none());
     }
 
     /// The site's hold (docs/design/sites.md): a network-heavy attempt that can pause is paused (here cooperatively)

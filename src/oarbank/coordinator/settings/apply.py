@@ -284,7 +284,7 @@ def plan(db, changes) -> dict:
     wire_keys = sorted({c["key"] for c in norm if c["scope"] != "campaign" and not c.get("orphan") and (
         defn(c["key"]).wire or defn(c["key"]).applies != "coordinator" or "statement" in defn(c["key"]).effects
         or "protection" in defn(c["key"]).effects)})
-    prot_notes = []
+    prot_notes, warnings = [], []
     diff, unaffected, errors, changed_nodes = [], [], [], []
     for n in nodes:
         reach = [c for c in norm if _reaches(before, n, c) and c["key"] in wire_keys]
@@ -314,6 +314,12 @@ def plan(db, changes) -> dict:
                    else "same value")
             unaffected.append({"node_id": n["node_id"], "hostname": n["hostname"], "key": k, "why": why,
                                "value_text": R.show(k, a[k]["value"], defn(k)), "source": V.badge(a[k])})
+        if "max_slots" in moved:                            # a CPU-slot budget below a stage's cpu keeps that stage off
+            from .. import modcalls, nodepolicy
+            budget = a["max_slots"]["value"]
+            on = {m for m in modcalls.CATALOG if V.resolve(after, n, "enabled", m)["value"]}     # enabled there, after it
+            warnings += [f"{n['hostname']}: {mod} stage {st} would never run there: " + nodepolicy.slot_budget_short(
+                budget, cpu, st) for mod, st, cpu in modcalls.stages_over_cpu(db, n, budget, on)]
         if any("protection" in defn(c["key"]).effects for c in reach):
             from .. import protection as PR
             had = set(PR.chain_errors(before, n))
@@ -357,8 +363,18 @@ def plan(db, changes) -> dict:
     if cimp and len(camp) != len(norm):
         summary += "; " + cimp["summary"]
     fleetish = any(c["scope"] in ("fleet", "group") for c in norm)
-    return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm],
+    from ..consolelisten import exposes
+    warnings = [w for c in norm if c["key"] == "console_listen" and not c["reset"] and (w := exposes(c["value"]))]
+    warnings += ["console_https tailscale: every device of your tailnet that its ACLs let reach this machine reaches the "
+                 "console's sign-in page at https://<this machine's MagicDNS name>/ (tailscale serve; never Funnel)"
+                 for c in norm if c["key"] == "console_https" and not c["reset"] and c["value"] == "tailscale"]
+    if any(c["key"] == "console_listen" for c in norm):
+        summary += "; the console rebinds its listeners within seconds (sign-in still applies on every address)"
+    if any(c["key"] == "console_https" for c in norm):
+        summary += "; the console sets up (or removes) its tailscale serve entries within 30 s, or names the command to run"
+    return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm], "warnings": warnings,
             "lock_notes": _lock_notes(before, nodes, norm, names), "protection_notes": sorted(set(prot_notes)),
+            "warnings": warnings,
             "nodes_changed": [f"{x['hostname']}: {x['label']} {x['old_text']} → {x['new_text']}" for x in diff]
                              + (cimp["nodes_changed"] if cimp else []),
             "nodes_unaffected": [f"{x['hostname']}: keeps {x['value_text']} ({x['why']}" + ("" if x["why"].startswith("locked")

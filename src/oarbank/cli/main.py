@@ -712,7 +712,10 @@ def cmd_console(a):
     """oarbank console login: a one-time sign-in link to the console (valid 2 minutes)."""
     res = run_op("access.login_link", a.account, {"console": a.console} if a.console else None, yes=True)
     r = (res or {}).get("result") or {}
-    print(r.get("url") or json.dumps(res, indent=1))
+    urls = r.get("urls") or ([r["url"]] if r.get("url") else [])
+    print("\n".join(urls) or json.dumps(res, indent=1))       # localhost first, then each listen address (console_listen)
+    if len(urls) > 1:
+        print("(one link per address the console listens on; it works once, from whichever you open)", file=sys.stderr)
     if a.open and r.get("url"):
         import webbrowser
         webbrowser.open(r["url"])
@@ -2383,7 +2386,8 @@ def parser() -> argparse.ArgumentParser:
     co = sub.add_parser("console", help="console sign-in: oarbank console login [--account NAME] [--open]")
     co.add_argument("action", choices=["login"])
     co.add_argument("--account")
-    co.add_argument("--console", help="the console's base URL (default http://127.0.0.1:7400)")
+    co.add_argument("--console", help="the console's base URL (default: a link for localhost and one for each address of "
+                                      "console_listen, e.g. http://100.64.0.1:7400)")
     co.add_argument("--open", action="store_true", help="open the link in the browser")
     co.set_defaults(fn=cmd_console)
     ag = sub.add_parser("agent", help="agent self-update: upload an oarbank-agent build, canary, promote, rollback, sign (no ssh)")

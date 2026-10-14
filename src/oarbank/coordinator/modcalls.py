@@ -625,6 +625,28 @@ def resources_on(res: dict, platform: str | None) -> dict:
     return out
 
 
+def stages_over_cpu(db, node: dict, budget, modules=None) -> list[tuple[str, str, float]]:
+    """The stages of the modules enabled on this node (or of `modules`) that declare more cpu than `budget` there (its
+    variant for the node's platform applied): (module, stage, cpu). A node's CPU-slot budget (`max_slots`) below one
+    keeps that stage off the node for good (nodepolicy.slot_budget_short)."""
+    if budget is None:
+        return []
+    if modules is None:
+        from . import modstore
+        modules = set(enabled(db)) - modstore.disabled_names(db, node)
+    plat = node.get("platform")
+    out = []
+    for name in sorted(modules):
+        i = CATALOG.get(name)
+        for st in (i.manifest.stages if i else ()):
+            if st.requires.platforms and plat and plat not in st.requires.platforms:
+                continue
+            cpu = float(resources_on(i.stage_resources(st.name), plat).get("cpu", 1))
+            if cpu > float(budget):
+                out.append((name, st.name, cpu))
+    return out
+
+
 def has_capability(name: str, cap: str) -> bool:
     i = CATALOG.get(name)
     return bool(i and cap in i.manifest.coordinator.capabilities)

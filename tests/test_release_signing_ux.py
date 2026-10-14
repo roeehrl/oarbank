@@ -295,6 +295,38 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     assert rd["state"] in ("waiting", "ready") and not rd["needs"]
 
 
+def test_readiness_names_each_missing_container_piece_with_its_fix(db, tmp_path, capsys):
+    """Issue #44: an agent reports each missing container piece as {what, detail, fix} (docs/protocol.md); the checklist
+    (and its API and CLI) names each with the agent's fix instead of failing."""
+    from fastapi.testclient import TestClient
+    from oarbank.cli import main as cli
+    from oarbank.coordinator import app as coord_app
+    from helpers import admin_headers
+    _, mac = enrolled_node(db, "mac")
+    missing = [{"what": "colima", "detail": "colima is not installed", "fix": "install it with Homebrew: `brew install colima`"},
+               {"what": "docker", "detail": "docker is not installed", "fix": "install it with Homebrew: `brew install docker`"}]
+    hello(db, mac, facts={**FACTS, "containers": {"runtime": "colima", "state": "missing", "gpu": "undetected",
+                                                  "platforms": [], "missing": missing}})
+    r = modstore.install(db, bundle(javatoy(tmp_path)), actor="test", self_test=False)
+    name = r["name"]
+    modsandbox.approve(db, name, r["version"], "test", None)
+    modstore.enable(db, name, r["version"])
+    releases.sync(db)
+    run = next(i for i in steps(readiness.module(db, name))["nodes"]["items"] if i.get("stage") == "run")
+    assert run["groups"][0]["nodes"] == ["mac"]
+    assert ("no ready container runtime (colima missing: missing colima, docker): colima: install it with Homebrew: "
+            "`brew install colima`; docker: install it with Homebrew: `brew install docker`") in run["groups"][0]["reasons"]
+    c = TestClient(coord_app.admin_app(db), client=("127.0.0.1", 50001))
+    got = c.get(f"/api/v1/modules/{name}/readiness", headers=admin_headers(db))
+    assert got.status_code == 200
+    cli.print_readiness(got.json())
+    assert "docker: install it with Homebrew: `brew install docker`" in capsys.readouterr().out
+    # a runtime that names nothing missing gets the OS's general fix
+    hello(db, mac, facts={**FACTS, "containers": {"runtime": "colima", "state": "failed", "missing": [], "detail": "boom"}})
+    run = next(i for i in steps(readiness.module(db, name))["nodes"]["items"] if i.get("stage") == "run")
+    assert any(x.startswith("no ready container runtime (colima failed): install Colima and Docker") for x in run["groups"][0]["reasons"])
+
+
 def test_readiness_api_and_cli_print_every_step(db, tmp_path, capsys):
     from fastapi.testclient import TestClient
     from oarbank.cli import main as cli

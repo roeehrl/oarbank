@@ -134,6 +134,13 @@ pub fn refresh(rest: &[String]) -> Result<()> {
         .with_context(|| format!("{} is not a job this launcher installs", t.plist.display()))?;
     spec.stop_timeout_s = Some(oarbank_core::service::AGENT_STOP_TIMEOUT_S);
     spec.associated_bundle = Some(NODE_APP_BUNDLE.into());
+    // a system job serving session helpers: their socket's directory, which only `service install` made before, so an
+    // upgraded node that lacked it served no helper (its agent makes it too when it may, and tries again until it can)
+    if let (true, true, Some(account)) = (t.domain == "system", spec.program.iter().any(|a| a == "--session-hub"), &spec.user) {
+        if let Err(e) = session_dir(account, dry) {
+            eprintln!("the session helpers' directory {SESSION_DIR}: {e:#}");
+        }
+    }
     let plist = oarbank_core::service::launchd_plist(&spec);
     if std::fs::read_to_string(&t.plist).ok().as_deref() == Some(plist.as_str()) {
         let o = launchctl(&["kickstart", "-k", &target], dry)?;

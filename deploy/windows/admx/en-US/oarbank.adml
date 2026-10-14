@@ -64,7 +64,7 @@ This value can only make the coordinator's setting stricter on this computer, ne
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="screen_sharing_present">Screen sharing counts as someone using it</string>
-      <string id="screen_sharing_present_Help">Enabled: a remote screen sharing session holds jobs back like a person at the keyboard, even without input. Disabled has no effect: the coordinator's setting applies.
+      <string id="screen_sharing_present_Help">Enabled: a connected screen sharing viewer holds jobs back like a person at the keyboard, even without input. Disabled has no effect: the coordinator's setting applies.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="run_on_battery">Run jobs on battery</string>
@@ -83,8 +83,8 @@ This value can only make the coordinator's setting stricter on this computer, ne
       <string id="inbound_listeners_Help">Disabled: no module listener accepts connections from the internet on this computer, and every router port mapping Oarbank made is removed. Enabled has no effect: the coordinator's setting applies.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
-      <string id="max_slots">Most jobs at once (slots)</string>
-      <string id="max_slots_Help">An upper bound on job slots whatever the hardware allows. A value higher than the coordinator's has no effect.
+      <string id="max_slots">CPU slots for jobs (cores)</string>
+      <string id="max_slots_Help">The computer's CPU budget for jobs, in cores, whatever the hardware allows: each running job takes its stage's cpu from it, so a stage needing more cpu than this never runs here. It is not a job count: to run one job at a time, set Concurrent jobs to 1. A value higher than the coordinator's has no effect.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="hard_limits">Hard limits</string>
@@ -175,7 +175,7 @@ This value can only make the coordinator's setting stricter on this computer, ne
         </textBox>
       </presentation>
       <presentation id="max_slots">
-        <decimalTextBox refId="max_slots" defaultValue="1">Slots:</decimalTextBox>
+        <decimalTextBox refId="max_slots" defaultValue="1">CPU slots (cores):</decimalTextBox>
       </presentation>
       <presentation id="cpu_cores">
         <textBox refId="cpu_cores">

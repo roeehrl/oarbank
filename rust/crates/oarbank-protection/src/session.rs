@@ -245,6 +245,20 @@ struct Wanted {
     sources: Vec<RelayedSource>,
 }
 
+/// Whether the system service serves its session helpers (the heartbeat's `protection.session_helpers`). While it does
+/// not, no helper can report: other accounts' processes go unread (on macOS unlisted), so a rule that matches them may
+/// match none, and the console says so (`PROTECTION_SESSION_HELPER_UNAVAILABLE`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Serving {
+    /// Where helpers connect: the socket's path, or the pipe's name.
+    pub at: String,
+    pub serving: bool,
+    /// Why not, from the last attempt (None while serving).
+    pub error: Option<String>,
+    /// Attempts that failed since it last served.
+    pub failures: u64,
+}
+
 /// The system service's view of its helpers' reports.
 #[derive(Default)]
 pub struct SessionHub {
@@ -255,6 +269,8 @@ pub struct SessionHub {
     hook: Mutex<Option<SourceHook>>,
     /// Who each principal is (an account name, where the transport proves it).
     accounts: Mutex<HashMap<Principal, Option<String>>>,
+    /// Whether helpers are served (None: nothing tried to serve them).
+    serving: Mutex<Option<Serving>>,
 }
 
 impl std::fmt::Debug for SessionHub {
@@ -266,6 +282,19 @@ impl std::fmt::Debug for SessionHub {
 impl SessionHub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Whether helpers are served now, and why not (None: the service never tried, as in a personal install).
+    pub fn serving(&self) -> Option<Serving> {
+        self.serving.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Record whether helpers are served; true when that (or why not) changed.
+    pub(crate) fn set_serving(&self, s: Serving) -> bool {
+        let mut cur = self.serving.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = cur.as_ref().is_none_or(|c| (c.serving, &c.error, &c.at) != (s.serving, &s.error, &s.at));
+        *cur = Some(s);
+        changed
     }
 
     fn fresh<T>(&self, f: impl FnOnce(&HashMap<Principal, Entry>) -> T) -> T {

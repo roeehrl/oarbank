@@ -21,6 +21,9 @@ pub fn socket_path() -> PathBuf {
     unix_session::socket_path("/Library/Application Support/Oarbank/run/session.sock")
 }
 
+/// How the socket's directory comes to be, for an error that says why it is not there.
+const HINT: &str = "the node package's installer makes it for the service's account, and so does `sudo oarbank-node service refresh --system`";
+
 /// Does the process belong to `uid` (and, unless `start_us` is 0, did it start then)?
 fn owns(uid: u32, pid: i32, start_us: u64) -> bool {
     kinfo(pid)
@@ -28,8 +31,8 @@ fn owns(uid: u32, pid: i32, start_us: u64) -> bool {
 }
 
 /// Serve helpers (the system service).
-pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<()> {
-    unix_session::serve(&socket_path(), hub, owns)
+pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<Box<dyn crate::platform::Served>> {
+    unix_session::serve(&socket_path(), HINT, hub, owns)
 }
 
 /// The account whose GUI session is on the screen (the owner of `/dev/console`); None at the login window.

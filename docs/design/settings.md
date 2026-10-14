@@ -43,7 +43,10 @@ The keys, by section:
 
 - **Memory**: `os_reserve_gb`, `user_reserve_gb`, `job_mem_gb`, `mem_in_use_bound`.
 - **When someone is using it**: `user_present_slots`, `user_idle_s`, `screen_sharing_present`, `run_on_battery`.
-- **Jobs**: `threads_per_job`, `max_slots`; advanced `nice` (not applied by agents yet), `hard_limits`.
+- **Jobs**: `threads_per_job`, `max_slots` (the node's CPU-slot budget in cores: every running job draws its stage's
+  `resources.cpu` from it, so a stage whose cpu exceeds it never runs on the node; it is not a job count, `jobs` is:
+  readiness, job Explain and the `settings set` preview say when it is below an enabled module's stage cpu);
+  advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
   advanced `vm_mem_gb`, `vm_cpus`, `disk_gb`, `staging_mbps`.
 - **Network** ([inbound-listeners.md](inbound-listeners.md)): `inbound_listeners` (off: no listener opens and every
@@ -53,7 +56,10 @@ The keys, by section:
   (`host:port`). All four travel to agents in the policy.
 - **Notifications** (fleet only): `ntfy.url`, `ntfy.click_base`. The ntfy token is not a setting: it is a core secret
   in the encrypted secrets store (write-only, shown as a fingerprint; `settings.secrets.set` / `clear`).
-- **Access** (fleet only): `console_hosts`, a typed list of host names (an optional `:port`).
+- **Access** (fleet only): `console_listen`, where the console and its module frames listen (`localhost`, always;
+  `tailscale`; IP addresses; `all`, confirmed by name), default `[localhost]`; `console_https`, `off` or `tailscale`
+  (https on the machine's MagicDNS name through `tailscale serve`, for passkeys); `console_hosts`, a typed list of extra
+  host names (an optional `:port`). See admin-console.md, "Listen addresses and https".
 - **Data and verification** (fleet only): `replica_rate`, 0 to 1, which a module may raise for its own work.
 - **Written by their own operations** (fleet only): `folder_registry`, `dataset_origins`.
 - **Every module's core keys** (`[module] <key>`): `enabled`, `services.disabled`, `pipeline`, and `replica_rate`
