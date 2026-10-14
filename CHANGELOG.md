@@ -6,16 +6,41 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ## Unreleased
 
-A coordinator update is no longer refused while a module re-certifies around running work. When a canary (or a
-promotion, a platform or OS change, or the periodic re-certification) reached a node, that node's module went to
-`certifying` while the jobs it had been granted on the previous version kept running, as designed. The S8 invariant
-counted those jobs as running uncertified, so `oarbank update start` refused the update ("the new build's self-test
-failed ... S8 attempt ... state=certifying") and the console raised an invariant alert. The certification a job was
-granted under now stands until a new one passes its goldens or the goldens fail. Jobs still running at that point are
-stopped and queued again, uncharged; their results were refused anyway. A job granted while the node was certifying,
-or one recording a version its node's release did not carry, is still a violation. A claim in the moment between
-starting a canary and building its release was granted the canary's version while the node still ran, and was
-certified on, the previous one; it is now granted the version its release carries.
+### Fixed
+
+- **A freshly installed node pins its update trust when it joins.** The package pinned the fleet's owner keys at
+  install time, before a fresh node had joined and had any, so `oarbank update plan` showed "no update trust is
+  pinned" for it. Upgraded nodes were not affected. Joining as an administrator now leaves the pin pending: with
+  `oarbank-node join`, the join window, a management profile or policy, or a join code given to the package. Root's
+  update runner then pins the agent's owner keys as soon as it has them, and `oarbank-node join` reports it. Nodes that
+  joined with 2.10.3 or 2.10.4 get their trust at their next package install, or with the command the plan now shows:
+  `sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent` on macOS,
+  `sudo oarbank-launcher update-trust --from-agent` on Linux, and `oarbank-node update-trust --from-agent` in an
+  elevated prompt on Windows. Before, the plan showed `update-trust` without `--from-agent`, which only prints usage.
+- **The coordinator pins its own update trust after a migration or an upgrade.** A coordinator moved from per-user to
+  the system service by the 2.10.3 pkg could miss its update trust, and `oarbank update start` stopped with "no update
+  trust on this machine". The pkg's (and deb's and rpm's) postinstall now pins it from the coordinator's owner keys
+  once the services run. A home with no owner keys yet leaves the pin pending, and the runner pins it at the first
+  update request. The refusal names the runnable command, `sudo "<build>/bin/oarbank-coordupdate" trust --from-home`
+  (on macOS the build is inside Oarbank Coordinator.app), instead of a bare `coordupdate`.
+- **A rollout halted by a refused coordinator update can go on.** `oarbank update resume` now sends the coordinator a
+  new update request when its update was refused or failed (no update trust, a request no runner took), instead of
+  reporting the old refusal again. `oarbank update coordinator <version>` and `oarbank update start` also supersede a
+  rollout halted in its coordinator ring before any node was told to install, so it no longer needs a rollback.
+- **The Windows Group Policy template zip is the same file for both architectures.** The x64 and arm64 jobs each
+  built `oarbank-agent-<version>-windows-admx.zip` with different bytes, so the published zip matched only one of the
+  two `SHA256SUMS-agent-*-windows-*` files (2.10.3 and 2.10.4). It is now written reproducibly: fixed order, time and
+  attributes, and stored entries.
+- **A coordinator update is no longer refused while a module re-certifies around running work.** When a canary (or a
+  promotion, a platform or OS change, or the periodic re-certification) reached a node, that node's module went to
+  `certifying` while the jobs it had been granted on the previous version kept running, as designed. The S8 invariant
+  counted those jobs as running uncertified, so `oarbank update start` refused the update ("the new build's self-test
+  failed ... S8 attempt ... state=certifying") and the console raised an invariant alert. The certification a job was
+  granted under now stands until a new one passes its goldens or the goldens fail. Jobs still running at that point
+  are stopped and queued again, uncharged; their results were refused anyway. A job granted while the node was
+  certifying, or one recording a version its node's release did not carry, is still a violation. A claim in the moment
+  between starting a canary and building its release was granted the canary's version while the node still ran, and
+  was certified on, the previous one; it is now granted the version its release carries.
 
 ## 2.10.4 (2026-10-14)
 

@@ -424,6 +424,21 @@ class Runner:
             return None
         return t if isinstance(t, dict) and t.get("format") == 1 and t.get("mode") in ("signed", "unsigned") else None
 
+    def settle_pending(self) -> dict | None:
+        """An administrator's install pinned nothing because the coordinator had no owner keys yet (a fresh install, or
+        a migration whose copied database the new build had not opened yet): it left a pin pending, made here from the
+        home's owner anchors now that a request shows the coordinator signs releases."""
+        if not (self.state / PENDING).is_file():
+            return None
+        try:
+            doc = pin_trust(self.state, self.home, False, "an administrator's install, pinned by the update runner")
+        except SystemExit as e:
+            self.log(f"update trust still pending: {e}")
+            return None
+        if doc:
+            self.log(f"update trust pinned from the home ({doc['mode']}, {len(doc['owner_keys'])} owner keys)")
+        return self.trust()
+
     def result(self, uid: str | None, version: str | None, state: str, error: str | None):
         """`<home>/updates/coordinator-result.json`, the coordinator account's (it reads and removes it)."""
         if not self.spool.is_dir() or self.spool.is_symlink():
@@ -514,10 +529,10 @@ class Runner:
         return self.proceed(j)
 
     def verify(self, r: dict, j: Journal) -> tuple[Path, int, str | None]:
-        trust = self.trust()
+        trust = self.trust() or self.settle_pending()
         if not trust:
-            raise Refused(f"no update trust on this machine: run `coordupdate trust --from-home` as an administrator "
-                          f"({self.state / 'trust.json'})")
+            raise Refused(f"no update trust on this machine ({self.state / 'trust.json'}): pin it as an administrator with "
+                          f"{trust_command(self.home, self.state)}")
         try:
             m = json.loads(r["manifest"])
         except ValueError:
@@ -872,6 +887,8 @@ def read_anchors(home: Path) -> dict:
     try:
         state = {k: json.loads(v) for k, v in c.execute(
             "SELECT key, value_json FROM system_state WHERE key IN ('owner_anchors','release_pubkey','fleet_id')")}
+    except sqlite3.Error as e:              # a database this build has not opened yet (a migration's copy, before start)
+        raise SystemExit(f"coordupdate: the coordinator has no owner keys yet ({db}: {e}); pin them later")
     finally:
         c.close()
         _fix_sidecars(db, owner)
@@ -886,21 +903,58 @@ def read_anchors(home: Path) -> dict:
                      "set); pin them later, or choose --unsigned for a test fleet")
 
 
+PENDING = "pin-pending"
+
+
 def pin_trust(state: Path, home: Path, unsigned: bool, by: str) -> dict | None:
-    """Write trust.json: from the home's owner anchors only when none exists; `unsigned` always (an explicit choice)."""
+    """Write trust.json: from the home's owner anchors only when none exists; `unsigned` always (an explicit choice).
+    A pin from the home before it has owner keys is left pending (`pin-pending`, root's): the runner makes it from the
+    home when the next update request comes (Runner.settle_pending). Any pin, or one found, settles it."""
     from .platform import files
     if not state.exists():
         files.private_dir(state)
     p = state / "trust.json"
     if p.exists() and not unsigned:
+        (state / PENDING).unlink(missing_ok=True)
         return None
     if unsigned:
         doc = {"format": 1, "mode": "unsigned", "fleet_id": None, "owner_version": None, "owner_keys": []}
     else:
-        doc = {"format": 1, "mode": "signed", **read_anchors(home)}
+        try:
+            anchors = read_anchors(home)
+        except SystemExit:
+            write_atomic(state / PENDING, json.dumps({"format": 1, "armed_at": time.time(), "by": by}))
+            raise
+        doc = {"format": 1, "mode": "signed", **anchors}
     doc.update(pinned_at=time.time(), pinned_by=by)
     write_atomic(p, json.dumps(doc, indent=1, sort_keys=True))
+    (state / PENDING).unlink(missing_ok=True)
     return doc
+
+
+def runner_command() -> str:
+    """This runner as a person types it: the build's own `bin/oarbank-coordupdate` (the coordinator build's Python is
+    `<build>/python/bin/python3.x`; on macOS the build is inside Oarbank Coordinator.app, on no PATH), quoted when its
+    path has spaces; else (a source checkout) the module."""
+    exe = Path(sys.executable)
+    if sys.platform == "win32":                    # <build>\python\python.exe, <build>\bin\oarbank-coordupdate.py
+        script = exe.parent.parent / "bin" / "oarbank-coordupdate.py"
+        return f'"{exe}" -I "{script}"' if script.is_file() else f'"{exe}" -m oarbank.coordupdate'
+    launcher = exe.parent.parent.parent / "bin" / "oarbank-coordupdate"
+    if launcher.is_file():
+        return f'"{launcher}"' if " " in str(launcher) else str(launcher)
+    return f"{exe} -m oarbank.coordupdate"
+
+
+def trust_command(home: Path | None = None, state: Path | None = None) -> str:
+    """The exact command that pins the coordinator's update trust from its home's owner keys, as an administrator."""
+    cmd = f"{runner_command()} trust --from-home"
+    q = lambda p: f'"{p}"' if " " in str(p) else str(p)   # noqa: E731
+    if home is not None and Path(home) != paths.coordinator_home():
+        cmd += f" --home {q(home)}"
+    if state is not None and Path(state) != default_state():
+        cmd += f" --state {q(state)}"
+    return f"{cmd} (in an elevated prompt)" if sys.platform == "win32" else f"sudo {cmd}"
 
 
 # ------------------------------------------------------------------ CLI

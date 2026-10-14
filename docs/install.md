@@ -401,10 +401,15 @@ while it runs.
 
 **Update trust.** The runner trusts only owner keys an administrator pinned on that machine. Installing a 2.10 (or
 later) package by hand on a node that has joined pins them: the postinstall (or the MSI) runs
-`oarbank-launcher update-trust --from-agent`, which copies the owner keys the agent pinned when it joined. A node
-that joined after its package was installed gets them with `sudo oarbank-launcher update-trust --from-agent` (an
-elevated prompt on Windows), or at its next package install. The Updates page lists nodes whose runner has no trust, with
-this remedy; they keep agent-only updates until then.
+`oarbank-launcher update-trust --from-agent`, which copies the owner keys the agent pinned when it joined. On a fresh
+install the node joins after its package, so from 2.10.5 the pin waits: once the node joins (`oarbank-node join`, the
+join window, a management profile or policy, or a join code given to the package), the runner pins the owner keys as
+soon as the agent has them, and `oarbank-node join` says so. A node that joined with 2.10.3 or 2.10.4 before its trust
+was pinned gets it at its next package install, or by hand:
+`sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent` on macOS,
+`sudo oarbank-launcher update-trust --from-agent` on Linux, and `oarbank-node update-trust --from-agent` in an
+elevated prompt on Windows. The Updates page lists nodes whose runner has no trust, with the command for each one;
+they keep agent-only updates until then.
 
 **Installing a package by hand** still works on any node, and does what a fleet update does: from 2.10 an upgrade
 also makes the package's agent the current one (before 2.10 it kept the agent version the coordinator had set), then
