@@ -360,6 +360,7 @@ impl Agent {
                               "ready_datasets": staging::ready(&self.layout), "tools": self.tools,
                               "live_attempts": self.table.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
                               "release_id": self.release.as_ref().map(|r| r.id.clone()), "clock": doctor::now()});
+        facts::warn_unknown_levels(&body["facts"]["cpu"]);
         body["facts"]["listeners"] = crate::listeners::Hub::facts();   // inbound listeners, and a dial-back prober
         merge(&mut body, self.hooks.hello_extra());
         merge(&mut body, self.update.report());

@@ -445,7 +445,7 @@ def test_a_node_without_telemetry_shows_only_what_it_reported(env):
     assert_clean(card, page)
     assert "capacity not reported yet" in card and "pools scorer 4" in card and "mem 24.0 GB" in card
     assert "CPU" not in card and "pressure" not in card and "thermal" not in card
-    assert "Apple M5 Pro (5P + 10E)" in page and "24.0 GB" in page and "macOS 27.0" in page
+    assert "Apple M5 Pro (5 Super + 10 Performance)" in page and "24.0 GB" in page and "macOS 27.0" in page
     assert "disk free" not in page and "user / power" not in page
 
 

@@ -65,6 +65,8 @@ struct SysInfo {
     model: Option<String>,
     perf: Option<u64>,
     eff: Option<u64>,
+    /// Apple silicon's performance levels, (name, physical cores); empty elsewhere.
+    levels: Vec<(String, u64)>,
     logical: Option<u64>,
     mem: Option<u64>,
     distro: Option<String>,
@@ -85,14 +87,89 @@ pub fn capacity_cores(cpu: &Value) -> (i64, i64) {
     }
 }
 
-/// macOS: `hw.perflevel0.physicalcpu` (performance) and `hw.perflevel1.physicalcpu` (efficiency) on Apple silicon;
-/// an Intel Mac has no performance levels, so all of `hw.physicalcpu` (cores, not Hyper-Threading's threads).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // parsed on every OS in the tests
-pub fn mac_cores(perflevel0: Option<u64>, perflevel1: Option<u64>, physical: Option<u64>) -> (Option<u64>, Option<u64>) {
-    match perflevel0.filter(|n| *n > 0) {
-        Some(p) => (Some(p), Some(perflevel1.unwrap_or(0))),
-        None => (physical.filter(|n| *n > 0), physical.filter(|n| *n > 0).map(|_| 0)),
+/// A core class's name, as macOS reports it (`hw.perflevelN.name`), that capacity counts at half: Apple silicon's
+/// efficiency cores. Every other name (`Performance`, the M5 Pro and M5 Max's `Super`, a name not known yet) is a
+/// full core.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn is_efficiency_level(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("efficiency")
+}
+
+/// The level names macOS is known to report (a macOS VM has one `Standard` level); any other is counted as a full core
+/// and logged once by the running agent (`warn_unknown_levels`).
+const KNOWN_LEVELS: [&str; 4] = ["Super", "Performance", "Efficiency", "Standard"];
+
+/// The facts' `cpu.levels` names that are not known (KNOWN_LEVELS): counted as full cores.
+pub fn unknown_levels(cpu: &Value) -> Vec<String> {
+    cpu["levels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str())
+        .filter(|n| !KNOWN_LEVELS.iter().any(|k| k.eq_ignore_ascii_case(n.trim()))).map(str::to_string).collect()
+}
+
+/// Logs, once per run, the core classes the facts name that are not known yet. Called by the running agent, never
+/// while collecting facts, so `oarbank-agent facts` prints JSON only.
+pub fn warn_unknown_levels(cpu: &Value) {
+    let unknown = unknown_levels(cpu);
+    if !unknown.is_empty() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| tracing::warn!(levels = ?unknown, "unknown Apple silicon core class: counted as full cores"));
     }
+}
+
+/// The cores of a Mac, by class: `perf` counts every full core and `eff` the efficiency cores; `levels` lists Apple
+/// silicon's performance levels as macOS names them (perflevel0 first), for the console's breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MacCores {
+    pub perf: Option<u64>,
+    pub eff: Option<u64>,
+    pub levels: Vec<(String, u64)>,
+    /// The level names that are not one of KNOWN_LEVELS (counted as full cores).
+    pub unknown: Vec<String>,
+}
+
+/// macOS: Apple silicon has `hw.nperflevels` performance levels, each with its physical cores
+/// (`hw.perflevelN.physicalcpu`) and a name (`hw.perflevelN.name`). Each level is weighed by its name, never by its
+/// position: M1 to M4 report `Performance` then `Efficiency`, while the M5 Pro and M5 Max report `Super` then
+/// `Performance` and have no efficiency cores. A level without a name (a macOS that does not report one) keeps the
+/// old reading: perflevel0 performance, the others efficiency. An Intel Mac has no performance levels, so all of
+/// `hw.physicalcpu` (cores, not Hyper-Threading's threads). `levels` is (name, physical cores) per level.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // parsed on every OS in the tests
+pub fn mac_cores(levels: &[(Option<String>, Option<u64>)], physical: Option<u64>) -> MacCores {
+    let mut out = MacCores::default();
+    let (mut perf, mut eff) = (0u64, 0u64);
+    for (i, (name, cores)) in levels.iter().enumerate() {
+        let Some(n) = cores.filter(|n| *n > 0) else { continue };
+        let name = match name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => s.to_string(),
+            None => if i == 0 { "Performance" } else { "Efficiency" }.to_string(),
+        };
+        if is_efficiency_level(&name) {
+            eff += n;
+        } else {
+            perf += n;
+        }
+        if !KNOWN_LEVELS.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
+            out.unknown.push(name.clone());
+        }
+        out.levels.push((name, n));
+    }
+    if perf + eff > 0 {
+        out.perf = Some(perf);
+        out.eff = Some(eff);
+    } else {
+        out.levels.clear();
+        out.unknown.clear();
+        out.perf = physical.filter(|n| *n > 0);
+        out.eff = out.perf.map(|_| 0);
+    }
+    out
+}
+
+/// This Mac's performance levels from sysctl: (name, physical cores) for each of `hw.nperflevels`.
+#[cfg(target_os = "macos")]
+fn mac_levels() -> Vec<(Option<String>, Option<u64>)> {
+    let n = sysctl_u64("hw.nperflevels").unwrap_or(0).min(16);
+    (0..n).map(|i| (sysctl_string(&format!("hw.perflevel{i}.name")), sysctl_u64(&format!("hw.perflevel{i}.physicalcpu"))))
+        .collect()
 }
 
 /// A Linux cpulist such as "0-15" or "0-7,16-23" -> the CPU numbers.
@@ -188,11 +265,10 @@ pub fn windows_cores(buf: &[u8]) -> Option<(u64, u64)> {
 
 #[cfg(target_os = "macos")]
 fn sysinfo() -> SysInfo {
-    let (perf, eff) = mac_cores(sysctl_u64("hw.perflevel0.physicalcpu"), sysctl_u64("hw.perflevel1.physicalcpu"),
-                                sysctl_u64("hw.physicalcpu"));
+    let MacCores { perf, eff, levels, .. } = mac_cores(&mac_levels(), sysctl_u64("hw.physicalcpu"));
     SysInfo { os_version: sysctl_string("kern.osproductversion"), os_build: sysctl_string("kern.osversion"),
               kernel: sysctl_string("kern.osrelease"), model: sysctl_string("machdep.cpu.brand_string"),
-              perf, eff, logical: sysctl_u64("hw.logicalcpu"), mem: sysctl_u64("hw.memsize"), ..Default::default() }
+              perf, eff, levels, logical: sysctl_u64("hw.logicalcpu"), mem: sysctl_u64("hw.memsize"), ..Default::default() }
 }
 
 /// /etc/os-release, /proc and uname; the cores from sysfs (`linux_cores`).
@@ -215,7 +291,7 @@ fn sysinfo() -> SysInfo {
     #[cfg(not(target_env = "gnu"))]
     let (libc_name, libc_version) = (Some("musl".to_string()), None);
     SysInfo { os_version: field("VERSION_ID"), os_build: None, kernel, model,
-              perf, eff,
+              perf, eff, levels: vec![],
               logical: std::thread::available_parallelism().ok().map(|n| n.get() as u64), mem, distro: field("ID"),
               libc: libc_name, libc_version }
 }
@@ -250,7 +326,7 @@ fn sysinfo() -> SysInfo {
         }
     }
     SysInfo { os_version: ok.then(|| format!("{}.{}", v.dwMajorVersion, v.dwMinorVersion)),
-              os_build: ok.then(|| v.dwBuildNumber.to_string()), kernel: None, model: None, perf, eff,
+              os_build: ok.then(|| v.dwBuildNumber.to_string()), kernel: None, model: None, perf, eff, levels: vec![],
               logical: std::thread::available_parallelism().ok().map(|n| n.get() as u64), mem, ..Default::default() }
 }
 
@@ -262,7 +338,7 @@ fn sysinfo() -> SysInfo {
 pub fn collect(home: &std::path::Path) -> Value {
     let plat = platform_token();
     let (os, arch) = plat.split_once('-').unwrap_or(("unknown", "unknown"));
-    let SysInfo { os_version, os_build, kernel, model, perf, eff, logical, mem, distro, libc, libc_version } = sysinfo();
+    let SysInfo { os_version, os_build, kernel, model, perf, eff, levels, logical, mem, distro, libc, libc_version } = sysinfo();
     // the GPU inventory; which APIs the node provides is the doctor's report (gpuapi.rs)
     let apple = cfg!(target_os = "macos") && arch == "arm64";
     let gpus = if apple {
@@ -275,7 +351,7 @@ pub fn collect(home: &std::path::Path) -> Value {
         "hostname": hostname(),
         "platform": {"os": os, "arch": arch, "os_version": os_version, "os_build": os_build, "kernel": kernel,
                      "distro": distro, "libc": libc, "libc_version": libc_version},
-        "cpu": {"model": model, "perf_cores": perf, "eff_cores": eff, "logical": logical},
+        "cpu": cpu_facts(model, perf, eff, &levels, logical),
         "memory_gb": mem.map(|b| (b as f64 / 1073741824.0 * 10.0).round() / 10.0),
         "gpus": gpus,
         "sandbox": sandbox_report(),
@@ -286,6 +362,14 @@ pub fn collect(home: &std::path::Path) -> Value {
         // the local zone's offset now: the coordinator places update windows in the node's own time (fleet-updates.md)
         "utc_offset_s": crate::sys::utc_offset_s(crate::doctor::now() as i64),
     })
+}
+
+/// The facts' `cpu`. `levels` names each core class where the OS does (Apple silicon's performance levels, in
+/// order): `[{"name": "Super", "cores": 6}, {"name": "Performance", "cores": 12}]`; null elsewhere.
+pub fn cpu_facts(model: Option<String>, perf: Option<u64>, eff: Option<u64>, levels: &[(String, u64)], logical: Option<u64>) -> Value {
+    let levels: Option<Vec<Value>> =
+        (!levels.is_empty()).then(|| levels.iter().map(|(name, cores)| json!({"name": name, "cores": cores})).collect());
+    json!({"model": model, "perf_cores": perf, "eff_cores": eff, "levels": levels, "logical": logical})
 }
 
 /// The node's container report: `gpu` is how containers get the node's GPUs (container_runtime::gpu_passthrough):
@@ -461,12 +545,80 @@ mod cores_tests {
         assert_eq!(windows_cores(&[]), None);
     }
 
+    /// `hw.nperflevels` levels as (`hw.perflevelN.name`, `hw.perflevelN.physicalcpu`).
+    fn levels(l: &[(&str, u64)]) -> Vec<(Option<String>, Option<u64>)> {
+        l.iter().map(|(n, c)| (Some(n.to_string()), Some(*c))).collect()
+    }
+
+    /// What capacity counts (capacity.rs: perf + eff / 2) from a Mac's cores.
+    fn slots(m: &MacCores) -> f64 {
+        m.perf.unwrap() as f64 + m.eff.unwrap() as f64 / 2.0
+    }
+
     #[test]
-    fn mac_cores_by_performance_level() {
-        assert_eq!(mac_cores(Some(12), Some(4), Some(16)), (Some(12), Some(4)));      // M4 Max
-        assert_eq!(mac_cores(Some(8), None, Some(8)), (Some(8), Some(0)));            // one level (a VM)
-        assert_eq!(mac_cores(None, None, Some(6)), (Some(6), Some(0)));               // Intel Mac: 6 cores, 12 threads
-        assert_eq!(mac_cores(None, None, None), (None, None));
+    fn mac_cores_by_performance_level_name() {
+        // M5 Max: hw.ncpu 18, 6 Super + 12 Performance, no efficiency cores
+        let m5max = mac_cores(&levels(&[("Super", 6), ("Performance", 12)]), Some(18));
+        assert_eq!((m5max.perf, m5max.eff), (Some(18), Some(0)));
+        assert_eq!(m5max.levels, vec![("Super".to_string(), 6), ("Performance".to_string(), 12)]);
+        assert!(m5max.unknown.is_empty());
+        assert_eq!(slots(&m5max), 18.0);
+        // M5 Pro: hw.ncpu 15, 5 Super + 10 Performance
+        let m5pro = mac_cores(&levels(&[("Super", 5), ("Performance", 10)]), Some(15));
+        assert_eq!((m5pro.perf, m5pro.eff, slots(&m5pro)), (Some(15), Some(0), 15.0));
+        // M4 Max: hw.ncpu 16, 12 Performance + 4 Efficiency, the efficiency cores at half
+        let m4max = mac_cores(&levels(&[("Performance", 12), ("Efficiency", 4)]), Some(16));
+        assert_eq!((m4max.perf, m4max.eff, slots(&m4max)), (Some(12), Some(4), 14.0));
+        assert_eq!(m4max.levels, vec![("Performance".to_string(), 12), ("Efficiency".to_string(), 4)]);
+        // M1: hw.ncpu 8, 4 Performance + 4 Efficiency
+        let m1 = mac_cores(&levels(&[("Performance", 4), ("Efficiency", 4)]), Some(8));
+        assert_eq!((m1.perf, m1.eff, slots(&m1)), (Some(4), Some(4), 6.0));
+    }
+
+    #[test]
+    fn mac_cores_without_performance_levels() {
+        // Intel Mac: no hw.nperflevels, 6 cores (12 Hyper-Threading threads)
+        let intel = mac_cores(&[], Some(6));
+        assert_eq!(intel, MacCores { perf: Some(6), eff: Some(0), levels: vec![], unknown: vec![] });
+        assert_eq!(mac_cores(&[], None), MacCores::default());
+        // one level (a VM)
+        let vm = mac_cores(&levels(&[("Performance", 8)]), Some(8));
+        assert_eq!((vm.perf, vm.eff), (Some(8), Some(0)));
+        // levels with no cores are no answer: hw.physicalcpu
+        assert_eq!(mac_cores(&[(None, None), (None, Some(0))], Some(4)).perf, Some(4));
+    }
+
+    #[test]
+    fn mac_cores_unknown_or_missing_names() {
+        // a name not known yet counts as full cores and is reported, so the agent logs it
+        let new = mac_cores(&levels(&[("Ultra", 4), ("Performance", 8), ("Efficiency", 4)]), Some(16));
+        assert_eq!((new.perf, new.eff, slots(&new)), (Some(12), Some(4), 14.0));
+        assert_eq!(new.unknown, vec!["Ultra".to_string()]);
+        // the name decides, whatever its case or padding
+        let m = mac_cores(&levels(&[("PERFORMANCE", 4), (" efficiency ", 6)]), Some(10));
+        assert_eq!((m.perf, m.eff), (Some(4), Some(6)));
+        assert!(m.unknown.is_empty());
+        // a level without a name keeps the old reading: perflevel0 performance, the others efficiency
+        let unnamed = mac_cores(&[(None, Some(12)), (Some(String::new()), Some(4))], Some(16));
+        assert_eq!((unnamed.perf, unnamed.eff), (Some(12), Some(4)));
+        assert_eq!(unnamed.levels, vec![("Performance".to_string(), 12), ("Efficiency".to_string(), 4)]);
+    }
+
+    #[test]
+    fn cpu_facts_name_each_level() {
+        let m = mac_cores(&levels(&[("Super", 6), ("Performance", 12)]), Some(18));
+        assert_eq!(cpu_facts(Some("Apple M5 Max".into()), m.perf, m.eff, &m.levels, Some(18)),
+                   json!({"model": "Apple M5 Max", "perf_cores": 18, "eff_cores": 0, "logical": 18,
+                          "levels": [{"name": "Super", "cores": 6}, {"name": "Performance", "cores": 12}]}));
+        assert_eq!(cpu_facts(None, Some(8), Some(4), &[], Some(20))["levels"], Value::Null);
+        // the names the running agent logs: none for known ones (a macOS VM's `Standard`), the rest by name
+        let vm = mac_cores(&levels(&[("Standard", 3)]), Some(3));
+        assert_eq!((vm.perf, vm.eff), (Some(3), Some(0)));
+        assert!(vm.unknown.is_empty());
+        assert!(unknown_levels(&cpu_facts(None, vm.perf, vm.eff, &vm.levels, Some(3))).is_empty());
+        let new = mac_cores(&levels(&[("Ultra", 4), ("Efficiency", 4)]), Some(8));
+        assert_eq!(unknown_levels(&cpu_facts(None, new.perf, new.eff, &new.levels, Some(8))), vec!["Ultra".to_string()]);
+        assert!(unknown_levels(&json!({"levels": null})).is_empty());
     }
 
     #[test]
@@ -482,8 +634,11 @@ mod cores_tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn this_mac_reports_physical_cores() {
-        let SysInfo { perf, eff, logical, .. } = sysinfo();
+        let SysInfo { perf, eff, levels, logical, .. } = sysinfo();
         let (p, e) = (perf.unwrap(), eff.unwrap());
         assert!(p >= 1 && p + e <= logical.unwrap(), "{p}P {e}E {logical:?}");
+        if cfg!(target_arch = "aarch64") {
+            assert_eq!(levels.iter().map(|(_, n)| n).sum::<u64>(), p + e, "{levels:?}");
+        }
     }
 }

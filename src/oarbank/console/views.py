@@ -41,6 +41,17 @@ HELD = {"guard:memory": "memory guard", "guard:thermal": "heat", "guard:battery"
         "protection": "host protection", "user": "the owner"}
 
 
+def _cores(cpu: dict, perf, eff, total, threads: str) -> str | None:
+    """The node's cores: each class by the name the OS gives it ("6 Super + 12 Performance", "12 Performance +
+    4 Efficiency"), else performance and efficiency cores ("8P + 4E"), else the count."""
+    levels = nodepolicy.core_levels(cpu)
+    if len(levels) > 1:
+        return " + ".join(f"{n} {name}" for name, n in levels) + threads
+    if perf and eff:
+        return f"{perf}P + {eff}E{threads}"
+    return f"{total} cores{threads}" if total else None
+
+
 def hardware(facts: dict) -> dict:
     """What the node's facts (format 2) say about its hardware, with None for anything it did not report."""
     facts = facts or {}
@@ -51,7 +62,7 @@ def hardware(facts: dict) -> dict:
     threads = f" ({logical} threads)" if logical and total and logical > total else ""
     os_name = OS_NAMES.get(plat.get("os"), plat.get("os"))
     return {"cpu": cpu.get("model") or None, "cores_total": total,
-            "cores": f"{perf}P + {eff}E{threads}" if perf and eff else (f"{total} cores{threads}" if total else None),
+            "cores": _cores(cpu, perf, eff, total, threads),
             "memory_gb": facts.get("memory_gb"), "os": " ".join(x for x in (os_name, plat.get("os_version")) if x) or None,
             "arch": plat.get("arch") or None,
             "gpus": [g.get("model") or g.get("vendor") for g in facts.get("gpus") or [] if g.get("model") or g.get("vendor")]}

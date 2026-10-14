@@ -55,6 +55,20 @@ fn formula_and_reservations() {
     assert_eq!(r.reserved_mem_gb, 10.0);
 }
 
+/// Only efficiency cores count at half: an M5 Max (6 Super + 12 Performance cores, facts perf 18 and eff 0) gets a slot
+/// per core, an M4 Max (12 Performance + 4 Efficiency) 14.
+#[test]
+fn full_cores_count_whole_and_efficiency_cores_at_half() {
+    let host = |perf, eff| {
+        let policy = Policy::from_json(Some(&json!({"os_reserve_gb": 6})), &Policy::default());
+        CapacityModel::compute(&CapacityInputs::new(128.0, perf, eff, policy, Limits::uncapped()))
+    };
+    assert_eq!(host(18, 0).cpu_slots, 18);
+    assert_eq!(host(15, 0).cpu_slots, 15);
+    assert_eq!(host(12, 4).cpu_slots, 14);
+    assert_eq!(host(4, 4).cpu_slots, 6);
+}
+
 #[test]
 fn protection_brakes_and_pool_jobs_only() {
     let mut no_admit = CombinedConstraint {

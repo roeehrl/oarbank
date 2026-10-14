@@ -394,7 +394,9 @@ class SimAgent:
                                             "no_loopback", "gpu.compute")}
         self.facts = {"facts": 2, "hostname": f"sim-{idx:04d}",
                       "platform": {"os": "darwin", "arch": "arm64", "os_version": "27.0", "os_build": "26A123"},
-                      "cpu": {"model": "Apple M5 Pro", "perf_cores": 5, "eff_cores": 10, "logical": 15}, "memory_gb": ram,
+                      "cpu": {"model": "Apple M5 Pro", "perf_cores": 15, "eff_cores": 0, "logical": 15,
+                              "levels": [{"name": "Super", "cores": 5}, {"name": "Performance", "cores": 10}]},
+                      "memory_gb": ram,
                       "disk_free_gb": 400.0, "sandbox": {"backend": "seatbelt", "enforcement": enforced}}
         self.client = self.node_id = None
         self.running: dict[int, Att] = {}
