@@ -15,7 +15,10 @@ Safety (must hold after every committed transaction):
   S7  live attempts only run on ready (not quarantined/retired) nodes
   S8  a live non-golden attempt runs a module certified on its node, under the current certification, or is an attempt
       of a stage that needs no certification (a bootstrap stage, or one that compares nothing and needs no capability or
-      pool) on a node where the module is in a state its doctor decides (not revoked, not unknown)
+      pool) on a node where the module is in a state its doctor decides (not revoked, not unknown). The certification an
+      attempt was granted under stands while the node re-certifies (a new version, canary or periodic: `certifying`,
+      same generation) for the attempts granted before that began; it ends with a new generation, a revocation or
+      golden_failed. The version an attempt records is the one its node's release carried (the certified code)
   S9  attempt bookkeeping: ended_at is set iff the attempt is no longer live
   S10 a job's exec_failures never exceeds its failed/killed attempts
   S11 no node holds more live attempts than its `jobs` cap (when set and enforced hard)
@@ -135,10 +138,41 @@ def _manifest(module: str, version: str | None):
         return i.manifest if i else None
 
 
+def _released_version(db: DB, release_id: str | None, module: str, cache: dict) -> dict:
+    """{version, digest} of a module in a release's composition ({} when the release names none)."""
+    if release_id not in cache:
+        r = db.one("SELECT composition_json FROM releases WHERE release_id=?", (release_id,)) if release_id else None
+        cache[release_id] = jl(r["composition_json"], {}) if r else {}
+    return cache[release_id].get(module) or {}
+
+
+def _s8_certified(r: dict, st: dict, ran: dict) -> str | None:
+    """Why a live attempt of a stage that needs certification does not run under a certification that stands (None: it
+    does). `ran`: the module's entry in the composition of the release the attempt was granted on."""
+    gen, state = st.get("generation"), st.get("state")
+    if gen != r["cert_generation"] or not isinstance(gen, int) or gen <= 0:
+        return f"state={state} gen={gen} attempt_gen={r['cert_generation']}"
+    if state == "certifying":
+        # re-certifying (a new version, canary or periodic): the certification stands for the attempts granted under it,
+        # but a node that is certifying is never granted work (claim: only `certified`)
+        since = st.get("certifying_since")
+        if since is not None and r["granted_at"] is not None and r["granted_at"] > since:
+            return f"state=certifying gen={gen} attempt_gen={r['cert_generation']}: granted while certifying"
+    elif state != "certified":
+        return f"state={state} gen={gen} attempt_gen={r['cert_generation']}"
+    if ran.get("version") and r["module_version"] and ran["version"] != r["module_version"]:
+        return (f"state={state} gen={gen}: records {r['module']} {r['module_version']} but its release "
+                f"{r['release_id']} carries {ran['version']}")
+    if ran.get("digest") and st.get("digest") and ran["digest"] != st["digest"]:
+        return f"state={state} gen={gen}: its release {r['release_id']} carries a digest of {r['module']} not certified here"
+    return None
+
+
 def s8_live_module_certified(db: DB):
-    out = []
-    for r in db.q("SELECT a.attempt_id, a.cert_generation, a.module_version, j.module, j.kind, j.stage, n.node_id, n.modules_json "
-                  "FROM attempts a JOIN jobs j ON j.job_id=a.job_id JOIN nodes n ON n.node_id=a.node_id WHERE a.state='live'"):
+    out, rels = [], {}
+    for r in db.q("SELECT a.attempt_id, a.cert_generation, a.module_version, a.release_id, a.granted_at, j.module, j.kind, "
+                  "j.stage, n.node_id, n.modules_json FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
+                  "JOIN nodes n ON n.node_id=a.node_id WHERE a.state='live'"):
         st = (jl(r["modules_json"], {}) or {}).get(r["module"], {})
         man = _manifest(r["module"], r["module_version"]) if r["kind"] != "golden" else None
         if man is not None and man.certification_exempt(r["stage"]):
@@ -149,9 +183,10 @@ def s8_live_module_certified(db: DB):
         elif r["kind"] == "golden":
             if st.get("state") not in ("certifying", "certified"):
                 out.append(f"S8 golden attempt {r['attempt_id']} live but {r['module']} is {st.get('state')} on {r['node_id']}")
-        elif st.get("state") != "certified" or st.get("generation") != r["cert_generation"]:
-            out.append(f"S8 attempt {r['attempt_id']} runs {r['module']} on {r['node_id']} state={st.get('state')} "
-                       f"gen={st.get('generation')} attempt_gen={r['cert_generation']}")
+        else:
+            why = _s8_certified(r, st, _released_version(db, r["release_id"], r["module"], rels))
+            if why:
+                out.append(f"S8 attempt {r['attempt_id']} runs {r['module']} on {r['node_id']} {why}")
     return out
 
 

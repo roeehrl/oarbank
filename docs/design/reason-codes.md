@@ -127,6 +127,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `PROTECTION_FRONT_UNKNOWN` | The front app cannot be read here ({why}); frontmost rules count it as in front | P4 | – | – | – |
 | `PROTECTION_PRESENCE_UNKNOWN` | Whether someone is at the machine cannot be read ({why}); it counts as someone present | P4 | – | – | – |
 | `PROTECTION_SESSION_HELPER_UNAVAILABLE` | Session helper unavailable ({why}): other accounts' processes are evaluated without session helper (fail-safe) (rules: {rules}) | P3 | – | – | – |
+| `PROTECTION_SESSION_HELPER_OUTDATED` | Session helper running another version than the installed agent {expected}: {helpers} | P4 | – | – | – |
 | `PROTECTION_UNREADABLE` | Rule {rule} matched {n} processes whose path, arguments or identity could not be read (counted as matches) | P5 | – | – | – |
 | `PROTECTION_WITHOUT_HELPER` | Rule {rule}: {n} processes evaluated without session helper (fail-safe): what only their helper reads counts as matching, unknown use as active | P4 | – | – | – |
 | `PROTECTION_NO_LOWERING` | This node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable jobs are paused instead | P3 | – | – | – |

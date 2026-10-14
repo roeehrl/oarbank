@@ -246,9 +246,10 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     assert any(t.startswith("windows-amd64: not a platform it supports (pc): no JVM build for Windows") for t in texts)
     assert s["built"]["status"] == "done"
     wait = {a["platform"]: a["release_id"] for a in releases.awaiting(db)}
+    assert list(wait) == ["darwin-arm64"]               # the PC's release holds no module: it needs no signature
     sign_items = [i for i in s["signed"]["items"] if i.get("sign")]
     assert s["signed"]["status"] == "blocked" and {i["command"] for i in sign_items} == {
-        f"oarbank release sign {wait['darwin-arm64']} --promote", f"oarbank release sign {wait['windows-amd64']} --promote"}
+        f"oarbank release sign {wait['darwin-arm64']} --promote"}
     # host tools: per request, how many nodes resolve it and why the others do not (tools.resolution)
     assert s["tools"]["status"] == "blocked" and s["tools"]["actions"][0]["href"] == f"/modules/{name}/nodes"
     item = s["tools"]["items"][0]
@@ -268,7 +269,7 @@ def test_readiness_walks_every_blocker_to_the_first_operation(db, tmp_path):
     assert nxt["status"] == "next" and [o["verb"] for o in nxt["items"]][:2] == ["set_favorite", "queue_sums"]
     assert nxt["items"][0]["op"] == "mod.javatoy.set_favorite"
     assert rd["state"] == "blocked"
-    assert rd["summary"] == "needs: sign 2 releases, jdk on a node, a node for run"
+    assert rd["summary"] == "needs: sign 1 release, jdk on a node, a node for run"
 
     # the Mac reports the JDK 11 it has: too old, with the command that installs one the module accepts
     core.heartbeat(db, fresh(db, mac), {"attempts": [], "tools": {"detected_at": 1.0, "native_arch": "arm64", "tools": {"jdk": [
@@ -379,13 +380,14 @@ def test_console_names_waiting_releases_and_the_readiness_checklist(db, tmp_path
             wait = {a["platform"]: a["release_id"] for a in releases.awaiting(db)}
             state.rebuild()
             fleet = c.get("/").text
-            assert "2 releases waiting for your signature." in fleet
-            for rid in wait.values():
-                assert f"oarbank release sign {rid} --promote" in fleet
-            assert "release needs your signature" in fleet                   # the enrolled nodes' chip
+            assert list(wait) == ["darwin-arm64"]                           # the PC's empty release needs none
+            assert "1 release waiting for your signature." in fleet
+            assert f"oarbank release sign {wait['darwin-arm64']} --promote" in fleet
+            assert "windows-amd64" not in fleet.split("release-wait", 1)[1].split("</div>", 1)[0]
+            assert "release needs your signature" in fleet                   # the Mac's chip
             mods = c.get("/modules").text
-            assert "2 releases waiting for your signature." in mods
-            assert "needs: sign 2 releases, jdk on a node, a node for run" in mods and "Getting it running" in mods
+            assert "1 release waiting for your signature." in mods
+            assert "needs: sign 1 release, jdk on a node, a node for run" in mods and "Getting it running" in mods
             page = c.get(f"/modules/{r['name']}")
             assert page.status_code == 200 and "script-src 'self'" in page.headers["content-security-policy"]
             html = page.text
@@ -397,6 +399,7 @@ def test_console_names_waiting_releases_and_the_readiness_checklist(db, tmp_path
             assert 'value="samtools"' in settings and "Define it" in settings
             assert "needs your signature" in settings and "Build releases" in settings
             assert f"{r['name']}@{r['version']}" in settings and "(no module)" in settings      # each release's contents
+            assert "no signature needed" in settings                          # the PC's empty release
             assert 'value="x&lt;y"' not in c.get("/settings", params={"tool": "x<y"}).text   # only a tool id is prefilled
 
 
@@ -419,3 +422,118 @@ def test_release_list_shows_platform_status_contents_and_the_command(db, monkeyp
         assert a["platform"] in row and "candidate" in row and "UNSIGNED" in row and "toy@0.1.0" in row
         assert "waiting for your signature" in row and f"    oarbank release sign {a['release_id']} --promote" in out
     assert "2 releases waiting for your signature" in out
+
+
+# ------------------------------------------------------------------ 6. an empty release needs no signature
+
+def macos_only(tmp_path) -> Path:
+    """toy, on macOS only: a fleet with a Windows PC has no module for it."""
+    src = tmp_path / "mactoy"
+    shutil.copytree(TOY_DIR, src)
+    t = (src / "oarbank-module.toml").read_text(encoding="utf-8")
+    t = t.replace('platforms = ["darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-arm64", "windows-amd64"]',
+                  'platforms = ["darwin-arm64"]')
+    (src / "oarbank-module.toml").write_text(t, encoding="utf-8")
+    return src
+
+
+def release_files(db, rid) -> tuple[dict, list[str]]:
+    """(modules.json, the paths MANIFEST.json lists) of a built release."""
+    import tarfile
+    path = db.one("SELECT path FROM releases WHERE release_id=?", (rid,))["path"]
+    with tarfile.open(db.abs(path)) as t:
+        mods = json.loads(t.extractfile("modules.json").read())
+        man = json.loads(t.extractfile("MANIFEST.json").read())
+    return mods, [f["path"] for f in man["files"]]
+
+
+@pytest.fixture
+def mixed(db, tmp_path):
+    """A Mac and a Windows PC; the one enabled module runs only on macOS. Returns (mac, pc, {platform: release_id})."""
+    _, mac = enrolled_node(db, "mac")
+    _, pc = enrolled_node(db, "pc", facts=WIN)
+    install(db, macos_only(tmp_path))
+    out = releases.sync(db)
+    return mac, pc, out["defaults"]
+
+
+def test_a_platform_no_module_runs_on_gets_an_empty_release_without_the_owner(db, mixed):
+    mac, pc, rel = mixed
+    win = db.one("SELECT * FROM releases WHERE release_id=?", (rel["windows-amd64"],))
+    assert win["status"] == "current" and win["signature"] is None and releases.is_empty(win["composition_json"])
+    mods, files = release_files(db, win["release_id"])
+    assert mods["modules"] == [] and mods["tools"] == {} and files == ["modules.json"]   # nothing that runs
+    # only the Mac's release, which holds module code, waits for the owner: one banner entry, one alert
+    assert [a["platform"] for a in releases.awaiting(db)] == ["darwin-arm64"]
+    assert [a["platform"] for a in db.get_state(releases.AWAITING)] == ["darwin-arm64"]
+    rules = [a["rule"] for a in db.q("SELECT rule FROM alerts WHERE state IN ('open','pending')")]
+    assert rules == [f"release_awaiting_owner:{rel['darwin-arm64']}"]
+    assert not [e for e in built(db) if "windows" in e["reason"] and "next" in e]
+    # the PC gets it, unsigned, installs it and is ready with no module
+    d = hello(db, pc, facts=WIN)
+    assert d["release"]["release_id"] == win["release_id"] and d["release"]["signature"] is None
+    assert releases.node_release(db, fresh(db, pc))["state"] == "installing"
+    hello(db, pc, win["release_id"], facts=WIN)
+    assert fresh(db, pc)["lifecycle"] == "ready" and releases.node_release(db, fresh(db, pc))["state"] == "installed"
+    nv = core.node_view_for_claim(db, fresh(db, pc), set(), set(), 8, 32, {})
+    from oarbank.coordinator import predicates
+    assert predicates.first_failure(predicates.admission(nv)).code not in ("NO_RELEASE", "RELEASE_UNSIGNED", "RELEASE_PENDING")
+    # the Mac still waits for the owner's signature: module code is never let through unsigned
+    assert releases.node_release(db, fresh(db, mac))["state"] == "unsigned"
+    assert hello(db, mac)["release"] is None
+
+
+def test_module_code_still_needs_the_signature(db, mixed):
+    mac, _, rel = mixed
+    with pytest.raises(releases.ReleaseRefused, match="unsigned"):
+        releases.promote(db, rel["darwin-arm64"], "owner")
+    out = {r["platform"]: r for r in op(db, "releases.build")["result"]["releases"]}
+    assert out["darwin-arm64"]["needs_signature"] and not out["windows-amd64"]["needs_signature"]
+    assert "next" not in out["windows-amd64"]
+    # a node-specific release with module code waits too; an empty node-specific one does not
+    empty = releases.build(db, make_current=False, comp={}, platform="darwin-arm64")
+    assert not empty["needs_signature"]
+    db.x("UPDATE nodes SET assigned_release=? WHERE node_id=?", (empty["release_id"], mac["node_id"]))
+    assert all(a["kind"] == "platform" for a in releases.awaiting(db))
+    assert releases.node_release(db, fresh(db, mac))["state"] == "installing"
+    sign(db, rel["darwin-arm64"])
+    assert releases.awaiting(db) == []
+
+
+def test_module_changes_do_not_make_the_owner_sign_empty_releases(db, mixed):
+    _, pc, rel = mixed
+    sign(db, rel["darwin-arm64"])
+    hello(db, pc, rel["windows-amd64"], facts=WIN)
+    for _ in range(2):
+        modstore.disable(db, "toy")
+        releases.sync(db)
+        modstore.enable(db, "toy", "0.1.0")
+        releases.sync(db)
+    assert [a["platform"] for a in releases.awaiting(db)] in ([], ["darwin-arm64"])
+    assert not [a for a in releases.awaiting(db) if a["platform"] == "windows-amd64"]
+    assert db.one("SELECT release_id FROM releases WHERE platform='windows-amd64' AND status='current'")["release_id"] == rel["windows-amd64"]
+    assert fresh(db, pc)["lifecycle"] == "ready" and hello(db, pc, rel["windows-amd64"], facts=WIN)["release"] is None
+
+
+def test_an_upgrade_clears_the_empty_releases_an_older_coordinator_held_for_the_owner(db, mixed):
+    """An older coordinator built the PC's empty release with the fleet's tool definitions and held it for the owner's
+    signature (banner, alert). After the upgrade it is retired, its replacement promoted, the alert resolved."""
+    _, pc, rel = mixed
+    old = "r_0ldempty0000"
+    db.x("UPDATE releases SET release_id=?, status='candidate' WHERE release_id=?", (old, rel["windows-amd64"]))
+    db.set_state(releases.DEFAULTS, {**db.get_state(releases.DEFAULTS), "windows-amd64": old})
+    core._alert(db, f"release_awaiting_owner:{old}", "platform:windows-amd64", "Release r_0ldempty0000 ... (no module)")
+    db.set_state(releases.AWAITING, [{"release_id": old, "platform": "windows-amd64", "kind": "platform", "modules": [],
+                                      "nodes": ["pc"], "node_ids": [pc["node_id"]], "command": f"oarbank release sign {old} --promote"}])
+    releases.ensure_fleet(db)                       # oarbankd's loop, right after the upgrade
+    assert db.one("SELECT status FROM releases WHERE release_id=?", (old,))["status"] == "retired"
+    cur = db.one("SELECT release_id, signature FROM releases WHERE platform='windows-amd64' AND status='current'")
+    assert cur["release_id"] == rel["windows-amd64"] and cur["signature"] is None
+    assert not db.q("SELECT 1 FROM alerts WHERE rule=? AND state IN ('open','pending')", (f"release_awaiting_owner:{old}",))
+    assert [a["platform"] for a in db.get_state(releases.AWAITING)] == ["darwin-arm64"]
+    hello(db, pc, cur["release_id"], facts=WIN)
+    assert fresh(db, pc)["lifecycle"] == "ready"
+    # the same id still waiting (no tool definitions then) is promoted in place
+    db.x("UPDATE releases SET status='candidate' WHERE release_id=?", (cur["release_id"],))
+    releases.ensure_fleet(db)
+    assert db.one("SELECT status FROM releases WHERE release_id=?", (cur["release_id"],))["status"] == "current"

@@ -212,6 +212,8 @@ CODES: list[ReasonCode] = [
       "as someone present", "P4"),
     C("PROTECTION_SESSION_HELPER_UNAVAILABLE", "protection", "Session helper unavailable ({why}): other accounts' "
       "processes are evaluated without session helper (fail-safe) (rules: {rules})", "P3"),
+    C("PROTECTION_SESSION_HELPER_OUTDATED", "protection", "Session helper running another version than the installed "
+      "agent {expected}: {helpers}", "P4"),
     C("PROTECTION_UNREADABLE", "protection", "Rule {rule} matched {n} processes whose path, arguments or identity could not "
       "be read (counted as matches)", "P5"),
     C("PROTECTION_WITHOUT_HELPER", "protection", "Rule {rule}: {n} processes evaluated without session helper (fail-safe): "

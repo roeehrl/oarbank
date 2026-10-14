@@ -301,9 +301,10 @@ The core runs no work of its own: a module brings it. From the console's **Modul
 2. **Approve its sandbox grants** if it asks for any: network hosts, host tools, containers
    (`oarbank module approve <name>@<version>`, previewed first).
 3. **Enable** it (`oarbank module enable <name>@<version>`). Oarbank builds a release for every platform of the
-   fleet: the module's bundle (or none, where it does not run) for the nodes of that platform.
-4. **Sign each platform's release.** With release signing on (the default) nothing reaches a node until the owner
-   signs its release offline, on the machine that holds the owner key:
+   fleet: the module's bundle for the nodes of that platform or, where no enabled module runs, an empty release.
+4. **Sign each platform's release that holds the module.** With release signing on (the default) no module code
+   reaches a node until the owner signs its release offline, on the machine that holds the owner key (an empty
+   release, for a platform the module does not run on, needs no signature: those nodes are ready with no module):
    ```bash
    oarbank release list                          # each release's platform, status and contents; the waiting ones
    oarbank release sign <release> --promote      # once per platform it names

@@ -495,7 +495,11 @@ fn main() -> anyhow::Result<()> {
             let mut a = agent::Agent::open(layout, coordinator.as_deref())?;
             a.enroll(std::time::Duration::from_secs(2), wait.map(std::time::Duration::from_secs)).await
         }),
-        Cmd::SessionHelper => Err(oarbank_protection::platform::run_session_helper().into()),
+        Cmd::SessionHelper => {
+            // its reports say which version it runs: the service asks one of another version to restart
+            oarbank_protection::session::set_helper_version(VERSION);
+            Err(oarbank_protection::platform::run_session_helper().into())
+        }
         Cmd::Check { code_file, code_stdin, coordinator, json } => {
             let code = read_code(code_file.as_deref(), code_stdin)?;
             let code = rt.block_on(check_cmd(code, coordinator, json));

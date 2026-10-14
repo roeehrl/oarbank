@@ -153,6 +153,8 @@ fn take_reports(hub: &Arc<SessionHub>, s: UnixStream, owns: fn(u32, i32, u64) ->
     // one writer for what the service sends this person's helper: the owner sources to read (`Watch` lines) and
     // requests to act on a delegated process of this person (`act` lines)
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // this connection's own writer for a restart request (a helper of another version than expected)
+    let mut restart_w = s.try_clone().ok();
     if let Ok(w) = s.try_clone() {
         let w = Arc::new(std::sync::Mutex::new(w));
         let relay_w = w.clone();
@@ -187,7 +189,11 @@ fn take_reports(hub: &Arc<SessionHub>, s: UnixStream, owns: fn(u32, i32, u64) ->
             _ => break,
         }
         if let Ok(report) = serde_json::from_str::<Report>(&line) {
+            let version = report.version.clone();
             hub.accept(who, report, |pid, start| owns(uid, pid, start));
+            if let (Some(req), Some(w)) = (hub.restart_line(who, version.as_deref()), restart_w.as_mut()) {
+                let _ = w.write_all(req.as_bytes());
+            }
         }
     }
     alive.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -215,7 +221,12 @@ pub(super) fn run_helper(path: &Path, mut report: impl FnMut(bool) -> Report) ->
                             Ok(n) if n > 0 && line.ends_with('\n') => {}
                             _ => return,
                         }
-                        if let Some(a) = act_request(&line) {
+                        if let Some(r) = crate::session::restart_request(&line) {
+                            // another version than the service expects: launchd or the user manager starts the
+                            // installed binary again
+                            eprintln!("oarbank session helper: restarting: {}", r.restart);
+                            std::process::exit(0);
+                        } else if let Some(a) = act_request(&line) {
                             let _ = act_on(&a);
                         } else if let Ok(w) = serde_json::from_str::<Watch>(&line) {
                             if w.v == PROTOCOL {
@@ -229,6 +240,7 @@ pub(super) fn run_helper(path: &Path, mut report: impl FnMut(bool) -> Report) ->
             loop {
                 let mut rep = report(first);
                 rep.sources = relay.readings();
+                rep.version = crate::session::helper_version();
                 let mut line = serde_json::to_string(&rep).unwrap_or_default();
                 line.push('\n');
                 if s.write_all(line.as_bytes()).is_err() {
@@ -353,6 +365,40 @@ mod tests {
         let again = serve(&path, "", SessionHub::new(), any_owner).unwrap();
         assert!(again.alive());
         UnixStream::connect(&path).expect("served again");
+    }
+
+    /// Over a real socket: a helper reporting another version than expected reads a restart request on its own
+    /// connection (once); one of the expected version reads none and shows as current.
+    #[test]
+    fn a_helper_of_another_version_reads_a_restart_request() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("run/s.sock");
+        let hub = SessionHub::new();
+        hub.set_expected_version(Some("2.10.5".into()));
+        let _served = serve(&path, "", hub.clone(), any_owner).unwrap();
+        let send = |s: &mut UnixStream, v: &str| {
+            let mut line = serde_json::to_string(&Report { v: PROTOCOL, version: Some(v.into()), ..Report::default() }).unwrap();
+            line.push('\n');
+            s.write_all(line.as_bytes()).unwrap();
+        };
+        let mut old = UnixStream::connect(&path).unwrap();
+        old.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut r = BufReader::new(old.try_clone().unwrap());
+        send(&mut old, "2.10.4");
+        let restart = loop {
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            if let Some(req) = crate::session::restart_request(&line) {
+                break req;                                   // (a `Watch` line may come first)
+            }
+        };
+        assert!(restart.restart.contains("runs 2.10.4, the installed agent is 2.10.5"), "{}", restart.restart);
+        assert!(until(|| hub.helpers().iter().any(|h| h.version.as_deref() == Some("2.10.4") && !h.current)));
+        drop((old, r));
+        assert!(until(|| hub.helpers().is_empty()));
+        let mut new = UnixStream::connect(&path).unwrap();
+        send(&mut new, "2.10.5");
+        assert!(until(|| hub.helpers().iter().any(|h| h.version.as_deref() == Some("2.10.5") && h.current)));
     }
 
     /// The system service keeps trying: a directory it cannot make at first (a file stands where it goes) fails with

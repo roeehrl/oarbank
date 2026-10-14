@@ -11,6 +11,12 @@ step needs ssh.
 
 An uploaded binary is never executed here: its platform comes from its executable headers (Mach-O, ELF, PE) and its
 version from the marker every agent build embeds, `oarbank-agent-version:<semver>` followed by a NUL byte.
+
+The installed package supersedes the channel (docs/protocol.md, "Agent self-update", "The package supersedes older
+builds"): a node is never assigned a channel build older than its package floor, the newer of the agent its installed
+package carries (`install.package_version`) and the fleet release it last installed (`node_update` done). A build of the
+floor's own version is assigned only to take a node back down to it (a rollback from a newer channel build). Starting a
+fleet rollout retires every channel build older than its release, and so does a migration for homes from before.
 """
 import hashlib
 import json
@@ -55,6 +61,85 @@ def behind(node: dict) -> dict | None:
             "text": f"agent {v} is older than this coordinator ({__version__}): update the node: install the "
                     f"{__version__} node package on it, or upload the {__version__} agent build on the Agent page and "
                     f"enable it for its platform"}
+
+
+def _vkey(v):
+    from .fleetupdates import vkey
+    return vkey(v)
+
+
+def _newer(a, b) -> bool:
+    from .fleetupdates import newer
+    return newer(a, b)
+
+
+def package_floor(node: dict) -> dict | None:
+    """The version no channel build may take this node below: {version, package, fleet, text}, or None when nothing
+    says (an agent of 2.10.4 or earlier does not report its package's version, and the node had no fleet update)."""
+    inst = jl(node.get("install_json"), {}) or {}
+    rep = jl(node.get("node_update_json"), {}) or {}
+    pkg = inst.get("package_version") if _vkey(inst.get("package_version")) else None
+    fleet = rep.get("release") if rep.get("state") == "done" and _vkey(rep.get("release")) else None
+    v = max((x for x in (pkg, fleet) if x), key=_vkey, default=None)
+    if not v:
+        return None
+    src = "its installed package" if v == pkg else f"fleet release {fleet}, which it installed"
+    return {"version": v, "package": pkg, "fleet": fleet, "text": f"agent {v} from {src}"}
+
+
+def superseded(node: dict, version: str | None) -> str | None:
+    """Why a channel build of `version` is not for this node: older than its package floor, or the floor's own version
+    while the node runs no newer agent (the package's agent is that version already). None when the build applies."""
+    f = package_floor(node)
+    if not f or not _vkey(version):
+        return None
+    if _newer(f["version"], version):
+        return f"channel build {version} is older than {f['text']}: the package supersedes it"
+    if _vkey(version) == _vkey(f["version"]) and not _newer(node.get("agent_version"), f["version"]):
+        return f"channel build {version} is the version of {f['text']}: the package's agent stays"
+    return None
+
+
+def fleet_floor(db: DB) -> str | None:
+    """The newest fleet release a rollout took (or is taking) the fleet to; channel builds older than it are stale."""
+    rows = db.q("SELECT version FROM rollouts WHERE kind='update' AND state IN ('running','paused','halted','done','superseded')")
+    return max((r["version"] for r in rows if _vkey(r["version"])), key=_vkey, default=None)
+
+
+def _check_floor(db: DB, sha: str):
+    floor, v = fleet_floor(db), (record(db, sha) or {}).get("version")
+    if floor and _newer(floor, v):
+        raise BuildError(f"agent build {v} ({sha[:12]}) is older than fleet release {floor}, which the fleet was updated "
+                         f"to: the package supersedes it (upload a newer build)")
+
+
+def retire(db: DB, version: str | None, actor: str = "system", why: str = "") -> dict:
+    """Retire every channel build older than fleet release `version`: on each platform, a current, previous or canary
+    build older than it is taken off the channel (the build stays in the store). {platform: [retired slots]}."""
+    out = {}
+    if not _vkey(version):
+        return out
+    ver = {b["sha256"]: b["version"] for b in db.q("SELECT sha256, version FROM agent_builds")}
+    for plat, ch in channels(db).items():
+        gone = [k for k in ("current", "previous", "canary") if ch[k] and _newer(version, ver.get(ch[k]))]
+        if not gone:
+            continue
+        for k in gone:
+            db.event("agent_build_retired", actor=actor, reason=f"{plat} {k} {ver.get(ch[k])} ({ch[k][:12]}) is older than "
+                     f"fleet release {version}" + (f": {why}" if why else ""))
+            ch[k] = None
+        if "canary" in gone:
+            ch["canary_nodes"] = []
+        _save(db, ch)
+        out[plat] = gone
+    return out
+
+
+def migrate(db: DB) -> dict:
+    """A home from before the package superseded the channel: retire the channel builds older than the newest fleet
+    release a rollout took the fleet to (the 2.10.3 channel build that kept nodes off the 2.10.4 package's agent)."""
+    with db.tx():
+        return retire(db, fleet_floor(db), why="the fleet release supersedes the channel")
 
 
 HEALTHY_WITHIN_S = 120                                          # a canary node must have heartbeated this recently
@@ -212,6 +297,7 @@ def canary(db: DB, sha: str, nodes: list[str]) -> dict:
     if not nodes:
         raise BuildError("name at least one canary node")
     _needs_signature(db, sha)
+    _check_floor(db, sha)
     by_plat = {}
     for nid in sorted(set(nodes)):
         plat = _node_platform(db, nid)
@@ -264,6 +350,7 @@ def promote(db: DB, platform: str | None = None) -> dict:
         if not ch["canary"]:
             raise BuildError(f"no canary agent build to promote on {plat}")
         _needs_signature(db, ch["canary"])
+        _check_floor(db, ch["canary"])
         if ch["current"] != ch["canary"]:
             ch["previous"] = ch["current"]
         ch.update(current=ch["canary"], canary=None, canary_nodes=[])
@@ -285,6 +372,7 @@ def rollback(db: DB, platform: str | None = None) -> dict:
             ch.update(canary=None, canary_nodes=[])
         elif ch["previous"]:
             _needs_signature(db, ch["previous"])
+            _check_floor(db, ch["previous"])
             ch.update(current=ch["previous"], previous=ch["current"])
         else:
             raise BuildError(f"nothing to roll back on {plat}: no canary and no previous build")
@@ -320,15 +408,23 @@ def attach_signature(db: DB, sha: str, stmt: str, signature: str) -> dict:
     return {"sha256": sha, "seq": int(s["seq"])}
 
 
+def channel_pick(ch: dict, node: dict) -> str | None:
+    """The channel's build for this node: the canary on canary nodes, else current."""
+    if ch["canary"] and node["node_id"] in ch["canary_nodes"]:
+        return ch["canary"]
+    return ch["current"]
+
+
 def assigned(db: DB, node: dict) -> str | None:
+    """The build this node is assigned: its channel's, unless its installed package supersedes it."""
     from . import platforms
     plat = platforms.node_platform(node)
     if not plat:
         return None
-    ch = channel(db, plat)
-    if ch["canary"] and node["node_id"] in ch["canary_nodes"]:
-        return ch["canary"]
-    return ch["current"]
+    sha = channel_pick(channel(db, plat), node)
+    if sha and superseded(node, (record(db, sha) or {}).get("version")):
+        return None
+    return sha
 
 
 def directive(db: DB, node: dict) -> dict | None:
@@ -360,17 +456,39 @@ def observe(db: DB, node: dict, body: dict):
                  reason=f"{(upd.get('target') or '')[:12]}: {(upd.get('error') or '')[:300]}")
 
 
+NODE_COLUMNS = ("node_id, hostname, platform, facts_json, agent_version, agent_build, agent_update_json, install_json, "
+                "node_update_json, last_heartbeat_at, lifecycle")
+
+
+def node_view(n: dict, ch: dict | None, versions: dict) -> dict:
+    """One node on the Agent page and in `oarbank agent list`: what it runs, its installed package's agent, its channel
+    build and whether the package supersedes it, and whether it is up to date. `ch` is its platform's channel."""
+    pick = channel_pick(ch, n) if ch else None
+    why = superseded(n, versions.get(pick)) if pick else None
+    a = None if why else pick
+    floor = package_floor(n)
+    pkg = floor["package"] if floor else None
+    below = floor if floor and _newer(floor["version"], n.get("agent_version")) else None
+    fix = ("its launcher starts the package's agent at its next start (restart the node's service)" if below and below["package"]
+           and not _newer(below["fleet"], below["package"]) else "the fleet rollout takes it to the release again")
+    return {**{k: n.get(k) for k in ("node_id", "hostname", "platform", "agent_version", "agent_build", "last_heartbeat_at")},
+            "assigned": a, "assigned_version": versions.get(a), "channel": pick, "channel_version": versions.get(pick),
+            "superseded": why, "package_version": pkg, "floor": floor,
+            "canary": bool(ch and ch["canary"] and n["node_id"] in ch["canary_nodes"]),
+            # older than its package floor: an older build kept running (a launcher of 2.10.4 or earlier kept a channel
+            # build current, or a coordinator before this rule sent the node back down)
+            "runs_older_than_package": f"runs agent {n.get('agent_version')}, older than {below['text']}: {fix}" if below else None,
+            "update": jl(n.get("agent_update_json"), {}) or {}, "behind": behind(n),
+            "up_to_date": (a is None or n.get("agent_build") == a) and not (a is None and behind(n)) and not below}
+
+
 def view(db: DB) -> dict:
-    nodes = db.q("SELECT node_id, hostname, platform, facts_json, agent_version, agent_build, agent_update_json, "
-                 "last_heartbeat_at, lifecycle FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
+    from . import platforms
+    nodes = db.q(f"SELECT {NODE_COLUMNS} FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")
     chs = channels(db)
     by_sha = {b["sha256"]: b for b in builds(db)}
-    out = []
-    for n in nodes:
-        a = assigned(db, n)
-        out.append({**{k: n[k] for k in ("node_id", "hostname", "platform", "agent_version", "agent_build", "last_heartbeat_at")},
-                    "assigned": a, "assigned_version": (by_sha.get(a) or {}).get("version"),
-                    "update": jl(n["agent_update_json"], {}) or {}, "behind": behind(n),
-                    "up_to_date": (a is None or n["agent_build"] == a) and not (a is None and behind(n))})
+    versions = {s: b["version"] for s, b in by_sha.items()}
+    out = [node_view(n, chs.get(platforms.node_platform(n)), versions) for n in nodes]
     return {"builds": [{k: v for k, v in b.items() if k != "path"} for b in by_sha.values()], "channels": chs, "nodes": out,
-            "readiness": {p: readiness(db, p) for p, ch in chs.items() if ch["canary"]}, "signing": C.RELEASE_SIGNING}
+            "readiness": {p: readiness(db, p) for p, ch in chs.items() if ch["canary"]}, "signing": C.RELEASE_SIGNING,
+            "fleet_floor": fleet_floor(db)}

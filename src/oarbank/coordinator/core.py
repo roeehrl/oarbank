@@ -462,6 +462,11 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
              " WHERE node_id=?", (t, json.dumps(tel), json.dumps(cap),
                                   json.dumps(body.get("ready_datasets") or jl(node["ready_datasets_json"], [])),
                                   clock_offset(body, t, node.get("clock_offset_s")), nid))
+        # an agent after 2.10.4 says which version it runs on every heartbeat, not only in its hello
+        hv = body.get("agent_version")
+        if isinstance(hv, str) and hv != node.get("agent_version") and fleetupdates.vkey(hv):
+            db.x("UPDATE nodes SET agent_version=? WHERE node_id=?", (hv, nid))
+            node = {**node, "agent_version": hv}
         last = db.one("SELECT MAX(ts) m FROM node_samples WHERE node_id=?", (nid,))
         if not last or not last["m"] or t - last["m"] >= C.SAMPLE_EVERY:
             busy = db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"]
@@ -590,9 +595,14 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
     doc = jl(node["doctor_json"]) or {}
     reports = doc.get("modules") or {}
     states = node_modules(node)
+    off = modstore.disabled_names(db, node)
     for name in modcalls.enabled(db):
         rep, st = reports.get(name), states.get(name, {})
         s = st.get("state")
+        if name in off:                   # turned off on this node: never certified or certifying here, no goldens
+            if s not in (None, "disabled"):
+                _module_off(db, nid, name)
+            continue
         if rep is None:
             continue                      # agent hasn't doctored this module (yet)
         health = rep.get("health")
@@ -611,7 +621,7 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
             _set_module_state(db, nid, name, golden_failures=0)
             queue_goldens(db, nid, name)
             continue
-        if s in (None, "doctor_failed", "undetected", "revoked") and node["release_id"] == rel_id:
+        if s in (None, "doctor_failed", "undetected", "revoked", "disabled") and node["release_id"] == rel_id:
             _resolve_alert(db, f"doctor_failed:{name}", nid)
             queue_goldens(db, nid, name)
             continue
@@ -635,6 +645,18 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
                 queue_goldens(db, nid, name)
 
 
+def _module_off(db: DB, node_id: str, module: str):
+    """The module is turned off on the node (its effective `[module] enabled`): it holds no certification there and
+    runs no goldens. Turned on again, it re-certifies like a module that was never certified there."""
+    _cancel_goldens(db, node_id, module, "module_disabled")
+    _set_module_state(db, node_id, module, state="disabled", generation=-1, goldens_pending=False,
+                      reason="turned off on this node")
+    _end_superseded(db, node_id, module, -1, "module_disabled")
+    for rule in ("certifying_stuck", "doctor_failed", "golden_failed", "no_golden"):
+        _resolve_alert(db, f"{rule}:{module}", node_id)
+    db.event("module_disabled_here", node_id=node_id, reason=module, module=module)
+
+
 def _cancel_goldens(db: DB, node_id: str, module: str, why: str):
     for g in db.q("SELECT job_id FROM jobs WHERE target_node=? AND kind='golden' AND module=? AND state IN ('pending','leased')",
                   (node_id, module)):
@@ -650,9 +672,44 @@ def _golden_failed(db: DB, node_id: str, module: str, failures: int, reason: str
     _cancel_goldens(db, node_id, module, "golden_failed")
     _set_module_state(db, node_id, module, state="golden_failed", golden_failures=failures, generation=-1,
                       reason=f"{failures} golden failures (last: {reason})")
+    _end_superseded(db, node_id, module, -1, "golden_failed")
     db.event("golden_failed", node_id=node_id, reason=f"{module}: {failures} failures, last {reason}", module=module)
     _alert(db, f"golden_failed:{module}", node_id,
            f"{module}: golden jobs failed {failures} times on this node (last: {reason}); not certified", priority="high")
+
+
+def node_runs(db: DB, node: dict, module: str) -> str | None:
+    """The version of a module a node runs: the one its installed release carries. A canary, pin or promotion reaches a
+    node only with its release, so until the node installs it (and re-certifies on it) the node runs, and is certified
+    on, the version before; the channel's version for the node (modstore.version_for_node) is the fallback for a
+    release that does not name one."""
+    v = (releases.composition_of(db, node.get("release_id")).get(module) or {}).get("version")
+    return v or modstore.version_for_node(db, module, node["node_id"])
+
+
+def _cert_exempt(module: str, version: str | None, stage: str | None) -> bool:
+    """Does a job of this stage, run by this version of the module, need no certification (Manifest.certification_exempt)?"""
+    try:
+        man = modcalls.info_for(module, version).manifest
+    except KeyError:
+        i = modcalls.CATALOG.get(module)
+        man = i.manifest if i else None
+    return man is not None and man.certification_exempt(stage)
+
+
+def _end_superseded(db: DB, node_id: str, module: str, generation: int, why: str):
+    """A certification ended (a new generation passed its goldens, or the goldens failed): end the node's live attempts of
+    the module granted under another one. complete() would refuse their results (release_invalid), so they stop now and
+    their jobs return to the queue, uncharged. Re-certification itself ends nothing: the certification an attempt was
+    granted under stands until this (or a revocation) ends it (S8). Golden jobs and stages that need no certification
+    never depended on it."""
+    for a in db.q("SELECT a.attempt_id, a.cert_generation, a.module_version, j.stage FROM attempts a "
+                  "JOIN jobs j ON j.job_id=a.job_id WHERE a.node_id=? AND a.state='live' AND j.module=? AND j.kind!='golden'",
+                  (node_id, module)):
+        if a["cert_generation"] == generation or _cert_exempt(module, a["module_version"], a["stage"]):
+            continue
+        _end_attempt(db, a["attempt_id"], "revoked", why, count_failure=False)
+        _push(db, node_id, "revoke", a["attempt_id"])
 
 
 def queue_goldens(db: DB, node_id: str, module: str):
@@ -673,10 +730,11 @@ def run_pending_goldens(db: DB, node_id: str | None = None) -> int:
     rows = db.q("SELECT * FROM nodes WHERE node_id=?", (node_id,)) if node_id else \
         db.q("SELECT * FROM nodes WHERE lifecycle='ready'")
     for node in rows:
+        off = modstore.disabled_names(db, node)
         for module, st in node_modules(node).items():
-            if not (st.get("state") == "certifying" and st.get("goldens_pending")):
+            if not (st.get("state") == "certifying" and st.get("goldens_pending")) or module in off:
                 continue
-            ver = modstore.version_for_node(db, module, node["node_id"])
+            ver = node_runs(db, node, module)
             try:
                 goldens = modcalls.goldens(db, module, node, ver)
             except (ModuleUnavailable, ModuleError) as e:
@@ -724,6 +782,7 @@ def _certify(db: DB, node_id: str, module: str, note: str = ""):
     _set_module_state(db, node_id, module, state="certified", generation=gen, release=node["release_id"], digest=digest,
                       platform=fp["platform"], os_version=fp["os_version"], certified_at=now(), reason=None, golden_failures=0,
                       containers_off=containers.mode(node) == "off")
+    _end_superseded(db, node_id, module, gen, "certification_superseded")
     db.x("UPDATE nodes SET cert_os_version=? WHERE node_id=?", (fp["os_version"], node_id))
     db.x("UPDATE nodes SET breaker_failures=0 WHERE node_id=?", (node_id,))
     db.event("certified", node_id=node_id, reason=f"{module} generation {gen} {note}".strip(), module=module)
@@ -1116,6 +1175,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             "WHERE a.state='live' GROUP BY j.campaign_id")}
         weights = {r["campaign_id"]: r["weight"] or 1 for r in db.q("SELECT campaign_id, weight FROM campaigns WHERE state='running'")}
         bindings: dict = {}               # units and datasets read in this transaction; first claims bind into it (D33)
+        runs: dict = {}                   # {module: the version the node runs} (node_runs)
         cands.sort(key=lambda j: (-(j["priority"] or 0),
                                   per_campaign.get(j["campaign_id"], 0) / max(weights.get(j["campaign_id"], 1), 1e-6),
                                   -(j["subpriority"] or 0), j["job_id"]))
@@ -1139,7 +1199,11 @@ def claim(db: DB, node: dict, body: dict) -> dict:
                 continue
             placement.bind_on_claim(db, j, node, bindings)
             need_cpu, need_mem = float(res.get("cpu", 1)), float(res.get("mem_gb", 1.0))
-            ver = modstore.version_for_node(db, j["module"], nid)
+            # the version the node's release carries, which its certification is on: never a canary or promotion it has not
+            # installed yet (the channel moves first, the node's release after it)
+            if j["module"] not in runs:
+                runs[j["module"]] = node_runs(db, node, j["module"])
+            ver = runs[j["module"]]
             # the runner gets a SpecEnvelope: the module's payload plus what the stage reserves and its inputs
             spec = envelope(db, j, ver, res, arts_box.get("arts") if j["depends_on"] else None, platform=node.get("platform"))
             gen = nv.states.get(j["module"], {}).get("generation", 0)
@@ -1974,11 +2038,14 @@ def reap(db: DB):
             db.event("job_quarantined", job_id=j["job_id"], campaign_id=j["campaign_id"],
                      reason="replicas disagree and no uninvolved node can break the tie")
         placed = placement.reap(db)
-    for n in db.q("SELECT node_id, hostname, modules_json, capacity_json FROM nodes WHERE lifecycle='ready'"):
+    for n in db.q("SELECT node_id, hostname, modules_json, capacity_json, settings_json FROM nodes WHERE lifecycle='ready'"):
         if not (jl(n["capacity_json"], {}) or {}).get("admit", True):
             continue          # yielding (user present, a protected app, schedule): not claiming, not stuck
+        off = modstore.disabled_names(db, n)
         for mname, st in (jl(n["modules_json"], {}) or {}).items():
-            if st.get("state") == "certifying" and not _can_serve(st):
+            if mname in off:
+                _resolve_alert(db, f"certifying_stuck:{mname}", n["node_id"])   # off here: not stuck, never certifying
+            elif st.get("state") == "certifying" and not _can_serve(st):
                 # goldens that never finish (e.g. the Mac sleeps through every run) no longer block work (F5),
                 # but the operator must hear about it (TLA+ review follow-up)
                 _alert(db, f"certifying_stuck:{mname}", n["node_id"],
