@@ -913,7 +913,7 @@ def test_the_periodic_check_fetches_a_newer_release(db, monkeypatch):
     node(db, "a")
     set_fleet(db, "update_check_h", 1)
     fetched = []
-    monkeypatch.setattr(F, "latest", lambda db: "2.10.4")
+    monkeypatch.setattr(F, "latest", lambda db: NEXT)                       # a release newer than this coordinator
     monkeypatch.setattr(F, "fetch", lambda db, v, actor: fetched.append((v, actor)))
     monkeypatch.setattr(RO, "_spawn", lambda fn: fn())
     RO.tick(db)
@@ -923,7 +923,7 @@ def test_the_periodic_check_fetches_a_newer_release(db, monkeypatch):
     assert fetched == []
     clock.advance(1)
     RO.tick(db)
-    assert fetched == [("2.10.4", "system")]
+    assert fetched == [(NEXT, "system")]
     set_fleet(db, "update_check_h", 0)
     clock.advance(7200)
     RO.tick(db)
