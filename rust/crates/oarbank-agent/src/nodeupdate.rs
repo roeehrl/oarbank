@@ -569,18 +569,23 @@ pub fn install_facts(home: &Path) -> Value {
     let marker = home.parent().map(|p| p.join("update").join("available"));
     let pinned = marker.as_ref().and_then(|m| std::fs::read(m).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .is_some_and(|v| v["format"] == 1);
-    let why = if format == "dev" {
-        Some("a development build: no package to update (agent-only self-update)")
-    } else if !system && !external {
-        Some("a personal install: only a system install has the update runner")
-    } else if !trigger_installed() {
-        Some("the update runner's trigger is not installed: reinstall the node package")
+    let why = why_no_updater(&format, system || external, || trigger_installed(), pinned);
+    json!({"format": format, "scope": if system { "system" } else { "personal" }, "updater": why.is_none(), "why": why})
+}
+
+/// Why the runner cannot update this node, with what fixes it (the coordinator's update plan shows it): None when it can.
+fn why_no_updater(format: &str, system: bool, trigger: impl FnOnce() -> bool, pinned: bool) -> Option<String> {
+    if format == "dev" {
+        Some("a development build: no package to update (agent-only self-update)".into())
+    } else if !system {
+        Some("a personal install: only a system install has the update runner".into())
+    } else if !trigger() {
+        Some("the update runner's trigger is not installed: reinstall the node package".into())
     } else if !pinned {
-        Some("no update trust is pinned: sudo oarbank-launcher update-trust")
+        Some(format!("no update trust is pinned: {}", oarbank_core::fleet::TRUST_REMEDY))
     } else {
         None
-    };
-    json!({"format": format, "scope": if system { "system" } else { "personal" }, "updater": why.is_none(), "why": why})
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +614,21 @@ mod tests {
                "artifact": {"name": "oarbank-agent-9.1.0-linux-amd64.tar.gz", "format": "tar", "sha256": sha, "size": p.len(),
                             "url": format!("/v1/updates/artifacts/{sha}")},
                "manifest": manifest, "signature": signature, "owner_anchors": null})
+    }
+
+    /// The plan's hint for a node without update trust is the command that pins it, `--from-agent` included (a bare
+    /// `update-trust` only prints its usage).
+    #[test]
+    fn a_node_without_update_trust_says_the_command_that_pins_it() {
+        let why = why_no_updater("pkg", true, || true, false).unwrap();
+        assert!(why.starts_with("no update trust is pinned: ") && why.contains("update-trust --from-agent"), "{why}");
+        if cfg!(target_os = "macos") {
+            assert!(why.ends_with(": sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent"), "{why}");
+        }
+        assert_eq!(why_no_updater("pkg", true, || true, true), None);
+        assert!(why_no_updater("pkg", true, || false, false).unwrap().contains("trigger is not installed"));
+        assert!(why_no_updater("deb", false, || panic!("not asked"), false).unwrap().starts_with("a personal install"));
+        assert!(why_no_updater("dev", true, || true, true).unwrap().starts_with("a development build"));
     }
 
     #[test]

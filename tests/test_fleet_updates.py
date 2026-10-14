@@ -1063,3 +1063,23 @@ def test_oarbank_update_sign_signs_the_manifest_with_the_owner_key(served, tmp_p
     assert F.release(db, NEW)["state"] == "incomplete"
     code, out = oarbank(capsys, "update", "sign", NEW)
     assert code == 0 and F.release(db, NEW)["state"] == "ready", out
+
+
+def test_a_node_without_update_trust_shows_the_command_that_pins_it(db, tmp_path):
+    """2.10.0-2.10.4 agents say `sudo oarbank-launcher update-trust`, which only prints its usage (and on macOS is not on
+    PATH): the plan shows the command that pins, per package format; a newer agent's own hint is kept."""
+    imported(db, tmp_path)
+    old = "no update trust is pinned: sudo oarbank-launcher update-trust"
+    cases = [("mac", "darwin-arm64", "pkg", old, "sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent"),
+             ("deb", "linux-amd64", "deb", old, "sudo oarbank-launcher update-trust --from-agent"),
+             ("win", "windows-amd64", "msi", old, "oarbank-node update-trust --from-agent (in an elevated prompt)"),
+             ("new", "darwin-arm64", "pkg", "no update trust is pinned: sudo /x/oarbank-launcher update-trust --from-agent",
+              "sudo /x/oarbank-launcher update-trust --from-agent")]
+    for name, plat, fmt, why, want in cases:
+        n = node(db, name, platform=plat, install={"format": fmt, "scope": "system", "updater": False, "why": why})
+        _, reason = F.artifact_for(db, NEW, fresh(db, n))
+        assert reason == f"no update runner on it: no update trust is pinned: {want}", reason
+        assert F.install_of(fresh(db, n))["why"] == f"no update trust is pinned: {want}"
+    # anything else is shown as the agent says it
+    n = node(db, "personal", install={"format": "pkg", "scope": "personal", "updater": False, "why": "a personal install"})
+    assert F.install_of(fresh(db, n))["why"] == "a personal install"

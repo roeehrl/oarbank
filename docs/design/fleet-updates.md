@@ -236,7 +236,7 @@ Steps, each journaled:
 
 **Triggers.** Each one is root's and installed by the package:
 - **macOS:** `/Library/LaunchDaemons/dev.codonic.oarbank.agent.update.plist` (`WatchPaths` on the request,
-  `RunAtLoad` for crash recovery).
+  `RunAtLoad` for crash recovery; `setup` kickstarts it when a node joins, for a pending pin).
 - **Linux:** `dev.codonic.oarbank.agent.update.path` (`PathExists`) and its oneshot `.service`.
 - **Windows:** the elevated helper (`OarbankHelper`, LocalSystem) watches the spool. It copies the launcher to
   `%ProgramData%\Oarbank\update\runner\` and starts it with `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB`, because the
@@ -246,8 +246,19 @@ Steps, each journaled:
 - **First pin:** at an administrator's install of a package that has one, `oarbank-launcher update-trust --from-agent`
   in postinstall or the MSI custom action. It copies the owner anchors the agent pinned (D35's trust on first use)
   while the administrator is present.
-- **Explicit pin:** `sudo oarbank-launcher update-trust --from-agent` on a node that joined after its package was
-  installed, or `--keys` with the fingerprints the console shows.
+- **Pending pin:** a fresh install runs that before the node has joined, when the agent has no owner keys yet. It
+  then leaves `<state>/pin-pending` (root's, 0600), and so does `setup` whenever an administrator stages a code or an
+  address at system scope (`oarbank-node join`, the join window, managed policy, the packages' join variables).
+  Setup then starts the runner (`launchctl kickstart`, `systemctl start --no-block`), which waits up to 15 minutes
+  for the agent's owner keys and pins them. The runner also settles a pending pin whenever it starts (boot, a
+  request), and the Windows helper checks every 5 s. `oarbank-node join` itself waits up to 60 s for the keys once
+  joined and says whether the trust is pinned; given the same fleet's code again on a node that has joined, it pins
+  without waiting. Only
+  an administrator's install or join arms a pin: the agent's account cannot ask root to pin keys.
+- **Explicit pin:** `sudo oarbank-launcher update-trust --from-agent` on a node whose pin is still pending (on macOS
+  `sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent`; on Windows `oarbank-node update-trust
+  --from-agent` in an elevated prompt), or `--keys` with the fingerprints the console shows. The agent's "no update
+  trust" hint, and the coordinator's plan, give the command for the node's OS.
 - **Rotation:** `owner_anchors` statements the agent relays in the request. Like the agent's own rule, the version must
   be +1 and the statement signed by a key of the old set and every new key.
 

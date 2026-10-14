@@ -8,6 +8,15 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Fixed
 
+- **A freshly installed node pins its update trust when it joins.** The package pinned the fleet's owner keys at
+  install time, before a fresh node had joined and had any, so `oarbank update plan` showed "no update trust is
+  pinned" for it. Upgraded nodes were not affected. Joining as an administrator now leaves the pin pending: with
+  `oarbank-node join`, the join window, a management profile or policy, or a join code given to the package. Root's
+  update runner then pins the agent's owner keys as soon as it has them, and `oarbank-node join` reports it. Nodes that
+  joined with 2.10.3 or 2.10.4 get their trust at their next package install, or with the command the plan now shows:
+  `sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent` on macOS,
+  `sudo oarbank-launcher update-trust --from-agent` on Linux, and `oarbank-node update-trust --from-agent` in an
+  elevated prompt on Windows. Before, the plan showed `update-trust` without `--from-agent`, which only prints usage.
 - **The Windows Group Policy template zip is the same file for both architectures.** The x64 and arm64 jobs each
   built `oarbank-agent-<version>-windows-admx.zip` with different bytes, so the published zip matched only one of the
   two `SHA256SUMS-agent-*-windows-*` files (2.10.3 and 2.10.4). It is now written reproducibly: fixed order, time and

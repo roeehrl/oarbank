@@ -505,9 +505,24 @@ def agent_min(db: DB) -> str | None:
 
 # ------------------------------------------------------------------ nodes
 
+# The command that pins a node's update trust, per package format, exactly as a person types it (the agent's own
+# oarbank_core::fleet::TRUST_REMEDY): the bare `update-trust` 2.10.0-2.10.4 agents name only prints its usage.
+TRUST_REMEDY = {
+    "pkg": "sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent",
+    "msi": "oarbank-node update-trust --from-agent (in an elevated prompt)",
+}
+TRUST_REMEDY_OTHER = "sudo oarbank-launcher update-trust --from-agent"
+NO_TRUST = "no update trust is pinned"
+
+
 def install_of(node: dict) -> dict:
-    """The agent's `install` facts ({format, scope, updater, why}); {} from an agent older than fleet updates."""
-    return jl(node.get("install_json"), {}) or {}
+    """The agent's `install` facts ({format, scope, updater, why}); {} from an agent older than fleet updates. An older
+    agent's "no update trust" names the command without `--from-agent`: shown with the one that pins."""
+    inst = jl(node.get("install_json"), {}) or {}
+    why = inst.get("why")
+    if isinstance(why, str) and why.startswith(NO_TRUST) and "--from-agent" not in why:
+        inst = {**inst, "why": f"{NO_TRUST}: {TRUST_REMEDY.get(inst.get('format'), TRUST_REMEDY_OTHER)}"}
+    return inst
 
 
 def nodes(db: DB) -> list[dict]:
