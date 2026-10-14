@@ -4,6 +4,15 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+### Fixed
+
+- **The Windows Group Policy template zip is the same file for both architectures.** The x64 and arm64 jobs each
+  built `oarbank-agent-<version>-windows-admx.zip` with different bytes, so the published zip matched only one of the
+  two `SHA256SUMS-agent-*-windows-*` files (2.10.3 and 2.10.4). It is now written reproducibly: fixed order, time and
+  attributes, and stored entries.
+
 ## 2.10.4 (2026-10-14)
 
 A fix release for 2.10.3. Module SDK: **oarbank-sdk 1.7.0**, unchanged; its runner protocol now spells out how a
