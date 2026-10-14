@@ -1,7 +1,8 @@
 """The node's join window (deploy/node/join-window.py) over real loopback HTTP, with a fake `oarbank-node`.
 
 The fake launcher is a small Python script: it records the argv and the code file it was given, prints canned check rows,
-appends progress lines and writes the status document named by OARBANK_NODE_STATUS. Nothing here elevates, opens a
+appends progress lines and writes the status document named by OARBANK_NODE_STATUS. A join waits for the file named by
+FAKE_RELEASE, when set, before it finishes, so a test can act while the launcher is surely running. Nothing here elevates, opens a
 browser, or touches the machine's own Oarbank installation; elevation is tested as the command it would run.
 """
 import base64
@@ -85,6 +86,11 @@ FAKE = textwrap.dedent(r'''
             p.write(json.dumps({"type": "state", "status": {"state": "joining", "coordinator": "https://coord.example.net:7443"}}) + "\n")
             p.flush()
             time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
+            release = os.environ.get("FAKE_RELEASE")
+            if release:  # stay running until the test has made its requests (a sleep races a busy runner)
+                deadline = time.monotonic() + 60
+                while not os.path.exists(release) and time.monotonic() < deadline:
+                    time.sleep(.01)
             if mode == "denied":
                 p.write(json.dumps({"type": "result", "ok": False, "exit": 4, "code": "E_CODE_USED", "message": "Already used."}) + "\n")
             else:
@@ -335,16 +341,20 @@ def test_check_failure_and_a_launcher_that_quotes_the_code(env, monkeypatch):
 
 # ---------------------------------------------------------------- join
 def test_join_uses_a_private_code_file_deleted_after_the_launcher_exits(env, monkeypatch):
-    monkeypatch.setenv("FAKE_SLEEP", ".6")
+    release = env.tmp / "release"
+    monkeypatch.setenv("FAKE_RELEASE", str(release))
     window = env.window(platform="linux")  # root: runs without elevation (pkexec passes the file, not stdin)
     with serving(window) as server:
-        r = post(server, "/join", {**JOIN, "scope": "system", "name": "build-07"})
-        assert r.status_code == 200 and r.json()["elevated"] is False and r.json()["scope"] == "system"
-        assert CODE not in r.text
-        job = window.job
-        assert job.code_file.read_text() == CODE  # present while the launcher runs
-        assert post(server, "/join", {**JOIN, "scope": "system"}).status_code == 409  # one run at a time
-        assert post(server, "/leave").status_code == 409
+        try:
+            r = post(server, "/join", {**JOIN, "scope": "system", "name": "build-07"})
+            assert r.status_code == 200 and r.json()["elevated"] is False and r.json()["scope"] == "system"
+            assert CODE not in r.text
+            job = window.job
+            assert job.code_file.read_text() == CODE  # present while the launcher runs
+            assert post(server, "/join", {**JOIN, "scope": "system"}).status_code == 409  # one run at a time
+            assert post(server, "/leave").status_code == 409
+        finally:
+            release.touch()  # lets the launcher finish
         p, lines = wait_done(server)
         assert not job.code_file.exists()
         assert [line["type"] for line in lines] == ["row", "state", "result"]
