@@ -208,6 +208,18 @@
 <td>{% if rep.held %}held ({{ rep.held }}){% elif rep.paused %}paused{% elif rep.lowered %}lowered{% elif rep.threads %}{{ rep.threads }} threads{% endif %}</td>
 <td class="mono">{{ rep.error or '' }}</td></tr>{% endfor %}</table>
 {% endif %}
+{% set S = d.storage %}
+<h2 id="module-data">Module data{% if S.reported %} <span class="small mut">(reported {{ S.at | ago }}{% if S.retention_days is not none %}; a module turned off here keeps its data {{ S.retention_days | num(0) }} days{% endif %})</span>{% endif %}</h2>
+{% if not S.reported %}<p class="small mut">Not reported yet: the node's agent reports what each module keeps here, and deletes what a module that left it put there.</p>
+{% else %}
+<table class="small"><tr><th scope="col">module</th><th scope="col" class="num">total</th><th scope="col" class="num">data directory</th><th scope="col" class="num">cached datasets</th><th scope="col" class="num">images</th><th scope="col">deleted</th><th scope="col"></th></tr>
+{% for x in S.modules %}<tr><td><a href="/modules/{{ x.module }}">{{ x.module }}</a></td><td class="num">{{ x.total_text }}</td><td class="num">{{ x.data_text }}</td>
+<td class="num">{{ x.cache_text }}{% if x.datasets %} <span class="mut">({{ x.datasets }})</span>{% endif %}</td><td class="num">{{ x.images_text }}</td>
+<td>{% if x.leaving and x.delete_at is not none %}<span class="chip warn">{{ x.delete_at | ts }}</span> <span class="mut">{{ x.why }}</span>{% elif x.leaving %}{{ x.why }}{% else %}<span class="mut">kept: enabled here</span>{% endif %}</td>
+<td>{% if x.leaving %}{{ m.op_form("modules.purge", x.module, "Delete now", params={"node": d.node.node_id}, return_to="/nodes/" ~ d.node.node_id) }}{% endif %}</td></tr>
+{% else %}<tr><td colspan="7" class="mut">no module keeps anything here</td></tr>{% endfor %}</table>
+<p class="small">Dataset cache: {{ S.cache.text }}, {{ S.cache.datasets or 0 }} datasets{% if S.cache.over_cap %} <span class="chip bad">over its cap: what is left is in use</span>{% endif %}{% if S.unremoved_images %} · {{ S.unremoved_images }} images of deleted modules wait for the container runtime{% endif %}{% if S.purges %} · purges waiting for the node: {{ S.purges | join(', ') }}{% endif %}</p>
+{% endif %}
 {% if n.doctor and n.doctor.modules %}
 <h2>Doctor</h2>
 {% for m, rep in n.doctor.modules.items() %}

@@ -249,7 +249,7 @@ def print_readiness(r: dict) -> None:
 
 
 def cmd_module(a):
-    """oarbank module <list|show|install|verify|enable|canary|promote|rollback|disable|pin|unpin|uninstall>."""
+    """oarbank module <list|show|install|verify|enable|canary|promote|rollback|disable|pin|unpin|uninstall|purge>."""
     ask = dict(reason=a.reason, yes=a.yes, dry_run=a.dry_run)
     if a.action == "list":
         s = api("GET", "/api/v1/modules/store")
@@ -305,6 +305,14 @@ def cmd_module(a):
         if not a.node or len(a.node) != 1:
             sys.exit(f"oarbank module {a.action} <name>@<version> --node N")
         res = run_op("modules.pin", a.what, {"node": a.node[0], **({"clear": True} if a.action == "unpin" else {})}, **ask)
+    elif a.action == "purge":
+        if not a.what or bool(a.node) == bool(a.all) or len(a.node or []) > 1:
+            sys.exit("oarbank module purge <name> --node N | --all")
+        res = run_op("modules.purge", a.what, {"node": a.node[0]} if a.node else {"all": True}, **ask)
+        r = res.get("result") or {}
+        print(f"{r.get('module')}: deleted at the next heartbeat of {', '.join(r.get('nodes') or [])} "
+              "(oarbank node show <node> lists what is left)")
+        return
     else:
         res = run_op(f"modules.{a.action}", a.what, **ask)
     print(json.dumps(res, indent=1, default=str))
@@ -965,6 +973,7 @@ def node_show(target: str, as_json: bool = False):
             got = r["detail"] if r["status"] != "ok" else f"{(r['installation'] or {}).get('version')} at {(r['installation'] or {}).get('path')}"
             print(f"  {mod} needs {r['need']}: {r['status']} ({got})"
                   + "".join(f"\n    {f['label']}: {f['command']}" for f in r.get("fixes") or [] if f.get("command")))
+    _print_storage(d.get("storage") or {})
     sb = d["sandbox"]
     print(f"  sandbox: {sb['backend'] or 'no backend: no module work'}")
     for c in sb["capabilities"]:
@@ -985,6 +994,28 @@ def node_show(target: str, as_json: bool = False):
                       + (f"  reset: oarbank settings reset {x['key']} --node {n['hostname']}" if x["source"]["scope"] == "node" else "")
                       + "".join(f"\n      error: {e}" for e in x.get("errors") or []))
         print(f"    everything else inherited: oarbank settings get --node {n['hostname']}")
+
+
+def _print_storage(s: dict) -> None:
+    """What modules keep on the node and when what is leaving goes (modcleanup.node_doc)."""
+    if not s.get("reported"):
+        print("  module data: not reported yet")
+        return
+    days = s.get("retention_days")
+    print(f"  module data (reported {_when(s.get('at'))}; a turned-off module's stays {days:g} days):" if days is not None
+          else f"  module data (reported {_when(s.get('at'))}):")
+    for m in s["modules"]:
+        when = (f", deleted {'now' if (m.get('delete_at') or 0) <= time.time() else _when(m['delete_at'])} ({m['why']})"
+                if m.get("leaving") and m.get("delete_at") is not None else "")
+        print(f"    {m['module']}: {m['total_text']} (data {m['data_text']}, datasets {m['cache_text']} in {m.get('datasets') or 0}, "
+              f"images {m['images_text']}){when}")
+    c = s.get("cache") or {}
+    print(f"  dataset cache: {c.get('text')}, {c.get('datasets') or 0} datasets" + (" OVER THE CAP: what is left is in use"
+                                                                                       if c.get("over_cap") else ""))
+    if s.get("unremoved_images"):
+        print(f"  images of deleted modules waiting for the container runtime: {s['unremoved_images']}")
+    if s.get("purges"):
+        print(f"  purges waiting for the node: {', '.join(s['purges'])}")
 
 
 def cmd_node(a):
@@ -2294,15 +2325,18 @@ def parser() -> argparse.ArgumentParser:
     al.add_argument("--noise", action="store_true")
     al.add_argument("--reason")
     al.set_defaults(fn=cmd_alerts)
-    mo = sub.add_parser("module", help="module lifecycle: install a bundle, enable, canary, promote, rollback, disable, pin")
+    mo = sub.add_parser("module", help="module lifecycle: install a bundle, enable, canary, promote, rollback, disable, pin, "
+                                       "purge what it left on nodes")
     mo.add_argument("action", choices=["list", "show", "ready", "install", "verify", "check", "approve", "enable", "canary", "promote", "rollback", "disable",
-                                       "pin", "unpin", "uninstall"])
+                                       "pin", "unpin", "uninstall", "purge"])
     mo.add_argument("--deep", action="store_true", help="check: also re-hash every module file")
     mo.add_argument("what", nargs="?", help="a bundle file (install); <name>@<version> (canary, pin, uninstall, approve; enable "
                                             "takes either form); <name> or <name>@<its canary version> (promote); <name> "
                                             "(rollback, disable, verify, check, show: where it runs, per platform; ready: what stands between it and "
-                                            "running work, every module without a name)")
-    mo.add_argument("--node", action="append", help="canary or pin node (repeat for several canary nodes)")
+                                            "running work, every module without a name; purge: delete what it left on a node "
+                                            "where it is turned off)")
+    mo.add_argument("--node", action="append", help="canary, pin or purge node (repeat for several canary nodes)")
+    mo.add_argument("--all", action="store_true", help="purge: on every node where the module is turned off")
     mo.add_argument("--group", help="canary: on the members of this node group (as it stands when the canary starts)")
     mo.add_argument("--reason")
     mo.add_argument("--yes", action="store_true")

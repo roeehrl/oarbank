@@ -353,6 +353,7 @@ class DB:
             from .joincodes import SCHEMA as JOIN_SCHEMA
             from .joincodes import migrate as join_migrate
             from .listeners import NODE_COLUMNS as LISTENER_COLUMNS
+            from .modcleanup import NODE_COLUMNS as CLEANUP_COLUMNS
             from .listeners import SCHEMA as LISTENER_SCHEMA
             from .rollouts import SCHEMA as ROLLOUT_SCHEMA
             from .settings import modkeys as settings_modkeys
@@ -367,6 +368,7 @@ class DB:
                 _ensure_columns(self.conn, table, cols)
             _ensure_columns(self.conn, "nodes", LISTENER_COLUMNS)     # inbound listeners (listeners.py)
             _ensure_columns(self.conn, "nodes", UPDATE_COLUMNS)       # fleet updates: the agent's report (fleetupdates.py)
+            _ensure_columns(self.conn, "nodes", CLEANUP_COLUMNS)      # module cleanup: what modules keep there (modcleanup.py)
             settings_store.ensure(self.conn)
         self.event_listeners = []   # callables(event_id) for SSE wakeups
         from .settings import migrate as settings_migrate

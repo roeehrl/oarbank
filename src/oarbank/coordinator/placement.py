@@ -100,6 +100,9 @@ def check_stage(module: str, item: dict) -> str | None:
     if stage is None:
         return None
     man = modcalls.info(module).manifest
+    if isinstance(stage, str) and (man.stage(stage) is not None and getattr(man.stage(stage), "cleanup", False)):
+        raise PlacementError(422, "cleanup_stage", f"stage {stage!r} is the module's cleanup stage: the agent runs it on a "
+                             "node before it deletes the module's data there, and no job does")
     if not isinstance(stage, str) or stage not in man.standalone_stages():
         raise PlacementError(422, "bad_stage", f"stage {stage!r}: one of the standalone stages {man.standalone_stages()} "
                              "(a chain stage cannot run alone)")

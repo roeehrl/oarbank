@@ -109,8 +109,14 @@ def module_entry(name: str, version: str, digest: str, path, platform: str = pla
                "pools": sorted(set(st.requires.pools) | set(st.requires.needs_pools)),
                "platforms": list(st.requires.platforms), **({"bootstrap": True} if st.bootstrap else {}),
                **({"checkpoint": {"max_mb": st.checkpoint.max_mb, "min_interval_s": st.checkpoint.min_interval_s}}
-                  if st.checkpoint else {})} for st in m.stages]
-    every = set.intersection(*(set(s["capabilities"]) for s in stages)) if stages else set()
+                  if st.checkpoint else {}),
+               # the cleanup stage: the agent runs it before it deletes the module's data on the node (cleanup.rs)
+               **({"cleanup": True, "timeout_s": st.for_platform(platform).timeout_s,
+                   "cpu": st.for_platform(platform).requires.resources.cpu,
+                   "mem_gb": st.for_platform(platform).requires.resources.mem_gb} if getattr(st, "cleanup", False) else {})}
+              for st in m.stages]
+    jobs = [s for s in stages if not s.get("cleanup")]
+    every = set.intersection(*(set(s["capabilities"]) for s in jobs)) if jobs else set()
     sb = m.sandbox
     keeps = any(st.checkpoint for st in m.stages)
     return {"name": name, "module_id": m.module.id, "version": version, "digest": digest, "bundle": f"modules/{name}",

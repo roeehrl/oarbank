@@ -163,6 +163,29 @@ pub trait ContainerRuntime: Send + Sync {
     }
     /// The agent is stopping: leave the runtime so the next agent can start it (macOS: stop the VMs, within `budget`).
     fn shutdown(&self, _budget: Duration) {}
+    /// Remove an image a module's jobs pulled, once the module is deleted from the node (cleanup.rs); one already gone
+    /// counts as removed.
+    fn remove_image(&self, _image: &str) -> Result<(), String> {
+        Err("this container runtime does not remove images".into())
+    }
+    /// An image's size in bytes, when the runtime says.
+    fn image_size(&self, _image: &str) -> Option<u64> {
+        None
+    }
+}
+
+/// An `image rm`'s outcome: an image that is not there (any more) counts as removed.
+pub fn removed(r: Result<Exec, String>) -> Result<(), String> {
+    let r = r?;
+    let err = r.stderr_tail(500);
+    let low = err.to_ascii_lowercase();
+    if r.ok() || ["no such image", "image not known", "not found"].iter().any(|x| low.contains(x)) { Ok(()) } else { Err(err) }
+}
+
+/// The size an `image inspect --format {{.Size}}` printed.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn inspected_size(r: Result<Exec, String>) -> Option<u64> {
+    r.ok().filter(|r| r.ok()).and_then(|r| String::from_utf8_lossy(&r.stdout).trim().parse().ok())
 }
 
 /// How often the agent re-probes a runtime that is missing a prerequisite (or, on macOS, whose start failed and whose
@@ -1022,6 +1045,14 @@ impl ContainerRuntime for ColimaRuntime {
         remove_labelled(|a, t| self.cli(a, t), &format!("label={ATTEMPT_LABEL}={attempt_id}"))
     }
 
+    fn remove_image(&self, image: &str) -> Result<(), String> {
+        removed(self.cli(&["image", "rm", image], 120))
+    }
+
+    fn image_size(&self, image: &str) -> Option<u64> {
+        inspected_size(self.cli(&["image", "inspect", "--format", "{{.Size}}", image], 30))
+    }
+
     /// The GPU VM's guest passes its render node through, offered while the report offers the GPU.
     fn gpu_device(&self) -> Option<String> {
         (self.profile == Profile::Gpu && self.shared.snapshot().gpu()).then(|| "/dev/dri".to_string())
@@ -1234,6 +1265,14 @@ impl ContainerRuntime for NativeRuntime {
 
     fn remove_attempt(&self, attempt_id: i64) -> Vec<String> {
         remove_labelled(|a, t| self.cli(a, t), &format!("label={ATTEMPT_LABEL}={attempt_id}"))
+    }
+
+    fn remove_image(&self, image: &str) -> Result<(), String> {
+        removed(self.cli(&["image", "rm", &qualified(image)], 120))
+    }
+
+    fn image_size(&self, image: &str) -> Option<u64> {
+        inspected_size(self.cli(&["image", "inspect", "--format", "{{.Size}}", &qualified(image)], 30))
     }
 
     fn pool_tokens(&self) -> u32 {

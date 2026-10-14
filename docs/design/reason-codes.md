@@ -70,6 +70,9 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `NO_MAPPING_PROTOCOL` | Listener {listener}: the router accepts no automatic port mapping: {text} | P3 | – | `listeners.configure` | – |
 | `MAPPED_UNREACHABLE` | Listener {listener}: mapped, but connections from outside do not arrive: {text} | P3 | – | `listeners.probe` | – |
 | `FIREWALL_BLOCKED` | Listener {listener}: this machine's firewall blocks incoming connections: {text} | P3 | – | – | – |
+| `MODULE_DATA_SCHEDULED` | What module {module} left on this node ({size}) is deleted {when} ({why}) | P1 | – | `modules.purge`, `settings.apply` | – |
+| `MODULE_CLEANUP_FAILED` | Module {module}'s cleanup stage failed on this node, and its data was deleted anyway: {detail} | P3 | – | – | – |
+| `DISK_CACHE_OVER_CAP` | The node's dataset cache holds {used}, over its {cap} cap (disk_gb): what is left is in use by its jobs or wanted by pending work | P3 | – | `settings.apply` | – |
 
 ## protection
 

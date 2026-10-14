@@ -29,6 +29,7 @@ pub const DEFS: &[Def] = &[
     Def { key: "vm_cpus", section: Section::Limits, kind: Kind::Integer, nullable: true, min: Some(1.0), exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
     Def { key: "disk_gb", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
     Def { key: "staging_mbps", section: Section::Limits, kind: Kind::Number, nullable: true, min: Some(0.0), exclusive_min: true, max: None, choices: &[], default: "null", tighten: Tighten::Lower, managed: true },
+    Def { key: "module_retention_days", section: Section::Policy, kind: Kind::Number, nullable: false, min: Some(0.0), exclusive_min: false, max: None, choices: &[], default: "7", tighten: Tighten::None, managed: false },
     Def { key: "inbound_listeners", section: Section::Policy, kind: Kind::Bool, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "true", tighten: Tighten::Lower, managed: true },
     Def { key: "listener_port_range", section: Section::Policy, kind: Kind::Text, nullable: false, min: None, exclusive_min: false, max: None, choices: &[], default: "\"41000-41999\"", tighten: Tighten::None, managed: false },
     Def { key: "listener_probe_endpoint", section: Section::Policy, kind: Kind::Text, nullable: true, min: None, exclusive_min: false, max: None, choices: &[], default: "null", tighten: Tighten::None, managed: false },
@@ -55,4 +56,5 @@ pub const NICE: i64 = 10;
 pub const HARD_LIMITS: bool = false;
 pub const WORKLOADS: bool = true;
 pub const DELEGATED_PROCESSES: bool = false;
+pub const MODULE_RETENTION_DAYS: f64 = 7.0;
 pub const INBOUND_LISTENERS: bool = true;

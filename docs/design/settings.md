@@ -48,7 +48,9 @@ The keys, by section:
   readiness, job Explain and the `settings set` preview say when it is below an enabled module's stage cpu);
   advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
-  advanced `vm_mem_gb`, `vm_cpus`, `disk_gb`, `staging_mbps`.
+  advanced `vm_mem_gb`, `vm_cpus`, `disk_gb` (the dataset cache, enforced from 2.11), `staging_mbps`.
+- **Module data**: `module_retention_days`, how long a node keeps what a module left there after the module is turned
+  off on it (7 days; 0 deletes at once; [protocol.md](../protocol.md), "Module cleanup").
 - **Network** ([inbound-listeners.md](inbound-listeners.md)): `inbound_listeners` (off: no listener opens and every
   router mapping is removed; managed, off is stricter), advanced `listener_port_range` (the internal ports listeners
   bind, default `41000-41999`); fleet only, both null by default so no third party is contacted:

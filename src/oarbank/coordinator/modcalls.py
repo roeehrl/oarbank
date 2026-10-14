@@ -641,7 +641,7 @@ def stages_over_cpu(db, node: dict, budget, modules=None) -> list[tuple[str, str
     out = []
     for name in sorted(modules):
         i = CATALOG.get(name)
-        for st in (i.manifest.stages if i else ()):
+        for st in (i.manifest.job_stages() if i else ()):       # the cleanup stage takes no slot
             if st.requires.platforms and plat and plat not in st.requires.platforms:
                 continue
             cpu = float(resources_on(i.stage_resources(st.name), plat).get("cpu", 1))

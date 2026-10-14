@@ -374,6 +374,15 @@ pub fn remove(explicit_home: Option<&Path>, opts: &[String]) -> Result<()> {
         }
     }
     if opts.iter().any(|o| o == "--purge") {
+        // the container images the node's modules pulled: a Linux host's engine keeps them outside the home
+        let agent = crate::Home(home.clone()).current_bin();
+        if (agent.exists() && home.join("state").join("module-cleanup.json").exists()) || st.dry {
+            st.run(&format!("{} --home {} remove-images", agent.display(), home.display()), || {
+                let out = std::process::Command::new(&agent).arg("--home").arg(&home).arg("remove-images").output()?;
+                print!("{}", String::from_utf8_lossy(&out.stdout));
+                Ok(())
+            })?;
+        }
         for rel in p["purge"].as_array().cloned().unwrap_or_default() {
             let path = plan_path(&home, rel.as_str().unwrap_or("-"));
             if path.exists() || st.dry {

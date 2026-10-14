@@ -122,6 +122,25 @@ pub struct Agent {
     sent_boot: f64,
     /// Inbound listeners and their router mappings (listeners.rs).
     pub listeners: crate::listeners::Hub,
+    /// Module cleanup (cleanup.rs): what the latest directives asked and the agent last reported.
+    tidy: Tidy,
+}
+
+/// What module cleanup works from between sweeps (cleanup.rs).
+#[derive(Default)]
+struct Tidy {
+    /// Directives from the coordinator arrived in this run: before that the agent knows of nothing to delete.
+    heard: bool,
+    /// When the agent last looked.
+    swept: Option<std::time::Instant>,
+    /// Look again at the next chance: a module turned off, purged or gone with a new release.
+    now: bool,
+    /// The modules the owner purged on this node (`module_purge`).
+    purge: std::collections::BTreeSet<String>,
+    /// The datasets pending work wants here (`prefetch`): the cache keeps them.
+    wanted: std::collections::BTreeSet<String>,
+    /// The heartbeat's `module_storage`.
+    report: Value,
 }
 
 /// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
@@ -171,7 +190,8 @@ impl Agent {
             tools: Value::Null, tool_pins: json!({}), detect_due: true, detected: None, settings_report: Value::Null,
             settings_base: initial_directives(), managed: Default::default(), managed_by: None, managed_read: None,
             workloads: None, workloads_seen: Default::default(), sent_boot: 0.0,
-            listeners: crate::listeners::Hub::new(Layout::new(layout_home.clone()), crate::listeners::Env::from_env()) };
+            listeners: crate::listeners::Hub::new(Layout::new(layout_home.clone()), crate::listeners::Env::from_env()),
+            tidy: Tidy::default() };
         a.refresh_managed();                    // the defaults the agent starts from are tightened, too
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
@@ -396,6 +416,14 @@ impl Agent {
         if !self.settings_report.is_null() {
             body["settings"] = self.settings_report.clone();
         }
+        // what modules keep here and when what is leaving goes, and the deletions not yet acknowledged (cleanup.rs)
+        if !self.tidy.report.is_null() {
+            body["module_storage"] = self.tidy.report.clone();
+        }
+        let done = crate::cleanup::load(&self.layout).done;
+        if !done.is_empty() {
+            body["module_cleanup"] = json!(done);
+        }
         merge(&mut body, self.listeners.report());                      // `listeners`, `portmaps`, `network`, `probe_results`
         merge(&mut body, self.hooks.heartbeat_extra());
         merge(&mut body, self.coord_install.report());
@@ -536,7 +564,9 @@ impl Agent {
                 }
             }
         }
-        if let (Some(api), Some(list)) = (self.api.clone(), d["prefetch"].as_array()) {
+        // a dataset cache over its disk_gb cap takes nothing ahead of need (cleanup.rs reports it)
+        let full = self.tidy.report["cache"]["over_cap"].as_bool() == Some(true);
+        if let (Some(api), Some(list), false) = (self.api.clone(), d["prefetch"].as_array(), full) {
             let ready = staging::ready(&self.layout);
             for did in list.iter().filter_map(Value::as_str).filter(|x| !ready.iter().any(|r| r == x) && !staging::staging_now(x)).take(4) {
                 let (api, l, did) = (api.clone(), Layout::new(self.layout.home.clone()), did.to_string());
@@ -588,6 +618,7 @@ impl Agent {
             }
         }
         self.hooks.on_directives(d);
+        self.observe_cleanup(d);
         self.directives = d.clone();
         self.sync_services();
         // after the services: a listen_fd listener's socket must exist before its service's first start
@@ -596,6 +627,201 @@ impl Agent {
             let mut w = w.lock().unwrap();
             w.set_wanted(&d["workloads"], self.sent_boot);
             w.ack_reports(&d["workload_reports_ack"]);
+        }
+    }
+
+    /// The modules turned off on this node (`modules_disabled`): nothing of theirs runs here, doctors and probes
+    /// included, and cleanup.rs deletes what they left after the retention.
+    fn modules_off(&self) -> std::collections::BTreeSet<String> {
+        names(&self.directives["modules_disabled"])
+    }
+
+    /// What a directive says about module cleanup (cleanup.rs): the purges, the datasets pending work wants, the
+    /// deletions the coordinator acknowledged. A module turned off or on, or purged, is looked at again at once.
+    fn observe_cleanup(&mut self, d: &Value) {
+        let (off, purge) = (names(&d["modules_disabled"]), names(&d["module_purge"]));
+        if off != self.modules_off() {
+            self.rerun_doctors = true;                          // a module turned off is doctored no more; one on again is
+            self.tidy.now = true;
+        }
+        if purge != self.tidy.purge || !self.tidy.heard {
+            self.tidy.now = true;
+        }
+        self.tidy.heard = true;
+        self.tidy.purge = purge;
+        self.tidy.wanted = names(&d["prefetch"]);
+        let acked: Vec<String> = names(&d["module_cleanup_ack"]).into_iter().collect();
+        crate::cleanup::ack(&self.layout, &acked);
+        if let Some(days) = d["policy"]["module_retention_days"].as_f64() {
+            if crate::cleanup::load(&self.layout).retention_days != Some(days) {
+                crate::cleanup::update(&self.layout, |st| st.retention_days = Some(days));
+                self.tidy.now = true;
+            }
+        }
+    }
+
+    /// Whether anything of the module still runs here: a job, a service or a workload (its deletion waits).
+    fn module_busy(&self, module: &str) -> bool {
+        let mine = |k: &String| k.split('/').next() == Some(module);
+        self.table.lock().unwrap().values().any(|j| j.module == module)
+            || self.services.as_ref().is_some_and(|s| s.lock().unwrap().running().iter().any(mine))
+            || self.workloads.as_ref().is_some_and(|w| w.lock().unwrap().running().iter().any(mine))
+    }
+
+    /// Module cleanup's sweep (cleanup.rs), every SWEEP_EVERY or at once when asked: bring the pending deletions up to
+    /// date, delete what is due (its cleanup stage first), remove images waiting for their runtime, collect the dataset
+    /// cache, and measure what each module keeps for the next heartbeat.
+    async fn tidy(&mut self) {
+        let retired = crate::cleanup::load(&self.layout).retired_at.is_some();
+        if !self.tidy.heard && !retired {
+            return;
+        }
+        if !self.tidy.now && self.tidy.swept.is_some_and(|t| t.elapsed() < crate::cleanup::SWEEP_EVERY) {
+            return;
+        }
+        self.tidy.now = false;
+        self.tidy.swept = Some(std::time::Instant::now());
+        let release: std::collections::BTreeSet<String> = self.release.as_ref().map(|r| r.modules.iter()
+            .filter_map(|m| m["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let (off, purge, rel_id) = (self.modules_off(), self.tidy.purge.clone(), self.release.as_ref().map(|r| r.id.clone()));
+        let (l, rel2) = (Layout::new(self.layout.home.clone()), release.clone());
+        let planned = tokio::task::spawn_blocking(move || {
+            let now = doctor::now();
+            let present = crate::cleanup::present(&l);
+            crate::cleanup::update(&l, |st| {
+                let inputs = crate::cleanup::Inputs { release: &rel2, release_id: rel_id.as_deref(), disabled: &off, purge: &purge,
+                                                      present: &present };
+                let cancelled = crate::cleanup::plan(st, &inputs, now);
+                for (m, p) in st.pending.iter_mut().filter(|(_, p)| p.release.is_none()) {
+                    p.release = release::holding(&l, m).map(|r| r.id);
+                }
+                // a purge of a module that left nothing here is done at once: the coordinator stops asking
+                let retired = st.retired_at.is_some();
+                let nothing: Vec<String> = purge.iter().filter(|m| !st.pending.contains_key(*m)
+                    && (retired || !rel2.contains(*m) || off.contains(*m))
+                    && !st.done.iter().any(|d| d["module"] == json!(m) && d["reason"] == "purge")).cloned().collect();
+                for m in nothing {
+                    crate::cleanup::note_done(st, crate::cleanup::done_record(&m, "purge", now, 0, 0, None, None));
+                }
+                (cancelled, crate::cleanup::due(st, now))
+            })
+        }).await;
+        let Ok((cancelled, due)) = planned else { return };
+        for m in cancelled {
+            info!(module = %m, "the module is back on this node: what it left here stays");
+        }
+        for (m, why) in due {
+            if self.module_busy(&m) {
+                self.tidy.now = true;                               // stopping: look again at the next round
+                continue;
+            }
+            self.delete_module(&m, why).await;
+        }
+        self.collect(&release).await;
+    }
+
+    /// Delete what `module` left on this node: its cleanup stage first (best effort), then its data directory, its use of
+    /// the dataset cache and the images only it used (or, its runtime not running, at a later sweep).
+    async fn delete_module(&mut self, module: &str, why: &'static str) {
+        let l = Layout::new(self.layout.home.clone());
+        let pending = crate::cleanup::load(&l).pending.get(module).cloned().unwrap_or_default();
+        let rel = self.release.clone().filter(|r| r.module(module).is_some())
+            .or_else(|| pending.release.as_deref().and_then(|id| release::by_id(&l, id)))
+            .or_else(|| release::holding(&l, module));
+        let entry = rel.as_ref().and_then(|r| r.module(module)).cloned();
+        let stage = entry.as_ref().and_then(crate::cleanup::stage_of);
+        let outcome = match (&rel, &entry, &stage, self.runtime()) {
+            (Some(rel), Some(entry), Some(stage), Ok(rt)) => {
+                let mut settings = self.directives["policy"]["module_settings"][module].clone();
+                if !settings.is_object() {
+                    settings = json!({});
+                }
+                Some(crate::cleanup::run_stage(&crate::cleanup::StageRun { layout: &l, runtime: &rt, release: rel, entry, stage,
+                                                                          reason: why, settings: &settings }).await)
+            }
+            (_, _, Some(stage), Err(e)) => Some(json!({"stage": stage["name"], "ok": false, "detail": format!("no module runtime: {e:#}")})),
+            _ => None,
+        };
+        let (l2, m) = (Layout::new(l.home.clone()), module.to_string());
+        let rts = self.containers.clone();
+        let Ok((freed, err, removed)) = tokio::task::spawn_blocking(move || {
+            let (freed, err) = crate::cleanup::delete_files(&l2, &m);
+            crate::cache::drop_module(&l2, &m);
+            let images = crate::cleanup::update(&l2, |st| crate::cleanup::take_images(st, &m));
+            let (n, left) = crate::cleanup::remove_images(rts.as_ref(), images);
+            crate::cleanup::update(&l2, |st| st.unremoved.extend(left));
+            (freed, err, n)
+        }).await else { return };
+        if let Some(e) = &err {
+            warn!(module, error = %e, "part of the module's data directory could not be deleted");
+        }
+        info!(module, why, freed_bytes = freed, images = removed, "deleted what the module left on this node");
+        let rec = crate::cleanup::done_record(module, why, doctor::now(), freed, removed, outcome, err);
+        crate::cleanup::update(&l, |st| {
+            st.pending.remove(module);
+            crate::cleanup::note_done(st, rec);
+        });
+    }
+
+    /// After the deletions: images still to remove, the dataset cache collected (under the `disk_gb` cap), and what each
+    /// module keeps here measured for the heartbeat.
+    async fn collect(&mut self, release: &std::collections::BTreeSet<String>) {
+        let l = Layout::new(self.layout.home.clone());
+        let rts = self.containers.clone();
+        let wanted = self.tidy.wanted.clone();
+        let cap = self.directives["limits"]["disk_gb"].as_f64().filter(|g| *g > 0.0).map(|g| (g * GIB) as u64);
+        let release = release.clone();
+        let Ok(report) = tokio::task::spawn_blocking(move || {
+            let left = crate::cleanup::update(&l, |st| std::mem::take(&mut st.unremoved));
+            if !left.is_empty() {
+                let (_, left) = crate::cleanup::remove_images(rts.as_ref(), left);
+                crate::cleanup::update(&l, |st| st.unremoved.extend(left));
+            }
+            let st = crate::cleanup::load(&l);
+            let alive: std::collections::BTreeSet<String> = (if st.retired_at.is_some() { Default::default() } else { release.clone() })
+                .into_iter().chain(st.pending.keys().cloned()).collect();
+            let days = st.retention_days.unwrap_or(crate::cleanup::RETENTION_DAYS);
+            let now = doctor::now();
+            let got = crate::cache::collect(&l, &crate::cache::Keep { alive: &alive, wanted: &wanted, idle_s: days.max(1.0) * 86400.0,
+                                                                      cap }, now);
+            if got.freed > 0 {
+                info!(freed_bytes = got.freed, evicted = got.evicted, cache_bytes = got.bytes, "dataset cache collected");
+            }
+            if got.over_cap {
+                warn!(cache_bytes = got.bytes, cap_bytes = cap, "the dataset cache is over its disk_gb cap: what is left is in use");
+            }
+            let present = crate::cleanup::present(&l);
+            let data = present.iter().map(|m| (m.clone(), crate::cleanup::dir_bytes(&l.module_data().join(m)))).collect();
+            crate::cleanup::report(&crate::cleanup::load(&l), &present, &release, &data, &got, now)
+        }).await else { return };
+        self.tidy.report = report;
+    }
+
+    /// The coordinator answered that this node was retired: nothing of the fleet runs here any more. Its services,
+    /// workloads and listeners stop, what its modules left goes after the grace (cleanup.rs), and the agent waits, doing
+    /// only that, until it is stopped. `oarbank-node leave` and a new join make it a node again.
+    async fn retired(&mut self, stop: &mut tokio::sync::watch::Receiver<bool>) -> Result<i32> {
+        warn!("the coordinator says this node was retired: its services and workloads stop, and what its modules left here \
+               is deleted after a day");
+        crate::cleanup::update(&self.layout, |st| {
+            st.retired_at.get_or_insert(doctor::now());
+        });
+        self.status.fail(crate::status::ERROR, "E_RETIRED", "The owner retired this node. To join a fleet again: \
+                         oarbank-node leave, then oarbank-node join.", json!({}));
+        self.stop_jobs().await;
+        if let Some(svc) = self.services.clone() {
+            let _ = tokio::task::spawn_blocking(move || svc.lock().unwrap().stop_all()).await;
+        }
+        for k in crate::workloads::stop_all_recorded(&self.layout) {
+            info!(workload = %k, "ended: the node was retired");
+        }
+        let _ = self.listeners.shutdown().await;
+        loop {
+            self.tidy.now = true;
+            self.tidy().await;
+            if sleep_or_stop(stop, Duration::from_secs(3600)).await {
+                return Ok(0);
+            }
         }
     }
 
@@ -675,6 +901,7 @@ impl Agent {
         let svc = self.services.clone().expect("set above");
         let mut s = svc.lock().unwrap();
         s.set_gpu_apis(crate::gpuapi::host(&self.gpu_apis));
+        s.set_modules_off(&self.modules_off());
         let limits = &self.directives["limits"];
         // a module the coordinator disabled (its kill switch) has every service disabled here: stopped, never offered
         let mut policy = self.with_grants(&self.directives["policy"]);
@@ -728,6 +955,7 @@ impl Agent {
                 self.release = Some(rel);
                 self.last_release_error = None;
                 self.need_hello = true;
+                self.tidy.now = true;                           // a module it no longer has waits for its deletion
                 #[cfg(windows)]
                 crate::sandbox_windows::reconcile_folder_grants(&self.layout, self.release.as_ref(), &self.folders);
                 self.detect_tools().await;                      // the release carries the fleet's tool definitions
@@ -763,7 +991,9 @@ impl Agent {
 
     async fn run_doctors(&mut self, policy: &Value) {
         self.probe_gpu_apis().await;
-        let (Some(rel), Ok(rt)) = (self.release.clone(), self.runtime()) else { return };
+        let (Some(mut rel), Ok(rt)) = (self.release.clone(), self.runtime()) else { return };
+        let off = self.modules_off();                           // a module turned off here runs nothing here
+        rel.modules.retain(|m| !m["name"].as_str().is_some_and(|n| off.contains(n)));
         let (l, p) = (Layout::new(self.layout.home.clone()), policy.clone());
         match tokio::task::spawn_blocking(move || doctor::run_all(&l, &rt, &rel, &p)).await {
             Ok(mut rep) => {
@@ -1506,6 +1736,8 @@ impl Agent {
                         let policy = self.with_grants(&self.directives["policy"]);
                         self.run_doctors(&policy).await;
                     }
+                    // after the doctors: a module turned on again has its data directory back before it is measured
+                    self.tidy().await;
                     self.fetch_workload_secrets().await;
                     self.claim().await?;
                 }
@@ -1514,7 +1746,7 @@ impl Agent {
                 Ok(code) => return Ok(code),
                 Err(e) => {
                     match e.code() {
-                        "node_retired" => bail!("this node was retired"),
+                        "node_retired" => return self.retired(&mut stopped).await,
                         "coordinator_moved" => {
                             if let ApiError::Http { body, .. } = &e {
                                 self.observe_moves(body);
@@ -1564,6 +1796,14 @@ async fn shutdown_runtimes(rts: Option<crate::container_runtime::Containers>) {
     for s in stops {
         let _ = s.await;
     }
+}
+
+/// Bytes in a GB (the settings' unit, as for memory).
+const GIB: f64 = 1073741824.0;
+
+/// The strings of a JSON array, as a set.
+fn names(v: &Value) -> std::collections::BTreeSet<String> {
+    v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
 }
 
 /// Sleep for `d`, or less if a stop is requested meanwhile; true when the agent is to stop.

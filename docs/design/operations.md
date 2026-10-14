@@ -2,7 +2,7 @@
 
 Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.docs`. Tiers, reasons and previews follow PLAN D14–D15.
 
-124 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
+125 operations. Module operations (`mod.<module>.<verb>`) are registered per installed module and listed in the console.
 
 ## fleet
 
@@ -88,6 +88,7 @@ Generated from `oarbank.contracts.operations` by `python -m oarbank.contracts.do
 | `modules.promote` — Make the canary version the default on all nodes | T2 | required | yes | admin | declarative | modules.rollback | `POST /api/v1/ops/{op}` (op=modules.promote)<br>`POST /do/{op}` (op=modules.promote) | oarbank module promote <name>[@<canary version>] |
 | `modules.rollback` — Abandon the canary, or flip the default back to the retained previous version | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=modules.rollback)<br>`POST /do/{op}` (op=modules.rollback) | oarbank module rollback <name> |
 | `modules.disable` — Kill switch: stop dispatch fleet-wide within one heartbeat, requeue live attempts | T1 | prompted | – | operator | declarative | modules.enable | `POST /api/v1/ops/{op}` (op=modules.disable)<br>`POST /do/{op}` (op=modules.disable) | oarbank module disable <name> |
+| `modules.purge` — Delete what a module left on a node (or on every node where it is turned off) at once, after its cleanup stage; never where it is enabled | T2 | required | yes | admin | natural | – | `POST /api/v1/ops/{op}` (op=modules.purge)<br>`POST /do/{op}` (op=modules.purge) | oarbank module purge <name> --node <node><br>oarbank module purge <name> --all |
 | `modules.pin` — Pin a node to a module version (or clear the pin) | T1 | prompted | – | operator | declarative | – | `POST /api/v1/ops/{op}` (op=modules.pin)<br>`POST /do/{op}` (op=modules.pin) | oarbank module pin|unpin <name>@<version> --node <node> |
 | `modules.restart_host` — Restart a module's coordinator process | T0 | optional | – | operator | natural | – | `POST /api/v1/ops/{op}` (op=modules.restart_host)<br>`POST /do/{op}` (op=modules.restart_host) | – |
 | `secrets.set` — Set a module secret for the module, a node group or one node (write-only: the value is never shown, only a fingerprint) | T1 | prompted | – | admin | declarative | secrets.clear | `POST /api/v1/ops/{op}` (op=secrets.set)<br>`POST /do/{op}` (op=secrets.set) | oarbank secret set <module> <name> [--node N]<br>oarbank secret set <module> <name> [--group G] |

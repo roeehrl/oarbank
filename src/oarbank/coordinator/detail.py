@@ -110,7 +110,14 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "settings": SV.effective_doc(r, n["node_id"]),
         # inbound listeners: each with the owner's entry, the agent's report and the latest probe; router mappings, the
         # network view and reachability (listeners.py, docs/design/inbound-listeners.md)
-        "listeners": _listeners(r, n, now)}
+        "listeners": _listeners(r, n, now),
+        # per module what it keeps there and when what is leaving goes; the dataset cache (modcleanup.py)
+        "storage": _storage(n, now)}
+
+
+def _storage(n: dict, now: float) -> dict:
+    from . import modcleanup
+    return modcleanup.node_doc(n, now)
 
 
 def _listeners(r, n: dict, now: float) -> dict:

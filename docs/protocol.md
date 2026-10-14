@@ -857,6 +857,49 @@ owner assigns to nodes (`workloads.assign`, T2).
 - **Adoption**: workloads outlive their agent; the next agent adopts a recorded run (`<home>/state/workloads/`) while its
   lease runs and its leader is the recorded process, and reports it at hello, which renews the lease.
 
+## Module cleanup
+
+When a module leaves a node, the node deletes what the module put there. A module's processes write only to its data
+directory (`<agent home>/modules-data/<module>`), their work directories, the dataset cache (through staging) and the
+container runtime (through the broker), so the agent does it without the module's help
+(`rust/crates/oarbank-agent/src/cleanup.rs`, `cache.rs`; `src/oarbank/coordinator/modcleanup.py`).
+
+- **When.** A module turned off on the node (`modules_disabled`) goes after `module_retention_days` (fleet, group or
+  node; 7 by default, 0: at once); turning it back on in that time keeps everything. A module no longer in the node's
+  release (its new version dropped the node's platform, the node was retired) goes after at most a day (sooner when the
+  retention is shorter). What the owner purges goes at once. The agent counts from when it first saw the module leave,
+  and keeps its state in `<agent home>/state/module-cleanup.json`, so a restart changes nothing. Nothing is deleted
+  while a job, service or workload of the module still runs, and a module turned off on the node runs nothing there:
+  no doctor, probe or service fingerprint either.
+- **What.** First the module's cleanup stage, if it declares one (the SDK's spec/manifest.md, "Cleanup stage"): best
+  effort, sandboxed, within the stage's `timeout_s` (at most 600 s), from the release that still holds its bundle (the
+  agent keeps that release until then). Then its data directory, the agent's grants for its processes (their settings
+  files), the cached datasets no other module on the node uses, and the container images it pulled that no other
+  module uses (an image whose runtime is not running is removed the next time it runs). The module's entry in the
+  release's `modules.json` marks its cleanup stage: `{"name", ..., "cleanup": true, "timeout_s", "cpu", "mem_gb"}`.
+- **The dataset cache** keeps, in `<agent home>/state/cache-index.json`, which modules used each cached dataset (and each
+  checkpoint file) and when it was last used. A dataset goes with the last module that used it; one no module used (a
+  prefetch, a cache from before 2.11) once it was not used for the retention (at least a day). Above the `disk_gb` cap
+  the least recently used datasets go first, and the agent prefetches nothing while the cache stays over it. A dataset
+  a running job or a staging holds, or that pending work wants (the `prefetch` directive), is never deleted.
+- **Report** (heartbeat): `module_storage: {at, retention_days, modules: [{module, state, in_release, data_bytes,
+  cache_bytes, datasets, images, image_bytes, delete_at}], cache: {bytes, datasets, cap_bytes, over_cap},
+  unremoved_images}`, measured every five minutes. `state` is `enabled`, or why the module goes: `disabled`, `removed`,
+  `retired` or `purge`. oarbankd keeps the latest as `nodes.storage_json`; the node page and `oarbank node show` list it,
+  and node explain names `MODULE_DATA_SCHEDULED` and `DISK_CACHE_OVER_CAP`.
+- **Deletions** (heartbeat): `module_cleanup: [{id, module, reason, at, freed_bytes, images_removed, cleanup: {stage, ok,
+  detail, seconds} | null, error}]` until the reply's `module_cleanup_ack: [id]` names them. oarbankd records each once as
+  a `module_data_deleted` event, and a failed cleanup stage as `module_cleanup_failed` (`MODULE_CLEANUP_FAILED` in node
+  explain for a week).
+- **Purge** (directive): `module_purge: [module]`, the modules the owner purged on the node (`modules.purge`, T2: `oarbank
+  module purge <module> --node N | --all`). It is refused on a node where the module is enabled, and dropped if the
+  module is enabled there again before the node deleted it. It stays in the directive until the node reports the
+  deletion (`reason: "purge"`).
+- **A retired node.** Retiring clears the node's certificate, and oarbankd answers a retired node's certificate with 403
+  `node_retired`. Its agent stops its jobs, services, workloads and listeners, deletes what its modules left after the
+  grace, and waits until it is stopped (status `E_RETIRED`). `oarbank-node leave` and a new join make it a node again;
+  `oarbank-uninstall --purge` (macOS), `apt purge` (Linux) and leaving delete the whole agent home.
+
 ## Inbound listeners
 
 docs/design/inbound-listeners.md is the full contract; in short:
@@ -1001,6 +1044,7 @@ lowest wins:
  "staging_mbps": null, "schedule": null, "enforce": "soft"}
 ```
 - **`schedule`** is `{"days": [0..6], "start": "22:00", "end": "07:30"}` in local time, or null.
+- **`disk_gb`** caps the dataset cache (see Module cleanup).
 - **Effective capacity** is always `min(automatic, cap)`.
 - **`enforce`.** `"hard"` makes the agent release the youngest attempts (`limit_*`) until the node is
   within the cap, and the agent applies `schedule` the same way (`limit_schedule`); `"soft"` only stops admitting.

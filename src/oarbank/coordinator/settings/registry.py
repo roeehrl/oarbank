@@ -180,10 +180,12 @@ SECTIONS = {
     "module_own": ("Its settings", "The settings the module declares in its manifest."),
     "protection": ("Protection", "How fleet work yields to the owner's own programs. Protected-process rules from every "
                                  "scope apply together; they are edited on the protection pages."),
+    "storage": ("Module data", "What a module leaves on the node, and how long the node keeps it once the module is turned "
+                              "off there (docs/protocol.md, \"Module cleanup\")."),
     "network": ("Network", "Inbound listeners and how they are checked from outside (docs/design/inbound-listeners.md)."),
     "updates": ("Updates", "How new Oarbank releases reach the coordinator and the nodes (docs/design/fleet-updates.md)."),
 }
-NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "protection", "network", "updates")
+NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "storage", "protection", "network", "updates")
 FLEET_SECTIONS = ("notifications", "access", "verification")
 # the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
 MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
@@ -265,10 +267,17 @@ SETTINGS = (
             danger="T0", advanced=True, hardware="ram", managed=True),
     Setting("vm_cpus", "VM CPUs (services)", "A module VM service applies it at its next start.", POS_INT,
             unit="cpus", wire="limits", section="caps", merge="min", danger="T0", advanced=True, hardware="cores", managed=True),
-    Setting("disk_gb", "Disk cache", "Dataset and image cache on the node.", {"type": "number", "exclusiveMinimum": 0},
+    Setting("disk_gb", "Disk cache", "The datasets cached on the node: above it, the least recently used ones no job here "
+            "holds or waits for are deleted.", {"type": "number", "exclusiveMinimum": 0},
             unit="GB", wire="limits", section="caps", merge="min", danger="T0", advanced=True, managed=True),
     Setting("staging_mbps", "Download bandwidth", "Dataset staging.", {"type": "number", "exclusiveMinimum": 0},
             unit="Mbps", wire="limits", section="caps", merge="min", danger="T0", advanced=True, managed=True),
+    # ---------------------------------------------------------------- module data on the node (the agent's cleanup)
+    Setting("module_retention_days", "Keep a turned-off module's data",
+            "Days the node keeps what a module left there (its data directory, cached datasets, container images) after "
+            "the module is turned off on it; turning it back on in that time keeps everything. 0 deletes at once. A module "
+            "no longer in the node's release goes after at most a day.",
+            NUM_GE0, default=7, unit="days", wire="policy", section="storage"),
     # ---------------------------------------------------------------- protection (assembled into the agent's policy)
     Setting("protection.mode", "Protection mode",
             "fleet_first: static rules and guards only; moderate: an adaptive budget that protects the front app and "
