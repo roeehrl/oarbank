@@ -556,6 +556,20 @@ fn leave_scope(explicit_home: Option<&Path>, scope: &str) -> Result<()> {
     Ok(())
 }
 
+/// A system install's session helpers, as its agent last wrote them in the status document: whether they are served,
+/// and else why not (protection rules may then miss other accounts' processes).
+fn helpers_row(st: &Value) -> Option<Value> {
+    let h = st.get("session_helpers").filter(|h| h.is_object())?;
+    let at = h["at"].as_str().unwrap_or("");
+    Some(if h["serving"] == true {
+        json!({"row": "helpers", "ok": true, "detail": format!("session helpers served at {at}")})
+    } else {
+        json!({"row": "helpers", "ok": false, "detail": format!(
+            "session helpers cannot be served ({}): protection rules may not match other accounts' processes; the agent \
+             tries again every 15 s", h["error"].as_str().unwrap_or("not served"))})
+    })
+}
+
 fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
     let mut report = json!({});
     let mut ok = true;
@@ -583,6 +597,13 @@ fn doctor(explicit_home: Option<&Path>, o: &Opts) -> Result<i32> {
                 }
             }
             report["checks"] = json!(rows);
+        }
+        if let Some(row) = helpers_row(&st) {
+            ok &= row["ok"] == true;
+            match report["checks"].as_array_mut() {
+                Some(rows) => rows.push(row),
+                None => report["checks"] = json!([row]),
+            }
         }
         break;
     }
@@ -712,5 +733,21 @@ mod tests {
     fn echo_off_is_none_where_input_cannot_be_hidden() {
         let f = std::fs::File::open("/dev/null").unwrap();
         assert!(echo_off(f.as_raw_fd()).is_none());
+    }
+
+    /// `oarbank-node doctor` says whether the system service serves its session helpers, from the status document, and
+    /// fails while it does not: rules may then miss other accounts' processes.
+    #[test]
+    fn doctor_fails_while_the_session_helpers_are_not_served() {
+        use serde_json::json;
+        assert!(super::helpers_row(&json!({"state": "connected"})).is_none(), "a personal install serves none");
+        let down = super::helpers_row(&json!({"session_helpers": {"at": "/x/run/session.sock", "serving": false,
+                                                                  "error": "cannot create /x/run: Permission denied"}})).unwrap();
+        assert_eq!((down["row"].as_str(), down["ok"].as_bool()), (Some("helpers"), Some(false)));
+        let detail = down["detail"].as_str().unwrap();
+        assert!(detail.contains("cannot create /x/run: Permission denied") && detail.contains("may not match"), "{detail}");
+        let up = super::helpers_row(&json!({"session_helpers": {"at": "/x/run/session.sock", "serving": true}})).unwrap();
+        assert_eq!(up["ok"], true);
+        assert!(up["detail"].as_str().unwrap().ends_with("/x/run/session.sock"));
     }
 }

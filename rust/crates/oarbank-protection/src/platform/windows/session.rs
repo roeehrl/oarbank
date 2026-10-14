@@ -39,7 +39,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// Serve helpers (the system service): the pipe's first instance is ours (no other process may have created it),
 /// each connection is read on a thread of its own.
-pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<()> {
+pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<Box<dyn crate::platform::Served>> {
     let sddl = wide(PIPE_SDDL);
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: a NUL-terminated SDDL; the descriptor is kept for the process's life (every instance uses it).
@@ -118,8 +118,13 @@ pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<()> {
                 .name("session-helper".into())
                 .spawn(move || take_reports(&hub, session, file));
         })?;
-    Ok(())
+    Ok(Box::new(Pipe))
 }
+
+/// The pipe, served for the rest of the process once its first instance is ours (no other process may take its name).
+struct Pipe;
+
+impl crate::platform::Served for Pipe {}
 
 fn take_reports(hub: &Arc<SessionHub>, session: u32, file: File) {
     let who = Principal::Session(session);

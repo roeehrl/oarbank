@@ -21,6 +21,9 @@ pub fn socket_path() -> PathBuf {
     unix_session::socket_path("/run/oarbank/session.sock")
 }
 
+/// How the socket's directory comes to be, for an error that says why it is not there.
+const HINT: &str = "systemd makes it for the service at each start (RuntimeDirectory=oarbank): restarting the service makes it again";
+
 /// Does the process belong to `uid` (and, unless `start_us` is 0, did it start then)?
 fn owns(uid: u32, pid: i32, start_us: u64) -> bool {
     let r = reader();
@@ -32,8 +35,8 @@ fn owns(uid: u32, pid: i32, start_us: u64) -> bool {
 }
 
 /// Serve helpers (the system service).
-pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<()> {
-    unix_session::serve(&socket_path(), hub, owns)
+pub fn serve(hub: Arc<SessionHub>) -> std::io::Result<Box<dyn crate::platform::Served>> {
+    unix_session::serve(&socket_path(), HINT, hub, owns)
 }
 
 /// What this account's helper reads each interval.

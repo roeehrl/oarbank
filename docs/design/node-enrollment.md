@@ -78,6 +78,7 @@ The agent writes `status/node.json` beside its home (and a `joined` marker file 
  "managed_by": "Example Corp", "error": {"code": "E_TLS_PIN_MISMATCH", "message": "…"},
  "update": {"state": "draining|installing|confirming|done|rolled_back|failed|…", "version": "2.10.0", "error": null,
             "at": 1790000000},
+ "session_helpers": {"at": "/Library/Application Support/Oarbank/run/session.sock", "serving": true, "error": null},
  "updated_at": 1790000000}
 ```
 
@@ -85,6 +86,9 @@ The agent writes `status/node.json` beside its home (and a `joined` marker file 
 as the agent reports it, `version` the release it goes to (on `rolled_back`, `failed` and `refused`: the version the
 node is back on), the runner's reason and when. The menu bar and tray show "Updating to <version>…" from `draining` to
 `confirming`, and "Update failed: back on <version>" for a day after a rollback.
+
+`session_helpers` is a system install's: whether its agent serves the people's session helpers, and why not.
+`oarbank-node doctor` fails its `helpers` row while it does not.
 
 A service started without a coordinator and without a code waits (`unjoined`) and looks every 5 s for a staged code
 (`state/join-code`) and for managed policy. A staged code is redeemed with backoff until it expires; a code the

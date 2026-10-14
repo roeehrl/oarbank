@@ -1116,6 +1116,13 @@ impl Agent {
         up.retain_heavy(&self.table.lock().unwrap().keys().copied().collect());
         p.site_hold = up.jobs_held().map(|why| (why, up.heavy()));
         p.tick(&self.directives, &self.table, &self.facts);
+        // for `oarbank-node doctor` and the menu bar app (written only when it changes)
+        if let Some(mut serving) = p.session_helpers() {
+            if let Some(o) = serving.as_object_mut() {
+                o.remove("failures");
+            }
+            self.status.put("session_helpers", serving);
+        }
         up.set_local(p.uplink_phases(), p.last.as_ref().and_then(|r| r.constraint.staging_mbps),
                      self.directives["limits"]["staging_mbps"].as_f64());
         // the services protection stops are held down until it lets them go (their users were released by the tick)

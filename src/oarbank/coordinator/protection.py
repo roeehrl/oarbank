@@ -243,6 +243,16 @@ def runtime_conditions(tel: dict) -> list[dict]:
         why = presence.removeprefix("unknown: ")
         out.append({"code": "PROTECTION_PRESENCE_UNKNOWN", "tone": "warn", "values": {"why": why},
                     "message": f"whether someone is at the machine cannot be read ({why}); it counts as someone present"})
+    # a system service that cannot serve its session helpers (an upgraded Mac without the socket's directory): other
+    # accounts' processes go unread (on macOS unseen), so a rule on a program in a person's home may match none of them
+    # and leave it unprotected without a word. The agent keeps trying; this says so meanwhile
+    helpers = prot.get("session_helpers") or {}
+    if helpers and helpers.get("serving") is False:
+        why = helpers.get("error") or "not served"
+        rules = ", ".join(str(r.get("id")) for r in prot.get("rules") or [] if r.get("id")) or "none"
+        out.append({"code": "PROTECTION_SESSION_HELPER_UNAVAILABLE", "tone": "bad", "values": {"why": why, "rules": rules},
+                    "message": f"session helper unavailable ({why}): protected processes in other accounts may not match "
+                               f"(rules: {rules}); the agent keeps trying to serve them"})
     for r in prot.get("rules") or []:
         if r.get("unreadable"):
             out.append({"code": "PROTECTION_UNREADABLE", "tone": "acc", "values": {"rule": r["id"], "n": r["unreadable"]},

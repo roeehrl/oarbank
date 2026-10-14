@@ -7,6 +7,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::relay::Relay;
@@ -50,28 +51,99 @@ fn peer_uid(s: &UnixStream) -> Option<u32> {
     (rc == 0).then_some(uid)
 }
 
-/// Serve helpers (the system service): bind the socket at `path`, open to every local account (the peer's uid
-/// says who it is), and take their reports on a thread each. `owns(uid, pid, start_us)`: does the process belong
-/// to that account (and, unless `start_us` is 0, did it start then)?
+/// The socket's directory, before binding in it: made when missing (this account's, 0755: everyone may reach the
+/// socket, only the account creates in it), its mode put right when it is this account's. One another account owns
+/// (root's, made by an install) is used as it is. `hint`: how the install makes it, for an error that says why not.
+pub(super) fn socket_dir(dir: &Path, hint: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mode = || std::fs::Permissions::from_mode(0o755);
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("cannot create {}: {e} ({hint})", dir.display()))
+            })?;
+            std::fs::set_permissions(dir, mode())
+        }
+        Err(e) => Err(e),
+        Ok(m) if !m.is_dir() => Err(std::io::Error::other(format!(
+            "{} is not a directory ({hint})",
+            dir.display()
+        ))),
+        // SAFETY: geteuid cannot fail.
+        Ok(m) if m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o7777 != 0o755 => {
+            std::fs::set_permissions(dir, mode())
+        }
+        Ok(_) => Ok(()),
+    }
+}
+
+/// A bound socket, served on its own thread until this is dropped.
+struct Listening {
+    path: PathBuf,
+    /// The socket's (device, inode): another file at the path is not this socket.
+    id: (u64, u64),
+    stop: Arc<AtomicBool>,
+}
+
+impl super::Served for Listening {
+    fn alive(&self) -> bool {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|m| m.file_type().is_socket() && (m.dev(), m.ino()) == self.id)
+    }
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Serve helpers (the system service): bind the socket at `path` (its directory made first: `socket_dir`), open to
+/// every local account (the peer's uid says who it is), and take their reports on a thread each. `owns(uid, pid,
+/// start_us)`: does the process belong to that account (and, unless `start_us` is 0, did it start then)? Served until
+/// what this returns is dropped.
 pub(super) fn serve(
     path: &Path,
+    hint: &str,
     hub: Arc<SessionHub>,
     owns: fn(u32, i32, u64) -> bool,
-) -> std::io::Result<()> {
+) -> std::io::Result<Box<dyn super::Served>> {
+    use std::os::unix::fs::MetadataExt;
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        socket_dir(dir, hint)?;
+    }
     let _ = std::fs::remove_file(path);
-    let l = UnixListener::bind(path)?;
+    let l = UnixListener::bind(path).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("cannot bind {}: {e} ({hint})", path.display()))
+    })?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
+    let m = std::fs::symlink_metadata(path)?;
+    // polled, so a dropped listener stops within a second instead of waiting for a connection that never comes
+    l.set_nonblocking(true)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
     std::thread::Builder::new()
         .name("session-hub".into())
         .spawn(move || {
-            for s in l.incoming().flatten() {
+            while !stopped.load(Ordering::Relaxed) {
+                let mut fd = libc::pollfd { fd: l.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                // SAFETY: one pollfd, for a listener this thread owns.
+                if unsafe { libc::poll(&mut fd, 1, 1000) } <= 0 {
+                    continue;
+                }
+                let Ok((s, _)) = l.accept() else { continue };
+                // macOS hands the listener's O_NONBLOCK to the connection; its reader blocks
+                if s.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let hub = hub.clone();
                 let _ = std::thread::Builder::new()
                     .name("session-helper".into())
                     .spawn(move || take_reports(&hub, s, owns));
             }
         })?;
-    Ok(())
+    Ok(Box::new(Listening { path: path.to_path_buf(), id: (m.dev(), m.ino()), stop }))
 }
 
 fn take_reports(hub: &Arc<SessionHub>, s: UnixStream, owns: fn(u32, i32, u64) -> bool) {
@@ -210,6 +282,115 @@ pub(super) fn act_on(a: &crate::session::Act) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, Instant};
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().mode() & 0o7777
+    }
+
+    fn any_owner(_uid: u32, _pid: i32, _start_us: u64) -> bool {
+        false
+    }
+
+    fn until(what: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !what() {
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    /// The socket's directory: made when missing (0755, this account's), put right when it is this account's, and
+    /// an error that names the directory and how the install makes it when it cannot be.
+    #[test]
+    fn the_socket_directory_is_made_for_this_account_and_put_right() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("a/run");
+        socket_dir(&dir, "the install makes it").unwrap();
+        assert!(dir.is_dir() && mode(&dir) == 0o755);
+        // SAFETY: geteuid cannot fail.
+        assert_eq!(std::fs::metadata(&dir).unwrap().uid(), unsafe { libc::geteuid() });
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        socket_dir(&dir, "").unwrap();
+        assert_eq!(mode(&dir), 0o755, "helpers of every account must reach the socket");
+        socket_dir(&dir, "").unwrap(); // again: nothing to do
+        let file = t.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let e = socket_dir(&file, "the install makes it").unwrap_err().to_string();
+        assert!(e.contains("is not a directory") && e.contains("the install makes it"), "{e}");
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            // a parent this account may not write in (root's, on an upgraded Mac)
+            let locked = t.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let e = socket_dir(&locked.join("run"), "the install makes it").unwrap_err();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            let e = e.to_string();
+            assert!(e.contains(&format!("cannot create {}", locked.join("run").display())) && e.contains("the install makes it"), "{e}");
+        }
+    }
+
+    /// Serving makes the socket's missing directory, binds the socket open to every account, and knows when the
+    /// socket is no longer where helpers look; a dropped listener lets the path be served again.
+    #[test]
+    fn serving_makes_the_missing_directory_and_sees_its_socket_go() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("run/s.sock");
+        let served = serve(&path, "", SessionHub::new(), any_owner).unwrap();
+        assert_eq!(mode(path.parent().unwrap()), 0o755);
+        assert_eq!(mode(&path), 0o666);
+        assert!(served.alive());
+        UnixStream::connect(&path).expect("a helper connects");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!served.alive(), "removed: no helper can reach it");
+        drop(served);
+        let again = serve(&path, "", SessionHub::new(), any_owner).unwrap();
+        assert!(again.alive());
+        UnixStream::connect(&path).expect("served again");
+    }
+
+    /// The system service keeps trying: a directory it cannot make at first (a file stands where it goes) fails with
+    /// the reason, once that is gone the next try serves, and a socket removed under it is served again.
+    #[test]
+    fn the_service_serves_helpers_once_it_can_and_again_when_its_socket_goes() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("run");
+        let path = dir.join("s.sock");
+        std::fs::write(&dir, b"").unwrap();
+        let hub = SessionHub::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // the supervisor outlives the test: once it is over, it may not make the scratch directory again
+        let over = Arc::new(AtomicBool::new(false));
+        let (h, p, o) = (hub.clone(), path.clone(), over.clone());
+        super::super::supervise(hub.clone(), path.display().to_string(), Duration::from_millis(20),
+                                move || match o.load(Ordering::Relaxed) {
+                                    false => serve(&p, "the install makes it", h.clone(), any_owner),
+                                    true => Err(std::io::Error::other("the test is over")),
+                                },
+                                move |s: &crate::session::Serving| { let _ = tx.send(s.clone()); });
+        let first = hub.serving().unwrap();
+        assert!(!first.serving && first.at == path.display().to_string());
+        assert!(first.error.as_deref().is_some_and(|e| e.contains("is not a directory")), "{first:?}");
+        assert!(until(|| hub.serving().unwrap().failures >= 3), "it tries again");
+        std::fs::remove_file(&dir).unwrap();
+        assert!(until(|| hub.serving().unwrap().serving), "{:?}", hub.serving());
+        assert!(hub.serving().unwrap().error.is_none() && hub.serving().unwrap().failures == 0);
+        UnixStream::connect(&path).expect("helpers connect");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(until(|| path.exists() && hub.serving().unwrap().serving), "served again");
+        UnixStream::connect(&path).expect("helpers connect again");
+        // each change heard once, however many tries failed the same way
+        let heard: Vec<_> = rx.try_iter().map(|s| (s.serving, s.error.unwrap_or_default())).collect();
+        assert_eq!(heard.iter().map(|x| x.0).collect::<Vec<_>>(), [false, true, false, true], "{heard:?}");
+        assert!(heard[2].1.ends_with("was removed"), "{heard:?}");
+        over.store(true, Ordering::Relaxed);
+    }
 
     /// A helper acts only on a process that still has the start time named, with the four verbs.
     #[test]

@@ -237,6 +237,33 @@ def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain
     assert rows["PROTECTION_NO_IPC_COUNTERS"] == {"rule": "build"}
 
 
+def test_a_service_without_its_session_helpers_says_rules_may_miss_other_accounts(db):
+    # an upgraded Mac whose agent could not serve its session helpers (the socket's directory was missing): a rule on a
+    # program in a person's home matched none of its processes, silently. The node now says so wherever protection shows
+    from oarbank.console.views import node_conditions
+    node = certify(db, enrolled_node(db, "mac")[1])
+    sock = "/Library/Application Support/Oarbank/run/session.sock"
+    down = {"protection": {"rules": [{"id": "editor", "active": False, "processes": 0, "unreadable": 0}],
+                           "session_helpers": {"at": sock, "serving": False, "failures": 4,
+                                               "error": "cannot create /Library/Application Support/Oarbank/run: "
+                                                        "Permission denied (os error 13)"}}}
+    conds = protection.runtime_conditions(down)
+    assert [c["code"] for c in conds] == ["PROTECTION_SESSION_HELPER_UNAVAILABLE"]
+    c = conds[0]
+    assert c["tone"] == "bad" and c["values"]["rules"] == "editor" and "Permission denied" in c["values"]["why"]
+    assert c["message"].startswith("session helper unavailable (cannot create") and \
+        "protected processes in other accounts may not match" in c["message"]
+    # served, or a personal install (no hub at all): nothing to say
+    up = {"protection": {"rules": [{"id": "editor"}], "session_helpers": {"at": sock, "serving": True, "failures": 0}}}
+    assert protection.runtime_conditions(up) == [] and protection.runtime_conditions({"protection": {"rules": []}}) == []
+    assert any(x["code"] == "PROTECTION_SESSION_HELPER_UNAVAILABLE" for x in node_conditions({"tel": down, "cap": {}}))
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (json.dumps(down), node["node_id"]))
+    st = protection.status(db, node["node_id"])                       # `oarbank protection show <node>`
+    assert [x["code"] for x in st["conditions"]] == ["PROTECTION_SESSION_HELPER_UNAVAILABLE"]
+    rows = {r.code: r.detail for r in explain.node_doc(db, node["node_id"]).summary}
+    assert rows["PROTECTION_SESSION_HELPER_UNAVAILABLE"]["rules"] == "editor"
+
+
 def test_paused_attempts_keep_their_lease(db):
     from helpers import create_study, PARAMS, SCENES
     node = certify(db, enrolled_node(db)[1])

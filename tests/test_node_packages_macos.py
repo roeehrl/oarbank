@@ -75,7 +75,7 @@ class Mac:
         stubs = {
             "open": 'echo "open $*" >> "$CALLS"',
             "sudo": 'echo "sudo $1 $2" >> "$CALLS"; shift 2; exec "$@"',
-            "chown": "exit 0",
+            "chown": 'echo "chown $*" >> "$CALLS"',
             "stat": f'echo "{user}"',
             "id": '[ "$2" = root ] && echo 0 || { [ "$2" = loginwindow ] && echo 0 || echo 501; }',
             "dscl": f'echo "NFSHomeDirectory: {self.home}"',
@@ -221,6 +221,32 @@ def test_an_upgrade_renders_the_service_again_and_restarts_it_in_either_scope(tm
                f"{mac.root}/Library/Oarbank/bin/oarbank-launcher service refresh\n")
     assert install in calls and refresh in calls and calls.index(install) < calls.index(refresh)
     assert "kickstart" not in calls and "system/dev.codonic.oarbank.agent " not in calls + " "
+
+
+@unix
+def test_an_upgrade_makes_the_session_helpers_directory_a_system_install_lacks(tmp_path):
+    # a node upgraded from 2.8 had no /Library/Application Support/Oarbank/run: its agent served no session helper, and
+    # a rule on a program in a person's home matched none of its processes. The upgrade makes it, the service
+    # account's (the job's UserName) and everyone's to enter, before the service restarts on the new launcher
+    mac = Mac(tmp_path)
+    with open(mac.root / "Library/LaunchDaemons/dev.codonic.oarbank.agent.plist", "wb") as f:
+        plistlib.dump({"Label": "dev.codonic.oarbank.agent", "UserName": "_svcacct"}, f)
+    run = mac.support / "run"
+    out, calls = mac.run(COMMAND_LINE_INSTALL="1")
+    assert out.returncode == 0
+    assert run.is_dir() and run.stat().st_mode & 0o777 == 0o755
+    # plutil reads the job's account where it exists (macOS); elsewhere the default account stands in
+    acct = "_svcacct" if Path("/usr/bin/plutil").exists() else "_oarbank"
+    assert f"chown {acct}:{acct} {run}\n" in calls
+    assert calls.index(f"chown {acct}:{acct} {run}") < calls.index("service refresh --system")
+    # again on the next upgrade, as it is: nothing to undo, nothing fails
+    run.chmod(0o700)
+    out, calls = Mac(tmp_path).run(COMMAND_LINE_INSTALL="1")
+    assert out.returncode == 0 and run.stat().st_mode & 0o777 == 0o755
+    # a node never set up as a system service gets no such directory (setup's `service install` makes it)
+    fresh = Mac(tmp_path / "fresh")
+    out, calls = fresh.run(COMMAND_LINE_INSTALL="1")
+    assert out.returncode == 0 and not (fresh.support / "run").exists() and "/run" not in calls
 
 
 @unix
