@@ -5,7 +5,9 @@
 <h1>Agent</h1>
 <p class="small mut">Each node updates its own oarbank-agent through oarbankd: it downloads the build assigned to its platform,
 checks it, installs it beside the running one, lets its running jobs finish and restarts on it. A build that fails to start,
-or is not confirmed within 10 minutes, is rolled back on that node automatically. No ssh.</p>
+or is not confirmed within 10 minutes, is rolled back on that node automatically. No ssh. A node's installed package
+supersedes older builds: the channel never takes a node below the agent its package (or the fleet release it installed)
+carries, and starting a fleet rollout retires the channel builds older than its release.</p>
 {% macro build(sha) -%}{% if sha %}<span class="mono" title="{{ sha }}">{{ versions[sha] or '?' }} · {{ sha[:12] }}</span>{% else %}–{% endif %}{%- endmacro %}
 
 <h2>Channels</h2>
@@ -25,18 +27,20 @@ or is not confirmed within 10 minutes, is rolled back on that node automatically
 
 <h2>Nodes</h2>
 <table class="small">
-  <tr><th>node</th><th>platform</th><th>runs</th><th>assigned</th><th>update</th></tr>
+  <tr><th>node</th><th>platform</th><th>runs</th><th>package</th><th>assigned</th><th>update</th></tr>
   {% for n in nodes %}<tr>
     <td>{{ n.hostname }}{% if n.canary %} <span class="chip warn">canary</span>{% endif %}</td>
     <td class="mono">{{ n.platform or '?' }}</td>
     <td class="mono">{{ n.agent_version or '?' }}{% if n.agent_build %} · {{ n.agent_build[:12] }}{% endif %}</td>
-    <td>{{ build(n.assigned) }}</td>
-    <td>{% if n.up_to_date %}<span class="chip ok">up to date</span>
+    <td class="mono" title="the agent the node's installed package carries (or the fleet release it installed)">{{ n.floor.version if n.floor else '–' }}</td>
+    <td>{{ build(n.assigned) }}{% if n.superseded %} <span class="mut small" title="{{ n.superseded }}">channel {{ build(n.channel) }} superseded by the package</span>{% endif %}</td>
+    <td>{% if n.runs_older_than_package %}<span class="chip warn">older than its package</span> <span class="mut">{{ n.runs_older_than_package }}</span>
+        {% elif n.up_to_date %}<span class="chip ok">up to date</span>
         {% elif n.behind and not n.assigned %}<span class="chip warn">older than the coordinator ({{ n.behind.coordinator }})</span>
         <span class="mut">install the {{ n.behind.coordinator }} node package on it, or upload the {{ n.behind.coordinator }} agent build below and enable it for {{ n.platform or 'its platform' }}</span>
         {% else %}{% set st = n.update.state or 'pending' %}<span class="chip {{ 'bad' if st in ('failed', 'rolled_back', 'blocked') else 'warn' }}">{{ st | replace('_', ' ') }}</span>
         {% if n.update.error %}<span class="mut">{{ n.update.error[:160] }}</span>{% endif %}{% endif %}</td>
-  </tr>{% else %}<tr><td colspan="5" class="mut">No nodes enrolled.</td></tr>{% endfor %}
+  </tr>{% else %}<tr><td colspan="6" class="mut">No nodes enrolled.</td></tr>{% endfor %}
 </table>
 
 <h2>Vendor update metadata</h2>

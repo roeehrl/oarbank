@@ -63,6 +63,71 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// A sortable key of a release version: a pre-release sorts before its release, build metadata is ignored (the
+/// coordinator's `fleetupdates.vkey`). None for anything else.
+pub fn version_key(v: &str) -> Option<(u64, u64, u64, u8, String)> {
+    let v = v.trim();
+    let core = v.split('+').next()?;
+    let (nums, pre) = match core.split_once('-') {
+        Some((n, p)) if !p.is_empty() => (n, Some(p)),
+        Some(_) => return None,
+        None => (core, None),
+    };
+    let mut it = nums.split('.');
+    let mut num = || it.next().filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).and_then(|s| s.parse::<u64>().ok());
+    let (a, b, c) = (num()?, num()?, num()?);
+    if it.next().is_some() || pre.is_some_and(|p| !p.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))) {
+        return None;
+    }
+    Some((a, b, c, if pre.is_some() { 0 } else { 1 }, pre.unwrap_or("").to_string()))
+}
+
+/// `a` is a later release than `b` (false when either is not a version).
+pub fn newer(a: &str, b: &str) -> bool {
+    matches!((version_key(a), version_key(b)), (Some(x), Some(y)) if x > y)
+}
+
+/// The version an oarbank-agent binary embeds (`oarbank-agent-version:<semver>` and a NUL; docs/protocol.md, "Agent
+/// self-update"). The prefix also appears as a plain literal (the code that looks for it): the occurrence a version
+/// follows counts.
+pub fn agent_version_of(data: &[u8]) -> Option<String> {
+    let p = b"oarbank-agent-version:";
+    let mut from = 0;
+    while let Some(i) = data[from..].windows(p.len()).position(|w| w == p) {
+        let rest = &data[from + i + p.len()..];
+        if let Some(end) = rest.iter().take(64).position(|&b| b == 0) {
+            let v = &rest[..end];
+            if !v.is_empty() && v[0].is_ascii_digit() && v.iter().all(|c| c.is_ascii_alphanumeric() || b".+-".contains(c)) {
+                return String::from_utf8(v.to_vec()).ok();
+            }
+        }
+        from += i + 1;
+    }
+    None
+}
+
+/// Where each package format installs the node's agent (scripts/package-*.sh, deploy/windows/oarbank-agent.wxs). A
+/// tarball has no fixed place (`<prefix>/versions/<release>/`).
+pub fn package_agent(format: &str) -> Option<PathBuf> {
+    match format {
+        "pkg" => Some(PathBuf::from("/Library/Oarbank/bin/oarbank-agent")),
+        "deb" | "rpm" => Some(PathBuf::from("/usr/lib/oarbank/oarbank-agent")),
+        "msi" => Some(std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+            .join("Oarbank").join("oarbank-agent.exe")),
+        _ => None,
+    }
+}
+
+/// The installed package's agent beside this launcher: the launcher is a package's own (it sits where a package format
+/// installs it) and the package's agent is there. A development or tarball launcher has none.
+pub fn package_agent_beside(launcher: &Path) -> Option<PathBuf> {
+    let dir = launcher.parent()?;
+    // Windows paths compare without case (the service's command line and %ProgramFiles% may spell it differently)
+    let same = |a: &Path| if cfg!(windows) { a.to_string_lossy().to_lowercase() == dir.to_string_lossy().to_lowercase() } else { a == dir };
+    ["pkg", "deb", "msi"].iter().filter_map(|f| package_agent(f))
+        .find(|a| a.parent().is_some_and(same) && a.is_file())
+}
+
 /// The manifest's hash: over its exact text.
 pub fn manifest_sha256(text: &str) -> String {
     sha256_hex(text.as_bytes())

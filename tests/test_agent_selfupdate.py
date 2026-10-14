@@ -217,3 +217,151 @@ def test_download_is_served_only_to_a_node_assigned_the_build(db):
     r = c.get(f"/v1/agent/builds/{sha}", headers=node_headers(der_a))
     assert r.status_code == 200 and hashlib.sha256(r.content).hexdigest() == sha
     assert c.get(f"/v1/agent/builds/{sha}", headers=node_headers(der_b)).status_code == 404
+
+
+# ------------------------------------------------------------------ the installed package supersedes the channel
+
+PKG = {"format": "pkg", "scope": "system", "updater": True, "why": None}
+
+
+def beat(db, node, build, version, install=None, node_update=None):
+    """A heartbeat from an agent that says what it runs, how it was installed and its last fleet update."""
+    body = {"attempts": [], "agent_build": build, "agent_version": version, "agent_update": {"state": "idle"}}
+    if install is not None:
+        body["install"] = install
+    if node_update is not None:
+        body["node_update"] = node_update
+    return core.heartbeat(db, fresh(db, node), body)
+
+
+def row(db, host):
+    return next(n for n in agentbuilds.view(db)["nodes"] if n["hostname"] == host)
+
+
+def promoted(db, node, version) -> str:
+    sha = upload(db, version)
+    planned(db, "agent.canary", sha, {"nodes": [fresh(db, node)["hostname"]]})
+    report(db, node, sha)
+    planned(db, "agent.promote", "agent")
+    return sha
+
+
+def test_a_fleet_release_the_node_installed_supersedes_an_older_channel_build(db):
+    """The live 2.10.3 -> 2.10.4 case: the 2.10.3 build pushed through the channel stays current; once the node installed
+    the 2.10.4 fleet release (its package's agent runs), the channel must not take it back down to 2.10.3."""
+    _, a = enrolled_node(db, "mini")
+    old = promoted(db, a, "2.10.3")
+    done = {"state": "done", "release": "2.10.4", "seq": 21004, "error": None, "at": 1.0}
+    assert beat(db, a, "f" * 64, "2.10.4", node_update=done)["agent_update"] is None      # was: -> 2.10.3, draining
+    r = row(db, "mini")
+    assert r["up_to_date"] and r["assigned"] is None and r["channel"] == old
+    assert r["floor"]["version"] == "2.10.4" and "older than agent 2.10.4 from fleet release 2.10.4" in r["superseded"]
+    assert agentbuilds.assigned(db, fresh(db, a)) is None          # and GET /v1/agent/builds/<old> is not served to it
+    # a node a coordinator before this rule already sent back down says so, with the way back
+    beat(db, a, old, "2.10.3", node_update=done)
+    r = row(db, "mini")
+    assert not r["up_to_date"] and "runs agent 2.10.3, older than agent 2.10.4 from fleet release 2.10.4" in r["runs_older_than_package"]
+    assert r["runs_older_than_package"].endswith("the fleet rollout takes it to the release again")
+
+
+def test_the_package_version_the_agent_reports_is_the_floor_too(db):
+    """A package installed by hand (installer -pkg, msiexec): the agent reports its package's agent version."""
+    _, a = enrolled_node(db, "mini")
+    old = promoted(db, a, "2.10.3")
+    assert beat(db, a, old, "2.10.3", install={**PKG, "package_version": "2.10.4"})["agent_update"] is None
+    r = row(db, "mini")
+    # the launcher kept the channel build current: shown, not hidden
+    assert not r["up_to_date"] and r["package_version"] == "2.10.4"
+    assert r["runs_older_than_package"].startswith("runs agent 2.10.3, older than agent 2.10.4 from its installed package: "
+                                                   "its launcher starts the package's agent at its next start")
+    beat(db, a, "e" * 64, "2.10.4", install={**PKG, "package_version": "2.10.4"})
+    assert row(db, "mini")["up_to_date"]
+    # what a heartbeat carries about the install is kept, the version checked
+    beat(db, a, "e" * 64, "2.10.4", install={**PKG, "package_version": "not a version"})
+    assert row(db, "mini")["package_version"] is None
+
+
+def test_a_newer_channel_build_still_updates_and_rolls_back_to_the_package_version(db):
+    """A channel build newer than the package (promoted after it) updates the node; abandoning it takes the node back to
+    a build of its package's version, never below."""
+    _, a = enrolled_node(db, "mini")
+    inst = {**PKG, "package_version": "2.10.4"}
+    same = promoted(db, a, "2.10.4")                       # the owner's fix: the 2.10.4 build uploaded to the channel
+    assert beat(db, a, "e" * 64, "2.10.4", install=inst)["agent_update"] is None          # the package's own 2.10.4 stays
+    newer = upload(db, "2.10.5")
+    planned(db, "agent.canary", newer, {"nodes": ["mini"]})
+    assert beat(db, a, "e" * 64, "2.10.4", install=inst)["agent_update"]["sha256"] == newer
+    beat(db, a, newer, "2.10.5", install=inst)
+    op(db, "agent.rollback", "agent", reason="bad canary")
+    assert beat(db, a, newer, "2.10.5", install=inst)["agent_update"]["sha256"] == same   # back down to 2.10.4, not below
+    beat(db, a, same, "2.10.4", install=inst)
+    assert row(db, "mini")["up_to_date"]
+
+
+def test_heartbeats_carry_the_running_version(db):
+    _, a = enrolled_node(db, "mini")
+    beat(db, a, "e" * 64, "2.10.4")
+    assert fresh(db, a)["agent_version"] == "2.10.4"
+    beat(db, a, "e" * 64, "x")                                 # not a version: the hello's stays
+    assert fresh(db, a)["agent_version"] == "2.10.4"
+
+
+def test_a_fleet_rollout_retires_older_channel_builds_and_refuses_them_after(db):
+    _, a = enrolled_node(db, "mini")
+    _, box = enrolled_node(db, "box", facts=facts_for("linux-amd64", os_version="6.8"))
+    old = promoted(db, a, "2.10.3")
+    newer = upload(db, "2.10.5", "linux-amd64")
+    planned(db, "agent.canary", newer, {"nodes": ["box"]})
+    db.x("INSERT INTO rollouts(rollout_id, version, state, kind, created_at) VALUES('ro_1', '2.10.4', 'done', 'update', 0)")
+    assert agentbuilds.migrate(db) == {"darwin-arm64": ["current"]}
+    ch = agentbuilds.channel(db, "darwin-arm64")
+    assert ch["current"] is None and agentbuilds.record(db, old)                    # off the channel, still in the store
+    assert agentbuilds.channel(db, "linux-amd64")["canary"] == newer                  # newer than the release: kept
+    ev = db.q("SELECT reason FROM events WHERE kind='agent_build_retired'")
+    assert len(ev) == 1 and "older than fleet release 2.10.4" in ev[0]["reason"]
+    assert agentbuilds.migrate(db) == {}                                              # once
+    with pytest.raises(core.ApiError, match="older than fleet release 2.10.4"):
+        planned(db, "agent.canary", old, {"nodes": ["mini"]})
+    assert agentbuilds.view(db)["fleet_floor"] == "2.10.4"
+    db.x("UPDATE rollouts SET state='rolled_back'")                                    # the fleet went back: no floor
+    assert agentbuilds.fleet_floor(db) is None
+
+
+def test_the_cli_shows_the_package_beside_what_runs(db, capsys, monkeypatch):
+    from oarbank.cli import main as cli
+    _, a = enrolled_node(db, "mini")
+    old = promoted(db, a, "2.10.3")
+    beat(db, a, old, "2.10.3", install={**PKG, "package_version": "2.10.4"})
+    monkeypatch.setattr(cli, "api", lambda method, path, **kw: agentbuilds.view(db))
+    cli.cmd_agent(type("A", (), {"action": "list", "reason": None, "yes": False, "dry_run": False})())
+    out = capsys.readouterr().out
+    line = next(x for x in out.splitlines() if "mini" in x)
+    assert "runs 2.10.3" in line and "package 2.10.4" in line and "older than agent 2.10.4 from its installed package" in line
+    assert "channel build 2.10.3 is older than agent 2.10.4 from its installed package" in out
+
+
+def test_the_agent_page_shows_the_package_and_the_superseded_channel_build(tmp_path):
+    from fastapi.testclient import TestClient
+    from oarbank.console.app import console_app
+    from oarbank.console.state import ConsoleState
+    from oarbank.coordinator import app as coord_app
+    from helpers import sign_in
+    from test_console import SECRET, Server
+    db = make_db(tmp_path / "oarbank.sqlite3")
+    _, a = enrolled_node(db, "mini")
+    _, b = enrolled_node(db, "desk")
+    old = promoted(db, a, "2.10.3")
+    done = {"state": "done", "release": "2.10.4", "seq": 21004, "error": None, "at": 1.0}
+    beat(db, a, "e" * 64, "2.10.4", node_update=done)
+    beat(db, b, old, "2.10.3", install={**PKG, "package_version": "2.10.4"})
+    with Server(coord_app.admin_app(db, console_secret=SECRET)) as oarbankd:
+        state = ConsoleState(str(db.path), f"http://127.0.0.1:{oarbankd.port}", secret=SECRET)
+        with TestClient(console_app(state, tmp_path / "logs"), client=("127.0.0.1", 50013)) as c:
+            sign_in(c, db)
+            page = c.get("/agent").text
+    mini = page[page.index("<td>mini"):]
+    mini = mini[:mini.index("</tr>")]
+    assert "2.10.4" in mini and "superseded by the package" in mini and "up to date" in mini
+    desk = page[page.index("<td>desk"):]
+    desk = desk[:desk.index("</tr>")]
+    assert "older than its package" in desk and "its launcher starts the package" in desk

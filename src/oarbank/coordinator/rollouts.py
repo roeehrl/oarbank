@@ -323,6 +323,9 @@ def start(db: DB, version: str, actor: str, params: dict | None = None, auto: bo
         _add_member(db, rid, _membership(db, n, version, p["policy"], auto, t, snap), version, t)
     db.event("rollout_started", actor=actor, reason=f"{rid}: {version}" + (" (automatic)" if auto else ""),
              rings=[r["ring"] for r in p["rings"] if r["nodes"]])
+    # the release's packages supersede every older agent-only build: none may take a node back below it afterwards
+    from . import agentbuilds
+    agentbuilds.retire(db, version, actor, why=f"rollout {rid}")
     from . import core
     core._resolve_alert(db, "update_available", f"release:{version}")
     _advance(db, row(db, rid), t)
@@ -595,6 +598,13 @@ def _sync(db: DB, r: dict, t: float, snap):
         if m["state"] not in SETTLED and n.get("agent_version") and not F.newer(r["version"], n["agent_version"]):
             _set_node(db, rid, m["node_id"], t, state="done", go=0, finished_at=t, error=None)   # its report got lost
             continue
+        if m["state"] == "done" and F.newer(r["version"], n.get("agent_version")):
+            # updated, then fell back below the release (an older agent-only build took it down, or a package installed
+            # by hand): it takes the release again, through the same slots and windows
+            why = f"fell back to agent {n['agent_version']} after updating to {r['version']}"
+            _set_node(db, rid, m["node_id"], t, state="pending", go=0, finished_at=None, heartbeats=0, error=why)
+            db.event("rollout_node_fell_back", node_id=m["node_id"], reason=f"{rid}: {why}")
+            m = {**m, "state": "pending"}
         hold, pin = F.active_hold(db, n, t, snap), F.active_pin(db, n, t, snap)
         blocked = f"held: {hold['reason']}" if hold else (f"pinned to {pin['version']}: {pin['reason']}"
                                                           if pin and pin["version"] != r["version"] else None)

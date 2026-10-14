@@ -560,8 +560,35 @@ fn trigger_installed() -> bool {
     }
 }
 
-/// `install: {format, scope, updater, why}`: the runner can update this node when the node is a system install, its
-/// trigger is in place and its trust is pinned (`<data root>/update/available`, which `update-trust` writes readable).
+/// The version of the installed package's agent: the binary the launcher names in `OARBANK_PACKAGE_AGENT` (a package's
+/// launcher names the agent its package installed beside it; a development or tarball launcher names none). It is read
+/// again only when the file changed. The package supersedes every older agent-only build (docs/protocol.md, "Agent
+/// self-update"): the coordinator never assigns one, and this agent refuses one.
+pub fn package_version() -> Option<String> {
+    package_version_at(Path::new(&std::env::var_os("OARBANK_PACKAGE_AGENT")?))
+}
+
+fn package_version_at(path: &Path) -> Option<String> {
+    type Seen = Option<(PathBuf, u64, Option<std::time::SystemTime>, Option<String>)>;
+    static SEEN: Mutex<Seen> = Mutex::new(None);
+    let path = path.to_path_buf();
+    let meta = std::fs::metadata(&path).ok()?;
+    let (len, mtime) = (meta.len(), meta.modified().ok());
+    let mut seen = SEEN.lock().unwrap();
+    if let Some((p, l, m, v)) = seen.as_ref() {
+        if *p == path && *l == len && *m == mtime {
+            return v.clone();
+        }
+    }
+    let v = std::fs::read(&path).ok().and_then(|d| fleet::agent_version_of(&d));
+    *seen = Some((path, len, mtime, v.clone()));
+    v
+}
+
+/// `install: {format, scope, updater, why, package_version}`: the runner can update this node when the node is a system
+/// install, its trigger is in place and its trust is pinned (`<data root>/update/available`, which `update-trust` writes
+/// readable); `package_version` is the installed package's agent ([`package_version`]), which may differ from the build
+/// this agent runs.
 pub fn install_facts(home: &Path) -> Value {
     let format = detect_format();
     let system = home == system_data().join("agent");
@@ -580,7 +607,8 @@ pub fn install_facts(home: &Path) -> Value {
     } else {
         None
     };
-    json!({"format": format, "scope": if system { "system" } else { "personal" }, "updater": why.is_none(), "why": why})
+    json!({"format": format, "scope": if system { "system" } else { "personal" }, "updater": why.is_none(), "why": why,
+           "package_version": package_version()})
 }
 
 #[cfg(test)]
@@ -803,6 +831,17 @@ mod tests {
         let gone = crate::rescue::tests::serve(vec![]).await;
         let api = Api::new(&gone, crate::rescue::client().unwrap(), 0);
         assert!(matches!(stage(&api, tmp.path(), &d, &[], "linux-amd64", "tar").await, Err(StageError::Retry { .. })));
+    }
+
+    #[test]
+    fn the_package_version_is_read_from_the_packages_agent_and_again_when_it_changes() {
+        let tmp = crate::scratch("nodeupdate-package");
+        let p = tmp.path().join("oarbank-agent");
+        assert_eq!(package_version_at(&p), None);
+        std::fs::write(&p, b"..oarbank-agent-version:2.10.4\0..").unwrap();
+        assert_eq!(package_version_at(&p).as_deref(), Some("2.10.4"));
+        std::fs::write(&p, b"....oarbank-agent-version:2.10.5\0....").unwrap();
+        assert_eq!(package_version_at(&p).as_deref(), Some("2.10.5"));
     }
 
     #[test]

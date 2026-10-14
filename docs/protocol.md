@@ -642,9 +642,11 @@ canary on chosen nodes (`agent.upload`, `agent.canary`, `agent.promote`, `agent.
   (64-bit Mach-O, including universal binaries; ELF; PE) and the version from the marker every build embeds,
   `oarbank-agent-version:<semver>` followed by a NUL byte. A build can serve only nodes of its platforms.
 
-- **Report.** hello and heartbeat carry `agent_build` (the sha256 of the running binary) and `agent_update`
-  `{state, target, version, error, at}`. States: `idle`, `staging`, `draining`, `restarting`, `confirming`,
-  `confirmed`, `failed`, `rolled_back`, `blocked`.
+- **Report.** hello and heartbeat carry `agent_version` (the running build's), `agent_build` (the sha256 of the
+  running binary) and `agent_update` `{state, target, version, error, at}`. States: `idle`, `staging`, `draining`,
+  `restarting`, `confirming`, `confirmed`, `failed`, `rolled_back`, `blocked`. The install facts carry
+  `package_version`, the version of the agent the installed package carries (see Fleet updates), which differs from the
+  running build after an agent-only update.
 - **Directive.** While a node's assigned build (the canary on canary nodes, else current; none before the
   first promotion) differs from `agent_build`, every hello and heartbeat reply carries
   `agent_update: {sha256, version, size, url, statement?, signature?}` (`statement`/`signature` in signing
@@ -668,6 +670,18 @@ canary on chosen nodes (`agent.upload`, `agent.canary`, `agent.promote`, `agent.
   agent not started by the launcher reports `blocked` and does not update itself.
 - **Promotion** is refused until every canary node reports running the canary build and has heartbeated in
   the last 120 s. In signing mode canary and promotion need a signed build.
+- **The package supersedes older builds.** A node package (a fleet release, or one installed by hand) is the unit; the
+  channel only ever moves a node forward from it. A node's floor is the newer of its installed package's agent
+  (`install.package_version`) and the fleet release it last installed (`node_update` `done`). A channel build older
+  than the floor is never assigned to the node (no directive; the Agent page and `oarbank agent list` say the package
+  supersedes it), and one of the floor's own version only to take the node back down to it from a newer channel build
+  (a rollback). A channel build newer than the floor, promoted after the package, updates the node as before. Starting
+  a fleet rollout retires every channel build older than its release (current, previous and canary; the builds stay in
+  the store), canary, promotion and rollback refuse a build older than the newest release a rollout took the fleet to,
+  and a coordinator from before this rule retires its stale builds once when it starts. On the node the launcher names
+  the package's agent to the agent (`OARBANK_PACKAGE_AGENT`); the agent refuses a directive older than it (`failed`,
+  not remembered), and the launcher refuses a staged build older than it and, at each start outside a trial, makes the
+  package's agent current when `current` names an older version.
 
 ## Fleet updates
 
@@ -684,16 +698,17 @@ without an update runner keeps agent-only self-update.
   directory, from files staged through `POST /api/v1/updates/uploads`, or from `update_source`
   (`<source>/download/v<version>/<asset>`). It checks each artifact's sha256 and size and keeps only the platforms its
   nodes and itself run.
-- **Report.** hello and heartbeat carry `install: {format, scope, updater, why}` (how the agent was installed and
-  whether the runner's trigger and trust are in place) and `node_update: {state, release, seq, error, at}`. States:
+- **Report.** hello and heartbeat carry `install: {format, scope, updater, why, package_version}` (how the agent was
+  installed, whether the runner's trigger and trust are in place, and the version of the package's agent) and `node_update: {state, release, seq, error, at}`. States:
   `idle`, `unsupported`, `staging`, `staged`, `draining`, `deferred`, `installing`, `confirming`, `done`, `failed`,
   `rolled_back`, `refused`.
 - **Directive.** While a node's target differs from the version it runs, every reply carries
   `node_update: {release, seq, go, rollback, drain_timeout_s, artifact: {name, format, sha256, size, url}, manifest,
   signature | null, owner_anchors | null}`; `null` otherwise. The target is the node's pin (`update_pin`), else none
   while it is held (`update_hold`), else the governing rollout's release once the node's ring started (or, after the
-  rollout is done, to catch up), else what it runs. It is never newer than the coordinator's own version, and a
-  `stops` version the node has not reached comes first. `owner_anchors` relays the owner key set for the runner's
+  rollout is done, to catch up), else what it runs. A node the rollout updated that later runs an older agent goes
+  back to `pending` and takes the release again under the same slots and windows. It is never newer than the
+  coordinator's own version, and a `stops` version the node has not reached comes first. `owner_anchors` relays the owner key set for the runner's
   rotation rule.
 - **Artifact.** `GET /v1/updates/artifacts/{sha256}` (agent listener, mTLS) serves only the artifact of the node's
   current directive (404 otherwise).

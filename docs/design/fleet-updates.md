@@ -261,6 +261,71 @@ roll back (by not confirming). It cannot choose *what*: the most it can do is in
 signed, at a seq no lower than the committed one. Request fields are data: the runner reads the package from its own
 copy, and paths never come from the request.
 
+### The package and the agent-only channel
+
+Agent self-update (protocol.md, "Agent self-update") keeps a channel of agent builds per platform. A fleet release
+installs a whole package, agent included. The two must not undo each other: the package is the unit (D57), and the
+channel only moves a node forward from it.
+
+**What went wrong in the 2.10.3 → 2.10.4 update.** Before nodes had full packages, the owner pushed the 2.10.3
+darwin-arm64 agent through the channel (`oarbank agent upload/sign/canary/promote`). The 2.10.4 rollout, and
+`installer -pkg` by hand, then brought the nodes' packages to 2.10.4, and the postinstall and the runner made the
+package's agent current. But the channel still named the 2.10.3 build as current. The coordinator withholds
+`agent_update` only while a node has a `node_update` directive. Once a node ran 2.10.4 it had none, so the next reply
+assigned it the channel's 2.10.3 build: `oarbank agent list` showed "-> 2.10.3 (channel build): draining", and the
+nodes went back to running 2.10.3 while `pkgutil` and the installed `oarbank-agent --version` said 2.10.4. The node
+then had a `node_update` directive for 2.10.4 again, but its rollout row was `done`, so it never got `go`. Uploading,
+canarying and promoting the 2.10.4 build to the channel brought the nodes back.
+
+**The rule.**
+- **The floor.** A node's floor is the newer of two versions: its installed package's agent (`install.package_version`)
+  and the fleet release it last installed (`node_update` `done`).
+- **Older builds.** A channel build older than the floor is never assigned to the node: no directive, and the build's
+  download route refuses it.
+- **The floor's own version.** A build of the floor's version is assigned only to take a node back down from a newer
+  channel build (an abandoned canary, a rollback).
+- **Newer builds.** A build newer than the floor, promoted after the package, updates the node as before. A later
+  package of that version or newer supersedes it in turn.
+- **Retirement.** Starting a fleet rollout retires every channel build older than its release: current, previous and
+  canary come off the channel, and the builds stay in the store. Canary, promotion and rollback then refuse a build
+  older than the newest release a rollout took the fleet to. A coordinator from before this rule retires its stale
+  builds once when its database opens (`agentbuilds.migrate`).
+- **A node that falls back.** A node the rollout updated that later runs an older agent goes back to `pending` in the
+  rollout. The done rollout's catch-up then takes it to the release again, instead of leaving it staged without `go`.
+
+**On the node.** The coordinator rule is enough on its own, but the node also enforces it, because the node's own
+software is what an old coordinator cannot change:
+- **The launcher names the package's agent.** It does this only when the launcher is a package's own (it sits where the
+  pkg, deb, rpm or MSI install it). It passes the agent to the agent in `OARBANK_PACKAGE_AGENT`.
+- **The agent reports it and refuses older directives.** It reports the package agent's version as
+  `install.package_version`. It refuses an `agent_update` directive older than that version (`failed`, not remembered,
+  since the package may later be rolled back below it).
+- **The launcher refuses older staged builds.** A staged build older than the package's agent becomes `failed`, and
+  the agent then never retries it.
+- **The launcher repairs `current`.** At each start outside a trial, if `current` names an older version than the
+  package's agent, the launcher makes the package's agent current. This catches a channel build that stayed current
+  because a postinstall could not move it.
+- **Reports.** `oarbank agent list`, the Agent page, `oarbank node show` and the node API show what runs (`agent_version`
+  and `agent_build`) beside the package floor. A node running below its floor says so and how it gets back. Heartbeats
+  also carry `agent_version`, so the version shown is never one hello behind the build.
+
+**The Windows node.** A Windows node whose rollout row said `done` still reported `runs 2.10.3 ca35d7bd752d`, and its
+platform has no channel build. The MSI path does swap the agent:
+- A major upgrade runs `setup --scope system` (oarbank-agent.wxs, `SetupWaiting`). It installs Program Files'
+  `oarbank-agent.exe` into `versions/` and points `current` at it.
+- The runner's `point_agent` does the same, refusing an agent whose embedded version is not the release's.
+- The runner commits only after an agent whose compiled version is the release writes `confirmed`.
+- The rollout row becomes `done` only when the coordinator has recorded the release as the node's `agent_version`,
+  from that agent's hello.
+
+So a `done` row means a 2.10.4 agent ran and said hello. A later `runs 2.10.3` with the 2.10.3 build's sha is a fall
+back, or another process saying hello with the node's identity, not a stale field. The row cannot show which from the
+coordinator. With this change:
+- the heartbeat carries `agent_version`;
+- `install.package_version` shows what the MSI installed;
+- the launcher repoints `current` when it names an older version than the MSI's agent;
+- the done rollout takes a fallen-back node to the release again.
+
 ## The coordinator
 
 **Ring 0.** A rollout whose release is newer than the coordinator starts by updating the coordinator: `coordupdate`,
@@ -502,8 +567,13 @@ uses the agent listener and mTLS, like `/v1/agent/builds/{sha}`.
 ```json
 "node_update": {"state": "idle|unsupported|staging|staged|draining|deferred|installing|confirming|done|failed|rolled_back|refused",
                 "release": "2.10.0", "seq": 21000, "error": null, "at": 1760000000.0},
-"install": {"format": "pkg|msi|deb|rpm|tar|dev", "scope": "system|personal", "updater": true, "why": null}
+"install": {"format": "pkg|msi|deb|rpm|tar|dev", "scope": "system|personal", "updater": true, "why": null,
+            "package_version": "2.10.4"}
 ```
+
+`package_version` is the version of the agent the installed package carries (null for a development or tarball
+launcher, and from agents of 2.10.4 or earlier). It is the node's floor for the agent-only channel ("The package and
+the agent-only channel").
 
 ### Spool files (agent ↔ node runner)
 
@@ -645,6 +715,16 @@ node runs the new version confirmed or the previous one).
     `update-run` for the second (installed), then a rollback (the first again).
   - **Windows:** the MSI major upgrade and downgrade through `update-run` (msi.yml).
   - **macOS:** an unsigned pkg upgrade through `update-run` on the macOS runner (sudo), with the team pin off.
+- **The package and the channel.**
+  - Coordinator: an older channel build is never assigned below the package floor, from the package version and from a
+    done fleet release; a newer one still updates; a rollback goes back to the floor's version. A rollout retires stale
+    builds, and canary and promotion are refused after. The migration runs once. A fallen-back node rejoins a done
+    rollout. The CLI and the Agent page show the package beside the running build.
+  - Launcher: an older `current` gives way to the package's agent; an older staged build is refused; a newer one goes
+    on trial; a trial is left alone; without a package agent nothing changes.
+  - Agent: an older directive is refused.
+  - The TLA+ spec does not model the agent-only channel. Its node versions are the package's, and the rule keeps the
+    agent at or above them.
 - **Regression.** The agent-only self-update suite still passes. A node without an updater keeps self-updating its
   agent. A manual package install now also makes the package's agent current: the package is the unit (D57).
 
