@@ -405,3 +405,65 @@ def rmtree_patient(path, wait_s: float = 10.0):
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 1.0)
+
+
+class ServerThread:
+    """A uvicorn server for `app` on a loopback port, run on a thread for the length of a `with` block.
+
+    The listening socket is bound here, before the thread starts, so no other process can take the port between
+    choosing it and binding it. Entering waits for uvicorn's own readiness signal (`started`) for up to `start_s`
+    seconds. If the server's thread ends first, or the deadline passes, the error names the cause and quotes what the
+    server logged. A loaded Windows runner can take many seconds to start one."""
+
+    def __init__(self, app, start_s: float = 60.0, **config):
+        import logging
+        import socket
+        import threading
+        import uvicorn
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.start_s = start_s
+        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error", **config))
+        self.error: BaseException | None = None
+        self.log: list[str] = []
+
+        class Keep(logging.Handler):
+            def emit(handler, record):
+                self.log.append(handler.format(record))
+        self._handler = Keep(logging.DEBUG)
+        self._handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+
+        def run():
+            try:
+                self.server.run(sockets=[self.sock])
+            except BaseException as e:          # uvicorn ends a failed startup with SystemExit
+                self.error = e
+        self.thread = threading.Thread(target=run, daemon=True)
+
+    def __enter__(self):
+        import logging
+        import time
+        for name in ("uvicorn", "uvicorn.error"):
+            logging.getLogger(name).addHandler(self._handler)
+        try:
+            self.thread.start()
+            deadline = time.monotonic() + self.start_s
+            while not self.server.started:
+                if not self.thread.is_alive():
+                    raise RuntimeError(f"server did not start: its thread ended ({self.error!r})\n" + "\n".join(self.log))
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"server did not start within {self.start_s:g} s\n" + "\n".join(self.log))
+                time.sleep(.02)
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *a):
+        import logging
+        self.server.should_exit = True
+        self.thread.join(5)
+        self.sock.close()
+        for name in ("uvicorn", "uvicorn.error"):
+            logging.getLogger(name).removeHandler(self._handler)
