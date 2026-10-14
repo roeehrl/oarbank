@@ -10,7 +10,7 @@ import pytest
 from oarbank.coordinator import core, modcalls, modstore, ops, releases
 from oarbank_sdk import bundle as B
 
-from helpers import (CAPACITY, sign_in, DOCTOR_OK, FACTS, PARAMS, READY, RELAY_DIR, SCENES, certify, create_study,
+from helpers import (CAPACITY, settings_apply, sign_in, DOCTOR_OK, FACTS, PARAMS, READY, RELAY_DIR, SCENES, certify, create_study,
                      enrolled_node, fresh, golden_result, make_db, relay_result, scratch)
 
 
@@ -356,3 +356,164 @@ def test_a_canary_can_go_to_a_group(db):
     op(db, "groups.create", "Empty", params={"members": []})
     with pytest.raises(core.ApiError, match="has no members"):
         planned(db, "modules.enable_canary", "relay@1.1.0", {"group": "Empty"})
+
+
+# ------------------------------------------------------------------ re-certification around live work (S8)
+
+def claim(db, node, cpu=8):
+    return core.claim(db, fresh(db, node), {"free_cpu": cpu, "free_mem_gb": 4 * cpu, "ready_datasets": READY})["grants"]
+
+
+def self_test_of(db, tmp_path):
+    """What `oarbank update start` runs before it requests a coordinator update (D58): the new build's self-test on a
+    snapshot of the database."""
+    import sqlite3
+    from oarbank.coordinator import coordself
+    home = tmp_path / "selftest"
+    home.mkdir(parents=True)
+    src, dst = sqlite3.connect(db.path), sqlite3.connect(home / "oarbank.sqlite3")
+    src.backup(dst)
+    src.close()
+    dst.close()
+    return coordself.self_test(home)
+
+
+def canary_with_live_work(db):
+    """A node certified on relay 1.0.0 runs campaign work when a canary of relay 1.1.0 reaches it: the agent installs the
+    canary's release, its 1.0.0 attempts still running, and the doctor passes. Returns (node, live grants, generation)."""
+    n = certify(db, enrolled_node(db, "canary")[1])
+    gen = state(db, n)["generation"]
+    create_study(db, "s", [], SCENES[:3], {"label": "base", "params": PARAMS})
+    live = claim(db, n, 2)
+    assert live and {g["kind"] for g in live} == {"eval"} and {g["spec"]["module_version"] for g in live} == {"1.0.0"}
+    modstore.install(db, bundle_of(relay_version("1.1.0")), self_test=False)
+    planned(db, "modules.enable_canary", "relay@1.1.0", {"nodes": [n["node_id"]]})
+    core.hello(db, fresh(db, n), {"release_id": releases.assigned(db, fresh(db, n)), "facts": FACTS,
+                                  "live_attempts": [g["attempt_id"] for g in live], "ready_datasets": READY})
+    core.heartbeat(db, fresh(db, n), {"capacity": CAPACITY, "doctor": DOCTOR_OK, "attempts": [], "ready_datasets": READY})
+    return n, live, gen
+
+
+def attempts_of(db, grants):
+    return db.q("SELECT a.attempt_id, a.state, a.end_reason, a.module_version, j.state jstate, j.exec_failures FROM attempts a "
+                "JOIN jobs j ON j.job_id=a.job_id WHERE a.attempt_id IN (%s) ORDER BY a.attempt_id"
+                % ",".join("?" * len(grants)), tuple(g["attempt_id"] for g in grants))
+
+
+def test_a_canary_re_certifies_around_live_work_and_a_coordinator_update_may_proceed(db, tmp_path):
+    """The certification the 1.0.0 attempts were granted under stands while the node re-certifies on the canary: they keep
+    running, S8 holds and the coordinator self-test passes (it refused the update before). Meanwhile the node is granted
+    the canary's goldens and nothing else. Once 1.1.0 passes them, the 1.0.0 attempts end, uncharged (complete() would
+    refuse their results), and their jobs run again on 1.1.0."""
+    from oarbank.coordinator import invariants
+    n, live, gen = canary_with_live_work(db)
+    st = state(db, n)
+    assert (st["state"], st["generation"]) == ("certifying", gen)              # re-certifying; the certification stands
+    assert {a["state"] for a in attempts_of(db, live)} == {"live"}
+    assert invariants.s8_live_module_certified(db) == [] and invariants.check_all(db) == []
+    out = self_test_of(db, tmp_path)
+    assert out["ok"] and out["invariants"] == [], out
+    goldens = claim(db, n)
+    assert goldens and {g["kind"] for g in goldens} == {"golden"}             # no campaign work while certifying
+    assert {g["spec"]["module_version"] for g in goldens} == {"1.1.0"}
+    for g in goldens:
+        core.complete(db, fresh(db, n), g["attempt_id"], golden_result(g, db))
+    st = state(db, n)
+    assert st["state"] == "certified" and st["generation"] > gen
+    assert [(a["state"], a["end_reason"], a["jstate"], a["exec_failures"]) for a in attempts_of(db, live)] == \
+        [("revoked", "certification_superseded", "pending", 0)] * len(live)
+    hb = core.heartbeat(db, fresh(db, n), {"capacity": CAPACITY, "attempts": [], "ready_datasets": READY})
+    assert sorted(hb["revoke"]) == sorted(g["attempt_id"] for g in live)        # the agent stops them
+    assert invariants.check_all(db) == []
+    again = claim(db, n)
+    assert {g["job_id"] for g in live} <= {g["job_id"] for g in again}
+    assert {g["spec"]["module_version"] for g in again} == {"1.1.0"}
+    assert invariants.check_all(db) == [] and self_test_of(db, tmp_path / "after")["ok"]
+
+
+def test_s8_and_the_self_test_still_catch_work_that_runs_uncertified(db, tmp_path):
+    """Re-certification spares only the attempts granted under the certification: an attempt granted while the node was
+    certifying, or one recording a version its node's release did not carry (an uncertified canary), is a violation,
+    and the self-test refuses the update over it."""
+    from oarbank.coordinator import invariants
+    n, live, gen = canary_with_live_work(db)
+    a = live[0]["attempt_id"]
+    since = state(db, n)["certifying_since"]
+    db.x("UPDATE attempts SET granted_at=? WHERE attempt_id=?", (since + 1, a))
+    v = invariants.s8_live_module_certified(db)
+    assert len(v) == 1 and v[0].startswith(f"S8 attempt {a} runs relay") and "granted while certifying" in v[0]
+    db.x("UPDATE attempts SET granted_at=?, module_version='1.1.0' WHERE attempt_id=?", (since - 1, a))
+    v = invariants.s8_live_module_certified(db)
+    assert len(v) == 1 and "records relay 1.1.0 but its release" in v[0] and "carries 1.0.0" in v[0]
+    out = self_test_of(db, tmp_path)
+    assert not out["ok"] and any(f"S8 attempt {a} " in x for x in out["invariants"])
+    db.x("UPDATE attempts SET module_version='1.0.0' WHERE attempt_id=?", (a,))
+    assert invariants.s8_live_module_certified(db) == []
+    # goldens that keep failing end the certification, and the attempts granted under it with it
+    with db.tx():
+        core._golden_failed(db, n["node_id"], "relay", 3, "exit_1")
+    assert state(db, n)["state"] == "golden_failed"
+    assert {(x["state"], x["end_reason"]) for x in attempts_of(db, live)} == {("revoked", "golden_failed")}
+    assert invariants.check_all(db) == []
+
+
+def test_a_grant_between_the_canary_and_its_release_runs_the_version_the_node_runs(db):
+    """The channel moves first and the canary node's release after it (releases.sync builds it): a claim in between is
+    granted the version its installed release carries, which it is certified on, never the canary's."""
+    from oarbank.coordinator import invariants
+    n = certify(db, enrolled_node(db, "canary")[1])
+    modstore.install(db, bundle_of(relay_version("1.1.0")), self_test=False)
+    with db.tx():
+        modstore.canary(db, "relay", "1.1.0", [n["node_id"]])               # committed; the release not built yet
+    assert modstore.version_for_node(db, "relay", n["node_id"]) == "1.1.0"
+    create_study(db, "s", [], SCENES[:1], {"label": "base", "params": PARAMS})
+    g = claim(db, n, 1)
+    assert len(g) == 1 and g[0]["spec"]["module_version"] == "1.0.0"
+    assert attempts_of(db, g)[0]["module_version"] == "1.0.0"
+    releases.sync(db)
+    assert releases.composition_of(db, releases.assigned(db, fresh(db, n)))["relay"]["version"] == "1.1.0"
+    assert invariants.check_all(db) == []
+
+
+# ------------------------------------------------------------------ a module turned off on one node
+
+@pytest.fixture
+def fake_clock():
+    from oarbank.coordinator import clock
+    clock.set_fake(1_900_000_000.0)
+    yield clock
+    clock.set_fake(None)                 # never leak a frozen clock into the next test on this worker
+
+
+def test_a_module_turned_off_on_a_node_never_certifies_there(db, fake_clock):
+    """`[relay] enabled` off for one node: after a new version reaches it (a canary here; a promotion alike) the module is
+    `disabled` there, not `certifying`. It gets no golden jobs, raises no certifying_stuck, and an earlier stuck alert
+    resolves. Turned on again, it re-certifies on the version its release carries."""
+    clock = fake_clock
+    n = certify(db, enrolled_node(db, "canary")[1])
+    modstore.install(db, bundle_of(relay_version("1.1.0")), self_test=False)
+    planned(db, "modules.enable_canary", "relay@1.1.0", {"nodes": [n["node_id"]]})
+    rehello(db, n)
+    assert state(db, n)["state"] == "certifying"
+    clock.advance(core.CERTIFYING_GRACE_S + 60)
+    core.reap(db)                                                          # stuck before it is turned off
+    assert db.one("SELECT 1 FROM alerts WHERE rule='certifying_stuck:relay' AND state='open'")
+    settings_apply(db, {"scope": "node", "scope_id": n["node_id"], "module": "relay", "key": "enabled", "value": False})
+    core.heartbeat(db, fresh(db, n), {"capacity": CAPACITY, "doctor": DOCTOR_OK, "attempts": [], "ready_datasets": READY})
+    st = state(db, n)
+    assert (st["state"], st["generation"]) == ("disabled", -1)
+    assert not db.q("SELECT 1 FROM jobs WHERE kind='golden' AND target_node=? AND module='relay' AND state IN "
+                    "('pending','leased')", (n["node_id"],))
+    assert claim(db, n) == []
+    clock.advance(core.CERTIFYING_GRACE_S + 60)
+    core.reap(db)
+    assert not db.one("SELECT 1 FROM alerts WHERE rule='certifying_stuck:relay' AND state='open'")
+    rehello(db, n)                                                         # a new release or doctor run changes nothing
+    assert state(db, n)["state"] == "disabled" and core.run_pending_goldens(db, n["node_id"]) == 0
+    assert state(db, n, "toy")["state"] == "certified"                    # other modules untouched
+    settings_apply(db, {"scope": "node", "scope_id": n["node_id"], "module": "relay", "key": "enabled", "reset": True})
+    core.heartbeat(db, fresh(db, n), {"capacity": CAPACITY, "doctor": DOCTOR_OK, "attempts": [], "ready_datasets": READY})
+    assert state(db, n)["state"] == "certifying"
+    run_goldens(db, n)
+    assert state(db, n)["state"] == "certified"
+    assert releases.composition_of(db, fresh(db, n)["release_id"])["relay"]["version"] == "1.1.0"

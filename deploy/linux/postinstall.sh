@@ -6,8 +6,8 @@
 # Upgrade of a joined node (it holds agent.json): make the package's agent the current one (`oarbank-launcher install`:
 # the package is the unit, PLAN D57, so the launcher, runtime and agent move together, whether an administrator or the
 # update runner installs it), render the service's unit again with the new launcher's settings (`oarbank-launcher
-# service refresh`: a 2.8 unit has no TimeoutStopSec) and restart it on the new launcher. Setup does not run: the node
-# keeps its identity and its coordinator.
+# service refresh`: a 2.8 unit has no TimeoutStopSec) and restart it on the new launcher, and every person's session
+# helper on the new agent binary. Setup does not run: the node keeps its identity and its coordinator.
 #
 # Either way, the update runner (docs/design/fleet-updates.md): `oarbank-launcher update-trust --from-agent` pins the
 # owner anchors the agent pinned as root's update trust while an administrator installs (nothing when trust is pinned
@@ -55,6 +55,9 @@ if [ -f "$AGENT_HOME/agent.json" ]; then
         echo "Oarbank: the package's agent could not be made current; the service keeps the agent it had"
     fi
     "$L" service refresh --system >/dev/null 2>&1 || systemctl try-restart "$UNIT" 2>/dev/null || true
+    # every person's session helper restarts on the new agent binary (a helper left on old code describes processes for
+    # host protection with it): ended here, its user manager starts the installed one again (Restart=always)
+    pkill -TERM -f '^/usr/lib/oarbank/oarbank-agent session-helper' 2>/dev/null || true
     update_runner
     echo "Oarbank: upgraded; the service restarted on the new launcher"
     exit 0

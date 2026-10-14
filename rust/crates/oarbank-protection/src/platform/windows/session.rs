@@ -131,7 +131,11 @@ fn take_reports(hub: &Arc<SessionHub>, session: u32, file: File) {
     // the pipe proves the session, not the account: sources for a named account are filtered by the helper itself
     hub.set_account(who, None);
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    if let Ok(mut w) = file.try_clone() {
+    let mut restart_w: Option<Arc<std::sync::Mutex<File>>> = None;
+    if let Ok(w) = file.try_clone() {
+        // one writer for what the service sends this session's helper: `Watch` lines and a restart request
+        let w = Arc::new(std::sync::Mutex::new(w));
+        restart_w = Some(w.clone());
         let (hub, alive) = (hub.clone(), alive.clone());
         let _ = std::thread::Builder::new().name("session-watch".into()).spawn(move || {
             let mut seen = u64::MAX;
@@ -142,7 +146,7 @@ fn take_reports(hub: &Arc<SessionHub>, session: u32, file: File) {
                     let mut line = serde_json::to_string(&Watch { v: PROTOCOL, watch: hub.all_wanted() })
                         .unwrap_or_default();
                     line.push('\n');
-                    if w.write_all(line.as_bytes()).is_err() {
+                    if w.lock().map(|mut w| w.write_all(line.as_bytes()).is_err()).unwrap_or(true) {
                         return;
                     }
                 }
@@ -162,6 +166,7 @@ fn take_reports(hub: &Arc<SessionHub>, session: u32, file: File) {
         };
         // a process is the session's when the process list puts it there, with the start time claimed
         let procs = processes().unwrap_or_default();
+        let version = report.version.clone();
         hub.accept(who, report, |pid, start| {
             procs.iter().any(|p| {
                 p.pid as i32 == pid
@@ -169,6 +174,9 @@ fn take_reports(hub: &Arc<SessionHub>, session: u32, file: File) {
                     && (start == 0 || p.start_us() == Some(start))
             })
         });
+        if let (Some(req), Some(w)) = (hub.restart_line(who, version.as_deref()), restart_w.as_ref()) {
+            let _ = w.lock().map(|mut w| w.write_all(req.as_bytes()));
+        }
     }
     hub.gone(who);
 }
@@ -225,7 +233,12 @@ pub fn run_helper() -> ! {
                             Ok(n) if n > 0 && line.ends_with('\n') => {}
                             _ => return,
                         }
-                        if let Ok(w) = serde_json::from_str::<Watch>(&line) {
+                        if let Some(r) = crate::session::restart_request(&line) {
+                            // another version than the service expects: the elevated helper starts the installed
+                            // binary again in this session
+                            eprintln!("oarbank session helper: restarting: {}", r.restart);
+                            std::process::exit(0);
+                        } else if let Ok(w) = serde_json::from_str::<Watch>(&line) {
                             if w.v == PROTOCOL {
                                 relay.set(w);
                             }
@@ -237,6 +250,7 @@ pub fn run_helper() -> ! {
             loop {
                 let mut rep = report(session, user.as_deref(), &mut described);
                 rep.sources = relay.readings();
+                rep.version = crate::session::helper_version();
                 let mut line = serde_json::to_string(&rep).unwrap_or_default();
                 line.push('\n');
                 if pipe.write_all(line.as_bytes()).is_err() {

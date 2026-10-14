@@ -236,6 +236,24 @@ fn refused_with(w: &World, req: Value, package: &[u8], why: &str) {
 }
 
 #[test]
+fn versions_order_as_the_coordinator_orders_them() {
+    assert!(newer("2.10.4", "2.10.3") && newer("2.10.10", "2.10.9") && newer("3.0.0", "2.99.99"));
+    assert!(newer("2.10.4", "2.10.4-rc.1") && !newer("2.10.4-rc.1", "2.10.4"));
+    assert!(!newer("2.10.4", "2.10.4") && !newer("2.10.4+build.7", "2.10.4"));
+    assert!(!newer("x", "1.0.0") && !newer("1.0.0", "") && !newer("1.0", "0.9.0") && !newer("1.2.3-", "0.1.0"));
+    assert_eq!(agent_version_of(b"..oarbank-agent-version:\0..oarbank-agent-version:2.10.4\0.."), Some("2.10.4".into()));
+    assert_eq!(agent_version_of(b"no marker"), None);
+}
+
+#[test]
+fn a_package_agent_is_found_only_beside_a_packages_launcher() {
+    let dir = std::env::temp_dir();
+    assert_eq!(package_agent_beside(&dir.join("oarbank-launcher")), None);
+    assert_eq!(package_agent_beside(Path::new("oarbank-launcher")), None);
+    assert!(package_agent("tar").is_none() && package_agent("pkg").is_some());
+}
+
+#[test]
 fn an_update_installs_confirms_and_commits() {
     let w = World::new("deb", true);
     let r2 = rel("2.0.0", 20, "deb");

@@ -8,6 +8,16 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Fixed
 
+- **A platform no module runs on no longer waits for the owner's signature.** With release signing on, a platform
+  none of the enabled modules runs on (a Windows PC when the only module is macOS-only) got a release with no module
+  that waited for the owner to sign it: its nodes never became ready, the console showed "1 release waiting for your
+  signature" and the `release_awaiting_owner` alert opened, and every module change built that empty release again for
+  another signature. The signature exists so nodes run only code the owner approved, and an empty release carries
+  none, so it now needs no signature: oarbankd makes it current at once and its nodes are ready with no module. The
+  agent installs an unsigned release only after checking it holds no module, no tool definition and no other file, and
+  still refuses any release with module code that is not signed. After the upgrade, empty releases still waiting are
+  retired, replaced and their alerts resolved; there is nothing to sign. Agents older than this change refuse the
+  unsigned empty release until they update.
 - **A freshly installed node pins its update trust when it joins.** The package pinned the fleet's owner keys at
   install time, before a fresh node had joined and had any, so `oarbank update plan` showed "no update trust is
   pinned" for it. Upgraded nodes were not affected. Joining as an administrator now leaves the pin pending: with
@@ -31,13 +41,28 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   built `oarbank-agent-<version>-windows-admx.zip` with different bytes, so the published zip matched only one of the
   two `SHA256SUMS-agent-*-windows-*` files (2.10.3 and 2.10.4). It is now written reproducibly: fixed order, time and
   attributes, and stored entries.
+- **A coordinator update is no longer refused while a module re-certifies around running work.** When a canary (or a
+  promotion, a platform or OS change, or the periodic re-certification) reached a node, that node's module went to
+  `certifying` while the jobs it had been granted on the previous version kept running, as designed. The S8 invariant
+  counted those jobs as running uncertified, so `oarbank update start` refused the update ("the new build's self-test
+  failed ... S8 attempt ... state=certifying") and the console raised an invariant alert. The certification a job was
+  granted under now stands until a new one passes its goldens or the goldens fail. Jobs still running at that point
+  are stopped and queued again, uncharged; their results were refused anyway. A job granted while the node was
+  certifying, or one recording a version its node's release did not carry, is still a violation. A claim in the moment
+  between starting a canary and building its release was granted the canary's version while the node still ran, and
+  was certified on, the previous one; it is now granted the version its release carries.
+- **A module turned off on a node no longer certifies there.** After a promotion or canary, a module turned off for
+  one node (`oarbank settings set enabled false --module <name> --node <node>`) still went to `certifying` there,
+  queued golden jobs for it and raised `certifying_stuck` after 30 minutes. It is now shown as `disabled` on that
+  node, with no goldens and no alert; an open `certifying_stuck` alert for it resolves. Turned on again, it
+  re-certifies.
 - **A retired node's agent learns it was retired.** Retiring clears the node's certificate, so its agent was refused as
   an unknown certificate, asked to join again as a new machine and kept its router mappings. The coordinator now
   answers `node_retired`: the agent stops its jobs, services, workloads and listeners (releasing its router mappings),
   deletes what its modules left after a day, and waits; `oarbank-node status` shows `E_RETIRED`.
-- **A module turned off on a node runs nothing there.** Its services stopped, but its doctor still ran, its probes still
-  ran and its services were still fingerprinted, all module code on a node where the owner had turned it off. They no
-  longer run until it is turned on again.
+- **A module turned off on a node runs nothing there either.** Its services stopped, but its doctor, its probes and its
+  services' fingerprints still ran: module code on a node where the owner had turned it off. They run again once it is
+  turned on.
 
 ### New
 

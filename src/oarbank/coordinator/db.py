@@ -382,6 +382,8 @@ class DB:
             statements_migrate(self)
         from .protection import migrate as protection_migrate
         protection_migrate(self)                # per-node protection sections: hoisted onto the settings chain once
+        from .agentbuilds import migrate as agent_channel_migrate
+        agent_channel_migrate(self)             # channel builds older than the fleet release: retired (agentbuilds.py)
 
     # -- low level ---------------------------------------------------------
     # Stored file paths are relative to the coordinator's home (the database's directory) whenever the file is inside

@@ -12,10 +12,17 @@ status 'current'. A node whose composition differs (a canary node, a pinned node
 `nodes.assigned_release`, built when the channels change (`sync`). Signed releases (D31) cover the whole
 composition: the release is the signed lock of module digests.
 
-With release signing on and an owner key pinned, a built release stays a candidate until the owner signs it offline
-(`oarbank release sign <rid> --promote`): nothing reaches a node before that. `awaiting` lists those releases, the
-console shows them as a banner and `note_awaiting` keeps one `release_awaiting_owner:<rid>` alert per release open
-until it is signed and promoted or a newer build replaces it.
+With release signing on and an owner key pinned, a built release that holds module code stays a candidate until the
+owner signs it offline (`oarbank release sign <rid> --promote`): no module code reaches a node before that. `awaiting`
+lists those releases, the console shows them as a banner and `note_awaiting` keeps one `release_awaiting_owner:<rid>`
+alert per release open until it is signed and promoted or a newer build replaces it.
+
+An **empty release** (no module runs on its platform, or on that node: an empty composition) carries no code: its
+modules.json lists no module and no tool definitions, and MANIFEST.json lists only modules.json. It needs no signature
+(the signature exists so nodes run only module code the owner approved, and there is none): it is promoted (or
+assigned) as soon as it is built, and the agent installs it unsigned only after checking it is exactly that
+(docs/release-signing.md, "Empty releases"). So a platform none of the enabled modules runs on never waits for the
+owner, and its nodes become ready with no module.
 """
 import json
 import tarfile
@@ -63,6 +70,19 @@ def contents(comp_json: str | None) -> list[str]:
 def signature_required(db: DB) -> bool:
     """Releases need the owner's signature before a node may install them (signing on, an owner key pinned)."""
     return bool(C.RELEASE_SIGNING and db.get_state("release_pubkey"))
+
+
+def is_empty(comp_json: str | None) -> bool:
+    """A release with no module (its composition_json is `{}`): it carries no code, so it needs no signature. A release
+    whose composition is not recorded (or unreadable) is not known to be empty: it needs the signature."""
+    v = jl(comp_json, None) if comp_json else None
+    return isinstance(v, dict) and not v
+
+
+def needs_signature(db: DB, row: dict | None) -> bool:
+    """Whether the owner must still sign this release (a row with `signature` and `composition_json`) before a node may
+    install it: signing is required, it holds module code and it is unsigned. An empty release never needs one."""
+    return bool(row) and signature_required(db) and not row.get("signature") and not is_empty(row.get("composition_json"))
 
 
 def any_module_enabled(db: DB) -> bool:
@@ -214,9 +234,11 @@ def build(db: DB, make_current: bool = True, comp: dict | None = None, platform:
             entries_mod.append(module_entry(name, c["version"], c["digest"], src, platform))
         # the fleet's tool definitions for this OS (extra search patterns, executables' version commands): what the
         # agent detects, besides its built-in kinds (docs/design/host-tools.md); never a path to grant
+        # an empty release carries none: nothing on the node can use them, and a release without a module must hold
+        # nothing that makes the agent run anything, so it can go out unsigned (is_empty)
         from . import tools as T
         (root / "modules.json").write_text(json.dumps({"format": MODULES_FORMAT, "platform": platform, "modules": entries_mod,
-                                                       "tools": T.release_definitions(db, os_)},
+                                                       "tools": T.release_definitions(db, os_) if comp else {}},
                                                       indent=1, sort_keys=True), encoding="utf-8", newline="\n")
         modes["modules.json"] = 0o644
         entries = [{"path": rel, "sha256": sha256_file(root / rel), "mode": oct(modes[rel])}
@@ -236,7 +258,7 @@ def build(db: DB, make_current: bool = True, comp: dict | None = None, platform:
          "composition_json,platform) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
          (rid, clock.now(), db.rel(out), digest, man, prev.get("status") or "candidate", prev.get("seq"), prev.get("statement"),
           prev.get("signature"), comp_json, platform))
-    signed_needed = signature_required(db) and not prev.get("signature")
+    signed_needed = signature_required(db) and bool(comp) and not prev.get("signature")     # empty: never (is_empty)
     if make_current and not signed_needed and prev.get("status") != "current":
         promote(db, rid, actor="build")
     if not prev:              # the same composition built again is the same release: only a new one is news
@@ -284,7 +306,9 @@ def ensure(db: DB, platform: str | None):
     comp = composition_json(composition(db, platform=platform))
     rows = db.q("SELECT release_id, status FROM releases WHERE platform=? AND composition_json=? AND status IN ('current','candidate') "
                 "ORDER BY status='current' DESC, created_at DESC", (platform, comp))
-    if any(r["status"] == "current" for r in rows) or (rows and signature_required(db)):
+    # a candidate of this composition waiting for the owner is the answer too, unless it is empty: an empty release
+    # needs no signature, so one still waiting (built before that rule) is built and promoted now
+    if any(r["status"] == "current" for r in rows) or (rows and signature_required(db) and not is_empty(comp)):
         known = (db.get_state(DEFAULTS) or {}).get(platform)
         known_comp = (db.one("SELECT composition_json FROM releases WHERE release_id=?", (known,)) or {}).get("composition_json") \
             if known else None
@@ -296,10 +320,28 @@ def ensure(db: DB, platform: str | None):
 
 
 def ensure_fleet(db: DB):
-    """ensure() for every platform of the fleet (oarbankd's background loop: also after an upgrade, before any hello)."""
+    """ensure() for every platform of the fleet (oarbankd's background loop: also after an upgrade, before any hello),
+    then clear_empty_candidates()."""
     if any_module_enabled(db):
         for plat in platforms.fleet_platforms(db):
             ensure(db, plat)
+    clear_empty_candidates(db)
+
+
+def clear_empty_candidates(db: DB) -> list[str]:
+    """Retire the empty releases still waiting as candidates that no platform or node uses any more: an older
+    coordinator held them for the owner's signature, and ensure() has built and promoted their replacement (an empty
+    release carries no tool definitions now, so its id may differ). Returns their ids."""
+    keep = set((db.get_state(DEFAULTS) or {}).values()) | {
+        r["assigned_release"] for r in db.q("SELECT DISTINCT assigned_release FROM nodes WHERE assigned_release IS NOT NULL")}
+    stale = [r["release_id"] for r in db.q("SELECT release_id, composition_json FROM releases WHERE status='candidate' "
+                                           "AND signature IS NULL") if is_empty(r["composition_json"]) and r["release_id"] not in keep]
+    for rid in stale:
+        db.x("UPDATE releases SET status='retired' WHERE release_id=?", (rid,))
+        db.event("release_retired", actor="system", reason=f"{rid}: an empty release needs no signature")
+    if stale:
+        note_awaiting(db)
+    return stale
 
 
 DEFAULTS = "release_defaults"          # setting: {platform: the release_id sync last built as its default}
@@ -308,7 +350,8 @@ AWAITING = "releases_awaiting"         # setting: awaiting(), as the console sho
 
 def awaiting(db: DB) -> list[dict]:
     """The releases only the owner can let through: each platform's default release that is not current yet, and the
-    node-specific releases (canary, pinned) nodes are assigned, while they lack the owner's signature. Each names the
+    node-specific releases (canary, pinned) nodes are assigned, while they lack the owner's signature. An empty release
+    is never one of them (it needs no signature: is_empty). Each names the
     command that lets it through: `oarbank release sign <rid> --promote` for a platform's release, without `--promote`
     for a node's own (promoting it would make it every node's)."""
     if not signature_required(db):
@@ -317,7 +360,7 @@ def awaiting(db: DB) -> list[dict]:
     fleet = set(platforms.fleet_platforms(db))
     for plat, rid in sorted((db.get_state(DEFAULTS) or {}).items()):
         row = db.one("SELECT status, signature, created_at, composition_json FROM releases WHERE release_id=?", (rid,))
-        if plat not in fleet or not row or row["status"] == "current":
+        if plat not in fleet or not row or row["status"] == "current" or is_empty(row["composition_json"]):
             continue
         nodes = [n for n in db.q("SELECT node_id, hostname, platform, facts_json FROM nodes WHERE lifecycle NOT IN ('retired') "
                                  "AND assigned_release IS NULL ORDER BY hostname") if platforms.node_platform(n) == plat]
@@ -328,6 +371,8 @@ def awaiting(db: DB) -> list[dict]:
     for n in db.q("SELECT n.node_id, n.hostname, n.assigned_release rid, r.platform, r.created_at, r.composition_json FROM nodes n "
                   "JOIN releases r "
                   "ON r.release_id=n.assigned_release WHERE n.lifecycle NOT IN ('retired') AND r.signature IS NULL ORDER BY n.hostname"):
+        if is_empty(n["composition_json"]):
+            continue
         e = by_rid.setdefault(n["rid"], {"release_id": n["rid"], "platform": n["platform"], "kind": "node", "signed": False,
                                          "since": n["created_at"], "modules": contents(n["composition_json"]),
                                          "nodes": [], "node_ids": [],
@@ -342,12 +387,10 @@ def awaiting_text(a: dict) -> str:
     k = len(a["nodes"])
     held = (f"Until then the canary or pinned node{'s' if k != 1 else ''} {', '.join(a['nodes'])} stay{'' if k != 1 else 's'} "
             "on what they run." if a["kind"] == "node" else
-            f"Until then its {k} node{'s' if k != 1 else ''} get{'' if k != 1 else 's'} nothing new." if k else "")
-    holds = ", ".join(a.get("modules") or []) or "no module"
-    none = ("" if a.get("modules") else f" None of the enabled modules runs on {a['platform']}, but its nodes need this "
-            "release to become ready.")
+            f"Until then its {k} node{'s' if k != 1 else ''} get{'' if k != 1 else 's'} no new module code." if k else "")
+    holds = ", ".join(a.get("modules") or [])
     return (f"Release {a['release_id']} for {a['platform']} ({holds}) is waiting for the owner's signature: run "
-            f"`{a['command']}` on the machine that holds the owner key.{none} {held}").rstrip()
+            f"`{a['command']}` on the machine that holds the owner key. {held}").rstrip()
 
 
 def note_awaiting(db: DB) -> list[dict]:
@@ -372,20 +415,21 @@ def note_awaiting(db: DB) -> list[dict]:
 def node_release(db: DB, node: dict) -> dict:
     """Where a node stands with its release, in words as well: {state, release, platform, text}. States: `installed`
     (it runs the release it is assigned), `installing` (assigned one it does not run yet), `unsigned` (the release it
-    needs waits for the owner's signature), `none` (no release for its platform: no module is enabled yet)."""
+    needs waits for the owner's signature; never an empty one, which needs none), `none` (no release for its platform:
+    no module is enabled yet). A node whose release is empty is `installed` once it runs it: ready, with no module."""
     plat = platforms.node_platform(node)
     rid = assigned(db, node)
     runs = f" (runs {node['release_id']})" if node.get("release_id") and node.get("release_id") != rid else ""
     if rid:
-        row = db.one("SELECT signature FROM releases WHERE release_id=?", (rid,)) or {}
-        if signature_required(db) and not row.get("signature"):
+        row = db.one("SELECT signature, composition_json FROM releases WHERE release_id=?", (rid,)) or {}
+        if needs_signature(db, row):
             return {"state": "unsigned", "release": rid, "platform": plat, "text": f"waiting for signature: {rid}{runs}"}
         if node.get("release_id") == rid:
             return {"state": "installed", "release": rid, "platform": plat, "text": rid}
         return {"state": "installing", "release": rid, "platform": plat, "text": f"installing {rid}{runs}"}
     waiting = (db.get_state(DEFAULTS) or {}).get(plat) if plat else None
-    row = db.one("SELECT status FROM releases WHERE release_id=?", (waiting,)) if waiting else None
-    if row and row["status"] == "candidate" and signature_required(db):
+    row = db.one("SELECT status, signature, composition_json FROM releases WHERE release_id=?", (waiting,)) if waiting else None
+    if row and row["status"] == "candidate" and needs_signature(db, row):
         return {"state": "unsigned", "release": waiting, "platform": plat,
                 "text": f"waiting for signature: {waiting}{runs}"}
     return {"state": "none", "release": None, "platform": plat,
@@ -452,11 +496,12 @@ def attach_signature(db: DB, release_id: str, stmt: str, signature: str) -> dict
 
 
 def promote(db: DB, release_id: str, actor: str):
-    """Make a release current for its platform."""
-    row = db.one("SELECT signature, platform FROM releases WHERE release_id=?", (release_id,))
+    """Make a release current for its platform. With signing on, only a signed one, or an empty one (no module code:
+    agents install it unsigned once they checked it holds nothing)."""
+    row = db.one("SELECT signature, platform, composition_json FROM releases WHERE release_id=?", (release_id,))
     if not row:
         raise ReleaseRefused(f"unknown release {release_id}")
-    if C.RELEASE_SIGNING and db.get_state("release_pubkey") and not row["signature"]:
+    if needs_signature(db, row):
         raise ReleaseRefused(f"{release_id} is unsigned; agents pinned to the release key would refuse it")
     with db.tx():
         db.x("UPDATE releases SET status='retired' WHERE status='current' AND platform=?", (row["platform"],))

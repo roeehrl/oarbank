@@ -405,7 +405,8 @@ impl Agent {
         if telemetry.is_object() {
             telemetry["uplink"] = crate::uplink::global().report();  // its transfers, holds and leases (sites.md)
         }
-        let mut body = json!({"seq": self.seq, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
+        // agent_version on every heartbeat too: what the coordinator shows as running is never older than this process
+        let mut body = json!({"seq": self.seq, "agent_version": VERSION, "attempts": jobs::attempts(&self.table), "doctor": self.doctor.take(),
                               "capacity": capacity, "telemetry": telemetry, "journal": journal, "processes": processes,
                               "ab_runs": ab_runs,
                               "ready_datasets": staging::ready(&self.layout), "folders": self.folders.report(), "tools": self.tools,

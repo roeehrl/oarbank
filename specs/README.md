@@ -117,9 +117,15 @@ liveness checking (tlaplus#971), which matters here because the script runs `-wo
 | `OarbankLease_m_dispute_behind_stalled_certifying` | liveness | liveness | PASS | 701692 | 239511 | 14 | 66s |
 | `OarbankLease_n_golden_sets_pile_up` | inv:GoldenSetsBounded | inv:GoldenSetsBounded | PASS | 2749 | 1587 | 5 | 1s |
 | `OarbankLease_n_golden_retry_loop` | inv:GoldenFailuresBounded | inv:GoldenFailuresBounded | PASS | 24811 | 11168 | 8 | 1s |
+| `OarbankLease_recertify` | ok | ok | PASS | 1283986 | 372844 | 26 | 3s |
+| `OarbankLease_witness_LiveWhileRecertifying` | inv:W_LiveWhileRecertifying | inv:W_LiveWhileRecertifying | PASS | 417 | 319 | 3 | 1s |
+| `OarbankLease_witness_CanonicalWhileRecertifying` | inv:W_CanonicalWhileRecertifying | inv:W_CanonicalWhileRecertifying | PASS | 11827 | 5550 | 8 | 1s |
+| `OarbankLease_p_recertify_keeps_superseded` | inv:LiveOnReadyCertified | inv:LiveOnReadyCertified | PASS | 1005 | 757 | 4 | 1s |
 
 All 54 outcomes match their expectation (`run_tlc.sh` exit status 0). The whole run took
-21 min 36 s. `QUICK=1` skips the four slowest configurations (the main one at 239 s, `_execfail`,
+21 min 36 s. The four re-certification rows (variant p) were added later. With them in the spec
+(`RecertifyCertified = FALSE` elsewhere), every earlier `OarbankLease` configuration finds the same
+number of distinct states and the same outcome. `QUICK=1` skips the four slowest configurations (the main one at 239 s, `_execfail`,
 `_liveness`, `_stalled_goldens_dispute_liveness`) and takes about 9 minutes.
 
 "GENERATED/DISTINCT" are TLC's state counts. "DEPTH" is the depth of the complete state graph
@@ -136,7 +142,7 @@ not deterministic, so state counts for violated configurations vary slightly bet
 | `job[j]` = `[st, g, canon, fails, disp, dres]` | `jobs.state` (`absent` = replica job not created yet), `generation`, `canonical_result_id` (as an attempt id), `exec_failures`, `dispute_json.nodes`, `dispute_json.results` |
 | `att[a]` = `[j, n, g, cg, st, rv, racc, rcan]` | one `attempts` row joined with its `results` row (`results.attempt_id` is UNIQUE): `job_id`, `node_id`, `generation`, `cert_generation`, `state`, result value, `results.accepted`, `results.canonical` |
 | `nextAtt` | `attempts.attempt_id` AUTOINCREMENT |
-| `cert[n]`, `cfy[n]` | `modules_json[m]`: `generation` (negative = revoked or `golden_failed`; core.py writes -1) and `state = 'certifying'` |
+| `cert[n]`, `cfy[n]` | `modules_json[m]`: `generation` (negative = revoked or `golden_failed`; core.py writes -1) and `state = 'certifying'` (with `cert[n] > 0`: a certified module re-certifying, its certification standing) |
 | `gold[n]` | `modules_json[m]`: `state = 'golden_failed'` (`gfd`), `golden_failures` (`gfail`), CERTIFYING_GRACE_S passed since `certifying_since` (`graceOver`); pending golden sets (`sets`); history: golden failures since the last certification or `golden_failed` (`gcons`) |
 | `brk[n]` | a module left in `state='revoked'` with its generation kept (the pre-27aa459 breaker; FALSE in the code as written) |
 | `quar[n]` | `nodes.lifecycle = 'quarantined'` |
@@ -171,7 +177,9 @@ written and every older or weakened version:
 | `CertifyingIsEligible` | TRUE: `_can_serve` counts a `certifying` node ... | FALSE: only `certified` counts (the alternative F5 fix) |
 | `CertifyingGrace` | TRUE: ... only within CERTIFYING_GRACE_S of `certifying_since` (bb04f9d) | variant (m), finding F5 |
 | `GoldenFailLimit` | TRUE: MAX_EXEC_FAILURES golden failures per (node, module) -> `_golden_failed` (goldens cancelled, `golden_failed`, alert, no breaker); `queue_goldens` cancels stale sets (bb04f9d) | variant (n), finding F6 |
+| `CertifyEndsSuperseded` | TRUE: `_certify` (a new generation) and `_golden_failed` (generation -1) end the node's live attempts granted under the certification they end (`_end_superseded`) | variant (p) |
 | `CertifyMayStall` | environment: TRUE lets golden jobs neither pass nor fail (their leases keep expiring), so a node can stay `certifying` forever | — |
+| `RecertifyCertified` | environment: TRUE lets a certified module re-certify while its work runs (`BeginRecertify`: a canary or promotion reaching the node's release, a platform or OS change, RECERT_EVERY), bounded by `MaxFaults`. FALSE in the configurations that predate it, which leaves their state spaces as they were | — |
 | `GoldenFailNodes` | environment: nodes whose golden jobs always fail | — |
 | `Variant` | `"none"` | weakened variants (a)–(d) |
 
@@ -203,6 +211,10 @@ outcome (pass, fail or stall), not as jobs. Its fix is covered by the replays.
   `GoldenFailNodes`, a counted fault for others; `trip` = the node breaker trips), or neither.
   CERTIFYING_GRACE_S passing is `GraceExpires` (fair), and RECERT_EVERY passing for a
   `golden_failed` module is `RetryGoldenFailed` (fair). Golden jobs are not modelled as jobs.
+  With `RecertifyCertified`, a certified module also re-certifies (`BeginRecertify`): `certifying`
+  with its generation kept, so its live attempts keep running under the certification they were
+  granted under, and claims grant it nothing (`Grantable`). Passing ends those attempts with the
+  new generation, as failing (`golden_failed` or a breaker trip, generation negative) does.
 * **Reaper fairness.** The replica cancel and the stranded-dispute check get strong fairness. The
   reaper runs every REAPER_EVERY seconds, and with a failing node that is retried every
   RECERT_EVERY, their conditions hold only intermittently (while the node is `golden_failed`),
@@ -227,7 +239,8 @@ Line numbers are for `core.py` at bb04f9d.
 | `ReapStranded(j)` | `reap` -> `_stranded_disputes` (l.926), also via `_eligible_nodes` |
 | `RevokeModule(n)` | `revoke_module` / `_revoke_quiet` (l.386) after a golden mismatch |
 | `BeginCertify(n)`, `Recertify(n)` | `_lifecycle_step` -> `queue_goldens` (l.343: cancels stale goldens, module `certifying`, `certifying_since`); `_golden_done` (l.378) -> `_certify` (l.366: new, larger cert generation, `golden_failures` reset) |
-| `GoldenFail(n, trip)` | a golden job fails: `fail` -> `_end_attempt` counts `golden_failures` (l.570); at MAX_EXEC_FAILURES `_golden_failed` (l.332: `_cancel_goldens`, `golden_failed`, generation -1, alert) and the breaker is suppressed (l.627); otherwise a breaker trip revokes (`_revoke_quiet`) |
+| `BeginRecertify(n)` | `_lifecycle_step` -> `queue_goldens` on a `certified` module whose digest, platform or OS version changed, or after RECERT_EVERY: `certifying`, generation kept |
+| `GoldenFail(n, trip)` | a golden job fails: `fail` -> `_end_attempt` counts `golden_failures` (l.570); at MAX_EXEC_FAILURES `_golden_failed` (l.332: `_cancel_goldens`, `golden_failed`, generation -1, alert, and `_end_superseded`) and the breaker is suppressed (l.627); otherwise a breaker trip revokes (`_revoke_quiet`) |
 | `GraceExpires(n)` | CERTIFYING_GRACE_S passes (`_can_serve`, l.671) |
 | `RetryGoldenFailed(n)` | `_lifecycle_step` (l.302): after RECERT_EVERY, `golden_failures = 0` and `queue_goldens` |
 | `AdminQuarantine(n)` | `quarantine` (l.400) with an operator reason (no invalidation) |
@@ -251,7 +264,8 @@ Line numbers are for `core.py` at bb04f9d.
 | 4 | `NoLostJob` | every leased job has a live attempt (so a job whose attempts all ended is pending or settled), and every live attempt belongs to a leased job of its own generation |
 | 5 | `QuarantinedNoGrant` | a quarantined node never receives a grant (history variable) |
 | S2 | `DoneHasCanonical` | a done job's `canonical_result_id` points at a canonical result of that job |
-| S7/S8 | `LiveOnReadyCertified` | live attempts run only on non-quarantined nodes, under the node's current certification |
+| S7/S8 | `LiveOnReadyCertified` | live attempts run only on non-quarantined nodes, under the node's current certification (which stands while the module re-certifies) |
+| S8 | `NoGrantWhileCertifying` | no attempt is granted where the module is `certifying`, re-certification included (history variable) |
 | — | `NoCanonicalFromQuarantined` | no result from a node that is quarantined at acceptance becomes canonical |
 | — | `NoCanonicalFromUncertified` | no result becomes canonical while its node's module is revoked |
 | — | `SettledNotRevived` | an accepted completion never lands on a cancelled or quarantined job (only `retry_job` reopens it) |
@@ -276,7 +290,8 @@ never happens and TLC must find a trace where it does: a late completion wins, a
 a tie-break convicts, a stranded dispute is quarantined, a replica disagrees, the reaper cancels
 a replica, a node convicts itself, a party's late vote is fenced, a stale completion is rejected,
 a retried job completes again, a revoked module's result is rejected, a node goes
-`golden_failed`, and a certifying node's grace expires and the reaper cancels a replica.
+`golden_failed`, a certifying node's grace expires and the reaper cancels a replica, work granted
+before a re-certification runs while the module re-certifies, and its result is accepted then.
 
 ## Weakened variants
 
@@ -401,6 +416,32 @@ The model adds:
 | `OarbankLease_module_faults` | ok | Module outages break no safety property, S15 included. |
 | `OarbankLease_module_faults_liveness` | ok | Every job still settles once the module is back. |
 | `OarbankLease_o_no_await_lease` | `inv:ModuleFaultsNotCharged` | Without the lease hold, a finished attempt waiting on its module lapses. It is expired and re-run, which charges the job for a module fault. TLC finds this in 7 steps. |
+
+### (p): re-certification around live work (S8)
+
+A certified module re-certifies while its work runs: a canary or promotion reaches the node's release, its platform or
+OS version changes, or RECERT_EVERY passes. Until this was modelled, `certifying` followed only a revocation, which ends
+every attempt, so the model never had live attempts on a `certifying` node. A live fleet did: an `oarbank update start`
+was refused because the self-test's S8 named a canary node's running campaign jobs (granted on the previous version,
+before the canary reached the node) as uncertified.
+
+The model adds:
+
+- **`BeginRecertify`** (`RecertifyCertified = TRUE`): `certifying` with the generation kept. The certification stands
+  for the attempts granted under it: `LiveOnReadyCertified` holds, and their results are accepted, as `complete()`
+  does (the certification generation matches).
+- **`Grantable`:** claims grant only where the module is `certified` and not `certifying`; property
+  `NoGrantWhileCertifying`.
+- **Code behaviour (`CertifyEndsSuperseded = TRUE`):** a new generation (`Recertify`) or `golden_failed` (`GoldenFail`
+  at the limit) ends the node's live attempts granted under the certification it ends (`_end_superseded`); a breaker
+  trip already revoked them.
+
+| Config | Expected | What it shows |
+|---|---|---|
+| `OarbankLease_recertify` | ok | Re-certification with live work breaks no safety property; n2's goldens always fail, so its re-certification ends in `golden_failed`. |
+| `OarbankLease_witness_LiveWhileRecertifying` | `inv:W_LiveWhileRecertifying` | Work granted before a re-certification runs while the module re-certifies. |
+| `OarbankLease_witness_CanonicalWhileRecertifying` | `inv:W_CanonicalWhileRecertifying` | Its result is accepted (canonical) while the module re-certifies. |
+| `OarbankLease_p_recertify_keeps_superseded` | `inv:LiveOnReadyCertified` | Without `_end_superseded` (core.py before it), the attempt granted under generation 1 is still live once generation 2 is certified: grant, re-certify, pass, in 4 states. `complete()` would refuse its result (`release_invalid`). |
 
 ## Findings
 

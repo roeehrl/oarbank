@@ -205,7 +205,12 @@ their process groups, deletes their workspaces, and does not report them.
   `{"at": "<socket path or pipe name>", "serving": false, "error": "cannot create …: Permission denied (os error 13)",
   "failures": 4}`. While it does not, the agent tries again every 15 s and the console shows
   `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes are evaluated without session helper (fail-safe;
-  docs/design/protection.md, "Without a session helper"). Absent in a personal install.
+  docs/design/protection.md, "Without a session helper"). Absent in a personal install. It also carries
+  `expected_version`, the version helpers should run (the installed package's agent, whose binary they run), and
+  `helpers: [{who: "uid:<n>"|"session:<n>", account, version, current}]`, each connected helper with the version it
+  reports (null: a helper of 2.10.4 or earlier, which does not say). A helper of another version is asked once on its
+  connection to exit (`{"v": 2, "restart": "<why>"}`), and its supervisor starts the installed binary again; the
+  console shows `PROTECTION_SESSION_HELPER_OUTDATED` while one is not current.
 - **`telemetry.protection.rules[].without_helper`**: how many of the rule's processes were listed without their
   account's session helper (none connected, or its report older than 10 s) and evaluated fail-safe; the console shows
   `PROTECTION_WITHOUT_HELPER` while it is above 0. A rule's `cpu_cores` and `footprint_gb` then include the estimate
@@ -263,7 +268,7 @@ their process groups, deletes their workspaces, and does not report them.
 | Directive | Meaning |
 |---|---|
 | `now` | oarbankd's clock when it answered (see Clocks). |
-| `release` | The release this node must run: its own composition, or the current one (see Releases). `null` when the node already runs it. `statement` and `signature` are present only with release signing. |
+| `release` | The release this node must run: its own composition, or the current one (see Releases). `null` when the node already runs it. `statement` and `signature` are present only with release signing, and are `null` for an empty release (no module), which needs no signature. |
 | `cancel` | Stop the attempt and `release(reason=user_cancel)`. |
 | `revoke` | Another attempt won, or the module was disabled: kill silently, no report. |
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
@@ -631,6 +636,12 @@ image's cosign signature (or its index membership) with it before the runtime pu
 - **Signing** is on by default (D31; `OARBANK_RELEASE_SIGNING=0` is developer mode): a release is the signed lock of
   module digests, and agents pin the key and refuse unsigned and rolled-back releases (docs/release-signing.md). The
   platform is bound into the signed sha256 through `modules.json`.
+- **Empty releases.** A platform (or a canary or pinned node) no enabled module runs on gets an empty release:
+  `modules.json` with `"modules": []` and `"tools": {}`, and `MANIFEST.json` listing `modules.json` alone. It needs no
+  signature: the coordinator makes it current as soon as it is built and sends it with `statement` and `signature`
+  `null`. An agent with a pinned key installs such an unsigned release only after checking, on the unpacked files and
+  before switching to it, that it is exactly that (at most 64 KiB to download); any other unsigned release is refused.
+  The node then runs no module and is ready (docs/release-signing.md, "Empty releases").
 
 ## Agent self-update
 
@@ -642,9 +653,11 @@ canary on chosen nodes (`agent.upload`, `agent.canary`, `agent.promote`, `agent.
   (64-bit Mach-O, including universal binaries; ELF; PE) and the version from the marker every build embeds,
   `oarbank-agent-version:<semver>` followed by a NUL byte. A build can serve only nodes of its platforms.
 
-- **Report.** hello and heartbeat carry `agent_build` (the sha256 of the running binary) and `agent_update`
-  `{state, target, version, error, at}`. States: `idle`, `staging`, `draining`, `restarting`, `confirming`,
-  `confirmed`, `failed`, `rolled_back`, `blocked`.
+- **Report.** hello and heartbeat carry `agent_version` (the running build's), `agent_build` (the sha256 of the
+  running binary) and `agent_update` `{state, target, version, error, at}`. States: `idle`, `staging`, `draining`,
+  `restarting`, `confirming`, `confirmed`, `failed`, `rolled_back`, `blocked`. The install facts carry
+  `package_version`, the version of the agent the installed package carries (see Fleet updates), which differs from the
+  running build after an agent-only update.
 - **Directive.** While a node's assigned build (the canary on canary nodes, else current; none before the
   first promotion) differs from `agent_build`, every hello and heartbeat reply carries
   `agent_update: {sha256, version, size, url, statement?, signature?}` (`statement`/`signature` in signing
@@ -668,6 +681,18 @@ canary on chosen nodes (`agent.upload`, `agent.canary`, `agent.promote`, `agent.
   agent not started by the launcher reports `blocked` and does not update itself.
 - **Promotion** is refused until every canary node reports running the canary build and has heartbeated in
   the last 120 s. In signing mode canary and promotion need a signed build.
+- **The package supersedes older builds.** A node package (a fleet release, or one installed by hand) is the unit; the
+  channel only ever moves a node forward from it. A node's floor is the newer of its installed package's agent
+  (`install.package_version`) and the fleet release it last installed (`node_update` `done`). A channel build older
+  than the floor is never assigned to the node (no directive; the Agent page and `oarbank agent list` say the package
+  supersedes it), and one of the floor's own version only to take the node back down to it from a newer channel build
+  (a rollback). A channel build newer than the floor, promoted after the package, updates the node as before. Starting
+  a fleet rollout retires every channel build older than its release (current, previous and canary; the builds stay in
+  the store), canary, promotion and rollback refuse a build older than the newest release a rollout took the fleet to,
+  and a coordinator from before this rule retires its stale builds once when it starts. On the node the launcher names
+  the package's agent to the agent (`OARBANK_PACKAGE_AGENT`); the agent refuses a directive older than it (`failed`,
+  not remembered), and the launcher refuses a staged build older than it and, at each start outside a trial, makes the
+  package's agent current when `current` names an older version.
 
 ## Fleet updates
 
@@ -684,16 +709,17 @@ without an update runner keeps agent-only self-update.
   directory, from files staged through `POST /api/v1/updates/uploads`, or from `update_source`
   (`<source>/download/v<version>/<asset>`). It checks each artifact's sha256 and size and keeps only the platforms its
   nodes and itself run.
-- **Report.** hello and heartbeat carry `install: {format, scope, updater, why}` (how the agent was installed and
-  whether the runner's trigger and trust are in place) and `node_update: {state, release, seq, error, at}`. States:
+- **Report.** hello and heartbeat carry `install: {format, scope, updater, why, package_version}` (how the agent was
+  installed, whether the runner's trigger and trust are in place, and the version of the package's agent) and `node_update: {state, release, seq, error, at}`. States:
   `idle`, `unsupported`, `staging`, `staged`, `draining`, `deferred`, `installing`, `confirming`, `done`, `failed`,
   `rolled_back`, `refused`.
 - **Directive.** While a node's target differs from the version it runs, every reply carries
   `node_update: {release, seq, go, rollback, drain_timeout_s, artifact: {name, format, sha256, size, url}, manifest,
   signature | null, owner_anchors | null}`; `null` otherwise. The target is the node's pin (`update_pin`), else none
   while it is held (`update_hold`), else the governing rollout's release once the node's ring started (or, after the
-  rollout is done, to catch up), else what it runs. It is never newer than the coordinator's own version, and a
-  `stops` version the node has not reached comes first. `owner_anchors` relays the owner key set for the runner's
+  rollout is done, to catch up), else what it runs. A node the rollout updated that later runs an older agent goes
+  back to `pending` and takes the release again under the same slots and windows. It is never newer than the
+  coordinator's own version, and a `stops` version the node has not reached comes first. `owner_anchors` relays the owner key set for the runner's
   rotation rule.
 - **Artifact.** `GET /v1/updates/artifacts/{sha256}` (agent listener, mTLS) serves only the artifact of the node's
   current directive (404 otherwise).
@@ -968,6 +994,13 @@ certification run there (docs/design/stage-gating.md). Release-install refusals 
 - **Per node and module.** A node is certified per (node, module), keyed by the module's content digest in
   the node's release. A new version re-certifies that module on that node and nothing else.
   Re-certification also happens after a platform or OS version change, and periodically.
+- **Work across a re-certification.** A grant runs the version the node's release carries, which its certification
+  is on (a canary or promotion reaches a node with its release). While the module re-certifies (`certifying`) the node
+  is granted only its goldens; the jobs it was granted before keep running and their results are accepted, because
+  the certification they were granted under stands. When a new certification passes its goldens, or the goldens fail
+  (`golden_failed`), the jobs still running under the old one stop (revoked, uncharged) and are queued again.
+- **A module turned off on a node** (its effective `[module] enabled` is false) is `disabled` there: it holds no
+  certification, runs no goldens and raises no `certifying_stuck`. Turned on again, it re-certifies.
 - **Goldens come from the module.** For the node's class (platform, OS version, CPU, GPUs and GPU APIs, pools and
   capabilities, never its identity), the module returns its goldens (`golden.list`), builds each one's spec (`spec.build`), and
   judges the result (`golden.compare`, or the evaluated digest against `expected.digest`). A golden limited to other
