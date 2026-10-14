@@ -134,7 +134,8 @@ def fleet_data(r, now: float | None = None) -> dict:
     now = now or time.time()
     stats = node_stats(r, now)
     nodes = [node_view(r, n, now, stats) for n in r.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]
-    enr = [{**e, "hw": hardware(jl(e["facts_json"], {}))}
+    from ..coordinator import nodeidentity
+    enr = [{**e, "hw": hardware(jl(e["facts_json"], {})), "identity": nodeidentity.of_enrollment(r, e)}
            for e in r.q("SELECT * FROM enrollments WHERE status='pending' ORDER BY created_at")]
     camps = r.q("SELECT * FROM campaigns WHERE state IN ('running','paused') ORDER BY created_at DESC")
     counts = {x["campaign_id"]: x for x in r.q(

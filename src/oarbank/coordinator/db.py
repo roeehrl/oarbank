@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   processes_json TEXT, processes_at REAL,          -- the agent's process summary (the rule editor's picker and preview)
   assigned_release TEXT,
   client_cert_fp TEXT, client_cert_prev_fp TEXT, client_cert_not_after REAL,   -- D29: the current (and, renewing, previous) certificate
+  client_key_sha256 TEXT, client_key_prev_sha256 TEXT,   -- the public keys (SPKI SHA-256) of those certificates (nodeidentity.py)
   agent_build TEXT, agent_update_json TEXT,         -- agent self-update: the binary the agent runs, and its update state
   cik_pinned TEXT, cik_confirmed TEXT, cik_confirmed_by TEXT, cik_confirmed_at REAL,   -- the coordinator key the agent pinned
   install_coordinator_json TEXT, coordinator_move_json TEXT,
@@ -315,7 +316,8 @@ ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "r
                  "nodes": {"settings_json": "TEXT", "settings_digest": "TEXT",
                            "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
                            "tools_json": "TEXT", "want_detect": "INT DEFAULT 0", "settings_changed_at": "REAL",
-                           "settings_managed_json": "TEXT", "detect_requested_at": "REAL"}}
+                           "settings_managed_json": "TEXT", "detect_requested_at": "REAL",
+                           "client_key_sha256": "TEXT", "client_key_prev_sha256": "TEXT"}}
 
 
 def _ensure_columns(conn, table: str, cols: dict) -> None:

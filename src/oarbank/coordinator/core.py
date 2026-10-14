@@ -144,6 +144,13 @@ def enroll(db: DB, hostname: str, facts: dict, peer_ip: str, csr: str, join: str
     if not jc["approve"]:
         db.event("join_code_pending", actor=hostname, reason=peer_ip, enrollment_id=eid, join_code_id=jc["code_id"])
         return {"enrollment_id": eid, "status": "pending", "join": "pending_approval"}
+    from . import nodeidentity
+    ident = nodeidentity.of_enrollment(db, db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,)))
+    if ident["ts_changed"] and jc["max_uses"] != 1:
+        # a multi-use code admits machines, it does not move a node to another Tailscale device: the owner decides
+        db.event("join_code_pending", actor=hostname, reason=f"re-enrolment of {ident['node_id']} from another Tailscale "
+                 f"device ({peer_ip})", enrollment_id=eid, join_code_id=jc["code_id"])
+        return {"enrollment_id": eid, "status": "pending", "join": "pending_approval"}
     label = jc["label"] if jc["max_uses"] == 1 else None
     approve_enrollment(db, eid, f"join:{jc['created_by']}", label=label)
     return {"enrollment_id": eid, "status": "approved", "join": "approved"}
@@ -175,9 +182,12 @@ def enroll_status(db: DB, eid: str) -> dict:
 
 
 def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -> dict:
-    """Approve an enrollment: the node (a known Tailscale node keeps its node_id) gets its client certificate. Its name
+    """Approve an enrollment: the node gets its client certificate. A request that proves a node's key (its CSR is
+    signed by the key of the node's current or previous certificate), else one from the node's Tailscale device, keeps
+    that node's id, settings and history, and re-pins it to the request's Tailscale device (nodeidentity.py). Its name
     is `label` (a join code's), else a label it already had, else the hostname it reported; a labelled node keeps its
     name when its agent reports another one (hello)."""
+    from . import nodeidentity
     label = (label or "").strip() or None
     with db.tx():
         e = db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,))
@@ -185,14 +195,16 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
             raise ApiError(409, "not_pending", eid)
         label = label or e["requested_name"]
         facts = jl(e["facts_json"], {})
-        # Re-enrolment of a known Tailscale node keeps its node_id (and history).
-        node = db.one("SELECT node_id FROM nodes WHERE ts_node_id=? AND ts_node_id IS NOT NULL",
-                      (e["ts_node_id"],)) if e["ts_node_id"] else None
-        node_id = node["node_id"] if node else "n_" + secrets.token_hex(4)
-        if node:
+        # Re-enrolment of a known node (by its key, else its Tailscale device) keeps its node_id, settings and history.
+        ident = nodeidentity.of_enrollment(db, e)
+        node_id = ident["node_id"] or "n_" + secrets.token_hex(4)
+        if ident["node_id"]:
             db.x("UPDATE nodes SET lifecycle='enrolled', facts_json=?, hostname=COALESCE(?, label, ?), label=COALESCE(?, label),"
-                 " ts_ip=?, quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
-                 (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], node_id))
+                 " ts_ip=?, ts_node_id=COALESCE(?, ts_node_id), quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
+                 (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], e["ts_node_id"], node_id))
+            if ident["ts_changed"]:
+                db.event("node_tailscale_repinned", actor=actor, node_id=node_id, enrollment_id=eid,
+                         reason=f"{ident['old_ts_node_id']} -> {e['ts_node_id']} (re-enrolment proved the node key)")
         else:
             # nothing of its settings is copied: it inherits the defaults, the fleet's and its groups' values (settings/)
             db.x("INSERT INTO nodes(node_id,ts_node_id,hostname,label,ts_ip,facts_json,lifecycle,desired_state,created_at)"
@@ -206,11 +218,15 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
             cert = tlsca.issue_client(Path(db.path).parent, e["csr_pem"], node_id)
         except tlsca.CAError as err:
             raise ApiError(400, "bad_csr", str(err))
-        db.x("UPDATE nodes SET client_cert_fp=?, client_cert_prev_fp=NULL, client_cert_not_after=? WHERE node_id=?",
-             (cert["fingerprint"], cert["not_after"], node_id))
+        db.x("UPDATE nodes SET client_cert_fp=?, client_cert_prev_fp=NULL, client_cert_not_after=?, client_key_sha256=?,"
+             " client_key_prev_sha256=NULL WHERE node_id=?",
+             (cert["fingerprint"], cert["not_after"], cert["key_sha256"], node_id))
         db.x("UPDATE enrollments SET status='approved', node_id=?, decided_at=?, decided_by=?, cert_json=? WHERE enrollment_id=?",
              (node_id, now(), actor, json.dumps(cert), eid))
-        db.event("enroll_approved", actor=actor, node_id=node_id, enrollment_id=eid)
+        db.event("enroll_approved", actor=actor, node_id=node_id, enrollment_id=eid,
+                 reason=f"re-enrolment ({ident['via']})" if ident["node_id"] else
+                 ("new node; looks like " + ", ".join(n["node_id"] for n in ident["lookalikes"]))
+                 if ident["lookalikes"] else None)
     releases.ensure(db, platforms.facts_platform(facts)["platform"])
     return {"node_id": node_id}
 
@@ -239,7 +255,11 @@ def auth_cert(db: DB, der: bytes | None, peer_ip: str) -> dict:
     if not node:
         raise ApiError(401, "unauthorized", "unknown or replaced client certificate")
     if fp == node["client_cert_fp"] and node["client_cert_prev_fp"]:     # the renewed certificate is in use: retire the old
-        db.x("UPDATE nodes SET client_cert_prev_fp=NULL WHERE node_id=?", (node["node_id"],))
+        db.x("UPDATE nodes SET client_cert_prev_fp=NULL, client_key_prev_sha256=NULL WHERE node_id=?", (node["node_id"],))
+    col = "client_key_sha256" if fp == node["client_cert_fp"] else "client_key_prev_sha256"
+    if not node.get(col):
+        # a certificate issued before the coordinator recorded keys: learn its key, so a re-enrolment can prove it
+        db.x(f"UPDATE nodes SET {col}=? WHERE node_id=?", (tlsca.key_of_cert(der), node["node_id"]))
     return _node_checks(db, node, peer_ip)
 
 
@@ -251,8 +271,9 @@ def renew_cert(db: DB, node: dict, csr: str) -> dict:
         cert = tlsca.issue_client(Path(db.path).parent, csr, node["node_id"])
     except tlsca.CAError as e:
         raise ApiError(400, "bad_csr", str(e))
-    db.x("UPDATE nodes SET client_cert_prev_fp=client_cert_fp, client_cert_fp=?, client_cert_not_after=? WHERE node_id=?",
-         (cert["fingerprint"], cert["not_after"], node["node_id"]))
+    db.x("UPDATE nodes SET client_cert_prev_fp=client_cert_fp, client_cert_fp=?, client_cert_not_after=?,"
+         " client_key_prev_sha256=client_key_sha256, client_key_sha256=? WHERE node_id=?",
+         (cert["fingerprint"], cert["not_after"], cert["key_sha256"], node["node_id"]))
     db.event("node_cert_renewed", node_id=node["node_id"], actor=node["hostname"], reason=cert["fingerprint"][:16])
     return {"cert_pem": cert["cert_pem"], "ca_pem": cert["ca_pem"], "cert_not_after": cert["not_after"]}
 
@@ -266,7 +287,15 @@ def _node_checks(db: DB, node: dict, peer_ip: str) -> dict:
         if peer_ip != node["ts_ip"]:
             who = tailscale_whois(peer_ip)
             if who and who["ts_node_id"] != node["ts_node_id"]:
-                raise ApiError(401, "unauthorized", "certificate/node mismatch")
+                # `unauthorized` makes every agent version enroll again with a CSR for the same key, which proves the
+                # node: the owner's approval then keeps its node_id and re-pins it to this device (nodeidentity.py)
+                if not db.one("SELECT 1 FROM events WHERE kind='node_cert_other_device' AND node_id=? AND ts>?",
+                              (node["node_id"], now() - 3600)):          # once an hour: a refused agent may retry
+                    db.event("node_cert_other_device", node_id=node["node_id"], actor=node["hostname"],
+                             reason=f"{node['ts_node_id']} -> {who['ts_node_id']} ({peer_ip})")
+                raise ApiError(401, "unauthorized", "certificate/node mismatch: the certificate was presented from "
+                               "another Tailscale device; a machine re-added to the tailnet enrolls again and keeps "
+                               "its node once the owner approves")
             db.x("UPDATE nodes SET ts_ip=? WHERE node_id=?", (peer_ip, node["node_id"]))
             db.event("node_ip_repinned", node_id=node["node_id"],
                      reason=f"{node['ts_ip']} -> {peer_ip} (whois {'confirmed' if who else 'unavailable'})")

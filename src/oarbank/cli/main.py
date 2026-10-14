@@ -880,6 +880,13 @@ def cmd_fleet(a):
             print(f"  containers {ct.get('state')}: {ct['detail']}")
     for e in d["enrollments"]:
         print(f"PENDING enrollment {e['enrollment_id']} from {e['hostname']} ({e['peer_ip']})  -> oarbank node approve {e['enrollment_id']}")
+        ident = e.get("identity") or {}
+        if ident.get("node_id"):
+            print(f"  re-enrolment of {ident['hostname']} ({ident['node_id']}): keeps its node id and settings"
+                  + ("; its Tailscale device changed" if ident.get("ts_changed") else ""))
+        for n in ident.get("lookalikes") or []:
+            print(f"  WARNING looks like {n['hostname']} ({n['node_id']}) but cannot prove it: approving makes a NEW node "
+                  f"without that node's settings; retire the old one with: oarbank op nodes.retire {n['node_id']}")
     for c in d["campaigns"]:
         j = c["jobs"]
         print(f"campaign {c['campaign_id']} {c['module']:<11} {c['name']:<30} {c['state']:<8} {j['d'] or 0}/{j['n']} done, "

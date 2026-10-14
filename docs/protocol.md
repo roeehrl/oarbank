@@ -26,10 +26,14 @@ compatibility).
     `POST /v1/agent/cert {"csr"}`; the old certificate keeps working until the new one is first used.
   - The coordinator stores only certificate fingerprints. Retiring a node revokes its certificate.
   - When the peer address is a Tailscale IP, oarbankd also checks `tailscale whois` and rejects a certificate
-    presented from another tailnet node.
+    presented from another tailnet node (`unauthorized`). A machine re-added to the tailnet is such a node. Its agent
+    enrolls again with a CSR for the same key. That CSR proves the node (its public key is that of the node's current
+    or previous certificate), and the owner's approval keeps the node's id and settings and re-pins it to the new
+    device (docs/design/node-enrollment.md, "Re-enrolment").
 - **Errors.** HTTP 4xx/5xx with `{"error": "<code>", "detail": "..."}`. The agent must handle:
   - `client_certificate_required`: the request reached the listener without the node's certificate;
-  - `unauthorized` (an unknown or replaced client certificate): re-enroll;
+  - `unauthorized` (an unknown or replaced client certificate, or one presented from another tailnet device):
+    re-enroll with a CSR for the node's existing key (keep `node.key`), so the request proves the node;
   - `coordinator_moved` (410): follow the signed move statement in the body;
   - `stale_coordinator` (raised by the agent itself): the coordinator answered at a lower epoch; refuse it;
   - `node_retired`: stop;

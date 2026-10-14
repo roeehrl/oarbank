@@ -28,7 +28,12 @@
     {{ m.op_form("nodes.admit", e.enrollment_id, "Approve…", cls="pri") }}
     {{ m.op_form("nodes.reject_enrollment", e.enrollment_id, "Reject", cls="danger", confirm="Reject " ~ e.hostname ~ "?") }}</div>
     {% set hw = e.hw %}
-    <div class="small mut">{{ [hw.os, hw.arch, hw.cpu, (hw.memory_gb | num(1)) ~ ' GB' if hw.memory_gb is known, 'requested ' ~ (e.created_at | ago)] | select | join(' · ') }}</div></div>
+    <div class="small mut">{{ [hw.os, hw.arch, hw.cpu, (hw.memory_gb | num(1)) ~ ' GB' if hw.memory_gb is known, 'requested ' ~ (e.created_at | ago)] | select | join(' · ') }}</div>
+    {% set ident = e.identity or {} %}
+    {% if ident.node_id %}<div class="small"><span class="chip">re-enrolment</span> of <a href="/nodes/{{ ident.node_id }}">{{ ident.hostname }}</a>: it proves the node's key and keeps its settings and history{% if ident.ts_changed %}; its Tailscale device changed{% endif %}</div>
+    {% endif %}{% for o in ident.lookalikes or [] %}<div class="small"><span class="chip warn">new node</span> looks like <a href="/nodes/{{ o.node_id }}">{{ o.hostname }}</a>{% if o.same_hardware %} (same hardware){% endif %} but cannot prove it is: approving makes a NEW node, and that node's settings do not apply to it.
+      {{ m.op_form("nodes.retire", o.node_id, "Retire " ~ o.hostname ~ "…", cls="danger") }}</div>
+    {% endfor %}</div>
 {% endfor %}</div>
 {% endif %}
 
