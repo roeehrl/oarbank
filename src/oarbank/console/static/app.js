@@ -170,6 +170,23 @@
   window.addEventListener("pageshow", function (ev) { if (ev.persisted) resetAll(); });
   doc.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape" && navigating && !uploading) setTimeout(resetAll, 0);   // Escape stops a page load
+    if (ev.key === "Escape") closeMenus(null, true);
+  });
+
+  // ---------------------------------------------------------------- the header's account menu (a <details>)
+  // Escape or a click elsewhere closes it; Escape from inside it returns focus to its summary.
+  function closeMenus(except, refocus) {
+    var open = doc.querySelectorAll("details.acct-menu[open]");
+    for (var i = 0; i < open.length; i++) {
+      if (open[i] === except) continue;
+      var s = refocus && open[i].contains(doc.activeElement) && open[i].querySelector("summary");
+      open[i].removeAttribute("open");
+      if (s && s.focus) s.focus();
+    }
+  }
+  doc.addEventListener("click", function (ev) {
+    var inside = ev.target && ev.target.closest ? ev.target.closest("details.acct-menu") : null;
+    closeMenus(inside, false);
   });
 
   // ---------------------------------------------------------------- form submissions

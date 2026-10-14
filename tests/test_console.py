@@ -196,6 +196,89 @@ def test_account_secrets_are_shown_once_on_a_page_never_in_a_url(env):
     assert c.get("/account").status_code == 200 and c.get("/access").status_code == 200
 
 
+def test_the_header_has_a_labelled_account_menu_for_every_signed_in_account(env):
+    # the account page (password, passkeys, sign-in code) was reachable only through the account name in the grey
+    # status line; the header now names it: Account, the signed-in name, "Your account" and Sign out
+    c, db = env["c"], env["db"]
+    for name, role in (("owner", "admin"), ("vic", "viewer")):
+        sign_in(c, db, name, role)
+        html = c.get("/jobs").text
+        menu = html.split('<details class="acct-menu">')[1].split("</details>")[0]
+        summary = menu.split("<summary>")[1].split("</summary>")[0]
+        assert ">Account</span>" in summary and f">{name}</span>" in summary and 'aria-hidden="true"' in summary
+        assert '<a href="/account"' in menu and "Your account" in menu and "Change password, passkeys, sign-in code" in menu
+        assert 'action="/logout"' in menu and ">Sign out</button>" in menu
+        who = html.split('<span class="who">')[1].split("</header>")[0].split("<details")[0]
+        assert 'href="/account"' not in who                                     # no longer only a link in the status line
+        assert ('<a href="/access">Access</a>' in html) == (role == "admin")
+    assert 'aria-current="page"' in c.get("/account").text.split('<details class="acct-menu">')[1].split("</details>")[0]
+
+
+def test_the_access_page_links_your_account_and_lets_an_admin_set_others_passwords(env):
+    from oarbank.coordinator import access
+    c, db = env["c"], env["db"]
+    access.create_account(db, "ana", "operator", None, "test")
+    html = c.get("/access").text
+    assert '<a href="/account">change your password, passkeys and authenticator code</a>' in html
+    assert 'data-set-password="ana"' in html and 'data-set-password="owner"' not in html     # yours is on /account
+    form_html = html.split('data-set-password="ana"')[1].split("</details>")[0]
+    assert 'action="/do/access.accounts.set_password"' in form_html and 'name="p.password"' in form_html
+    assert 'value="ana"' in form_html and 'autocomplete="new-password"' in form_html and "New authenticator seed" in html
+    r = form(c, "access.accounts.set_password", target="ana", **{"p.password": "a new long password"})
+    assert r.status_code == 303 and "kind=ok" in r.headers["location"]
+    assert access.verify_password(access.account(db, "ana")["pw_hash"], "a new long password")
+    assert "password + code" in c.get("/access").text
+    # everyone else: a link to their own account, none of the admin's forms, and oarbankd refuses another's password
+    sign_in(c, db, "vic", "viewer")
+    html = c.get("/access").text
+    assert 'href="/account"' in html and "data-set-password" not in html and "Disable…" not in html and "New account" not in html
+    r = form(c, "access.accounts.set_password", target="ana", **{"p.password": "mallory's password"})
+    assert "forbidden_role" in r.headers["location"]
+    assert access.verify_password(access.account(db, "ana")["pw_hash"], "a new long password")
+    r = form(c, "access.accounts.set_password", target="vic", **{"p.password": "vic's own password"})
+    assert r.status_code == 303 and access.verify_password(access.account(db, "vic")["pw_hash"], "vic's own password")
+
+
+def test_the_account_page_leads_with_change_password_and_the_sign_in_methods(env):
+    from oarbank.coordinator import access
+    c, db = env["c"], env["db"]
+    access.create_account(db, "ana", "operator", None, "test")
+    db.x("INSERT INTO passkeys(credential_id, account, public_key, label, rp_id, created_at) VALUES('k1','ana','x','anas-key','localhost',0)")
+    html = c.get("/account").text
+    assert '<h2 id="change-password">Change password</h2>' in html and 'href="#change-password"' in html
+    assert '<h2 id="sign-in-methods">Sign-in methods</h2>' in html and "oarbank console login" in html
+    assert "no password yet" in html                                       # the owner signs in with links and passkeys
+    assert "http://localhost or the console's https host name" in html
+    assert "anas-key" not in html                                          # only your own passkeys, even for an admin
+    access.set_password(db, "owner", "the owner's password")
+    sign_in(c, db)
+    assert ">set up</span>" in c.get("/account").text
+
+
+def test_a_failed_sign_in_says_how_many_tries_are_left_and_how_to_recover(env):
+    from oarbank.coordinator import access
+    db, c = env["db"], env["c"]
+    access.create_account(db, "ana", "operator", "correct horse battery", "test")
+    _signed_out(c)
+
+    def fail(name):
+        r = c.post("/login", data={"name": name, "password": "wrong password!!", "code": "123456", "next": "/"})
+        assert r.status_code == 401
+        return r.text.split('id="login-error">')[1].split("</div>")[0], r.text
+
+    known, page = fail("ana")
+    unknown, _ = fail("nobody")
+    assert known == unknown                                # the same words whether or not the account exists
+    assert "account name, password or authenticator code is wrong" in known and "4 attempts left" in known
+    assert "locked for 15 minutes" in known and "oarbank console login" in page and 'id="login-recovery"' in page
+    for left in (3, 2, 1):
+        assert f"{left} attempt{'s' if left != 1 else ''} left" in fail("ANA ")[0]
+    msg, _ = fail("ana")
+    assert "Too many failed attempts" in msg and access.account(db, "ana")["locked_until"] > time.time()
+    assert "Too many failed attempts" in fail("ana")[0]
+    assert "attempts left" not in c.get("/login").text and "login-recovery" not in c.get("/login").text
+
+
 def test_fragments_render_once_per_snapshot_version(env):
     c, state = env["c"], env["state"]
     c.get("/frag/fleet")
