@@ -77,6 +77,16 @@ pub struct Agent {
     /// The coordinator's clock as of its last answer: moves' time locks and expiries are in its time (clock.rs).
     pub coord_clock: crate::clock::CoordClock,
     pub containers: Option<crate::container_runtime::Containers>,
+    /// When the runtime runs (the owner's `containers` setting) and what the agent measured of it (containers_gate.rs).
+    pub gate: crate::containers_gate::Gate,
+    /// The VM size settings the runtimes were made with (a change restarts an idle VM at the new size).
+    containers_caps: Option<crate::container_runtime::Caps>,
+    /// The heartbeat's `containers`: the runtime's mode, state, startable pools and VM size.
+    containers_report: Value,
+    /// What a stopped runtime misses to start, looked up at most every RUNTIME_REPROBE.
+    prerequisites: Option<(std::time::Instant, Vec<Value>)>,
+    /// Makes the runtimes in place of this platform's (tests: fakes, no VM).
+    pub make_runtime: Option<RuntimeFactory>,
     /// When the container runtimes were last re-probed (`reprobe_runtimes`).
     runtimes_probed: Option<std::time::Instant>,
     /// Verifies container set images for every attempt (verified digests are remembered for the agent's lifetime).
@@ -144,6 +154,9 @@ struct Tidy {
 }
 
 /// Directives before the coordinator's first answer: the settings table's defaults, nothing else.
+/// Makes the container runtimes at the owner's VM size (the agent's own is this platform's: `make_containers`).
+pub type RuntimeFactory = Arc<dyn Fn(crate::container_runtime::Caps) -> Option<crate::container_runtime::Containers> + Send + Sync>;
+
 pub fn initial_directives() -> Value {
     use oarbank_protection::settings::{defaults, Section};
     json!({"policy": defaults(Section::Policy), "limits": defaults(Section::Limits)})
@@ -182,7 +195,8 @@ impl Agent {
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout),
                    node_update: crate::nodeupdate::NodeUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
-                   containers: None, runtimes_probed: None, images: None,
+                   containers: None, gate: Default::default(), containers_caps: None, containers_report: Value::Null,
+                   prerequisites: None, make_runtime: None, runtimes_probed: None, images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
             rerun_doctors: true,                 // a release installed before a restart: its doctors run again before any claim
@@ -193,6 +207,10 @@ impl Agent {
             listeners: crate::listeners::Hub::new(Layout::new(layout_home.clone()), crate::listeners::Env::from_env()),
             tidy: Tidy::default() };
         a.refresh_managed();                    // the defaults the agent starts from are tightened, too
+        // the containers mode of the last run, until the coordinator answers: an on-demand or off node starts no VM now
+        a.gate.load(&a.layout.home);
+        a.gate.configure(&json!({}));           // no earlier run: the table's defaults
+        a.configure_gate();                     // a machine's managed policy may turn containers off before that
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
         #[cfg(target_os = "macos")]
@@ -417,6 +435,9 @@ impl Agent {
         if !self.settings_report.is_null() {
             body["settings"] = self.settings_report.clone();
         }
+        if !self.containers_report.is_null() {
+            body["containers"] = self.containers_report.clone();       // containers_gate.rs
+        }
         // what modules keep here and when what is leaving goes, and the deletions not yet acknowledged (cleanup.rs)
         if !self.tidy.report.is_null() {
             body["module_storage"] = self.tidy.report.clone();
@@ -468,6 +489,18 @@ impl Agent {
             self.directives["policy"] = policy;
             self.directives["limits"] = limits;
         }
+        self.configure_gate();
+    }
+
+    /// The containers mode in force: the coordinator's (once it answered) with this machine's managed settings laid over;
+    /// before the coordinator answers, the last run's, unless a managed policy turns containers off.
+    fn configure_gate(&mut self) {
+        let policy = &self.directives["policy"];
+        if self.settings_report.is_null() && crate::containers_gate::Mode::of(policy) != crate::containers_gate::Mode::Off {
+            return;
+        }
+        self.gate.configure(policy);
+        self.gate.save(&self.layout.home);
     }
 
     /// The settings in force: the coordinator's (`settings_base`) with this machine's managed settings laid over, each
@@ -621,6 +654,9 @@ impl Agent {
         self.hooks.on_directives(d);
         self.observe_cleanup(d);
         self.directives = d.clone();
+        self.configure_gate();
+        // the coordinator's hint for an on-demand runtime: container work this node could run waits (containers_gate.rs)
+        self.gate.wanted = d["containers_wanted"].as_bool().unwrap_or(false);
         self.sync_services();
         // after the services: a listen_fd listener's socket must exist before its service's first start
         self.listeners.configure(self.release.as_ref(), &self.folders, d, self.services.clone(), self.node_id.as_deref());
@@ -1252,30 +1288,180 @@ impl Agent {
         Ok(true)
     }
 
+    /// Whether the release has a module approved for containers.
+    fn release_wants_containers(&self) -> bool {
+        self.release.as_ref().is_some_and(|r| r.modules.iter()
+            .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))))
+    }
+
     /// The container runtimes, once a release has a module approved for containers and a runtime exists here (on
-    /// Windows and macOS it always does: it reports what is missing itself).
+    /// Windows and macOS it always does: it reports what is missing itself). With containers = always the runtime is
+    /// made (and comes up) here; on demand only when container work needs it (`govern_containers`, `claim`); with
+    /// containers = off never (one still held stops once its container jobs end).
     fn container_runtime(&mut self) -> Option<crate::container_runtime::Containers> {
-        let wants = self.release.as_ref().is_some_and(|r| r.modules.iter()
-            .any(|m| ["containers", "container_sets"].iter().any(|k| m["sandbox"][k].as_array().is_some_and(|c| !c.is_empty()))));
-        if !wants {
+        if !self.release_wants_containers() {
             return None;
         }
-        if self.containers.is_none() {
-            #[cfg(target_os = "macos")]
-            {
-                // the agent's own runtime publishes its report (the facts' `containers`) and comes up now, in the
-                // background (docs/design/macos-containers.md, "Bring-up")
-                self.containers = crate::container_runtime::for_node_mac(&self.layout, true);
-                if let Some(rts) = &self.containers {
-                    rts.all().iter().for_each(|rt| rt.recheck());
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                self.containers = crate::container_runtime::for_node(&self.layout);
-            }
+        if self.containers.is_none() && self.gate.mode != crate::containers_gate::Mode::Off && !self.gate.parked() {
+            self.make_containers();
         }
         self.containers.clone()
+    }
+
+    /// Make the runtimes at the owner's VM size and bring them up (macOS: in the background; Windows: the session host
+    /// starts at once).
+    fn make_containers(&mut self) {
+        let caps = crate::container_runtime::Caps::of(&self.directives["limits"]);
+        if let Some(f) = self.make_runtime.clone() {
+            self.containers = f(caps);
+        } else {
+            self.make_platform_containers(caps);
+        }
+        if self.containers.is_some() {
+            self.containers_caps = Some(caps);
+            self.gate.started(std::time::Instant::now());
+        }
+    }
+
+    fn make_platform_containers(&mut self, caps: crate::container_runtime::Caps) {
+        #[cfg(target_os = "macos")]
+        {
+            // the agent's own runtime publishes its report (the facts' `containers`) and comes up now, in the
+            // background (docs/design/macos-containers.md, "Bring-up")
+            self.containers = crate::container_runtime::for_node_mac(&self.layout, true, caps);
+            if let Some(rts) = &self.containers {
+                rts.all().iter().for_each(|rt| rt.recheck());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.containers = crate::container_runtime::for_node_with(&self.layout, caps);
+        }
+    }
+
+    /// Stop the runtimes now (each VM within VM_STOP_BUDGET, all at once) and drop them.
+    async fn stop_containers(&mut self) {
+        if let Some(rts) = self.containers.take() {
+            let stops: Vec<_> = rts.all().into_iter()
+                .map(|rt| tokio::task::spawn_blocking(move || rt.stop(crate::container_runtime::VM_STOP_BUDGET))).collect();
+            for s in stops {
+                let _ = s.await;
+            }
+        }
+        self.containers_caps = None;
+        self.gate.stopped();
+    }
+
+    /// Container attempts live here (their grants reserve or need the `containers` pool).
+    fn container_attempts(&self) -> usize {
+        self.table.lock().unwrap().values().filter(|j| j.needs.iter().any(|n| n == "containers")).count()
+    }
+
+    /// The VM size the owner's settings ask for and the size the runtime was made at, or runs at, when they differ.
+    fn size_mismatch(&self) -> Option<((f64, u32), (f64, u32))> {
+        use crate::container_runtime::{same_size, vm_size, Caps};
+        let rts = self.containers.as_ref()?;
+        let made = self.containers_caps?;
+        let (ram, logical) = crate::container_runtime::host_size();
+        let want = vm_size(ram, logical, Caps::of(&self.directives["limits"]));
+        let configured = rts.cpu.size().unwrap_or_else(|| vm_size(ram, logical, made));
+        if !same_size(want, configured) {
+            return Some((want, configured));
+        }
+        rts.cpu.actual_size().filter(|have| !same_size(want, *have)).map(|have| (want, have))
+    }
+
+    /// Start, stop or resize the runtime as the owner's containers settings say (containers_gate.rs): on demand it
+    /// starts for live or waiting container work and stops after the idle time; with containers off a held runtime stops;
+    /// a VM at another size than vm_mem_gb and vm_cpus restarts at the new size once no container job is live.
+    async fn govern_containers(&mut self) {
+        use crate::containers_gate::Do;
+        if !self.release_wants_containers() && self.containers.is_none() {
+            return;
+        }
+        let (live, up, size) = (self.container_attempts(), self.containers.is_some(), self.size_mismatch());
+        match self.gate.decide(std::time::Instant::now(), up, live, size) {
+            Do::Nothing => {}
+            Do::Start(why) => {
+                info!(why = %why, mode = self.gate.mode.as_str(), "starting the container runtime");
+                self.make_containers();
+            }
+            Do::Stop(why) => {
+                info!(why = %why, "stopping the container runtime");
+                self.stop_containers().await;
+            }
+            Do::Restart(why) => {
+                info!(why = %why, "restarting the container runtime at the owner's VM size");
+                self.stop_containers().await;
+                self.make_containers();
+            }
+        }
+    }
+
+    /// What a stopped runtime misses to start (file checks on macOS, the WSL SDK on Windows), at most every
+    /// RUNTIME_REPROBE.
+    fn runtime_prerequisites(&mut self, now: std::time::Instant) -> Vec<Value> {
+        if let Some((t, m)) = &self.prerequisites {
+            if now.saturating_duration_since(*t) < crate::container_runtime::RUNTIME_REPROBE {
+                return m.clone();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let m: Vec<Value> = crate::container_runtime::mac_report_now(&self.layout.home).missing.iter().map(crate::colima::Missing::json).collect();
+        #[cfg(windows)]
+        let m: Vec<Value> = crate::wslc::check().iter().map(crate::wslc::Missing::json).collect();
+        #[cfg(target_os = "linux")]
+        let m: Vec<Value> = if crate::container_runtime::runtime_name().is_some() { vec![] } else {
+            vec![json!({"what": "engine", "detail": "no container engine installed", "fix": "install rootless Podman (or Docker Engine)"})]
+        };
+        self.prerequisites = Some((now, m.clone()));
+        m
+    }
+
+    /// The heartbeat's `containers` and the facts' override while the agent runs no runtime by the owner's choice. True
+    /// when the facts' report changed.
+    fn container_state(&mut self, rts: Option<&crate::container_runtime::Containers>) -> bool {
+        use crate::containers_gate::{held_state, idle_report, set_override, Mode};
+        let now = std::time::Instant::now();
+        let wants = self.release_wants_containers();
+        let caps = crate::container_runtime::Caps::of(&self.directives["limits"]);
+        let (ram, logical) = crate::container_runtime::host_size();
+        let (mem, cpus) = crate::container_runtime::vm_size(ram, logical, caps);
+        let vm = crate::colima::vm_json(mem, cpus, None);
+        let mut startable = serde_json::Map::new();
+        let (state, idle): (String, Option<Value>) = match rts {
+            Some(rts) => {
+                let rep = rts.cpu.report();
+                let state = rep.as_ref().and_then(|r| r["state"].as_str()).unwrap_or("ready").to_string();
+                let gpu = rts.gpu.as_ref().is_some_and(|g| g.gpu_device().is_some());
+                self.gate.observe(now, &state, gpu);
+                (held_state(&state).to_string(), None)
+            }
+            None if self.gate.mode == Mode::Off => {
+                let r = idle_report(&runtime_name(), Mode::Off, vec![], &vm);
+                ("disabled".into(), Some(r))
+            }
+            None if !wants => ("absent".into(), None),
+            None => {
+                let missing = self.runtime_prerequisites(now);
+                let r = idle_report(&runtime_name(), self.gate.mode, missing.clone(), &vm);
+                let ok = missing.is_empty();
+                if self.gate.startable(now, ok) {
+                    let t = crate::container_runtime::tokens(mem);
+                    if t > 0 {
+                        startable.insert("containers".into(), json!(t));
+                        if self.gate.gpu_seen {
+                            startable.insert("gpu".into(), json!(1));
+                        }
+                    }
+                }
+                let state = if !ok { "missing" } else if !self.gate.startable(now, ok) { "failed" } else { "stopped" };
+                (state.into(), Some(r))
+            }
+        };
+        let vm = rts.and_then(|r| r.cpu.report()).map(|r| r["vm"].clone()).filter(|v| v.is_object()).unwrap_or(vm);
+        self.containers_report = self.gate.report(&state, &startable, &vm);
+        set_override(&self.layout.home, idle.as_ref())
     }
 
     /// The owner asked for a fresh look (a doctor run, Re-detect): each runtime the agent has checks again now, whatever
@@ -1330,7 +1516,14 @@ impl Agent {
         // the runtime's `containers` pool (only while it can run containers), and the `gpu` pool where containers can get
         // the node's GPUs (CDI on Linux and Windows, the krunkit VM on macOS)
         let rts = self.container_runtime();
-        let mut pools = container_pools(rts.as_ref());
+        // containers = off: no container pool, even from a runtime still finishing its container jobs
+        let mut pools = if self.gate.mode == crate::containers_gate::Mode::Off { Default::default() } else { container_pools(rts.as_ref()) };
+        // the runtime's mode and state for the heartbeat; the facts' own report while none runs by the owner's choice
+        if self.container_state(rts.as_ref()) && !self.facts.is_null() {
+            self.facts = facts::collect(&self.layout.home);
+            self.need_hello = true;
+            self.rerun_doctors = true;
+        }
         // a runtime that keeps its own report (Windows) changed state: the facts go out again, and the doctors (with the
         // GPU APIs in containers) run again
         if let Some(report) = rts.as_ref().and_then(|r| r.cpu.report()) {
@@ -1495,6 +1688,13 @@ impl Agent {
             return Ok(0);
         }
         let rt = self.runtime().map_err(io_err)?;
+        // an on-demand runtime that is stopped starts for a grant that needs containers (its broker waits for it)
+        let container_grant = grants.iter().any(|g| jobs::needs_of(&g["spec"]["resources"]).iter().any(|n| n == "containers"));
+        if container_grant && self.containers.is_none() && self.release_wants_containers()
+            && self.gate.mode != crate::containers_gate::Mode::Off {
+            info!("starting the container runtime for a granted container job");
+            self.make_containers();
+        }
         let ctx = Arc::new(jobs::Ctx { api: self.api.clone().expect("connected"), layout: Layout::new(self.layout.home.clone()),
                                        runtime: rt, release: rel.clone(), policy: self.with_grants(&self.directives["policy"]),
                                        table: self.table.clone(), registry: self.prot.as_ref().map(|p| p.registry.clone()),
@@ -1725,6 +1925,7 @@ impl Agent {
                     self.draining = self.update.staged.is_some() || self.node_update.draining();
                     self.status.put("update", self.node_update.status());
                     self.drain_services().await;
+                    self.govern_containers().await;
                     if self.detection_due() {
                         self.detect_tools().await;
                         self.sync_services();
@@ -1824,6 +2025,17 @@ pub fn data_root(home: &std::path::Path) -> std::path::PathBuf {
         Some(p) if p.file_name().is_some_and(|n| n == "Oarbank") => p.to_path_buf(),
         _ => home.to_path_buf(),
     }
+}
+
+/// The container runtime's name in the facts (the runtime's own report names it while it runs).
+fn runtime_name() -> String {
+    #[cfg(target_os = "macos")]
+    let name = "colima".to_string();
+    #[cfg(windows)]
+    let name = "wslc".to_string();
+    #[cfg(target_os = "linux")]
+    let name = crate::container_runtime::runtime_name().unwrap_or_else(|| "engine".into());
+    name
 }
 
 /// The agent's own pools from its container runtimes: `containers` while the runtime can run containers (one that is not
@@ -1991,6 +2203,204 @@ pub mod tests {
         agent.containers = None;
         agent.retry_runtimes();
         assert!(agent.reprobe_runtimes(t0 + crate::container_runtime::RUNTIME_REPROBE * 2));
+    }
+
+    /// A container runtime the gate drives: its VM size from the caps it was made with, the size it runs at, and how
+    /// often it was stopped (no VM).
+    struct SizedRuntime {
+        size: (f64, u32),
+        actual: std::sync::Mutex<Option<(f64, u32)>>,
+        stops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::container_runtime::ContainerRuntime for SizedRuntime {
+        fn status(&self) -> Result<crate::container_runtime::RuntimeStatus, String> {
+            Err("unused".into())
+        }
+        fn ensure_started(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn pull(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn run(&self, _: &crate::container_runtime::RunSpec, _: &std::sync::atomic::AtomicBool)
+               -> Result<crate::container_runtime::RunResult, String> {
+            Err("unused".into())
+        }
+        fn images(&self) -> Vec<String> {
+            vec![]
+        }
+        fn reap(&self) -> Vec<String> {
+            vec![]
+        }
+        fn remove_attempt(&self, _: i64) -> Vec<String> {
+            vec![]
+        }
+        fn pool_tokens(&self) -> u32 {
+            crate::container_runtime::tokens(self.size.0)
+        }
+        fn stop(&self, _: Duration) {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn size(&self) -> Option<(f64, u32)> {
+            Some(self.size)
+        }
+        fn actual_size(&self) -> Option<(f64, u32)> {
+            *self.actual.lock().unwrap()
+        }
+    }
+
+    /// An agent whose release has a module approved for containers, whose runtimes are SizedRuntimes (the caps each
+    /// was made with recorded, and their stops counted).
+    #[allow(clippy::type_complexity)]
+    fn container_agent(tag: &str) -> (tempfile::TempDir, Agent, Arc<std::sync::Mutex<Vec<crate::container_runtime::Caps>>>,
+                                      Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::Mutex<Option<(f64, u32)>>>) {
+        let tmp = crate::scratch(tag);
+        let mut agent = Agent::open(Layout::new(tmp.path().join("agent")), Some("https://127.0.0.1:9")).unwrap();
+        agent.release = Some(crate::release::Release { id: "r1".into(), dir: tmp.path().join("rel"), tools: Value::Null,
+            modules: vec![json!({"name": "scorer", "sandbox": {"containers": [{"image": "docker.io/x/y@sha256:00", "platform": "linux/arm64"}]}})] });
+        agent.prerequisites = Some((std::time::Instant::now() + Duration::from_secs(3600), vec![]));   // all there
+        let made = Arc::new(std::sync::Mutex::new(vec![]));
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let actual: Arc<std::sync::Mutex<Option<(f64, u32)>>> = Arc::new(std::sync::Mutex::new(None));
+        let (m, s, a) = (made.clone(), stops.clone(), actual.clone());
+        agent.make_runtime = Some(Arc::new(move |caps| {
+            m.lock().unwrap().push(caps);
+            let (ram, logical) = crate::container_runtime::host_size();
+            let rt: Arc<dyn crate::container_runtime::ContainerRuntime> = Arc::new(SizedRuntime {
+                size: crate::container_runtime::vm_size(ram, logical, caps), actual: std::sync::Mutex::new(*a.lock().unwrap()), stops: s.clone() });
+            Some(crate::container_runtime::Containers { cpu: rt, gpu: None })
+        }));
+        (tmp, agent, made, stops, actual)
+    }
+
+    /// The coordinator's directive with these policy and limits keys over the table's defaults.
+    fn settings_directive(policy: Value, limits: Value, rev: i64) -> Value {
+        use oarbank_protection::settings::{defaults, Section};
+        let (mut p, mut l) = (defaults(Section::Policy), defaults(Section::Limits));
+        for (k, v) in policy.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        for (k, v) in limits.as_object().unwrap() {
+            l[k] = v.clone();
+        }
+        json!({"policy": p, "limits": l, "settings_rev": rev})
+    }
+
+    /// containers = off: no runtime is made, a held one stops (its container jobs ended), the node offers no container
+    /// pool and its facts say `disabled` (not missing or failed).
+    #[tokio::test]
+    async fn with_containers_off_no_runtime_runs_and_the_node_reports_it_disabled() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (_tmp, mut agent, made, stops, _) = container_agent("agent-ct-off");
+        assert!(agent.container_runtime().is_some(), "always (the default): made when the release needs containers");
+        assert_eq!(made.lock().unwrap().len(), 1);
+        agent.after_directives(&settings_directive(json!({"containers": "off"}), json!({}), 1)).await;
+        assert_eq!(agent.gate.mode, crate::containers_gate::Mode::Off);
+        agent.govern_containers().await;
+        assert_eq!((stops.load(SeqCst), agent.containers.is_none()), (1, true), "the held runtime stopped");
+        assert!(agent.container_runtime().is_none());
+        assert_eq!(made.lock().unwrap().len(), 1, "and none is made again");
+        assert!(agent.container_state(None), "the facts' report changed");
+        assert_eq!(agent.containers_report["state"], "disabled");
+        assert_eq!(agent.containers_report["mode"], "off");
+        assert_eq!(agent.containers_report["startable"], json!({}));
+        let facts = facts::collect(&agent.layout.home);
+        assert_eq!((facts["containers"]["state"].as_str(), facts["containers"]["mode"].as_str()), (Some("disabled"), Some("off")));
+        assert!(!agent.container_state(None), "unchanged");
+        // the mode is kept for the next run: it starts no VM before the coordinator answers
+        let mut again = Agent::open(Layout::new(agent.layout.home.clone()), Some("https://127.0.0.1:9")).unwrap();
+        assert_eq!(again.gate.mode, crate::containers_gate::Mode::Off);
+        again.make_runtime = agent.make_runtime.clone();
+        again.release = agent.release.clone();
+        assert!(again.container_runtime().is_none());
+        // back on: the override goes, and the runtime is made again
+        agent.after_directives(&settings_directive(json!({"containers": "always"}), json!({}), 2)).await;
+        assert!(agent.container_runtime().is_some());
+        assert!(agent.container_state(agent.containers.clone().as_ref()));
+        assert_eq!(agent.containers_report["state"], "running");
+        assert_ne!(facts::collect(&agent.layout.home)["containers"]["state"], "disabled");
+    }
+
+    /// containers = on_demand: no runtime until the coordinator says container work waits (or a grant needs it); while
+    /// stopped the node offers its pool as startable; it stops after the idle time without work, and starts again.
+    #[tokio::test]
+    #[cfg(any(target_os = "macos", windows))]
+    async fn on_demand_the_runtime_starts_for_waiting_work_and_stops_when_idle() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (_tmp, mut agent, made, stops, _) = container_agent("agent-ct-od");
+        agent.after_directives(&settings_directive(json!({"containers": "on_demand", "containers_idle_stop_s": 60}),
+                                                   json!({"vm_mem_gb": 6.5}), 1)).await;
+        assert!(agent.container_runtime().is_none(), "stopped until work needs it");
+        agent.govern_containers().await;
+        assert!(made.lock().unwrap().is_empty());
+        agent.container_state(None);
+        let rep = agent.containers_report.clone();
+        assert_eq!((rep["state"].as_str(), rep["mode"].as_str(), rep["idle_stop_s"].as_u64()), (Some("stopped"), Some("on_demand"), Some(60)));
+        let (ram, logical) = crate::container_runtime::host_size();
+        let mem = crate::container_runtime::vm_size(ram, logical, crate::container_runtime::Caps { mem_gb: Some(6.5), cpus: None }).0;
+        let tokens = crate::container_runtime::tokens(mem);
+        assert_eq!(rep["startable"].get("containers").and_then(Value::as_u64), (tokens > 0).then_some(tokens as u64));
+        assert_eq!(rep["vm"]["mem_gb"].as_f64(), Some(mem), "the size it would start at");
+        assert_eq!(facts::collect(&agent.layout.home)["containers"]["state"], "stopped");
+        // the coordinator's hint: container work this node could run waits
+        let mut d = settings_directive(json!({"containers": "on_demand", "containers_idle_stop_s": 60}), json!({"vm_mem_gb": 6.5}), 1);
+        d["containers_wanted"] = json!(true);
+        agent.after_directives(&d).await;
+        agent.govern_containers().await;
+        assert_eq!(made.lock().unwrap().as_slice(), [crate::container_runtime::Caps { mem_gb: Some(6.5), cpus: None }],
+                   "made at the owner's size");
+        assert!(agent.container_state(agent.containers.clone().as_ref()), "the override is gone");
+        assert_eq!(agent.containers_report["state"], "running");
+        assert_eq!(agent.containers_report["startable"], json!({}));
+        // the work went: after the idle time it stops, not before
+        d["containers_wanted"] = json!(false);
+        agent.after_directives(&d).await;
+        agent.govern_containers().await;
+        assert_eq!(stops.load(SeqCst), 0);
+        agent.gate.backdate(Duration::from_secs(61));
+        agent.govern_containers().await;
+        assert_eq!((stops.load(SeqCst), agent.containers.is_none()), (1, true));
+        agent.container_state(None);
+        assert_eq!(agent.containers_report["state"], "stopped");
+        // a failed start is not offered for a while
+        agent.make_containers();
+        agent.gate.observe(std::time::Instant::now(), "failed", false);
+        agent.stop_containers().await;
+        agent.container_state(None);
+        assert_eq!((agent.containers_report["state"].as_str(), agent.containers_report["startable"].clone()), (Some("failed"), json!({})));
+    }
+
+    /// The owner's vm_mem_gb and vm_cpus size the runtime's VM (2.10.4 ignored them: a 24 GB Mac always got 8 GB); a
+    /// change restarts an idle runtime at the new size, and so does a VM found running at another size, once per size.
+    /// 2 GB gives no `containers` tokens: no container work there.
+    #[tokio::test]
+    async fn the_owners_vm_size_reaches_the_runtime_and_a_change_restarts_it_when_idle() {
+        use crate::container_runtime::Caps;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (_tmp, mut agent, made, stops, actual) = container_agent("agent-ct-size");
+        agent.after_directives(&settings_directive(json!({}), json!({"vm_mem_gb": 6.5, "vm_cpus": 2}), 1)).await;
+        let rts = agent.container_runtime().unwrap();
+        assert_eq!(made.lock().unwrap().as_slice(), [Caps { mem_gb: Some(6.5), cpus: Some(2) }]);
+        agent.govern_containers().await;
+        assert_eq!(stops.load(SeqCst), 0, "the size it was made at");
+        agent.after_directives(&settings_directive(json!({}), json!({"vm_mem_gb": 2, "vm_cpus": 2}), 2)).await;
+        agent.govern_containers().await;
+        assert_eq!(stops.load(SeqCst), 1, "restarted at the new size");
+        assert_eq!(made.lock().unwrap().last(), Some(&Caps { mem_gb: Some(2.0), cpus: Some(2) }));
+        let rts2 = agent.containers.clone().unwrap();
+        assert!(!Arc::ptr_eq(&rts.cpu, &rts2.cpu));
+        assert!(container_pools(Some(&rts2)).is_empty(), "2 GB: no containers tokens");
+        agent.govern_containers().await;
+        assert_eq!(stops.load(SeqCst), 1, "settled");
+        // a VM that runs at another size (started before the change, or by an earlier agent): restarted once
+        *actual.lock().unwrap() = Some((8.0, 2));
+        agent.stop_containers().await;
+        agent.make_containers();
+        agent.govern_containers().await;
+        assert_eq!(stops.load(SeqCst), 3, "the stop above, and the restart");
+        agent.govern_containers().await;
+        assert_eq!(stops.load(SeqCst), 3, "not again for the same size");
     }
 
     /// The owner key set a directive carries pins its rescue locations; a rescue move published there is recorded as

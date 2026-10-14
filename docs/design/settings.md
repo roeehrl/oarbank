@@ -48,7 +48,12 @@ The keys, by section:
   readiness, job Explain and the `settings set` preview say when it is below an enabled module's stage cpu);
   advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
-  advanced `vm_mem_gb`, `vm_cpus`, `disk_gb` (the dataset cache, enforced from 2.11), `staging_mbps`.
+  advanced `vm_mem_gb`, `vm_cpus` (the container runtime's VM size, and a module VM service's; an idle container VM is
+  restarted at the new size), `disk_gb` (the dataset cache, enforced from 2.11), `staging_mbps`.
+- **Containers** ([macos-containers.md](macos-containers.md), "When the runtime runs"): `containers` (`always`, the
+  default; `on_demand`, recommended: the runtime runs only while container work waits for the node; `off`: never, and
+  the node takes no container work; managed, off is stricter), advanced `containers_idle_stop_s` (600 s: how long an
+  on-demand runtime stays up without container work). Both travel to agents in the policy.
 - **Module data**: `module_retention_days`, how long a node keeps what a module left there after the module is turned
   off on it (7 days; 0 deletes at once; [protocol.md](../protocol.md), "Module cleanup").
 - **Network** ([inbound-listeners.md](inbound-listeners.md)): `inbound_listeners` (off: no listener opens and every
@@ -372,7 +377,7 @@ machine" layer, in the safe direction only.
 - **Which keys.** The registry's `managed` keys: `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` (higher is
   stricter), `mem_in_use_bound`, `screen_sharing_present`, `hard_limits` (on is stricter), `user_present_slots`,
   `max_slots`, `run_on_battery`, `inbound_listeners`, `workloads` and `delegated_processes` (lower, off), every cap (`cpu_cores`, `mem_gb`, `jobs`, `vm_mem_gb`, `vm_cpus`, `disk_gb`,
-  `staging_mbps`: lower), `enforce` (hard is stricter), and two keys the coordinator applies, `update_auto` (towards
+  `staging_mbps`: lower), `enforce` (hard is stricter), `containers` (`always` < `on_demand` < `off`), and two keys the coordinator applies, `update_auto` (towards
   `off`) and `update_hold` (a hold), which the agent checks and reports but never applies itself (its settings table's
   `Coordinator` section; [fleet-updates.md](fleet-updates.md)). Anything else (`job_mem_gb`, a schedule, protection) is
   refused and reported: protection already has its own tighten-only local file.

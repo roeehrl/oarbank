@@ -230,6 +230,7 @@ owner still lowers caps from the console. The keys and which way each tightens:
 | `cpu_cores`, `mem_gb`, `vm_mem_gb`, `disk_gb`, `staging_mbps` | number | lower |
 | `os_reserve_gb`, `user_reserve_gb`, `user_idle_s` | number | higher |
 | `enforce` | `soft` or `hard` | hard |
+| `containers` | `always`, `on_demand` or `off` | off (`on_demand` is stricter than `always`) |
 | `update_auto` | `off`, `notify` or `on` | off (the coordinator applies it: [fleet updates](design/fleet-updates.md)) |
 | `update_hold` | the hold's reason as text, or `{"reason", "until"}` | any hold |
 

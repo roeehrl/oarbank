@@ -84,6 +84,14 @@ under the agent's home, its own VM size, its own settings.
   or Re-detect), when a broker request finds it not ready, when a `wslc` call finds the session gone, and every 60 s
   while it is `missing` (`ContainerRuntime::reprobe`; the report stays `missing` until nothing is, so the facts do not
   change on each look).
+- **When it runs, and its size** (2.11; [macos-containers.md](macos-containers.md), "When the runtime runs"): the
+  owner's `containers` setting. `always` creates the session when a release wants containers, as before; `on_demand`
+  creates it only while container work waits for the node (the coordinator's `containers_wanted`) or a grant needs it,
+  and ends it after `containers_idle_stop_s` without container work: the session host stops first, so it does not
+  create the session again, then `wslc system session terminate` ends it and WSL shuts its VM down; `off` never creates
+  it and reports `disabled`. The session is created at the owner's `vm_mem_gb` and `vm_cpus` (else by RAM, within
+  half the host's memory and its processors; 2.10.4 ignored those settings), and the facts' `vm` says so; a change
+  ends the idle session and creates it at the new size.
 - **Containers through the CLI.** Every container operation is `wslc.exe --session <name> ...` with a fixed shape, as
   the macOS and Linux runtimes run `docker`/`podman`. The SDK's C API has no per-container CPU or memory limit, no
   labels and no listing; the CLI has all three, and a session created through the SDK is reachable by name from the

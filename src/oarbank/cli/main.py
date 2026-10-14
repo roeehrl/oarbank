@@ -900,6 +900,8 @@ def cmd_fleet(a):
             print(f"  containers missing {m.get('what')}: {m.get('detail')}  -> {m.get('fix')}")
         if ct.get("detail"):
             print(f"  containers {ct.get('state')}: {ct['detail']}")
+        if n.get("containers_line"):
+            print(f"  {n['containers_line']}")
     for e in d["enrollments"]:
         print(f"PENDING enrollment {e['enrollment_id']} from {e['hostname']} ({e['peer_ip']})  -> oarbank node approve {e['enrollment_id']}")
         ident = e.get("identity") or {}
@@ -968,6 +970,8 @@ def node_show(target: str, as_json: bool = False):
         print(f"  containers: none ({ct.get('detail') or 'no container runtime'})")
     for m in (ct or {}).get("missing") or []:
         print(f"    missing {m.get('what')}: {m.get('detail')}" + (f"; fix: {m['fix']}" if m.get("fix") else ""))
+    if d.get("containers_line"):
+        print(f"  container runtime: {d['containers_line']}")
     if not d["services"]:
         print("  services: none reported")
     for sv in d["services"]:

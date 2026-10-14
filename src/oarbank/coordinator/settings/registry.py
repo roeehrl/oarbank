@@ -164,6 +164,7 @@ HOST = r"^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:[0-9]{1,5})?$"
 NUM_GE0 = {"type": "number", "minimum": 0}
 POS_NUM = {"type": "number", "exclusiveMinimum": 0}
 POS_INT = {"type": "integer", "minimum": 1}
+CONTAINER_MODES = ("always", "on_demand", "off")    # loosest first: off is the strictest (a managed policy may only go there)
 
 SECTIONS = {
     "memory": ("Memory", "What a job may use, and what stays free for the system and the person at the computer."),
@@ -184,10 +185,12 @@ SECTIONS = {
                               "off there (docs/protocol.md, \"Module cleanup\")."),
     "network": ("Network", "Inbound listeners and how they are checked from outside (docs/design/inbound-listeners.md)."),
     "updates": ("Updates", "How new Oarbank releases reach the coordinator and the nodes (docs/design/fleet-updates.md)."),
+    "containers": ("Containers", "The container runtime modules' sandboxed containers run in: a VM on macOS and Windows, the "
+                                 "host's engine on Linux (docs/design/macos-containers.md, \"When the runtime runs\")."),
     "onboarding": ("New machines", "What a machine you approve starts as, until you change it (an approval's own choices "
                                    "win: docs/design/node-enrollment.md, \"Admission\")."),
 }
-NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "storage", "protection", "network", "updates")
+NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "storage", "protection", "network", "updates", "containers")
 FLEET_SECTIONS = ("notifications", "access", "verification", "onboarding")
 # the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
 MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
@@ -264,10 +267,13 @@ SETTINGS = (
             "soft: stop admitting and let running jobs finish; hard: also hand back the youngest jobs to fit.",
             {"type": "string", "enum": ["soft", "hard"]}, default="soft", wire="limits", section="caps", merge="max",
             order=("soft", "hard"), danger="T0", applies="both", managed=True),
-    Setting("vm_mem_gb", "VM memory (services)", "A module VM service applies it at its next start.",
+    Setting("vm_mem_gb", "VM memory", "The container runtime's VM (Colima, the WSL containers session; on Linux the "
+            "engine's budget) and a module VM service: applied at its next start; the agent restarts an idle container VM "
+            "at the new size. Its containers pool follows: floor((GB - 1.5) / 2.5) container slots (2 GB: none).",
             {"type": "number", "exclusiveMinimum": 0}, unit="GB", wire="limits", section="caps", merge="min",
             danger="T0", advanced=True, hardware="ram", managed=True),
-    Setting("vm_cpus", "VM CPUs (services)", "A module VM service applies it at its next start.", POS_INT,
+    Setting("vm_cpus", "VM CPUs", "The container runtime's VM and a module VM service: applied at its next start; the agent "
+            "restarts an idle container VM with the new count.", POS_INT,
             unit="cpus", wire="limits", section="caps", merge="min", danger="T0", advanced=True, hardware="cores", managed=True),
     Setting("disk_gb", "Disk cache", "The datasets cached on the node: above it, the least recently used ones no job here "
             "holds or waits for are deleted.", {"type": "number", "exclusiveMinimum": 0},
@@ -280,6 +286,20 @@ SETTINGS = (
             "the module is turned off on it; turning it back on in that time keeps everything. 0 deletes at once. A module "
             "no longer in the node's release goes after at most a day.",
             NUM_GE0, default=7, unit="days", wire="policy", section="storage"),
+    # ---------------------------------------------------------------- containers (the agent's container runtime)
+    Setting("containers", "Container runtime",
+            "When the agent runs its container runtime (the Colima VM on macOS, the WSL containers session on Windows) for "
+            "modules whose stages run containers. always: as soon as a release needs containers, and it stays up; "
+            "on_demand (recommended): stopped until container work waits for this node, stopped again after the idle time "
+            "below, and a stopped VM holds no memory; off: never, the node takes no container work and certifies only "
+            "its other stages. On Linux the host's engine has no VM: on_demand runs as always.",
+            {"type": "string", "enum": list(CONTAINER_MODES)}, default="always", wire="policy", section="containers",
+            applies="both", order=CONTAINER_MODES, tighten="higher", managed=True),
+    Setting("containers_idle_stop_s", "Stop the runtime after",
+            "With containers = on_demand: seconds without a container job, and without container work waiting for this "
+            "node, before the agent stops its runtime again.",
+            {"type": "integer", "minimum": 60, "maximum": 86400}, default=600, unit="s", wire="policy",
+            section="containers", advanced=True),
     # ---------------------------------------------------------------- protection (assembled into the agent's policy)
     Setting("protection.mode", "Protection mode",
             "fleet_first: static rules and guards only; moderate: an adaptive budget that protects the front app and "

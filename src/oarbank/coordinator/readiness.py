@@ -23,7 +23,7 @@ from oarbank_sdk import platform as pf
 from oarbank_sdk import portable
 
 from . import config as C
-from . import modsandbox, modstore, platforms, predicates, releases
+from . import containers, modsandbox, modstore, platforms, predicates, releases
 from .db import DB, jl
 
 OS_NAMES = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
@@ -118,6 +118,10 @@ def _stage_reasons(name: str, stage, node: dict, tool_ids: set, has_release: boo
     for p, k in sorted(need.items()):
         if int(pools.get(p, 0)) >= int(k):
             continue
+        if p in ("containers", "gpu") and containers.mode(node) == "off":
+            out.append("containers are off on this node (containers = off): its container stages run elsewhere and it "
+                       "certifies its other stages only; set containers to on_demand or always there to run them")
+            break
         if p == "containers":
             out.append(_containers_why(facts, os_))
         else:
@@ -140,7 +144,7 @@ def _stage_reasons(name: str, stage, node: dict, tool_ids: set, has_release: boo
 
 def predicates_pools(node: dict) -> dict:
     from . import core
-    return core._node_pools(node)
+    return core._node_pools_possible(node)
 
 
 def _group(rows: list[tuple[str, list[str]]]) -> list[dict]:

@@ -382,9 +382,18 @@ fn directml() -> Result<Vec<String>, String> {
 const PROBES: [(&str, Probe); 6] = [("cuda", cuda), ("directml", directml), ("metal", metal), ("opencl", opencl), ("rocm", rocm),
                                     ("vulkan", vulkan)];
 
-/// How this node's containers get the GPU: (the API list, the evidence), from the container runtime.
+/// How this node's containers get the GPU: (the API list, the evidence), from the container runtime; none where the
+/// owner turned containers off (a stopped on-demand runtime keeps what it found when it last ran).
+fn containers(home: &Path) -> (Vec<String>, String) {
+    if crate::containers_gate::read_override(home).is_some_and(|r| r["state"] == "disabled") {
+        return (vec![], "no GPU in containers: containers = off on this node".into());
+    }
+    runtime_containers(home)
+}
+
+/// How this node's containers get the GPU from its container runtime.
 #[cfg(target_os = "linux")]
-fn containers(_home: &Path) -> (Vec<String>, String) {
+fn runtime_containers(_home: &Path) -> (Vec<String>, String) {
     match crate::container_runtime::gpu_passthrough() {
         Some(p) => (p.apis, p.evidence),
         None => (vec![], "no GPU in containers: no container engine with a CDI spec for a GPU".into()),
@@ -393,13 +402,13 @@ fn containers(_home: &Path) -> (Vec<String>, String) {
 
 /// macOS: what the agent's Colima runtime last reported (`vulkan` only from a ready runtime with krunkit).
 #[cfg(target_os = "macos")]
-fn containers(home: &Path) -> (Vec<String>, String) {
+fn runtime_containers(home: &Path) -> (Vec<String>, String) {
     crate::colima::container_apis(home, || crate::container_runtime::mac_report_now(home))
 }
 
 /// Windows: what the agent's WSL containers session last found (wslc.rs; the APIs of a GPU container on its VM).
 #[cfg(windows)]
-fn containers(home: &Path) -> (Vec<String>, String) {
+fn runtime_containers(home: &Path) -> (Vec<String>, String) {
     crate::wslc::container_apis(home)
 }
 

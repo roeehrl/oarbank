@@ -92,6 +92,12 @@ enrolls again (`unauthorized`: every agent version does this).
   preview, `oarbank status` and the console's waiting card warn that the old node's settings will NOT apply, say
   whether the hardware facts match too, and offer retiring the old record (`nodes.retire`), or declaring it the same
   machine ([below](#the-same-machine)).
+- **A retired node is closed.** No request is a retired node. Its key hashes are cleared, so no CSR proves it. It
+  keeps the Tailscale StableID it last had, but a request from that device is not matched to it (a request from a
+  live node's own device, without its key, is still that node's re-enrolment). It is not offered as a lookalike, and
+  its settings cannot be carried over. A machine whose record was retired and that enrolls again, from the same
+  device or another, is a new node under the fleet's onboarding policy, and the preview and the waiting card show it
+  as one. A join code that approves automatically admits it as a new node too.
 
 ## Admission: what a node starts as
 
@@ -140,9 +146,10 @@ in the same approval apply on top. The fleet's onboarding policy does not apply.
 It is never automatic and carries no credential: the new node keeps its own key and certificate, and secrets set for
 the old node are not copied. It is refused (409 `adopt_refused`) for a request that proves a node's key (the copied-key
 case of [Re-enrolment](#re-enrolment-a-node-is-its-key) stays as it is: that request keeps the node, or is rejected),
-for a node the request does not look like, and for an old node that is still online (a machine that runs it cannot be
-the one asking). Because it retires a node, the approval is T3, like `nodes.retire`: the owner types the old node's
-name.
+for a node the request does not look like, for an old node that is still online (a machine that runs it cannot be
+the one asking), and for a retired node (its record is closed; naming one is refused, not ignored). The old node may
+be named by its id or its name. Because it retires a node, the approval is T3, like `nodes.retire`: the owner types
+the old node's name.
 
 ## The node's states and status document
 

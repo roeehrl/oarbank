@@ -14,6 +14,7 @@ mod clock;
 mod colima;
 mod config;
 mod container_runtime;
+mod containers_gate;
 mod coordinstall;
 mod discover;
 mod doctor;

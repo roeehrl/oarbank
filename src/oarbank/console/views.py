@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 
-from ..coordinator import agentbuilds, detail, nodepolicy, nodeservices
+from ..coordinator import agentbuilds, containers, detail, nodepolicy, nodeservices
 from ..coordinator.failures import failure_breakdown
 from ..coordinator.settings import views as settings_views
 from ..coordinator.settings.apply import flat_values, node_values
@@ -126,6 +126,7 @@ def node_view(r, n: dict, now: float, stats: dict | None = None) -> dict:
     v["slots"] = capacity_summary(v)
     v["why"] = nodepolicy.why(cap, tel, facts, v["policy"], n.get("os"), n["node_id"])
     v["gpu"] = detail.gpu(facts, v["doctor"])
+    v["containers_line"] = containers.line(n) if containers.shown(n) else None
     v["services"] = nodeservices.rows(n)
     v["agent_behind"] = agentbuilds.behind(n)
     return v

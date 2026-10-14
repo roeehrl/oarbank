@@ -190,7 +190,8 @@ def enroll_status(db: DB, eid: str) -> dict:
 def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None, admission: dict | None = None) -> dict:
     """Approve an enrollment: the node gets its client certificate. A request that proves a node's key (its CSR is
     signed by the key of the node's current or previous certificate), else one from the node's Tailscale device, keeps
-    that node's id, settings and history, and re-pins it to the request's Tailscale device (nodeidentity.py). Its name
+    that node's id, settings and history, and re-pins it to the request's Tailscale device; a retired node is never kept
+    this way, and the request makes a new node (nodeidentity.py). Its name
     is `label` (a join code's), else a label it already had, else the hostname it reported; a labelled node keeps its
     name when its agent reports another one (hello).
 
@@ -228,7 +229,8 @@ def admit_node(db: DB, e: dict, actor: str, label: str | None = None, admission:
     from . import admission as adm_mod, nodeidentity
     label = (label or "").strip() or e["requested_name"] or None
     facts = jl(e["facts_json"], {})
-    # Re-enrolment of a known node (by its key, else its Tailscale device) keeps its node_id, settings and history.
+    # Re-enrolment of a known node (by its key, else its Tailscale device; never a retired node) keeps its node_id,
+    # settings and history.
     ident = nodeidentity.of_enrollment(db, e)
     node_id = ident["node_id"] or "n_" + secrets.token_hex(4)
     if ident["node_id"]:
@@ -485,6 +487,8 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
     t = now()
     nid = node["node_id"]
     tel, cap = body.get("telemetry") or {}, body.get("capacity") or {}
+    if isinstance(body.get("containers"), dict):         # the agent's container runtime (containers.py)
+        cap = {**cap, "container_runtime": body["containers"]}
     with db.tx():
         was_offline = (node["last_heartbeat_at"] or 0) < t - C.OFFLINE_AFTER
         db.x("UPDATE nodes SET last_heartbeat_at=?, telemetry_json=?, capacity_json=?, ready_datasets_json=?, clock_offset_s=?"
@@ -558,6 +562,10 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
     run_pending_goldens(db, nid)
     d = _node_directives(db, node)
     d.update(cancel=cancel, revoke=revoke, recertify=recert)
+    from . import containers
+    if containers.mode(node) == "on_demand":
+        with db.tx():
+            d["containers_wanted"] = containers.wanted(db, node, t)
     if ack is not None:
         d["journal_ack"] = ack
     if wl_ack is not None:
@@ -609,7 +617,8 @@ def certified_modules(node: dict) -> list[str]:
 
 def _lifecycle_step(db: DB, node: dict, facts: dict):
     """enrolled -> ready (current release installed); then per module: doctor ok -> certifying
-    (golden jobs queued) -> certified. Re-certify a module on a release, platform or OS version change, or every 6 h."""
+    (golden jobs queued) -> certified. Re-certify a module on a release, platform or OS version change, when the node's
+    containers setting turns off or back on (its goldens differ: containers.py), or every 6 h."""
     nid, lc = node["node_id"], node["lifecycle"]
     if lc in ("retired", "quarantined"):
         return
@@ -670,6 +679,9 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
                 reasons.append("os_version")
             if st.get("certified_at") and now() - st["certified_at"] > C.RECERT_EVERY:
                 reasons.append("periodic")
+            from . import containers
+            if bool(st.get("containers_off")) != (containers.mode(node) == "off"):
+                reasons.append("containers")
             if reasons:
                 db.event("recertify", node_id=nid, reason=f"{name}: {','.join(reasons)}", module=name)
                 queue_goldens(db, nid, name)
@@ -809,8 +821,11 @@ def _certify(db: DB, node_id: str, module: str, note: str = ""):
     db.set_state("cert_counter", gen)
     fp = platforms.facts_platform(jl(node["facts_json"], {}))
     digest = (releases.composition_of(db, node["release_id"]).get(module) or {}).get("digest")
+    from . import containers
+    # with containers off the node certified only its stages that need none: turning them on certifies it again
     _set_module_state(db, node_id, module, state="certified", generation=gen, release=node["release_id"], digest=digest,
-                      platform=fp["platform"], os_version=fp["os_version"], certified_at=now(), reason=None, golden_failures=0)
+                      platform=fp["platform"], os_version=fp["os_version"], certified_at=now(), reason=None, golden_failures=0,
+                      containers_off=containers.mode(node) == "off")
     _end_superseded(db, node_id, module, gen, "certification_superseded")
     db.x("UPDATE nodes SET cert_os_version=? WHERE node_id=?", (fp["os_version"], node_id))
     db.x("UPDATE nodes SET breaker_failures=0 WHERE node_id=?", (node_id,))
@@ -1031,7 +1046,7 @@ def runner_ready(node: dict, module: str) -> bool:
 def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: float, free_mem: float,
                         body: dict) -> predicates.NodeView:
     """Every node-level fact claim() decides on (read inside its transaction). explain builds the same."""
-    from . import modsandbox, modsecrets
+    from . import containers, modsandbox, modsecrets
     nid = node["node_id"]
     excluded = modsandbox.node_exclusions(db, node, set(offered))
     # a module excluded only for some of its stages (predicates.SPARED) stays offered: the module check decides per job
@@ -1076,6 +1091,7 @@ def node_view_for_claim(db: DB, node: dict, offered: set, ready: set, free_cpu: 
         limits=node_limits(node), fleet_state=db.get_state("fleet_state", "active"),
         current_release=releases.assigned(db, node), release_of=lambda: releases.node_release(db, node),
         pool_cap=_node_pools(node), pool_use=_pool_usage(db, nid),
+        pool_startable=containers.startable(node), containers_mode=containers.mode(node), containers_start_s=containers.start_s(node),
         failed_here={r["job_id"] for r in db.q("SELECT DISTINCT job_id FROM attempts WHERE node_id=? AND state='failed'", (nid,))},
         pool_jobs_only=bool(body.get("pool_jobs_only")),
         gpu_cap=None if body.get("gpu_jobs") is None else int(body["gpu_jobs"]), gpu_use=_gpu_usage(db, nid, node.get("platform")),
@@ -1474,18 +1490,31 @@ def _can_serve(st: dict) -> bool:
 def _node_pools(node: dict):
     """Pools a node may be scheduled against: its report (none until its first heartbeat), except that pools provided
     only by services the owner disabled on the node are zero, whatever it reports (e.g. it can see a VM another agent
-    on the same machine runs)."""
+    on the same machine runs), and so are the agent's container pools where the owner set containers = off."""
+    from . import containers
     cap = (jl(node.get("capacity_json"), {}) or {}).get("pools") or {}
-    off = modcalls.pools_of_disabled(node_disabled_services(node))
+    off = modcalls.pools_of_disabled(node_disabled_services(node)) | containers.pools_off(node)
     return {**cap, **{p: 0 for p in off}} if off else cap
 
 
+def _node_pools_possible(node: dict) -> dict:
+    """The pools a node could run work against: _node_pools, and those a stopped on-demand container runtime offers once
+    it starts (containers.startable). Placement's "could this node ever run it" (readiness, goldens, retries, replicas)
+    counts them; claim grants only against _node_pools."""
+    from . import containers
+    pools = dict(_node_pools(node))
+    for p, k in containers.startable(node).items():
+        pools[p] = max(int(pools.get(p) or 0), k)
+    return pools
+
+
 def _pools_fit(node: dict, resources: dict | None) -> bool:
-    """Could this node ever run a job with these resources? Its pools must hold what the job reserves or needs."""
+    """Could this node ever run a job with these resources? Its pools must hold what the job reserves or needs (a stopped
+    on-demand container runtime's startable pools count: it starts for the work)."""
     res = resources or {}
     if not (res.get("pools") or res.get("needs_pools")):
         return True
-    cap = _node_pools(node)
+    cap = _node_pools_possible(node)
     return all(int(cap.get(p, 0)) >= int(k) for p, k in (res.get("pools") or {}).items()) and \
         all(int(cap.get(p, 0)) > 0 for p in (res.get("needs_pools") or []))
 

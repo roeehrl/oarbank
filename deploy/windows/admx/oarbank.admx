@@ -20,6 +20,7 @@
       <definition name="SUPPORTED_Oarbank_2_8" displayName="$(string.SUPPORTED_Oarbank_2_8)" />
       <definition name="SUPPORTED_Oarbank_2_9" displayName="$(string.SUPPORTED_Oarbank_2_9)" />
       <definition name="SUPPORTED_Oarbank_2_10" displayName="$(string.SUPPORTED_Oarbank_2_10)" />
+      <definition name="SUPPORTED_Oarbank_2_11" displayName="$(string.SUPPORTED_Oarbank_2_11)" />
     </definitions>
   </supportedOn>
   <categories>
@@ -256,6 +257,30 @@
           <item displayName="$(string.enforce_hard)">
             <value>
               <string>hard</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="containers" class="Machine" displayName="$(string.containers)" explainText="$(string.containers_Help)"
+            presentation="$(presentation.containers)" key="SOFTWARE\Policies\Codonic\Oarbank\Agent\Settings">
+      <parentCategory ref="NodeSettings" />
+      <supportedOn ref="SUPPORTED_Oarbank_2_11" />
+      <elements>
+        <enum id="containers" valueName="containers" required="true">
+          <item displayName="$(string.containers_always)">
+            <value>
+              <string>always</string>
+            </value>
+          </item>
+          <item displayName="$(string.containers_on_demand)">
+            <value>
+              <string>on_demand</string>
+            </value>
+          </item>
+          <item displayName="$(string.containers_off)">
+            <value>
+              <string>off</string>
             </value>
           </item>
         </enum>

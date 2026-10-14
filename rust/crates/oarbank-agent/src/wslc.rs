@@ -39,12 +39,10 @@ pub fn host_path(p: &Path) -> String {
     }
 }
 
-/// The session VM's memory and CPUs: the budget the other runtimes get (`sizing`), within what the host has. A VM asked
-/// for more processors than the host has does not start (`E_FAIL` on a 4-core runner asked for 6), and one taking more
-/// than half the host's memory starves it.
+/// The session VM's memory and CPUs: the budget the other runtimes get, by the host's RAM, within what the host has
+/// (`container_runtime::vm_size`, which also takes the owner's vm_mem_gb and vm_cpus).
 pub fn session_size(ram_gb: f64, logical: u32) -> (f64, u32) {
-    let (mem_gb, cpus, _) = crate::container_runtime::sizing(ram_gb, None, None);
-    (mem_gb.min((ram_gb / 2.0).floor()).max(1.0), cpus.min(logical).max(1))
+    crate::container_runtime::vm_size(ram_gb, logical, crate::container_runtime::Caps::default())
 }
 
 /// `wslc` memory: whole MiB (`2.5` GB is `2560m`).
@@ -386,6 +384,9 @@ pub struct Report {
     pub probe: Probe,
     pub missing: Vec<Missing>,
     pub detail: Option<String>,
+    /// The size the session's VM is created at (the owner's vm_mem_gb and vm_cpus, else by RAM); 0: not set.
+    pub mem_gb: f64,
+    pub cpus: u32,
 }
 
 impl Report {
@@ -406,6 +407,9 @@ impl Report {
         });
         if let Some(d) = &self.detail {
             j["detail"] = json!(d);
+        }
+        if self.cpus > 0 {
+            j["vm"] = crate::colima::vm_json(self.mem_gb, self.cpus, None);
         }
         j
     }
@@ -621,10 +625,11 @@ mod imp {
     }
 
     impl WslcRuntime {
-        /// The runtime for this agent, sized by the host's RAM, with its session host started.
-        pub fn start(layout: &crate::paths::Layout, ram_gb: f64) -> WslcRuntime {
+        /// The runtime for this agent, sized by the owner's vm_mem_gb and vm_cpus (else by the host's RAM), with its
+        /// session host started.
+        pub fn start(layout: &crate::paths::Layout, ram_gb: f64, caps: crate::container_runtime::Caps) -> WslcRuntime {
             let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
-            let (mem_gb, cpus) = session_size(ram_gb, logical);
+            let (mem_gb, cpus) = crate::container_runtime::vm_size(ram_gb, logical, caps);
             WslcRuntime::start_at(&layout.home, agent_dir().join(SDK_DLL), mem_gb, cpus)
         }
 
@@ -637,7 +642,7 @@ mod imp {
 
         pub fn new(home: &Path, sdk: PathBuf, wslc: PathBuf, mem_gb: f64, cpus: u32) -> WslcRuntime {
             let event = |manual: i32| unsafe { CreateEventW(std::ptr::null(), manual, 0, std::ptr::null()) } as usize;
-            let report = Report { state: State::Starting, session: session_name(home), ..Default::default() };
+            let report = Report { state: State::Starting, session: session_name(home), mem_gb, cpus, ..Default::default() };
             WslcRuntime { home: home.to_path_buf(), session: session_name(home), wslc, sdk, mem_gb, cpus,
                           shared: Arc::new(Shared { report: Mutex::new(report), changed: Condvar::new(), kick: event(0), stop: event(1) }) }
         }
@@ -778,6 +783,22 @@ mod imp {
             Some(self.snapshot().json())
         }
 
+        /// End the session now (an idle on-demand session, containers turned off, a new size): the session host stops
+        /// first, so it does not create the session again when it sees it end, then the session is terminated.
+        fn stop(&self, budget: Duration) {
+            unsafe { SetEvent(self.shared.stop as HANDLE) };
+            let secs = budget.as_secs().clamp(5, 60);
+            match self.cli(&["system", "session", "terminate"], secs) {
+                Ok(r) if r.ok() => tracing::info!(session = %self.session, "the WSL containers session was ended"),
+                Ok(r) => tracing::warn!(session = %self.session, error = %decode(&r.stderr).trim(), "ending the WSL containers session failed"),
+                Err(e) => tracing::warn!(session = %self.session, error = %e, "ending the WSL containers session failed"),
+            }
+        }
+
+        fn size(&self) -> Option<(f64, u32)> {
+            Some((self.mem_gb, self.cpus))
+        }
+
         fn recheck(&self) {
             if matches!(self.snapshot().state, State::Missing | State::Failed) {
                 self.kick();
@@ -813,7 +834,7 @@ mod imp {
         }
 
         fn report(&self, state: State) -> Report {
-            Report { state, session: self.session.clone(), ..Default::default() }
+            Report { state, session: self.session.clone(), mem_gb: self.mem_gb, cpus: self.cpus, ..Default::default() }
         }
 
         /// Wait for a kick (or the agent's stop); true when stopping.

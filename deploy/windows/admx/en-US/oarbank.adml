@@ -9,6 +9,7 @@
       <string id="SUPPORTED_Oarbank_2_8">Oarbank agent 2.8 or later</string>
       <string id="SUPPORTED_Oarbank_2_9">Oarbank agent 2.9 or later</string>
       <string id="SUPPORTED_Oarbank_2_10">Oarbank agent 2.10 or later</string>
+      <string id="SUPPORTED_Oarbank_2_11">Oarbank agent 2.11 or later</string>
       <string id="Codonic">Codonic</string>
       <string id="Oarbank">Oarbank</string>
       <string id="Node">Node</string>
@@ -107,6 +108,13 @@ This value can only make the coordinator's setting stricter on this computer, ne
       <string id="enforce_Help">Soft: stop admitting jobs over a cap and let running jobs finish. Hard: also hand back the youngest jobs to fit. Soft has no effect when the coordinator asks for hard.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="containers">Container runtime</string>
+      <string id="containers_Help">When the agent runs its WSL containers session for modules whose stages run containers. Always: as soon as a release needs containers. On demand: only while container work waits for this computer, stopped again after the coordinator's idle time, so the session's VM holds no memory meanwhile. Off: never; this computer takes no container work. Off is the strictest; a value looser than the coordinator's has no effect.
+
+This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
+      <string id="containers_always">Always</string>
+      <string id="containers_on_demand">On demand</string>
+      <string id="containers_off">Off</string>
       <string id="update_auto">Update automatically</string>
       <string id="update_auto_Help">Off: a new fleet release never starts updating this computer by itself; the owner still starts a rollout by hand. Notify: the coordinator says a release is ready and waits for the owner. On has no effect when the coordinator's setting is stricter: a machine's policy can only make updates less automatic.
 </string>
@@ -118,12 +126,12 @@ This value can only make the coordinator's setting stricter on this computer, ne
 </string>
       <string id="enforce_soft">Soft</string>
       <string id="enforce_hard">Hard</string>
-      <string id="vm_mem_gb">VM memory cap for services (GB)</string>
-      <string id="vm_mem_gb_Help">Memory for a module's VM service, in GB, applied at its next start. A value higher than the coordinator's cap has no effect.
+      <string id="vm_mem_gb">VM memory cap (GB)</string>
+      <string id="vm_mem_gb_Help">Memory for the agent's WSL containers session and a module's VM service, in GB, applied at its next start (the agent restarts an idle session at the new size). A value higher than the coordinator's cap has no effect.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
-      <string id="vm_cpus">VM CPUs cap for services</string>
-      <string id="vm_cpus_Help">CPUs for a module's VM service, applied at its next start. A value higher than the coordinator's cap has no effect.
+      <string id="vm_cpus">VM CPUs cap</string>
+      <string id="vm_cpus_Help">CPUs for the agent's WSL containers session and a module's VM service, applied at its next start (the agent restarts an idle session with the new count). A value higher than the coordinator's cap has no effect.
 
 This value can only make the coordinator's setting stricter on this computer, never looser; the console shows the setting as Managed on this machine.</string>
       <string id="disk_gb">Disk cache cap (GB)</string>
@@ -192,6 +200,9 @@ This value can only make the coordinator's setting stricter on this computer, ne
       </presentation>
       <presentation id="enforce">
         <dropdownList refId="enforce" noSort="true" defaultItem="1">Enforcement:</dropdownList>
+      </presentation>
+      <presentation id="containers">
+        <dropdownList refId="containers" noSort="true" defaultItem="1">Container runtime:</dropdownList>
       </presentation>
       <presentation id="update_auto">
         <dropdownList refId="update_auto" noSort="true" defaultItem="1">Updates:</dropdownList>
