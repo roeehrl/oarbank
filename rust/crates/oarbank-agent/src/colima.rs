@@ -275,6 +275,29 @@ pub struct Report {
     pub gpu_detail: Option<String>,
     /// Colima's configuration directory (where the profiles live).
     pub colima_home: String,
+    /// The size the CPU profile's VM is started at (the owner's vm_mem_gb and vm_cpus, else by RAM); 0: not set yet.
+    pub vm_mem_gb: f64,
+    pub vm_cpus: u32,
+    /// The size its VM runs at, as `colima status` reported it when it came up (None while it is not running).
+    pub actual_mem_gb: Option<f64>,
+    pub actual_cpus: Option<u32>,
+}
+
+/// The VM size in a `colima status --json` (memory in bytes from colima 0.10, GiB before it; `cpu`).
+pub fn status_size(j: &Value) -> Option<(f64, u32)> {
+    let mem = j["memory"].as_f64().map(|m| if m > 1048576.0 { m / 1073741824.0 } else { m })?;
+    let cpus = j["cpu"].as_u64().or_else(|| j["cpus"].as_u64())? as u32;
+    Some(((mem * 100.0).round() / 100.0, cpus))
+}
+
+/// The facts' `vm`: the size a runtime starts its VM at and, when known, the size it runs at.
+pub fn vm_json(mem_gb: f64, cpus: u32, actual: Option<(f64, u32)>) -> Value {
+    let mut v = json!({"mem_gb": mem_gb, "cpus": cpus});
+    if let Some((m, c)) = actual {
+        v["actual_mem_gb"] = json!(m);
+        v["actual_cpus"] = json!(c);
+    }
+    v
 }
 
 impl Report {
@@ -310,6 +333,9 @@ impl Report {
         });
         if let Some(d) = &self.detail {
             j["detail"] = json!(d);
+        }
+        if self.vm_cpus > 0 {
+            j["vm"] = vm_json(self.vm_mem_gb, self.vm_cpus, self.actual_mem_gb.zip(self.actual_cpus));
         }
         j
     }
@@ -515,6 +541,19 @@ fn user_name(uid: u32) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colima_status_and_the_report_name_the_vm_size() {
+        assert_eq!(status_size(&json!({"cpu": 6, "memory": 8589934592u64})), Some((8.0, 6)), "colima 0.10: bytes");
+        assert_eq!(status_size(&json!({"cpu": 2, "memory": 6.5})), Some((6.5, 2)), "older: GiB");
+        assert_eq!(status_size(&json!({"memory": 8})), None);
+        let mut r = Report { vm_mem_gb: 2.0, vm_cpus: 6, ..Default::default() };
+        assert_eq!(r.json()["vm"], json!({"mem_gb": 2.0, "cpus": 6}));
+        (r.actual_mem_gb, r.actual_cpus) = (Some(8.0), Some(6));
+        assert_eq!(r.json()["vm"], json!({"mem_gb": 2.0, "cpus": 6, "actual_mem_gb": 8.0, "actual_cpus": 6}),
+                   "configured beside running: a VM started before the change");
+        assert!(Report::default().json().get("vm").is_none());
+    }
 
     fn host() -> Host {
         Host { arm: true, colima: Found::Usable("/opt/homebrew/bin/colima".into()), docker: Found::Usable("/opt/homebrew/bin/docker".into()),

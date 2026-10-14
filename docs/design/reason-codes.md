@@ -15,6 +15,8 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `BACKOFF` | Retrying after {seconds} s (backoff) | P1 | – | – | – |
 | `POOL_EXHAUSTED` | No free {pool} token ({free} free, {need} needed) | P1 | – | – | – |
 | `POOL_ABSENT` | The node offers no {pool} pool | P1 | – | – | – |
+| `CONTAINERS_DISABLED` | Containers are off on this node (containers = off): its container stages run elsewhere; set containers to on_demand or always there to run them | P1 | – | `settings.apply` | – |
+| `CONTAINERS_STOPPED` | The node's container runtime is stopped (containers = on_demand): it starts when container work waits for it and the fleet's running runtimes are busy, in about {seconds} s | P1 | – | – | – |
 | `INSUFFICIENT_CPU` | Needs {need} cores, {free} allocatable | P1 | – | – | – |
 | `INSUFFICIENT_MEM` | Needs {need} GB, {free} GB allocatable | P1 | – | – | – |
 | `USER_CAP_BINDING` | Owner cap {cap} is binding | P1 | – | `settings.apply` | – |

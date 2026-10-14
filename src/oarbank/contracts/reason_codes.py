@@ -49,6 +49,10 @@ CODES: list[ReasonCode] = [
     C("BACKOFF", "job_pending", "Retrying after {seconds} s (backoff)"),
     C("POOL_EXHAUSTED", "job_pending", "No free {pool} token ({free} free, {need} needed)"),
     C("POOL_ABSENT", "job_pending", "The node offers no {pool} pool"),
+    C("CONTAINERS_DISABLED", "job_pending", "Containers are off on this node (containers = off): its container stages run "
+      "elsewhere; set containers to on_demand or always there to run them", remedies=["settings.apply"]),
+    C("CONTAINERS_STOPPED", "job_pending", "The node's container runtime is stopped (containers = on_demand): it starts when "
+      "container work waits for it and the fleet's running runtimes are busy, in about {seconds} s"),
     C("INSUFFICIENT_CPU", "job_pending", "Needs {need} cores, {free} allocatable"),
     C("INSUFFICIENT_MEM", "job_pending", "Needs {need} GB, {free} GB allocatable"),
     C("USER_CAP_BINDING", "job_pending", "Owner cap {cap} is binding", remedies=["settings.apply"]),

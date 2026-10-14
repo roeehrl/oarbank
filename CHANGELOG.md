@@ -8,6 +8,18 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Added
 
+- **Say when a node runs its container VM: `containers` = `always`, `on_demand` or `off`.** Since 2.9 every node
+  whose release has a module with sandbox containers started its Colima VM (or WSL containers session) and kept it,
+  whether or not it ever got container work, holding 8 GB or more on small machines. The node, group or fleet setting
+  `containers` (Settings → Containers; `oarbank settings set containers on_demand --node mini`) now decides. `always`
+  is the default and keeps the old behaviour. `on_demand`, recommended where container work is occasional, keeps the
+  runtime stopped until container work waits for the node: the coordinator tells one stopped node to start when the
+  fleet's running runtimes have no room for the waiting work, and the agent stops it again after
+  `containers_idle_stop_s` (600 s) without container work. A stopped VM holds no memory. `off` never runs it: the
+  node reports its runtime `disabled`, takes no container work (its jobs explain `CONTAINERS_DISABLED` with the fix)
+  and certifies only the stages that need no containers. A machine's managed policy may set it, tighten-only. On Linux,
+  where the host's engine is not a VM, `on_demand` runs as `always`. Agents older than 2.11 ignore the setting, but
+  the coordinator still keeps container work off a node set to `off`.
 - **Approve a machine with what it starts as.** `oarbank node approve` and `approve-code` take `--state paused`,
   `--module-off <module>` (and `--module-on`), `--set key=value` (`<module>:key=value` for a module's own setting),
   `--labels` and `--groups`; the console's waiting card has **Approve with options…** with a review. They are written in
@@ -24,6 +36,11 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Fixed
 
+- **`vm_mem_gb` and `vm_cpus` size the container VM.** The owner's settings never reached Colima, the WSL containers
+  session or the Linux engine's budget, so every runtime got the RAM-based default (8 GB on a 24 GB Mac, whatever was
+  set). The agent now makes its runtime at the configured size, within half the host's memory and its processors, and
+  restarts an idle VM at the new size when the settings change or when it finds the VM running at another size. The
+  `containers` pool follows the size (2 GB gives none). The node's line shows the configured size beside the running one.
 - **A machine whose node was retired joins as a new machine.** A machine that enrolled again from a retired node's
   Tailscale device (reinstalled, with a new key) was taken for a re-enrolment of that node. The waiting card said
   "re-enrolment of" the retired node and that it proved the node's key, and approving it brought the retired record

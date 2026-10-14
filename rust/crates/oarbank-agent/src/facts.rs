@@ -378,8 +378,14 @@ pub fn cpu_facts(model: Option<String>, perf: Option<u64>, eff: Option<u64>, lev
 /// docs/design/macos-containers.md), `cdi:microsoft.com/wslc` on Windows from a ready WSL containers session whose VM has a GPU, else
 /// `undetected` (always without a runtime). Windows adds its session's state (wslc.rs writes it on every change;
 /// docs/design/windows-containers.md, "The node's report"); Linux reports its host engine as `installed`, or `absent`.
-/// The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs).
+/// The APIs a GPU container gets are the doctor report's `gpu_apis.containers` (gpuapi.rs). While the agent runs no
+/// runtime by the owner's choice (containers off, an on-demand runtime stopped) the report is the agent's own
+/// (`disabled`, `stopped`: containers_gate.rs).
 fn containers(home: &std::path::Path) -> Value {
+    // the owner turned containers off here, or an on-demand runtime is stopped (containers_gate.rs)
+    if let Some(r) = crate::containers_gate::read_override(home) {
+        return r;
+    }
     #[cfg(windows)]
     {
         crate::wslc::facts(home)

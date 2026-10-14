@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config as C
 from . import clock
 from . import modcalls
-from . import (agentbuilds, audit, blobstore, campaigns, coordmove, core, datasets, identity, modstore, movepull, nodepolicy, nodeservices,
+from . import (agentbuilds, audit, blobstore, campaigns, containers, coordmove, core, datasets, identity, modstore, movepull, nodepolicy, nodeservices,
                ops, releases)
 from ..contracts import operations as registry
 from .db import DB, DBBusy, jl
@@ -716,7 +716,8 @@ def admin_app(db: DB, bus: "EventBus | None" = None, console_secret: str | None 
                 "facts": facts, "tel": tel, "cap": cap, "limits": core.node_limits(n),
                 "policy": policy, "doctor": jl(n["doctor_json"]), "online": hb and t - hb < C.OFFLINE_AFTER,
                 "hb_age": t - hb if hb else None, "live": live, "done1h": done1h, "services": nodeservices.rows(n),
-                "why": nodepolicy.why(cap, tel, facts, policy, n.get("os"), n["node_id"])}
+                "why": nodepolicy.why(cap, tel, facts, policy, n.get("os"), n["node_id"]),
+                "containers_line": containers.line(n) if containers.shown(n) else None}
 
     def fleet_data():
         nodes = [node_view(n) for n in db.q("SELECT * FROM nodes WHERE lifecycle!='retired' ORDER BY hostname")]

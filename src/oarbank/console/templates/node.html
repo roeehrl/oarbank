@@ -38,6 +38,7 @@
     {% set ct = n.facts.containers %}
     {% if ct and ct.runtime %}<span class="mut">containers</span><span>{{ ct.runtime }} {{ ct.state }}{% if ct.platforms %} · {{ ct.platforms | join(', ') }}{% endif %}{% for m in ct.missing or [] %}<br><b>{{ m.what }}</b>: {{ m.detail }}; {{ m.fix }}{% endfor %}{% if ct.detail %}<br>{{ ct.detail }}{% endif %}</span>
     {% elif ct and ct.state == 'absent' %}<span class="mut">containers</span><span>none ({{ ct.detail or 'no container runtime' }})</span>{% endif %}
+    {% if n.containers_line %}<span class="mut">container runtime</span><span>{{ n.containers_line }}</span>{% endif %}
     {% if ct %}<span class="mut">GPU in containers</span><span>{% if n.gpu.mechanism and ct.state != 'absent' %}{{ n.gpu.mechanism }}{% if n.gpu.containers %}: {{ n.gpu.containers | join(', ') }}{% endif %}{% else %}undetected{% if ct.state == 'absent' %}: no container runtime{% elif ct.state and ct.state not in ('ready', 'installed') %}: the container runtime is not ready{% elif n.platform and n.platform.startswith('darwin') %}: krunkit is not installed{% endif %}{% endif %}</span>{% endif %}
     {% if T0.services_reserved_gb %}<span class="mut">services hold</span><span>{{ T0.services_reserved_gb | num(1) }} GB</span>{% endif %}
     {% set mem = [(T0.mem_used_gb | num(1)) ~ ' GB used' if T0.mem_used_gb is known, (T0.mem_free_pct | num(0)) ~ '% free' if T0.mem_free_pct is known,
