@@ -80,8 +80,11 @@ class Mac:
             "id": '[ "$2" = root ] && echo 0 || { [ "$2" = loginwindow ] && echo 0 || echo 501; }',
             "dscl": f'echo "NFSHomeDirectory: {self.home}"',
             "who": f'echo "{user} console Oct 10 09:00"',
+            # the processes running: $PS_LINES (`uid command` lines), else none
+            "ps": 'printf "%s" "${PS_LINES:-}"',
+            "pkill": 'echo "pkill $*" >> "$CALLS"',
             # `launchctl print` shows the update runner's job in $RUNNER_STATE (running, not running), if set
-            "launchctl": 'echo "launchctl $*" >> "$CALLS"; [ "$1" = print ] && [ -n "${RUNNER_STATE:-}" ] && '
+            "launchctl": 'echo "launchctl $*" >> "$CALLS"; [ "$1 $3" = "kickstart ${KICKSTART_FAILS:-}" ] && exit 3; [ "$1" = print ] && [ -n "${RUNNER_STATE:-}" ] && '
                          'printf \'system/x = {\\n\\tstate = %s\\n}\\n\' "$RUNNER_STATE"; exit 0',
         }
         for name, body in stubs.items():
@@ -101,6 +104,7 @@ class Mac:
         for real, fake in [("/bin/launchctl", f"{s}/launchctl"), ("/usr/bin/open", f"{s}/open"), ("/usr/bin/sudo", f"{s}/sudo"),
                            ("/usr/sbin/chown", f"{s}/chown"), ("/usr/bin/stat", f"{s}/stat"), ("/usr/bin/id", f"{s}/id"),
                            ("/usr/bin/dscl", f"{s}/dscl"), ("/usr/bin/who", f"{s}/who"), ("/bin/sleep", "true"),
+                           ("/bin/ps", f"{s}/ps"), ("/usr/bin/pkill", f"{s}/pkill"),
                            ("/usr/local/bin", f"{r}/usr/local/bin"), ("/var/log/", f"{r}/var/log/"),
                            ("/Library/LaunchDaemons", f"{r}/Library/LaunchDaemons"),
                            ("/Library/Managed Preferences", f"{r}/Library/Managed Preferences"),
@@ -184,6 +188,25 @@ def test_a_managed_mac_joins_by_policy_and_its_code_is_never_printed(tmp_path):
     mac = Mac(tmp_path / "empty")
     mac.manage(JoinCode="  ".strip())
     assert "--args --join" in mac.run()[1]
+
+
+@unix
+def test_an_upgrade_restarts_every_persons_session_helper_not_only_the_consoles(tmp_path):
+    """A session helper left on old code (one in a fast-user-switched session survived two updates) describes processes
+    for host protection with it: every running helper restarts on the new binary, and one its job no longer names is
+    ended for launchd to start again."""
+    mac = Mac(tmp_path)
+    (mac.root / "Library/LaunchDaemons/dev.codonic.oarbank.agent.plist").write_text("<plist/>", encoding="utf-8")
+    (mac.support / "agent").mkdir(parents=True)
+    (mac.support / "agent/current").symlink_to("versions/2.9.0-0123456789ab/oarbank-agent")
+    agent = f"{mac.root}/Library/Oarbank/bin/oarbank-agent"
+    lines = f"  502 {agent} session-helper\n  503 /usr/bin/other session-helper\n  501 {agent} session-helper\n"
+    out, calls = mac.run(PS_LINES=lines, KICKSTART_FAILS="gui/502/dev.codonic.oarbank.agent.session")
+    assert out.returncode == 0
+    for uid in ("501", "502"):
+        assert calls.count(f"launchctl kickstart -k gui/{uid}/dev.codonic.oarbank.agent.session") == 1, calls
+    assert "gui/503" not in calls
+    assert f"pkill -U 502 -f ^{agent} session-helper" in calls and "pkill -U 501" not in calls
 
 
 @unix

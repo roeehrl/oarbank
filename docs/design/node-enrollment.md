@@ -117,9 +117,9 @@ the transaction that creates the node and issues its certificate (`coordinator/a
   as (`starts`), the modules off there, the settings it sets as `settings.apply` words them, labels and groups, and
   refuses what the approval would refuse.
 - **No work.** A paused (or draining) node is never granted a job, and no certification golden is made for it
-  (`_lifecycle_step` queues goldens only on an active node). A module off on a node is never certified there: no golden
-  is made for it, and a pending golden request for it waits. Resuming the node, or turning the module on, certifies it
-  as usual.
+  (`_lifecycle_step` queues goldens only on an active node, and `run_pending_goldens` leaves a pending request waiting).
+  A module off on a node is never certified there (its state there is `disabled`: no golden, no alert). Resuming the
+  node, or turning the module on, certifies it as usual.
 - **Onboarding policy.** A new node with no choice of its own follows the fleet settings `new_node_state` (`active` or
   `paused`) and `new_node_modules` (`all` or `none`: every installed module off on the node, except one a lock holds
   on). They apply to every approval that makes a new node, a join code's automatic one included. An approval's own

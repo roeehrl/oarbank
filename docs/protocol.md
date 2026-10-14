@@ -205,7 +205,12 @@ their process groups, deletes their workspaces, and does not report them.
   `{"at": "<socket path or pipe name>", "serving": false, "error": "cannot create …: Permission denied (os error 13)",
   "failures": 4}`. While it does not, the agent tries again every 15 s and the console shows
   `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes are evaluated without session helper (fail-safe;
-  docs/design/protection.md, "Without a session helper"). Absent in a personal install.
+  docs/design/protection.md, "Without a session helper"). Absent in a personal install. It also carries
+  `expected_version`, the version helpers should run (the installed package's agent, whose binary they run), and
+  `helpers: [{who: "uid:<n>"|"session:<n>", account, version, current}]`, each connected helper with the version it
+  reports (null: a helper of 2.10.4 or earlier, which does not say). A helper of another version is asked once on its
+  connection to exit (`{"v": 2, "restart": "<why>"}`), and its supervisor starts the installed binary again; the
+  console shows `PROTECTION_SESSION_HELPER_OUTDATED` while one is not current.
 - **`telemetry.protection.rules[].without_helper`**: how many of the rule's processes were listed without their
   account's session helper (none connected, or its report older than 10 s) and evaluated fail-safe; the console shows
   `PROTECTION_WITHOUT_HELPER` while it is above 0. A rule's `cpu_cores` and `footprint_gb` then include the estimate
@@ -946,6 +951,13 @@ certification run there (docs/design/stage-gating.md). Release-install refusals 
 - **Per node and module.** A node is certified per (node, module), keyed by the module's content digest in
   the node's release. A new version re-certifies that module on that node and nothing else.
   Re-certification also happens after a platform or OS version change, and periodically.
+- **Work across a re-certification.** A grant runs the version the node's release carries, which its certification
+  is on (a canary or promotion reaches a node with its release). While the module re-certifies (`certifying`) the node
+  is granted only its goldens; the jobs it was granted before keep running and their results are accepted, because
+  the certification they were granted under stands. When a new certification passes its goldens, or the goldens fail
+  (`golden_failed`), the jobs still running under the old one stop (revoked, uncharged) and are queued again.
+- **A module turned off on a node** (its effective `[module] enabled` is false) is `disabled` there: it holds no
+  certification, runs no goldens and raises no `certifying_stuck`. Turned on again, it re-certifies.
 - **Goldens come from the module.** For the node's class (platform, OS version, CPU, GPUs and GPU APIs, pools and
   capabilities, never its identity), the module returns its goldens (`golden.list`), builds each one's spec (`spec.build`), and
   judges the result (`golden.compare`, or the evaluated digest against `expected.digest`). A golden limited to other

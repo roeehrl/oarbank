@@ -8,6 +8,11 @@
 //! The wire format is one JSON report per line, every two seconds. This module holds the format and the
 //! service's view of the reports; the platforms carry them (a Unix socket on Linux and macOS, a named pipe on
 //! Windows) and prove who sent them (the peer's uid, the client's session).
+//!
+//! A helper says which version it runs (`version`). A helper of another version than the service expects (the agent the
+//! installed package carries: helpers run the package's binary) is asked to exit (`{"v", "restart"}`), and its
+//! supervisor (launchd, the systemd user manager, the Windows elevated helper) starts the installed binary again. A
+//! helper too old to say its version, or to understand the request, is replaced by the package's installer instead.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -25,6 +30,47 @@ pub const INTERVAL: Duration = Duration::from_secs(2);
 pub const STALE: Duration = Duration::from_secs(10);
 /// The longest report line a service reads.
 pub const MAX_LINE: usize = 8 << 20;
+/// A helper asked to restart that comes back with the same version is asked again only after this long (its binary on
+/// disk did not change: restarting it again would only churn).
+pub const RESTART_AGAIN: Duration = Duration::from_secs(600);
+
+static HELPER_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The version this process reports when it runs as a session helper (the agent's, set before it starts the helper).
+pub fn set_helper_version(v: &str) {
+    let _ = HELPER_VERSION.set(v.to_string());
+}
+
+/// What this helper puts in its reports' `version`.
+pub fn helper_version() -> Option<String> {
+    HELPER_VERSION.get().cloned()
+}
+
+/// The service's request that a helper exit so its supervisor starts the installed binary again: the helper runs
+/// another version than the service expects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Restart {
+    pub v: u32,
+    /// Why, for the helper's log.
+    pub restart: String,
+}
+
+/// A service line asking this helper to restart.
+pub fn restart_request(line: &str) -> Option<Restart> {
+    serde_json::from_str::<Restart>(line).ok().filter(|r| r.v == PROTOCOL)
+}
+
+/// One connected helper as the heartbeat reports it (`protection.session_helpers.helpers`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HelperState {
+    /// `uid:<n>` or `session:<n>`.
+    pub who: String,
+    pub account: Option<String>,
+    /// The version it reports; None: a helper too old to say.
+    pub version: Option<String>,
+    /// It runs the version the service expects (true when the service expects none).
+    pub current: bool,
+}
 
 /// One process a helper describes (the first time it reports it on a connection).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,6 +223,9 @@ pub struct Report {
     /// files' contents (D51).
     #[serde(default)]
     pub sources: Vec<SourceReport>,
+    /// The helper's own version (helpers of 2.10.4 or earlier send none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// One owner source as a helper read it.
@@ -274,6 +323,12 @@ pub struct SessionHub {
     /// Everyone a helper has reported for since the service started (fresh or not): their processes stay the owner's
     /// after the helper goes away, evaluated without it (fail-safe).
     known: Mutex<HashSet<Principal>>,
+    /// The version helpers should run (None: any).
+    expected: Mutex<Option<String>>,
+    /// What each connected helper reports running.
+    versions: Mutex<HashMap<Principal, Option<String>>>,
+    /// When a restart was last asked of a principal's helper running a version.
+    restarts: Mutex<HashMap<(Principal, Option<String>), Instant>>,
 }
 
 impl std::fmt::Debug for SessionHub {
@@ -317,6 +372,7 @@ impl SessionHub {
             return;
         }
         self.known.lock().unwrap_or_else(|e| e.into_inner()).insert(who);
+        self.versions.lock().unwrap_or_else(|e| e.into_inner()).insert(who, r.version.clone());
         let mut all = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let e = all.entry(who).or_insert_with(|| Entry {
             at: Instant::now(),
@@ -381,6 +437,59 @@ impl SessionHub {
         }
     }
 
+    /// The version session helpers should run: the agent the installed package carries (helpers run its binary), else
+    /// the service's own. A helper reporting another one is asked to restart.
+    pub fn set_expected_version(&self, v: Option<String>) {
+        *self.expected.lock().unwrap_or_else(|e| e.into_inner()) = v;
+    }
+
+    pub fn expected_version(&self) -> Option<String> {
+        self.expected.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The line asking a helper of `who` that reports `version` to restart, when it runs another version than
+    /// expected: once, and again for the same version only after `RESTART_AGAIN` (its binary did not change). The
+    /// connection that carried the report writes it, so a request never reaches another helper of the same principal
+    /// (an orphan beside a new one in a Windows session).
+    pub fn restart_line(&self, who: Principal, version: Option<&str>) -> Option<String> {
+        self.restart_line_at(Instant::now(), who, version)
+    }
+
+    fn restart_line_at(&self, now: Instant, who: Principal, version: Option<&str>) -> Option<String> {
+        let want = self.expected_version()?;
+        if version == Some(want.as_str()) {
+            return None;
+        }
+        let mut asked = self.restarts.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (who, version.map(str::to_string));
+        if asked.get(&key).is_some_and(|at| now.saturating_duration_since(*at) < RESTART_AGAIN) {
+            return None;
+        }
+        asked.insert(key, now);
+        let why = format!("this helper runs {}, the installed agent is {want}", version.unwrap_or("an unknown version"));
+        let mut line = serde_json::to_string(&Restart { v: PROTOCOL, restart: why }).unwrap_or_default();
+        line.push('\n');
+        Some(line)
+    }
+
+    /// The helpers reporting now, with the version each runs.
+    pub fn helpers(&self) -> Vec<HelperState> {
+        let want = self.expected_version();
+        let versions = self.versions.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut out: Vec<HelperState> = self.principals().into_iter().map(|who| {
+            let version = versions.get(&who).cloned().flatten();
+            HelperState {
+                who: match who { Principal::Uid(u) => format!("uid:{u}"), Principal::Session(s) => format!("session:{s}") },
+                account: accounts.get(&who).cloned().flatten(),
+                current: want.is_none() || version == want,
+                version,
+            }
+        }).collect();
+        out.sort_by(|a, b| a.who.cmp(&b.who));
+        out
+    }
+
     /// Where the event path hears of source changes a helper reports.
     pub fn set_source_hook(&self, hook: SourceHook) {
         *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
@@ -429,6 +538,7 @@ impl SessionHub {
             .remove(&who);
         self.relays.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
         self.accounts.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
+        self.versions.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
         if let Some(h) = self.hook.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             // its sources read as unreadable now: let the event path see it
             let keys: Vec<String> = self.wanted.lock().unwrap_or_else(|e| e.into_inner())
@@ -574,6 +684,7 @@ mod tests {
             gpu_unknown: vec![11],
             usage: vec![usage(10, 1000, 1.5, 0.25)],
             sources: vec![],
+            version: Some("2.10.5".into()),
         };
         let line = serde_json::to_string(&r).unwrap();
         assert!(!line.contains('\n'));
@@ -608,6 +719,7 @@ mod tests {
                 gpu_unknown: vec![20],
                 usage: vec![usage(10, 1000, 2.0, 0.5), usage(20, 5, 9.0, 9.0)],
                 sources: vec![],
+                version: None,
             },
             owns,
         );

@@ -650,11 +650,71 @@ fn running(h: HANDLE) -> bool {
     unsafe { GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32 }
 }
 
+/// The session helpers to end before this helper starts its own: processes in a person's session (not session 0, where
+/// the agent's own service runs) whose executable is the installed agent, which no running helper of ours started.
+/// They are left over from an earlier helper (one that ended without ending them, or one from before it did), run the
+/// code of an earlier package, and would report beside the new ones. Paths compare without case.
+fn leftover_helpers(procs: &[(u32, u32, String)], agent: &std::path::Path) -> Vec<u32> {
+    let want = agent.display().to_string().to_lowercase();
+    procs.iter().filter(|(_, session, path)| *session != 0 && path.to_lowercase() == want).map(|(pid, _, _)| *pid).collect()
+}
+
+/// Every process with its session and executable path, where this LocalSystem service may read it.
+fn session_processes() -> Vec<(u32, u32, String)> {
+    use windows_sys::Win32::System::RemoteDesktop::{WTSEnumerateProcessesW, WTSFreeMemory, WTS_PROCESS_INFOW};
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                                                PROCESS_QUERY_LIMITED_INFORMATION};
+    let mut info: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
+    let mut n = 0u32;
+    // SAFETY: the local server (a null handle), version 1; the list is freed below.
+    if unsafe { WTSEnumerateProcessesW(std::ptr::null_mut(), 0, 1, &mut info, &mut n) } == 0 || info.is_null() {
+        return vec![];
+    }
+    // SAFETY: WTS returned `n` entries at `info`.
+    let list = unsafe { std::slice::from_raw_parts(info, n as usize) };
+    let mut out = vec![];
+    for p in list {
+        // SAFETY: a pid; nothing is held on failure.
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, p.ProcessId) };
+        if h.is_null() {
+            continue;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        // SAFETY: a live handle and a buffer of `len` units.
+        let ok = unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) } != 0;
+        unsafe { CloseHandle(h) };
+        if ok {
+            out.push((p.ProcessId, p.SessionId, String::from_utf16_lossy(&buf[..len as usize])));
+        }
+    }
+    unsafe { WTSFreeMemory(info.cast()) };
+    out
+}
+
+/// End the session helpers an earlier helper left running ([`leftover_helpers`]).
+fn end_leftover_helpers(agent: &std::path::Path) {
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    for pid in leftover_helpers(&session_processes(), agent) {
+        // SAFETY: a pid; nothing is held on failure.
+        let h = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if !h.is_null() {
+            eprintln!("oarbank helper: ending session helper {pid}, left over from an earlier helper");
+            unsafe {
+                TerminateProcess(h, 0);
+                CloseHandle(h);
+            }
+        }
+    }
+}
+
 /// Keep a session helper in every session a person is logged on to: started when the session appears and again
-/// when it exits (no sooner than a minute after the previous start), ended when the service stops.
+/// when it exits (no sooner than a minute after the previous start), ended when the service stops. Helpers an earlier
+/// helper left running (an update that replaced it) are ended first, so every session runs the installed agent's code.
 fn keep_session_helpers(agent: PathBuf) {
     use windows_sys::Win32::System::RemoteDesktop::WTSActive;
     use windows_sys::Win32::System::Threading::TerminateProcess;
+    end_leftover_helpers(&agent);
     let mut helpers: HashMap<u32, SessionHelper> = HashMap::new();
     while !crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
         let active: Vec<u32> = crate::helper_sessions::read().unwrap_or_default().iter()
@@ -757,6 +817,21 @@ fn serve_pipe(name: &str, sa: Option<&SECURITY_ATTRIBUTES>, stop: &dyn Fn() -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the installed agent's processes in people's sessions are left over: not the agent's own service (session
+    /// 0), not another program, and a path spelled with other case is the same file.
+    #[test]
+    fn leftover_session_helpers_are_the_installed_agent_in_a_persons_session() {
+        let agent = std::path::Path::new(r"C:\Program Files\Oarbank\oarbank-agent.exe");
+        let procs = vec![
+            (10, 0, r"C:\ProgramData\Oarbank\agent\versions\2.10.4-abc\oarbank-agent.exe".to_string()),
+            (11, 0, r"C:\Program Files\Oarbank\oarbank-agent.exe".to_string()),
+            (12, 2, r"C:\PROGRAM FILES\Oarbank\oarbank-agent.exe".to_string()),
+            (13, 2, r"C:\Program Files\Oarbank\Oarbank Node.exe".to_string()),
+            (14, 3, r"C:\Program Files\Oarbank\oarbank-agent.exe".to_string()),
+        ];
+        assert_eq!(leftover_helpers(&procs, agent), [12, 14]);
+    }
 
     /// Every reply reaches its client, also one that reads only after the helper has written and moved on (the
     /// helper used to disconnect right after writing, which drops an unread reply: the client read nothing).

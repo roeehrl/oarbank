@@ -237,6 +237,29 @@ def test_what_protection_cannot_read_now_shows_as_node_conditions_and_in_explain
     assert rows["PROTECTION_NO_IPC_COUNTERS"] == {"rule": "build"}
 
 
+def test_a_session_helper_left_on_old_code_is_a_node_condition(db):
+    """A person's session helper survived two package updates on old code: the heartbeat names each helper's version
+    beside the installed agent's, and the node says which helpers are outdated."""
+    from oarbank.console.views import node_conditions
+    node = certify(db, enrolled_node(db, "win")[1])
+    helpers = {"at": r"\\.\pipe\oarbank-session", "serving": True, "failures": 0, "expected_version": "2.10.4",
+               "helpers": [{"who": "session:1", "account": None, "version": None, "current": False},
+                           {"who": "session:2", "account": None, "version": "2.10.4", "current": True},
+                           {"who": "uid:501", "account": "pat", "version": "2.10.3", "current": False}]}
+    tel = {"protection": {"rules": [], "session_helpers": helpers}}
+    [c] = protection.runtime_conditions(tel)
+    assert c["code"] == "PROTECTION_SESSION_HELPER_OUTDATED" and c["tone"] == "warn"
+    assert c["values"] == {"helpers": "session:1 (too old to say), pat (2.10.3)", "expected": "2.10.4"}
+    assert "asked to restart" in c["message"]
+    assert any(x["code"] == "PROTECTION_SESSION_HELPER_OUTDATED" for x in node_conditions({"tel": tel, "cap": {}}))
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (json.dumps(tel), node["node_id"]))
+    assert [x["code"] for x in protection.status(db, node["node_id"])["conditions"]] == ["PROTECTION_SESSION_HELPER_OUTDATED"]
+    # all current, or an agent that does not report versions yet: nothing to say
+    helpers["helpers"] = [h | {"current": True} for h in helpers["helpers"]]
+    assert protection.runtime_conditions(tel) == []
+    assert protection.runtime_conditions({"protection": {"session_helpers": {"serving": True}}}) == []
+
+
 def test_a_service_without_its_session_helpers_says_rules_may_miss_other_accounts(db):
     # an upgraded Mac whose agent could not serve its session helpers (the socket's directory was missing): a rule on a
     # program in a person's home matched none of its processes, silently. The node now says so wherever protection shows

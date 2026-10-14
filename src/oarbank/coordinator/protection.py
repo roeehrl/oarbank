@@ -253,6 +253,17 @@ def runtime_conditions(tel: dict) -> list[dict]:
         out.append({"code": "PROTECTION_SESSION_HELPER_UNAVAILABLE", "tone": "bad", "values": {"why": why, "rules": rules},
                     "message": f"session helper unavailable ({why}): other accounts' processes are evaluated without "
                                f"session helper (fail-safe) (rules: {rules}); the agent keeps trying to serve them"})
+    # a session helper left on another version's code (an update that did not restart it: one survived two package
+    # updates): it still describes the person's processes, with old code. The agent asks it to restart; one too old to
+    # understand that is replaced by the next package install, or ends at the person's next login
+    stale = [h for h in (helpers.get("helpers") or []) if isinstance(h, dict) and h.get("current") is False]
+    if stale:
+        want = helpers.get("expected_version") or "?"
+        who = ", ".join(f"{h.get('account') or h.get('who')} ({h.get('version') or 'too old to say'})" for h in stale)
+        out.append({"code": "PROTECTION_SESSION_HELPER_OUTDATED", "tone": "warn", "values": {"helpers": who, "expected": want},
+                    "message": f"session helper running another version than the installed agent {want}: {who}; it is "
+                               "asked to restart (one too old to understand that restarts with the next package install "
+                               "or the person's next login)"})
     for r in prot.get("rules") or []:
         if r.get("unreadable"):
             out.append({"code": "PROTECTION_UNREADABLE", "tone": "acc", "values": {"rule": r["id"], "n": r["unreadable"]},

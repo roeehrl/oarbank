@@ -43,7 +43,8 @@ EXCLUSION_WORDS = {
 }
 MODULE_STATES = {"certifying": "not certified yet: running goldens", "doctor_failed": "the module's doctor fails",
                  "golden_failed": "golden jobs failed", "undetected": "the node cannot run it (doctor: undetected)",
-                 "revoked": "revoked after a golden mismatch", "no_golden": "no golden jobs for this node class"}
+                 "revoked": "revoked after a golden mismatch", "no_golden": "no golden jobs for this node class",
+                 "disabled": "turned off on this node"}
 
 
 def _op_id(name: str, verb: str) -> str:
