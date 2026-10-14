@@ -24,6 +24,16 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Fixed
 
+- **A machine whose node was retired joins as a new machine.** A machine that enrolled again from a retired node's
+  Tailscale device (reinstalled, with a new key) was taken for a re-enrolment of that node. The waiting card said
+  "re-enrolment of" the retired node and that it proved the node's key, and approving it brought the retired record
+  back, with its old settings. A join code that approves automatically did this with no one looking. A retired node is
+  now never what a request is, by its key or by its Tailscale device, and is no lookalike: the request is a new node
+  under the fleet's onboarding policy. `--adopt-settings-from` a retired node is refused (`adopt_refused`, "is
+  retired") instead of answering that there is no such node. Naming the old node by its host name now finds that
+  node, not the new node being approved under the same name. The waiting card says whether a re-enrolment proves the
+  node's key or comes from its Tailscale device. A request already waiting is judged again when it is shown and
+  approved, so it needs nothing after the upgrade.
 - **A platform no module runs on no longer waits for the owner's signature.** With release signing on, a platform
   none of the enabled modules runs on (a Windows PC when the only module is macOS-only) got a release with no module
   that waited for the owner to sign it: its nodes never became ready, the console showed "1 release waiting for your

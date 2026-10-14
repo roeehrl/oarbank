@@ -21,8 +21,9 @@ given for it change it like any other node.
 its key (a reinstalled machine) is that machine. It carries the old node's node-scoped settings (module switches,
 protection, update holds and pins, caps, ...), its desired state, labels, explicit group memberships, module version
 pins, site and owner-given name over to the new node, and retires the old record, in the same transaction. It is never
-automatic, it is refused for a request that proves a node's key (that request keeps the node already) and for an old
-node that is still online (a machine running it cannot be the one asking), and it carries no credential: secrets set
+automatic, it is refused for a request that proves a node's key (that request keeps the node already), for an old
+node that is still online (a machine running it cannot be the one asking) and for a retired node (its record is closed:
+the owner already retired it, and a request is never that node), and it carries no credential: secrets set
 for the old node are dropped with it, and the new node keeps its own key and certificate."""
 import json
 
@@ -91,17 +92,25 @@ def policy(r) -> dict:
     return {"state": store.fleet_value(r, "new_node_state"), "modules": store.fleet_value(r, "new_node_modules")}
 
 
-def adopt_target(db, ident: dict, who: str) -> dict:
-    """The old node an approval may carry over (a lookalike of this request that is offline), or AdmissionError."""
+def adopt_target(db, ident: dict, who: str, nid: str) -> dict:
+    """The old node (its id or name) an approval of node `nid` may carry over (a lookalike of this request that is
+    offline), or AdmissionError. `nid` is never it: the approval's new node is already there, with the same name. A
+    retired node never is: its record is closed (nodeidentity.py), and carrying it over would retire it again."""
     if ident.get("node_id"):
-        raise AdmissionError(409, "adopt_refused", f"this request proves the key of {ident['hostname']} "
-                                                   f"({ident['node_id']}): approving it keeps that node, its settings and "
-                                                   "history already; there is nothing to carry over")
-    old = db.one("SELECT * FROM nodes WHERE (node_id=? OR hostname=?) AND lifecycle!='retired' ORDER BY node_id=? DESC",
-                 (who, who, who))
+        how = "proves the key of" if ident.get("via") == "node_key" else "comes from the Tailscale device of"
+        raise AdmissionError(409, "adopt_refused", f"this request {how} {ident['hostname']} ({ident['node_id']}): "
+                                                   "approving it keeps that node, its settings and history already; "
+                                                   "there is nothing to carry over")
+    old = db.one("SELECT * FROM nodes WHERE (node_id=? OR hostname=?) AND node_id!=? AND lifecycle!='retired' "
+                 "ORDER BY node_id=? DESC", (who, who, nid, who))
     if not old:
-        raise AdmissionError(404, "unknown_node", f"adopt_settings_from: no node {who!r} (a retired node cannot be "
-                                                  "carried over)")
+        gone = db.one("SELECT node_id, hostname FROM nodes WHERE (node_id=? OR hostname=?) AND lifecycle='retired' "
+                      "ORDER BY node_id=? DESC", (who, who, who))
+        if gone:
+            raise AdmissionError(409, "adopt_refused", f"{gone['hostname']} ({gone['node_id']}) is retired: its record "
+                                                       "is closed, so nothing is carried over from it. Approve this "
+                                                       "machine as a new node, with the options it needs")
+        raise AdmissionError(404, "unknown_node", f"adopt_settings_from: no node {who!r}")
     if old["node_id"] not in {n["node_id"] for n in ident.get("lookalikes") or []}:
         raise AdmissionError(409, "adopt_refused", f"{old['hostname']} ({old['node_id']}) is not a node this machine "
                                                    "looks like (the same host name): only such a node's settings can be "
@@ -176,7 +185,7 @@ def apply(db, nid: str, adm: dict | None, ident: dict, actor: str, eid: str) -> 
     new = not ident.get("node_id")
     out: dict = {}
     if adm["adopt"]:
-        out["carried_over"] = _adopt(db, adopt_target(db, ident, adm["adopt"]), nid, actor)
+        out["carried_over"] = _adopt(db, adopt_target(db, ident, adm["adopt"], nid), nid, actor)
     pol = policy(db) if new and not adm["adopt"] else {"state": None, "modules": "all"}
     state = adm["state"] or (pol["state"] if pol["state"] != "active" else None)
     if state:
