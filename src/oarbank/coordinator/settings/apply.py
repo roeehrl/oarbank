@@ -363,7 +363,16 @@ def plan(db, changes) -> dict:
     if cimp and len(camp) != len(norm):
         summary += "; " + cimp["summary"]
     fleetish = any(c["scope"] in ("fleet", "group") for c in norm)
-    return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm],
+    from ..consolelisten import exposes
+    warnings = [w for c in norm if c["key"] == "console_listen" and not c["reset"] and (w := exposes(c["value"]))]
+    warnings += ["console_https tailscale: every device of your tailnet that its ACLs let reach this machine reaches the "
+                 "console's sign-in page at https://<this machine's MagicDNS name>/ (tailscale serve; never Funnel)"
+                 for c in norm if c["key"] == "console_https" and not c["reset"] and c["value"] == "tailscale"]
+    if any(c["key"] == "console_listen" for c in norm):
+        summary += "; the console rebinds its listeners within seconds (sign-in still applies on every address)"
+    if any(c["key"] == "console_https" for c in norm):
+        summary += "; the console sets up (or removes) its tailscale serve entries within 30 s, or names the command to run"
+    return {"summary": summary, "changes": [_change_text(c, names, before) for c in norm], "warnings": warnings,
             "lock_notes": _lock_notes(before, nodes, norm, names), "protection_notes": sorted(set(prot_notes)),
             "warnings": warnings,
             "nodes_changed": [f"{x['hostname']}: {x['label']} {x['old_text']} → {x['new_text']}" for x in diff]

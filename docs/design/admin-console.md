@@ -100,10 +100,55 @@ Alerting runs inside oarbankd (D18; `coordinator/alerting.py`, rules in `oarbank
 Nothing is admin for being local, and identity headers are never trusted (architecture.md, "Network and access"):
 console accounts with a password and TOTP, passkeys or one-time links; HttpOnly, SameSite=Strict sessions with a CSRF
 token on every form and htmx request; a strict CSP with no inline script; Fetch Metadata and Origin checks; a Host
-allowlist on both listeners; Funnel traffic refused. Module pages and panels render through host components only, with
+allowlist on both listeners (with their listen addresses, "Listen addresses and https"); Funnel traffic refused. Module pages and panels render through host components only, with
 the viewer's role; the sandboxed iframe placement is served from a separate origin, uses only the bridge capabilities its
 manifest declares (checked by the console's script and again by its server) and can only request operations, which the
 host confirms and posts with the session's CSRF token.
+
+## Listen addresses and https
+
+The console process serves two listeners, the console (7400) and the module origin for sandboxed frames (7402). Where
+they listen is the fleet setting `console_listen` (Settings → Access, or `oarbank settings set console_listen
+localhost,tailscale`), not an environment variable, so a system-service install (launchd, systemd, the Windows service)
+is changed from the console with no service file edited:
+
+- `localhost` is always included (127.0.0.1): the desktop app, the menu bar's "Open console" and `oarbank console
+  login` use it.
+- `tailscale` is this machine's Tailscale addresses (IPv4 and IPv6, from `tailscale ip`), looked up every 30 s, so a
+  late or changed address is followed; until Tailscale is up the Settings page says so.
+- An IP address of this machine is bound as given; one that cannot be bound now is retried every few seconds and named
+  on the Settings page.
+- `all` binds every interface (0.0.0.0 and ::): anyone who can reach the machine reaches the sign-in page. Saving it is
+  T3 (type `console_listen` to confirm) and the plan shows the exposure; any other non-local value is T2 with a warning.
+
+`oarbank-console` runs one server per (listener, address) and re-reads the setting every 5 s: it starts the servers of
+new addresses and stops those of addresses that left (a stream on one gets 3 s to end), so nothing restarts and an
+address that stays keeps its connections. Both listeners bind exactly the listed addresses (an IPv6 socket is IPv6 only),
+never an interface that is not listed. `OARBANKD_CONSOLE_BIND` / `--bind` still work: their entries are added to the
+setting's.
+
+Every address keeps the console's sign-in, sessions, CSRF checks and Host allowlist. The allowlist is loopback names,
+the listen addresses on the listener's port (an IP literal cannot be DNS-rebound; under `all`, any IP literal on the
+port), and `console_hosts` (MagicDNS names, a reverse proxy's name). The module origin has the same allowlist (on its
+port) since it can be reached remotely now. The two origins follow the host the browser used: the console opened at
+`http://100.64.0.1:7400` frames modules from `http://100.64.0.1:7402`, and the frames' `frame-ancestors` names the console
+at that same host; behind a proxy that reaches the console on another port the module origin is the default
+`http://127.0.0.1:7402` unless `OARBANKD_MODULE_ORIGIN` / `OARBANKD_CONSOLE_ORIGIN` fix both.
+
+**https for passkeys.** A passkey needs a host name in a secure context, so it never works at an IP address (only
+`http://localhost` or an https name). The fleet setting `console_https` = `tailscale` has the console keep two `tailscale
+serve` entries on this machine's MagicDNS name: `https://<name>/` to the console and `https://<name>:8443/` to the module
+origin. Tailscale terminates TLS with a certificate for the name and answers on the tailnet only (never Funnel; Funnel
+requests are refused anyway). The console checks the entries every 30 s and at once when the setting changes; an entry
+set outside Oarbank that points elsewhere is never replaced, and turning the setting off removes only entries that
+point to this console. The https name joins both allowlists and the sign-in links while the entries are in place;
+the console reads `X-Forwarded-Proto` only from 127.0.0.1 (tailscale serve), so sessions are `Secure` and the frames
+origin is `https://<name>:8443` there. It needs MagicDNS and HTTPS certificates turned on in the tailnet. Where the
+console may not change Tailscale's configuration (Linux, unless the coordinator's account is Tailscale's operator), the
+Settings page shows the two commands to run once as root; tailscaled keeps them across restarts.
+
+`oarbank console login` prints one sign-in link per address: localhost first, then the https name and each listen
+address (the link works once, from whichever is opened); `--console URL` prints just that one.
 
 ## Chaos
 

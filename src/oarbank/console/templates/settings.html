@@ -36,7 +36,24 @@ The mode is in Node defaults above.</p>
   {% endcall %}
   {% if s.ntfy_token.set %}{{ m.op_form("settings.secrets.clear", "ntfy_token", "Clear token", cls="danger", confirm="Clear the ntfy token? Notifications go without it.") }}{% endif %}
 </section>{% endif %}
-{% if sec.id == 'access' %}<p class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page.</p>{% endif %}
+{% if sec.id == 'access' %}<section class="card small" aria-labelledby="h-listen"><h2 id="h-listen">Listening now</h2>
+  {% if listen %}<p class="mut">The console and its module frames listen on these addresses (they follow <span class="mono">console_listen</span>
+  within seconds; every address still asks for a sign-in):</p>
+  <ul>{% for u in listen.listeners.console %}<li class="mono"><a href="{{ u }}/">{{ u }}</a></li>{% else %}<li class="mut">no address</li>{% endfor %}</ul>
+  <p class="mut">module frames: <span class="mono">{{ listen.listeners.frames | join(', ') or '–' }}</span></p>
+  {% if 'all' in listen.value %}<div class="flash warn" role="note"><b>Every interface:</b> anyone who can reach this machine reaches the sign-in page.</div>{% endif %}
+  {% for x in listen.notes + listen.errors %}<div class="flash warn" role="note">{{ x }}</div>{% endfor %}
+  {% set h = listen.https %}{% if h %}<h3>https (passkeys from other devices)</h3>
+  {% if h.url %}<p>Served at <a class="mono" href="{{ h.url }}">{{ h.url }}</a>{% if h.frames %}, module frames at <span class="mono">{{ h.frames }}</span>{% else %} <span class="chip warn">module frames not served on 8443</span>{% endif %} (tailscale serve, tailnet only).</p>
+  {% elif h.mode == 'tailscale' %}<p class="mut">Setting up <span class="mono">tailscale serve</span>{% if h.name %} for <span class="mono">{{ h.name }}</span>{% endif %}…</p>
+  {% else %}<p class="mut">Off: set <span class="mono">console_https</span> to <span class="mono">tailscale</span> above to serve the console at {% if h.name %}<span class="mono">https://{{ h.name }}/</span>{% else %}https at this machine's MagicDNS name{% endif %}.</p>{% endif %}
+  {% if h.error %}<div class="flash warn" role="note">{{ h.error }}</div>{% endif %}
+  {% if h.commands %}<p class="mut">Run once on this machine (as root, or after <span class="mono">tailscale set --operator=&lt;the coordinator's account&gt;</span> on Linux), then it is kept:</p>
+  <pre class="mono">{{ h.commands | join('\n') }}</pre>{% endif %}{% endif %}
+  <p class="mut">Passkeys need a host name in a secure context: http://localhost or the https name above; on an IP address sign in with a password and code, or with a link from <span class="mono">oarbank console login</span>.</p>
+  {% else %}<p class="mut">This page cannot see the console's listeners (it is not served by oarbank-console).</p>{% endif %}
+</section>
+<p class="small mut">Accounts, tokens and passkeys are on the <a href="/access">Access</a> page.</p>{% endif %}
 {% endfor %}
 </div>
 

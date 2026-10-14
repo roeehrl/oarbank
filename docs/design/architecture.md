@@ -299,7 +299,8 @@ No network is required or assumed (D25): a fleet runs the same on one LAN, over 
   none. Where no one can answer an alert, macOS 15.5 and later let an administrator exempt networks
   (`AllowedEthernetLocalNetworkAddresses`, `AllowedWiFiLocalNetworkAddresses` in `com.apple.network.local-network`,
   then a restart); MDM cannot set Local Network privacy, and a join code or tailnet address avoids it.
-- **Ports**: the agent listener 7443 (TLS), the admin API 7401 and the console 7400 on loopback, module frames 7402.
+- **Ports**: the agent listener 7443 (TLS), the admin API 7401 on loopback, the console 7400 and module frames 7402 on
+  loopback plus the addresses of the `console_listen` setting (admin-console.md, "Listen addresses and https").
   Agents are outbound-only, except for **inbound listeners** ([inbound-listeners.md](inbound-listeners.md), D47-D49):
   a TCP port the agent opens on a node only for a module whose `[sandbox].net.inbound` grant is approved and whose
   listener the owner put in the node's signed statement. The agent binds the node's address on the default route,

@@ -449,10 +449,13 @@ def passkeys(db: DB, name: str | None = None) -> list[dict]:
 TEST_HOSTS: set[str] = set()      # the core's test suite adds its test client's host name
 
 
-def allowed_hosts(port: int, extra: list[str] | None = None) -> set[str]:
-    """Host header values a listener answers to: loopback names on its port, plus the operator's console hostnames
-    (setting `console_hosts`, for the remote mode)."""
+def allowed_hosts(port: int, extra: list[str] | None = None, listen: list[str] | tuple = ()) -> set[str]:
+    """Host header values a listener answers to: loopback names on its port, the addresses it listens on (setting
+    `console_listen`: an IP literal cannot be DNS-rebound) on its port, plus the operator's console hostnames (setting
+    `console_hosts`: MagicDNS or `tailscale serve` names, for the remote mode)."""
+    from .consolelisten import WILDCARDS, url_host
     out = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+    out |= {f"{url_host(ip)}:{port}".lower() for ip in listen or () if ip not in WILDCARDS}
     for h in extra or []:
         h = h.strip().lower()
         if h:
@@ -460,8 +463,17 @@ def allowed_hosts(port: int, extra: list[str] | None = None) -> set[str]:
     return out
 
 
-def host_ok(host_header: str | None, allowed: set[str]) -> bool:
-    return (host_header or "").strip().lower() in allowed
+def host_ok(host_header: str | None, allowed: set[str], any_ip_port: int | None = None) -> bool:
+    """Is the Host header allowed? `any_ip_port`: the listener listens on every interface (console_listen all), so any IP
+    literal on its port is too (DNS rebinding needs a name)."""
+    h = (host_header or "").strip().lower()
+    if h in allowed:
+        return True
+    if any_ip_port:
+        from .consolelisten import is_ip_literal, split_host
+        name, port = split_host(h)
+        return port == any_ip_port and is_ip_literal(name)
+    return False
 
 
 def via_funnel(headers) -> bool:

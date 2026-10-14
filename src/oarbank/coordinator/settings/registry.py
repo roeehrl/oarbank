@@ -140,6 +140,17 @@ def _source(v):
     return v.rstrip("/")
 
 
+def _listen(v):
+    """console_listen: localhost, tailscale, all or IP addresses (consolelisten.normalize: localhost always first)."""
+    from ..consolelisten import ListenError, normalize
+    if not isinstance(v, list):
+        raise SettingError("bad_type", f"console_listen: expected array, got {type(v).__name__} {v!r}"[:300])
+    try:
+        return normalize(v)
+    except ListenError as e:
+        raise SettingError("bad_value", f"console_listen: {e}")
+
+
 def _https_or_none(v):
     """listener_probe_endpoint: an https:// URL, or none."""
     v = _check(REGISTRY["listener_probe_endpoint"].schema, v, "listener_probe_endpoint")
@@ -161,7 +172,8 @@ SECTIONS = {
     "caps": ("Caps", "Hard upper bounds the owner sets. A cap can only lower capacity: every scope's cap applies and the "
                      "lowest wins; a node's hardware bounds it anyway."),
     "notifications": ("Notifications", "Push notifications for alerts, through ntfy (self-hosted or ntfy.sh)."),
-    "access": ("Access", "Host names the console and the admin API answer to besides localhost (the remote mode)."),
+    "access": ("Access", "Where the console listens, and the host names the console and the admin API answer to besides "
+                         "localhost (the remote mode)."),
     "verification": ("Data and verification", "How often finished work is re-run on another node to catch a wrong one."),
     "tools": ("Host tools", "Which installation of a host tool a node grants (docs/design/host-tools.md)."),
     "module": ("Running it", "Where the module runs, which of its services run, and how its work is split and checked."),
@@ -305,6 +317,19 @@ SETTINGS = (
             {"type": "array", "items": {"type": "string", "pattern": HOST, "maxLength": 260}, "maxItems": 32},
             default=[], scopes=("fleet",), applies="coordinator", section="access", lockable=False,
             examples=("oarbank.example.ts.net",)),
+    Setting("console_listen", "Console listen addresses",
+            "Where the console and its module frames listen: localhost (always), tailscale (this machine's Tailscale "
+            "addresses, followed when they change), IP addresses of this machine, or all (every interface: anyone who can "
+            "reach the machine reaches the sign-in page). The console rebinds within seconds; sign-in still applies.",
+            {"type": "array", "items": {"type": "string", "maxLength": 64}, "maxItems": 16}, default=["localhost"],
+            scopes=("fleet",), applies="coordinator", section="access", lockable=False, validator=lambda v: _listen(v),
+            examples=("localhost", "tailscale", "100.64.0.1")),
+    Setting("console_https", "Console over https (Tailscale)",
+            "tailscale: this machine's tailscaled serves the console at https://<its MagicDNS name>/ and the module frames "
+            "at port 8443 (tailscale serve, tailnet only, never Funnel), so passkeys work from other devices; off: no "
+            "https name is set up by Oarbank. Needs MagicDNS and HTTPS certificates on in the tailnet.",
+            {"type": "string", "enum": ["off", "tailscale"]}, default="off", scopes=("fleet",), applies="coordinator",
+            section="access", lockable=False),
     Setting("replica_rate", "Replica rate",
             "The share of finished jobs re-run on another node and compared (0 to 1); a module's own rate can only raise "
             "the fleet's (the higher applies).",
@@ -624,6 +649,11 @@ def _up(t: str) -> str:
     return TIERS[min(TIERS.index(t) + 1, 3)]
 
 
+def _listens_everywhere(v) -> bool:
+    from ..consolelisten import ALL
+    return isinstance(v, list) and any(isinstance(x, str) and x.strip().lower() == ALL for x in v)
+
+
 def change_tier(changes) -> str:
     """A change set's tier from each key's danger tier and its scope (admin-console.md, tiers): a node change keeps the
     key's tier, a fleet or group change is one tier up, a lock is T3. Unknown keys count as T1 (apply refuses them)."""
@@ -635,6 +665,8 @@ def change_tier(changes) -> str:
             t = _up(t)
         if (c or {}).get("enforce"):
             t = "T3"
+        if (c or {}).get("key") == "console_listen" and _listens_everywhere((c or {}).get("value")):
+            t = "T3"                              # every interface: confirmed by typing the key's name
         tier = max(tier, t, key=TIERS.index)
     return tier
 
