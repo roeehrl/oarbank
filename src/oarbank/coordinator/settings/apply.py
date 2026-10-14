@@ -364,7 +364,7 @@ def plan(db, changes) -> dict:
         summary += "; " + cimp["summary"]
     fleetish = any(c["scope"] in ("fleet", "group") for c in norm)
     from ..consolelisten import exposes
-    warnings = [w for c in norm if c["key"] == "console_listen" and not c["reset"] and (w := exposes(c["value"]))]
+    warnings += [w for c in norm if c["key"] == "console_listen" and not c["reset"] and (w := exposes(c["value"]))]
     warnings += ["console_https tailscale: every device of your tailnet that its ACLs let reach this machine reaches the "
                  "console's sign-in page at https://<this machine's MagicDNS name>/ (tailscale serve; never Funnel)"
                  for c in norm if c["key"] == "console_https" and not c["reset"] and c["value"] == "tailscale"]
