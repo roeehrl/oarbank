@@ -23,6 +23,10 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   once the services run. A home with no owner keys yet leaves the pin pending, and the runner pins it at the first
   update request. The refusal names the runnable command, `sudo "<build>/bin/oarbank-coordupdate" trust --from-home`
   (on macOS the build is inside Oarbank Coordinator.app), instead of a bare `coordupdate`.
+- **A rollout halted by a refused coordinator update can go on.** `oarbank update resume` now sends the coordinator a
+  new update request when its update was refused or failed (no update trust, a request no runner took), instead of
+  reporting the old refusal again. `oarbank update coordinator <version>` and `oarbank update start` also supersede a
+  rollout halted in its coordinator ring before any node was told to install, so it no longer needs a rollback.
 - **The Windows Group Policy template zip is the same file for both architectures.** The x64 and arm64 jobs each
   built `oarbank-agent-<version>-windows-admx.zip` with different bytes, so the published zip matched only one of the
   two `SHA256SUMS-agent-*-windows-*` files (2.10.3 and 2.10.4). It is now written reproducibly: fixed order, time and

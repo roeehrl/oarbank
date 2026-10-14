@@ -623,6 +623,78 @@ def test_a_coordinator_update_refused_by_coordself_or_old_agents_halts(db, tmp_p
     assert RO.active(db)["state"] == "halted" and "migration 41" in RO.active(db)["halted_reason"]
 
 
+def test_resume_asks_the_coordinator_again_after_a_refusal_whose_cause_was_fixed(db, tmp_path, coordself):
+    """The root runner refused the coordinator's update (no update trust on the machine): the rollout halted. Once an
+    administrator pinned the trust, a resume re-issues the coordinator step with a new request instead of reporting
+    the old refusal again; a rolled-back update (it installed, and failed its probation) is not installed again."""
+    a = node(db, "a")
+    imported(db, tmp_path, NEXT)
+    start(db, NEXT)
+    tick(db, a)
+    assert coordself.calls == [NEXT]
+    coordself.current = {"update_id": "cu_1", "state": "refused", "version": NEXT,
+                         "error": "no update trust on this machine: pin it with sudo ... trust --from-home"}
+    tick(db, a)
+    r = RO.active(db)
+    assert r["state"] == "halted" and "no update trust" in r["halted_reason"]
+    run_op(db, "updates.resume", None)
+    r = RO.active(db)
+    assert r["state"] == "running" and r["policy"]["coord_retry_of"] == "cu_1" and "coord_requested_at" not in r["policy"]
+    assert db.one("SELECT reason FROM events WHERE kind='rollout_coordinator_retry'")["reason"].endswith("asking again")
+    tick(db, a)                                                      # the old refusal does not halt it again
+    tick(db, a)
+    assert RO.active(db)["state"] == "running" and coordself.calls == [NEXT, NEXT]   # a new request
+    assert directive(db, a) is None                                  # nodes still wait for the coordinator
+    coordself.current = {**coordself.current, "update_id": "cu_2"}
+    tick(db, a)
+    assert RO.active(db)["state"] == "running"
+    # the new request failing (no runner took it) halts it again, and a resume asks once more
+    coordself.current = {"update_id": "cu_2", "state": "failed", "version": NEXT, "error": "no update runner took the request"}
+    tick(db, a)
+    assert RO.active(db)["state"] == "halted"
+    run_op(db, "updates.resume", None)
+    tick(db, a)
+    tick(db, a)
+    assert coordself.calls == [NEXT, NEXT, NEXT] and RO.active(db)["policy"]["coord_retry_of"] == "cu_2"
+    # a rolled-back coordinator update: resume does not reinstall it, the rollout halts again on it
+    coordself.current = {"update_id": "cu_3", "state": "rolled_back", "version": NEXT, "error": "probation"}
+    tick(db, a)
+    assert RO.active(db)["state"] == "halted"
+    run_op(db, "updates.resume", None)
+    tick(db, a)
+    assert RO.active(db)["state"] == "halted" and coordself.calls == [NEXT, NEXT, NEXT]
+
+
+def test_a_rollout_halted_at_the_coordinator_is_superseded_by_a_new_start(db, tmp_path, coordself):
+    """`oarbank update coordinator <version>` (or start) after the coordinator's update was refused: the halted rollout
+    installed nothing anywhere, so the new start supersedes it rather than demand a rollback (which would have every
+    node reinstall what it runs). A halted rollout whose nodes were told to install still blocks a start."""
+    a = node(db, "a")
+    imported(db, tmp_path, NEXT)
+    start(db, NEXT)
+    first = RO.active(db)["rollout_id"]
+    tick(db, a)
+    coordself.current = {"update_id": "cu_1", "state": "refused", "version": NEXT, "error": "no update trust"}
+    tick(db, a)
+    assert RO.active(db)["state"] == "halted"
+    assert RO.stopped_at_the_coordinator(db, RO.row(db, first))
+    start(db, NEXT, rings=["coordinator"])
+    second = RO.active(db)
+    assert second["rollout_id"] != first and second["state"] == "running" and second["ring"] == "coordinator"
+    assert RO.row(db, first)["state"] == "superseded"
+    tick(db, a)
+    tick(db, a)
+    assert coordself.calls == [NEXT, NEXT]
+    ok(db)
+    # a rollout halted once a node ring started (a node was told to install) still asks for resume or rollback
+    coordself.current = {"update_id": "cu_2", "state": "refused", "version": NEXT, "error": "no update trust"}
+    tick(db, a)
+    db.x("UPDATE rollout_nodes SET go=1 WHERE rollout_id=?", (second["rollout_id"],))
+    assert not RO.stopped_at_the_coordinator(db, RO.row(db, second["rollout_id"]))
+    with pytest.raises(core.ApiError, match="resume, roll back or let it finish first"):
+        start(db, NEXT)
+
+
 def test_the_fleet_health_gate(db, tmp_path):
     n = rings(db)
     imported(db, tmp_path)

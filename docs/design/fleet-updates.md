@@ -333,7 +333,16 @@ running ─pause─▶ paused ─resume─▶ running
 running ─failures > budget │ coordinator update rolled back │ fleet unhealthy at a ring's start─▶ halted
 halted ─resume─▶ running          halted ─rollback (auto with auto_rollback)─▶ rolling_back ─▶ rolled_back
 any ─a newer release's rollout starts─▶ superseded
+halted in the coordinator ring, no node told to install ─any rollout starts─▶ superseded
 ```
+
+A coordinator update that the root runner refused (no update trust, for one), or that failed (no runner took the
+request), installed nothing. Resuming its halted rollout asks again with a new request: the cause may have been fixed
+since. The rollout records the old update's id (`coord_retry_of`), so that outcome does not halt it a second time. A
+coordinator update that rolled back did install, then failed its probation; resuming does not install it again. A
+rollout halted in its coordinator ring with no node told to install can also be superseded by a new start, for
+example `oarbank update coordinator <version>`. A rollback is not needed there: it would have each node reinstall the
+release it runs.
 
 Per node: `pending → waiting(why) → staging → staged → draining → installing → confirming → done`. The exits are:
 - `deferred`: the drain timed out; back to `waiting`.
