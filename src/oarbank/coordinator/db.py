@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   dispute_json TEXT,    -- {"nodes": [...], "results": [...], "scope", "class"}: replicas disagreed, awaiting a tie-break
   spec_version INT,
   placement_unit TEXT, platforms_json TEXT, group_key TEXT,   -- D33: its unit of work, its platforms, its group
-  images_json TEXT);    -- the container set images its runner may run (jobs.enqueue images)
+  images_json TEXT,     -- the container set images its runner may run (jobs.enqueue images)
+  failure_json TEXT);   -- its last counted failure: {reason, code, detail, fault, retryable, attempt_id, node_id, at}
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, priority);
 CREATE INDEX IF NOT EXISTS jobs_dispatch ON jobs(state, priority DESC, subpriority DESC, job_id);
 CREATE INDEX IF NOT EXISTS jobs_target ON jobs(target_node, state) WHERE target_node IS NOT NULL;
@@ -310,6 +311,7 @@ class _TimedLock:
 
 # Columns added after a table first shipped: a home made by an earlier version gets them when it opens.
 ADDED_COLUMNS = {"enrollments": {"join_code_id": "TEXT", "user_code": "TEXT", "requested_name": "TEXT"},
+                 "jobs": {"failure_json": "TEXT"},
                  "nodes": {"settings_json": "TEXT", "settings_digest": "TEXT",
                            "settings_rev": "INT", "settings_applied_rev": "INT", "settings_rejected_json": "TEXT",
                            "tools_json": "TEXT", "want_detect": "INT DEFAULT 0", "settings_changed_at": "REAL",

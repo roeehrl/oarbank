@@ -201,6 +201,7 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `PLACEMENT_REBOUND` | Its unit of work moved to another platform class | P1 | no / no | – | `placement_rebound` |
 | `JOB_CANCELLED` | The job was cancelled | P1 | no / no | – | `job_cancelled` |
 | `JOB_QUARANTINED` | The job was quarantined | P1 | no / no | – | `job_quarantined` |
+| `JOB_FAILED` | The job failed: its runner declared it can never succeed (not retried) | P1 | no / no | – | `job_failed` |
 | `ATTEMPT_CLOSED` | The attempt was already closed | P1 | no / no | – | `attempt_closed` |
 | `JOB_DONE` | The job was already done | P1 | no / no | – | `job_done` |
 

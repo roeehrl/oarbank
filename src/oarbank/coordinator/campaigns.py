@@ -16,6 +16,7 @@ from oarbank_sdk import module_protocol as mp
 
 from . import audit, clock, effects, modcalls, placement
 from .db import DB, jl
+from .failures import TICK_FAILURE_DETAIL, failure_breakdown, failure_view
 from .modulehost import ModuleError, ModuleUnavailable
 
 FAULT_EVENT_EVERY_S = 300.0
@@ -40,16 +41,19 @@ def campaign_row(db: DB, c: dict) -> dict:
 def campaign_jobs(db: DB, campaign_id: str, module: str | None = None) -> list[dict]:
     """The campaign's evaluations with their canonical results, as CampaignJob rows. A split evaluation is its tail
     job (kind 'eval'); the head stage's job (kind 'call') is an input to it, not an evaluation. For a `module` that
-    declares campaign.tick.results, done jobs also carry `result` (results_of)."""
+    declares campaign.tick.results, done jobs also carry `result` (results_of). A failed or quarantined job carries
+    `failure`: why it ended (its runner's reason code and detail, the fault, whether it was retryable)."""
     rows = db.q("SELECT j.job_id, j.job_key, j.state, j.kind, j.stage, j.dataset_id, j.labels_json, j.done_at, j.group_key, "
-                "r.value, r.digest, r.fields_json, r.platform, r.module_version, r.result_json FROM jobs j "
+                "j.failure_json, r.value, r.digest, r.fields_json, r.platform, r.module_version, r.result_json FROM jobs j "
                 "LEFT JOIN results r ON r.result_id=j.canonical_result_id WHERE j.campaign_id=? AND j.kind='eval' "
                 "ORDER BY j.job_id", (campaign_id,))
     out = [{"job_id": r["job_id"], "job_key": r["job_key"], "state": r["state"], "kind": r["kind"], "stage": r["stage"],
             "dataset_id": r["dataset_id"], "labels": jl(r["labels_json"], {}) or {}, "done_at": r["done_at"],
             "value": r["value"] if r["state"] == "done" else None, "digest": r["digest"] if r["state"] == "done" else None,
             "fields": (jl(r["fields_json"], {}) or {}) if r["state"] == "done" else {},
-            "platform": r["platform"] if r["state"] == "done" else None, "group": r["group_key"]} for r in rows]
+            "platform": r["platform"] if r["state"] == "done" else None, "group": r["group_key"],
+            **({"failure": failure_view(r["failure_json"], TICK_FAILURE_DETAIL)}
+               if r["state"] in ("failed", "quarantined") and r["failure_json"] else {})} for r in rows]
     if module and modcalls.has_capability(module, mp.CAP_TICK_RESULTS):
         results_of(module, rows, out)
     return out
@@ -171,4 +175,5 @@ def summary(db: DB, campaign_id: str) -> dict | None:
                   "SUM(state IN ('failed','quarantined')) f, SUM(state='cancelled') x FROM jobs WHERE campaign_id=?",
                   (campaign_id,))
     return {**campaign_row(db, c), "ticked_at": c["ticked_at"], "created_by": c["created_by"],
-            "jobs": {k: v or 0 for k, v in jobs.items()}}
+            "jobs": {k: v or 0 for k, v in jobs.items()}, "failures": failure_breakdown(db, campaign_id)}
+

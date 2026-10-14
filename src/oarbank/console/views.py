@@ -10,6 +10,7 @@ import time
 from types import SimpleNamespace
 
 from ..coordinator import agentbuilds, detail, nodepolicy, nodeservices
+from ..coordinator.failures import failure_breakdown
 from ..coordinator.settings import views as settings_views
 from ..coordinator.settings.apply import flat_values, node_values
 
@@ -406,7 +407,7 @@ def campaign_page(r, cid: str, now: float) -> dict | None:
     platforms = sorted(set(PLATFORM_TOKENS) | {x["platform"] for x in r.q("SELECT DISTINCT platform FROM nodes WHERE platform IS NOT NULL")})
     return {"c": c, "jobs": jobs, "eta_s": eta(r, cid, now), "history": history, "events": events, "results": results,
             "placement": placement_of(r, c), "placement_alerts": stranded, "platforms": platforms,
-            "overrides": settings_views.campaign_section(r, cid)}
+            "overrides": settings_views.campaign_section(r, cid), "failures": failure_breakdown(r, cid)}
 
 
 def result_cell(v, fmt: str | None, unit: str | None) -> str:
@@ -472,7 +473,7 @@ def job_page(r, jid: int, attempt_log_dir) -> dict | None:
     events = r.q("SELECT * FROM events WHERE job_id=? ORDER BY event_id", (jid,))
     history = r.q("SELECT * FROM audit WHERE target_type='job' AND target_id=? ORDER BY event_id DESC LIMIT 30", (str(jid),))
     return {"j": j, "spec": jl(j["spec_json"], {}), "attempts": atts, "results": res, "logs": logs, "events": events,
-            "history": history, "waterfall": waterfall(r, j, atts), "checkpoint": d["checkpoint"]}
+            "history": history, "waterfall": waterfall(r, j, atts), "checkpoint": d["checkpoint"], "failure": d["failure"]}
 
 
 SEGMENT_CLASS = {"queued": "seg-q", "staging": "seg-s", "finalizing": "seg-f", "evaluating": "seg-e"}

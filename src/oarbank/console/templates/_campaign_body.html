@@ -4,6 +4,8 @@
   <span class="sp"></span>
   <span class="small mut">jobs {{ jobs.d }}/{{ jobs.n }} · running {{ jobs.l }} · failed {{ jobs.f }} · ETA {{ eta_s | secs if eta_s is not none else '–' }}</span></div>
 <div class="bar"><i style="width:{{ (100 * jobs.d / jobs.n) if jobs.n else 0 }}%"></i></div>
+{% if failures %}<div class="small" style="margin-top:6px"><span class="mut">why jobs failed</span>
+{% for f in failures %}<div><span class="chip bad">{{ f.state }}</span> <span class="mono">{{ f.code or '?' }}</span> · {{ f.jobs }} job{{ 's' if f.jobs != 1 }} (latest <a href="/jobs/{{ f.job_id }}">{{ f.job_id }}</a>){% if f.detail %}: <span class="mut">{{ f.detail }}</span>{% endif %}</div>{% endfor %}</div>{% endif %}
 <div class="row" style="margin:8px 0">{% set can = CAMPAIGN_OPS[c.state] %}
   {% if 'campaigns.pause' in can %}{{ m.op_form("campaigns.pause", c.campaign_id, "Pause") }}{% endif %}
   {% if 'campaigns.resume' in can %}{{ m.op_form("campaigns.resume", c.campaign_id, "Resume", cls="pri") }}{% endif %}
