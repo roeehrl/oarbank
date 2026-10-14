@@ -35,12 +35,16 @@ def cap(cpu, idle, slots, free, binding="in_use", in_use=None, present=False, ad
 
 
 def test_why_on_the_owners_fleet():
-    studio = nodepolicy.why(cap(2, 14, 2, 9.22, in_use=46.1, present=True), {"presence": "hid"},
+    studio = nodepolicy.why(cap(2, 14, 2, 9.22, in_use=46.1, present=True), {"presence": "hid", "user_idle_s": 12.4},
                             facts(64.0, perf=12, eff=4, logical=16), defaults_for(facts(64.0)), "darwin")
-    assert studio["line"] == "2 slots while someone is using this Mac (14 when idle) · 9.2 GB free for jobs (apps and the system use 46 GB)"
-    mbp = nodepolicy.why(cap(2, 12, 2, 63.74, in_use=47.9, present=True), {"presence": "screen sharing"},
+    assert studio["line"] == ("2 slots while someone is using this Mac: keyboard or mouse input 12 s ago (14 when idle) · "
+                              "9.2 GB free for jobs (apps and the system use 46 GB)")
+    assert studio["present"] == "keyboard or mouse input 12 s ago"
+    mbp = nodepolicy.why(cap(2, 12, 2, 63.74, in_use=47.9, present=True),
+                         {"presence": "screen sharing: 1 viewer connected", "user_idle_s": 0.0},
                          facts(128.0, perf=6, eff=12, logical=18), defaults_for(facts(128.0)), "darwin")
     assert mbp["slots"] == "2 slots while someone is screen sharing this Mac (12 when idle)"
+    assert mbp["present"] == "a Screen Sharing viewer is connected"
     mini = nodepolicy.why(cap(10, 10, 2, 4.12, in_use=16.0, limit="memory_in_use"), {}, facts(24.0), defaults_for(facts(24.0)))
     assert mini["line"] == ("10 slots (5 performance cores + 10 efficiency cores at half), memory for 2 jobs · "
                              "4.1 GB free for jobs (apps and the system use 16 GB)")
@@ -81,3 +85,35 @@ def test_hardware_counts_physical_cores():
     assert views.hardware(facts(32.0, "linux", perf=8, eff=4, logical=20))["cores"] == "8P + 4E (20 threads)"
     # facts from an agent that reported no core counts
     assert views.hardware({**FACTS, "cpu": {"perf_cores": None, "eff_cores": None, "logical": 8}})["cores"] == "8 cores"
+
+
+def test_why_names_the_signal_that_counts_someone_present():
+    """A headless Mac counted as in use must say why, so its owner can tell a real person from a stray signal."""
+    f, p = facts(24.0), defaults_for(facts(24.0))
+    # every slot already fits the people's limit, so only the memory kept for them names the signal
+    mini = nodepolicy.why(cap(2, 2, 1, 3.5, binding="reserve", present=True), {"presence": "hid", "user_idle_s": 95.0},
+                          f, p, "darwin")
+    assert mini["line"] == ("2 slots (5 performance cores + 10 efficiency cores at half), memory for 1 job · 3.5 GB free "
+                            "for jobs (4.0 GB for the system and 8.0 GB for the person using it (keyboard or mouse input "
+                            "2 min ago) kept)")
+    # the slots name it once; the memory does not repeat it
+    both = nodepolicy.why(cap(2, 10, 2, 3.5, binding="reserve", present=True), {"presence": "hid", "user_idle_s": 3.0},
+                          f, p, "darwin")
+    assert both["line"] == ("2 slots while someone is using this Mac: keyboard or mouse input 3 s ago (10 when idle) · "
+                            "3.5 GB free for jobs (4.0 GB for the system and 8.0 GB for the person using it kept)")
+    signal = nodepolicy.presence_signal
+    assert signal({"presence": "screen sharing: 2 viewers connected"}) == "2 Screen Sharing viewers are connected"
+    assert signal({"presence": "screen sharing"}) == "a Screen Sharing viewer is connected"        # an older agent
+    assert signal({"presence": "hid (screensharingd runs with no viewer connected)", "user_idle_s": 0.4}) \
+        == "keyboard or mouse input under a second ago"
+    assert signal({"presence": "hid"}, {"user_idle_s": 300}) == "keyboard or mouse input in the last 5 min"
+    assert signal({"presence": "logind: session 7 (gdm-password, x11, seat0), the least idle of 2; ignored 1 "
+                               "non-interactive session (remote login: 5)", "user_idle_s": 40.0}) \
+        == "input 40 s ago in session 7 (gdm-password, x11, seat0)"
+    assert signal({"presence": "wts: session 1 (ada)", "user_idle_s": 7200.0}) == "input 2.0 h ago in session 1 (ada)"
+    assert signal({"presence": "unknown: IOHIDSystem has no HIDIdleTime"}) == \
+        "whether someone is at it cannot be read, which counts as someone present (IOHIDSystem has no HIDIdleTime)"
+    assert signal({}) is None
+    # nobody present: no signal, whatever the agent read
+    idle = nodepolicy.why(cap(10, 10, 2, 12.0, binding="reserve"), {"presence": "hid", "user_idle_s": 3600.0}, f, p)
+    assert idle["present"] is None and "person using it" not in idle["line"]

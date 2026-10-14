@@ -2,6 +2,8 @@
 slots and its memory for jobs from the capacity the agent reported (docs/protocol.md, "Capacity and host protection"),
 citing the settings that decide it, each with its value and where that value comes from (settings/resolve.py), linked to
 its Explain row on the node's Settings tab. Pure functions over plain dicts."""
+import math
+
 from .settings import registry as R
 
 
@@ -37,14 +39,65 @@ def _held(key: str, tel: dict) -> str:
     return key.replace("_", " ")
 
 
+def _ago(s: float) -> str:
+    if s < 1:
+        return "under a second"
+    if s < 90:
+        return f"{s:.0f} s"
+    if s < 5400:
+        return f"{s / 60:.0f} min"
+    return f"{s / 3600:.1f} h"
+
+
+def presence_signal(tel: dict, policy: dict | None = None) -> str | None:
+    """What made the agent count someone as using the machine, from its `presence` telemetry (the reading's source,
+    rust/crates/oarbank-protection/src/presence.rs) and `user_idle_s`: "keyboard or mouse input 12 s ago", "a Screen
+    Sharing viewer is connected", "input 40 s ago in session 7 (gdm-password, x11, seat0)", or why presence cannot
+    be read. None when the agent did not say (an agent from before it reported a source)."""
+    src = (tel or {}).get("presence") or ""
+    if not src:
+        return None
+    idle = tel.get("user_idle_s")
+    if isinstance(idle, (int, float)):
+        when = f"{_ago(idle)} ago"
+    elif (policy or {}).get("user_idle_s") is not None:
+        when = f"in the last {_ago(policy['user_idle_s'])}"
+    else:
+        when = "recently"
+    if src.startswith("unknown"):
+        return "whether someone is at it cannot be read, which counts as someone present (" \
+            + src.removeprefix("unknown: ").removeprefix("unknown") + ")"
+    if src.startswith("screen sharing"):
+        n = src.partition(": ")[2].split(" ", 1)[0]
+        return "a Screen Sharing viewer is connected" if n in ("", "1") else f"{n} Screen Sharing viewers are connected"
+    if src.startswith("hid"):
+        return f"keyboard or mouse input {when}"
+    if src.startswith(("logind: ", "wts: ")):
+        where = src.split(": ", 1)[1].split(";", 1)[0].split(", the least idle", 1)[0]
+        return f"input {when} in {where}"
+    return f"{src} ({when})"
+
+
 CAP_KEYS = {"cap.cpu_cores": "cpu_cores", "cap.mem_gb": "mem_gb", "cap.jobs": "jobs", "cap.staging_mbps": "staging_mbps",
             "cap.mem_gb exceeded": "mem_gb", "outside_schedule": "schedule"}
 
 
+def slot_budget_short(max_slots, cpu, stage: str | None = None) -> str | None:
+    """When a node's CPU-slot budget (`max_slots`) is below a stage's declared `resources.cpu`, what it means and the fix:
+    each running job draws its stage's cpu from the budget (core.claim, predicates INSUFFICIENT_CPU), so that stage can
+    never run there. `jobs` is the setting that limits how many jobs run at once. None when the budget fits."""
+    if max_slots is None or cpu is None or float(cpu) <= float(max_slots):
+        return None
+    what = f"stage {stage}'s cpu {float(cpu):g}" if stage else f"this stage's cpu {float(cpu):g}"
+    return (f"max_slots {max_slots} is below {what}: raise max_slots to {math.ceil(float(cpu))} or more, or use jobs to "
+            "limit how many jobs run")
+
+
 def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None, node_id: str | None = None,
         sources: dict | None = None) -> dict | None:
-    """Why the node has the slots and memory it has: {"slots", "memory", "held", "line", "cites"} (None before it
-    reports). `policy` is the node's effective policy and caps (settings/apply.node_values, both sections merged);
+    """Why the node has the slots and memory it has: {"slots", "memory", "held", "present", "line", "cites"} (None
+    before it reports). `present` is what made the agent count someone as using the machine (`presence_signal`), None
+    with nobody present; the line says it where it names the person (their slots, or the memory kept for them). `policy` is the node's effective policy and caps (settings/apply.node_values, both sections merged);
     `sources` names where each value comes from (`resolve.badge`), and `cites` lists the settings the line rests on:
     {key, label, text ("Run jobs on battery: off · Fleet"), href (its Explain row)}."""
     cap, tel, facts, policy = cap or {}, tel or {}, facts or {}, policy or {}
@@ -67,6 +120,9 @@ def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None,
     if present is None and tel.get("user_idle_s") is not None and policy.get("user_idle_s") is not None:
         present = tel["user_idle_s"] < policy["user_idle_s"]
     jobs = cap.get("slots")
+    signal = presence_signal(tel, policy) if present else None
+    out["present"] = signal
+    shown = False
     if out["held"] is None:
         cores = facts.get("cpu") or {}
         perf, eff = cores.get("perf_cores"), cores.get("eff_cores")
@@ -78,8 +134,14 @@ def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None,
         elif binding == "thermal":
             s = f"{_plural(cpu, 'slot')}: fewer while it runs hot"
         elif present and idle is not None and idle > cpu:
-            who = "someone is screen sharing" if tel.get("presence") == "screen sharing" else "someone is using"
-            s = f"{_plural(cpu, 'slot')} while {who} {noun} ({idle} when idle)"
+            sharing = (tel.get("presence") or "").startswith("screen sharing")
+            who = "someone is screen sharing" if sharing else "someone is using"
+            s = f"{_plural(cpu, 'slot')} while {who} {noun}"
+            if signal and not sharing:
+                s += f": {signal}"
+                shown = True
+            s += f" ({idle} when idle)"
+            shown = shown or sharing
             cite("user_present_slots")
             cite("user_idle_s")
         elif perf and eff:
@@ -89,7 +151,7 @@ def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None,
         else:
             s = _plural(cpu, "slot")
         if policy.get("max_slots") is not None and cpu == policy["max_slots"] and not binding.startswith(("cap.", "rule:")):
-            s = f"{_plural(cpu, 'slot')} (at most {policy['max_slots']} in settings)"
+            s = f"{_plural(cpu, 'CPU slot')} (max_slots caps the cores for jobs at {policy['max_slots']})"
             cite("max_slots")
         if jobs is not None and jobs < cpu:
             s += f", memory for {_plural(jobs, 'job')}"
@@ -104,7 +166,8 @@ def why(cap: dict, tel: dict, facts: dict, policy: dict, os_: str | None = None,
             kept = [f"{_gb(policy.get('os_reserve_gb') or 0)} for the system"]
             cite("os_reserve_gb")
             if present and policy.get("user_reserve_gb"):
-                kept.append(f"{_gb(policy['user_reserve_gb'])} for the person using it")
+                kept.append(f"{_gb(policy['user_reserve_gb'])} for the person using it"
+                            + (f" ({signal})" if signal and not shown else ""))
                 cite("user_reserve_gb")
             if tel.get("services_reserved_gb"):
                 kept.append(f"{_gb(tel['services_reserved_gb'])} for services")

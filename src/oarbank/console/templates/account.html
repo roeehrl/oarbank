@@ -2,25 +2,52 @@
 {% import "_macros.html" as m with context %}
 {% block title %}Account · Oarbank{% endblock %}
 {% block body %}
-<h1>{{ me.account }} <span class="chip">{{ me.role }}</span></h1>
-<div class="grid">
-<div class="card">
-  <b>Passkeys</b>
+{% set mine = (accounts | selectattr('name', 'equalto', me.account) | first) or {} %}
+{# an admin's view of the access API lists every account's passkeys and tokens: this page shows only its own #}
+{% set passkeys = passkeys | selectattr('account', 'equalto', me.account) | list %}
+{% set tokens = tokens | selectattr('account', 'equalto', me.account) | list %}
+<h1>Your account: {{ me.account }} <span class="chip">{{ me.role }}</span></h1>
+<p class="small mut">Change your password, add or remove passkeys, and manage personal access tokens.
+  <a href="#change-password">Change password</a> · <a href="#passkeys">Passkeys</a> · <a href="#sign-in-code">Authenticator code</a> · <a href="#tokens">Tokens</a></p>
+<div class="grid stack">
+<section class="card" aria-labelledby="sign-in-methods">
+  <h2 id="sign-in-methods">Sign-in methods</h2>
+  <table class="small">
+    <tr><th scope="row">Password and authenticator code</th><td>{% if not mine %}<span class="mut">unknown</span>{% elif mine.password_set and mine.totp_set %}<span class="chip ok">set up</span>{% elif mine.totp_set %}<span class="chip">no password yet</span>{% else %}<span class="chip">not set up</span>{% endif %}</td></tr>
+    <tr><th scope="row">Passkeys</th><td>{% if passkeys %}<span class="chip ok">{{ passkeys | length }} passkey{{ 's' if passkeys | length != 1 }}</span>{% else %}<span class="chip">none</span>{% endif %}</td></tr>
+    <tr><th scope="row">One-time sign-in link</th><td>always, on the coordinator: <span class="mono">oarbank console login</span></td></tr>
+  </table>
+  <p class="small mut">A password works only together with the code from your authenticator app. Locked out? On the coordinator,
+    <span class="mono">oarbank console login</span> prints a one-time link that signs you in; then set a new password here.</p>
+</section>
+<section class="card" aria-labelledby="change-password">
+  <h2 id="change-password">Change password</h2>
+  <p class="small mut">{% if mine.password_set %}Replaces your current password.{% else %}You have no password yet: set one to sign in with a password and an authenticator code.{% endif %}
+    Every session of yours ends, this one too: sign in again with the new password.</p>
+  {% call m.op_form("access.accounts.set_password", me.account, "Change password", inline=False, confirm="Change your password? You will need to sign in again.") %}
+    <label class="small">new password (12+ characters) <input type="password" name="p.password" autocomplete="new-password" minlength="12" required></label>
+  {% endcall %}
+</section>
+<section class="card" aria-labelledby="passkeys">
+  <h2 id="passkeys">Passkeys</h2>
   <table class="small">{% for k in passkeys %}<tr><td>{{ k.label }}</td><td class="mono">{{ k.rp_id }}</td><td class="mut">{{ k.created_at | ago }}</td>
     <td>{{ m.op_form("access.passkeys.remove", k.credential_id, "Remove", confirm="Remove this passkey?") }}</td></tr>
   {% else %}<tr><td class="mut">No passkeys.</td></tr>{% endfor %}</table>
   <label class="small">name <input data-passkey-label value="passkey"></label>
   <button type="button" data-passkey-register>Add a passkey</button>
   <p class="small mut" data-passkey-status role="status">Passkeys work on http://localhost or the console's https host name, never on an IP address.</p>
-</div>
-<div class="card">
-  <b>Password</b>
-  {% call m.op_form("access.accounts.set_password", me.account, "Set password", inline=False) %}
-    <label class="small">new password (12+ characters) <input type="password" name="p.password" autocomplete="new-password" minlength="12" required></label>
-  {% endcall %}
-</div>
-<div class="card">
-  <b>Personal access tokens</b>
+</section>
+<section class="card" aria-labelledby="sign-in-code">
+  <h2 id="sign-in-code">Authenticator code</h2>
+  {% if me.role == 'admin' %}
+  <p class="small mut">A new authenticator seed replaces the old one (your sessions end); the seed is shown once, to add to your authenticator app.</p>
+  {{ m.op_form("access.accounts.reset_totp", me.account, "New authenticator seed…") }}
+  {% else %}
+  <p class="small mut">Lost your authenticator app? Ask an admin to issue a new seed on the Access page, or sign in with a passkey.</p>
+  {% endif %}
+</section>
+<section class="card" aria-labelledby="tokens">
+  <h2 id="tokens">Personal access tokens</h2>
   <div class="small mut">For scripts and the CLI on other machines (<span class="mono">OARBANK_TOKEN</span>).</div>
   <table class="small">{% for t in tokens %}<tr><td class="mono">{{ t.token_id }}</td><td>{{ t.label }}</td><td>{{ t.role }}</td>
     <td class="mut">expires {{ t.expires_at | ts }}</td>
@@ -31,7 +58,7 @@
     <label class="small">role <select name="p.role"><option>viewer</option><option>operator</option>{% if me.role == 'admin' %}<option>admin</option>{% endif %}</select></label>
     <label class="small">days <input name="p.days" type="number" min="1" max="366" value="90"></label>
   {% endcall %}
-</div>
+</section>
 </div>
 <script src="{{ asset('/static/passkey.js') }}" defer></script>
 {% endblock %}

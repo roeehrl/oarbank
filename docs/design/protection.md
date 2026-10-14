@@ -222,8 +222,9 @@ when they are written (a promotion skips the nodes that cannot run them and says
 What depends on the moment rather than the OS the agent reports, and the console and explain show it as a node
 condition while the fail-safe default applies: a front app that cannot be read (`PROTECTION_FRONT_UNKNOWN`: a Wayland
 desktop), presence that cannot be read (`PROTECTION_PRESENCE_UNKNOWN`: counts as someone present; on Linux, where
-presence is a desktop session or a session with a terminal that has had input, only when logind cannot be asked or
-such a session's input time cannot be read, never because of an ssh command or a user manager), processes matched
+presence is a desktop session or a local text session with a terminal that has had input, only when logind cannot be
+asked or such a session's input time cannot be read, never because of ssh or a user manager; on macOS when the HID
+idle time cannot be read, or `screensharingd` runs and its connections cannot be read), processes matched
 only because their path or arguments were unreadable (`PROTECTION_UNREADABLE`), an `ipc_ratio` rule whose processes
 have no instruction or cycle counters (`PROTECTION_NO_IPC_COUNTERS`: a virtual machine; the metric is unknown, so the
 budget does not grow on it), and a node that cannot lower its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused
@@ -244,6 +245,10 @@ mem_gb_free = host_budget − Σ running jobs' resources.mem_gb
 slots       = min(cpu, max_slots, floor(host_budget / job_mem_gb), cap.jobs, cap.cpu_cores / threads, protection.slots)
 paused      = the pause_fleet scopes of the active rules (no work of theirs is granted; all or io: admit = false)
 ```
+
+`max_slots` caps the CPU slots (`cpu_slots = min(cpu, max_slots, cap.cpu_cores, protection.cpu_cores)`), the budget
+each running job's `resources.cpu` is drawn from (`free_cpu = cpu_slots − Σ running cpu`), so it bounds cores, not jobs:
+`max_slots 1` keeps every stage declaring `cpu = 2` off the node. `cap.jobs` is what limits the number of jobs.
 
 - **Never more memory than the machine has.** The reserves alone ignore what the owner's apps use: a 64 GB Mac with
   46 GB in use offered 50 GB to jobs. The in-use bound starts from the memory available now, RAM minus what the host
@@ -266,12 +271,18 @@ paused      = the pause_fleet scopes of the active rules (no work of theirs is g
   Windows one `RelationProcessorCore` record per core from GetLogicalProcessorInformationEx, the highest
   `EfficiencyClass` being the performance cores. A CPU without classes has only performance cores (`eff_cores` 0);
   only facts without core counts fall back to logical processors.
-- **Someone present** means input within `user_idle_s` (300 s), or presence that cannot be read. On macOS a Screen
-  Sharing session counts too, even without input, unless the node policy's `screen_sharing_present` is off; Windows'
-  Remote Desktop sessions and Linux's remote logins are sessions with their own input time.
+- **Someone present** means input within `user_idle_s` (300 s), or presence that cannot be read. A logged-in
+  session with no recent input is nobody (a headless Mac logged in at the console), and ssh never
+  counts, with or without a terminal. On macOS a connected Screen Sharing viewer counts too, even without input,
+  unless the node policy's `screen_sharing_present` is off: an established TCP connection of `screensharingd`, read
+  from `netstat -anv -p tcp`; the daemon running is not enough, since it can stay running and listening after the
+  viewer leaves. Windows' Remote Desktop sessions and Linux's remote desktops are sessions with their own input time.
+  The agent's `presence` telemetry names the signal ("hid", "screen sharing: 1 viewer connected", "logind: session 7
+  (gdm-password, x11, seat0)", "wts: session 1 (ada)", or "unknown: …").
 - **Why.** The console's node cards and node page, `oarbank node show` and `oarbank fleet` print one line from the
-  reported capacity: "2 slots while someone is using this Mac (14 when idle) · 9.2 GB free for jobs (apps and the
-  system use 46 GB)", or what holds the node back and how to allow it ("no new jobs: on battery (allow it in
+  reported capacity: "2 slots while someone is using this Mac: keyboard or mouse input 12 s ago (14 when idle) ·
+  9.2 GB free for jobs (apps and the system use 46 GB)", naming the signal that counts someone present where it
+  names the person (their slots, or the memory kept for them), or what holds the node back and how to allow it ("no new jobs: on battery (allow it in
   settings: Run jobs on battery)"); `coordinator/nodepolicy.py`.
 - **Settings.** The why line cites the settings it rests on with their value and source ("Run jobs on battery: off ·
   Default"), each linked to its Explain row on the node's Settings tab, which labels every setting and shows where its

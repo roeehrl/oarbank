@@ -271,7 +271,9 @@ where it comes from (this machine's default and why, the fleet's value, a group'
 a value for that node and **Reset to inherited** takes it back. Fleet-wide defaults are under **Settings → Node
 defaults**, which shows the nodes a change reaches before it saves. From a terminal: `oarbank settings get --node
 <node>`, `oarbank settings set <key> <value> [--node <node>]`, `oarbank settings reset <key> --node <node>`. On a Mac,
-a Screen Sharing session counts as someone using it unless you turn off "Screen sharing counts as someone using it". `oarbank-agent discover` lists coordinators announcing themselves
+a connected Screen Sharing viewer counts as someone using it unless you turn off "Screen sharing counts as someone
+using it". Being logged in does not count, nor does ssh: a headless machine logged in at the console counts as in use
+only while it has keyboard or mouse input, and the line says which signal it saw ("keyboard or mouse input 12 s ago"). `oarbank-agent discover` lists coordinators announcing themselves
 on the local network, a hint for the URL only.
 
 **Local Network privacy (macOS 15 and later).** The personal scope's LaunchAgent is not exempt: a macOS that applies

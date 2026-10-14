@@ -108,7 +108,8 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
          ("relay", "cd" * 32, "ghcr.io/example/relay@sha256:" + "cd" * 32, "scorers", "ef" * 32, 0, nid, 1))
     pages = ["/", "/agent", "/updates", "/coordinator", f"/nodes/{nid}", f"/nodes/{nid}/protection", "/campaigns", f"/campaigns/{cid}", "/jobs", f"/jobs/{job}",
              "/events", "/audit", "/settings", "/verify", "/modules", "/modules/relay", "/modules/toy", "/m/relay/scores", "/modules/reel", "/m/reel/data",
-             f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health", "/datasets", "/datasets/upload"]
+             f"/explain/job/{job}", f"/explain/node/{nid}", "/modules/relay/health", "/datasets", "/datasets/upload",
+             "/account", "/access"]
     files = []
     with Server(coord_app.admin_app(db, console_secret=SECRET)) as oarbankd:
         state = ConsoleState(str(db.path), f"http://127.0.0.1:{oarbankd.port}", secret=SECRET)
@@ -121,6 +122,10 @@ def test_every_console_page_has_no_serious_axe_violations(tmp_path):
                 f = f.with_suffix(".html")
                 f.write_text(r.text)
                 files.append(f)
+            r = c.post("/login", data={"name": "nobody", "password": "wrong password!!", "code": "123456"})
+            assert r.status_code == 401 and "attempts left" in r.text                     # the sign-in page with its error
+            (tmp_path / "login-failed.html").write_text(r.text)
+            files.append(tmp_path / "login-failed.html")
             for op, target in (("releases.promote", "x"), ("coordinator.move", None)):          # plan pages
                 r = c.post(f"/do/{op}", data={"target": target or "", "return_to": "/", "idem": "a"})
                 assert "Review" in r.text, op

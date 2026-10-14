@@ -141,7 +141,21 @@ def _reason_text(j: dict, code: str, rows: list) -> str:
         text = f"{r0.predicate} (observed {r0.observed}, required {r0.required})"
     plat = collections.Counter(n["platform"] or "unknown-platform" for n, _, _ in rows)
     where = ", ".join(f"{k} {p}" for p, k in sorted(plat.items(), key=lambda kv: (-kv[1], kv[0])))
-    return f"{text} ({len(rows)} node{'s' if len(rows) != 1 else ''}: {where})"
+    return f"{text} ({len(rows)} node{'s' if len(rows) != 1 else ''}: {where})" + (_slot_budget_text(rows) if code == "INSUFFICIENT_CPU" else "")
+
+
+def _slot_budget_text(rows: list) -> str:
+    """Where the stage's cpu exceeds the node's CPU-slot budget itself (max_slots), not only what is free now: it never
+    runs there until the budget is raised, so say it with the fix, per distinct budget (`rows`: as _reason_text)."""
+    from . import nodepolicy
+    from .settings.apply import flat_values
+    hosts = collections.defaultdict(list)
+    for n, r, _ in rows:
+        if isinstance(r.required, (int, float)) and not isinstance(r.required, bool):
+            short = nodepolicy.slot_budget_short(flat_values(n).get("max_slots"), r.required)
+            if short:
+                hosts[short].append(n["hostname"])
+    return "".join(f"; on {', '.join(h)}: {t}" for t, h in hosts.items())
 
 
 def _job_ids(j: dict) -> dict:
@@ -253,8 +267,13 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
         rel = nv.release_of() if nv.release_of else {}
         head = X.Headline(code=ff.code, text="Not admitting: " + RC.REGISTRY[ff.code].render(
             release=rel.get("release") or "?", platform=rel.get("platform") or "?"))
+    from . import nodepolicy
+    from .settings.apply import flat_values
+    budget = flat_values(n).get("max_slots")
+    actions = [f"{mod} stage {st} never runs here: " + nodepolicy.slot_budget_short(budget, cpu, st)
+               for mod, st, cpu in modcalls.stages_over_cpu(db, n, budget)]
     return X.ExplainDocument(
-        subject=X.Subject(kind="node", id=n["node_id"]),
+        subject=X.Subject(kind="node", id=n["node_id"]), system_actions=actions,
         as_of=X.AsOf(snapshot_version=db.one("SELECT COALESCE(MAX(event_id),0) m FROM events")["m"], evaluated_at=now),
         verdict="admitting" if ff is None else "blocked", headline=head, summary=summary,
         matrix=[X.MatrixRow(node=n["hostname"], results=adm)],
