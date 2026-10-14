@@ -127,8 +127,65 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-/// Before each start: apply a staged update, and decide whether a trial has failed.
+/// The version of the agent `rel` (a path relative to the home) names: `versions/<version>-<sha12>/oarbank-agent`, as
+/// `install` and the agent's staging name it; else the version its binary embeds.
+fn version_at(home: &Home, rel: &str) -> Option<String> {
+    let named = Path::new(rel).parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string())
+        .and_then(|n| n.rsplit_once('-').filter(|(_, h)| h.len() == 12 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                         .map(|(v, _)| v.to_string()))
+        .filter(|v| oarbank_core::fleet::version_key(v).is_some());
+    named.or_else(|| std::fs::read(home.0.join(rel)).ok().and_then(|d| oarbank_core::fleet::agent_version_of(&d)))
+}
+
+/// The installed package's agent: beside this launcher when the launcher is a package's own (fleet.rs
+/// `package_agent_beside`); none for a development or tarball launcher.
+fn package_agent() -> Option<PathBuf> {
+    let me = std::env::current_exe().ok()?;
+    let me = if cfg!(windows) { me } else { std::fs::canonicalize(me).ok()? };
+    oarbank_core::fleet::package_agent_beside(&me)
+}
+
+/// The installed package supersedes every older agent-only build (docs/protocol.md, "Agent self-update"; a fleet release
+/// or a manual package install is the unit, D57): a staged agent-only update to a version older than the package's
+/// agent is refused (`failed`: the agent reports it and never retries that build), and when `current` names an older
+/// version than the package's agent (a channel build from before the package was installed, whose postinstall could
+/// not move `current`) the package's agent becomes current. A trial in progress is left to finish first.
+fn supersede(home: &Home, package: Option<&Path>) -> Result<()> {
+    let Some(pkg) = package else { return Ok(()) };
+    let Some(pv) = std::fs::read(pkg).ok().and_then(|d| oarbank_core::fleet::agent_version_of(&d)) else { return Ok(()) };
+    let mut up = home.read_upgrade();
+    if let Some(u) = up.as_mut().filter(|u| u["state"] == "staged") {
+        let target = u["target"].as_str().unwrap_or("").to_string();
+        let tv = u["version"].as_str().map(str::to_string).or_else(|| version_at(home, &target));
+        if let Some(tv) = tv.filter(|tv| oarbank_core::fleet::newer(&pv, tv)) {
+            u["state"] = json!("failed");
+            u["error"] = json!(format!("agent build {tv} is older than the installed package's agent {pv}: the package supersedes it"));
+            home.write_upgrade(u)?;
+            eprintln!("oarbank-launcher: refused the staged agent {tv}: the installed package's agent is {pv}");
+        }
+    }
+    if up.as_ref().is_some_and(|u| matches!(u["state"].as_str(), Some("staged" | "trial"))) {
+        return Ok(());
+    }
+    let cv = home.current_target().and_then(|t| version_at(home, &t));
+    if cv.as_deref().is_some_and(|cv| oarbank_core::fleet::newer(&pv, cv)) {
+        let rel = install(home, pkg)?;
+        eprintln!("oarbank-launcher: current ran agent {} older than the installed package's {pv}: current -> {rel}",
+                  cv.unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// Before each start: the installed package supersedes older agent-only builds, then apply a staged update, and decide
+/// whether a trial has failed.
 fn before_start(home: &Home) -> Result<()> {
+    before_start_with(home, package_agent().as_deref())
+}
+
+fn before_start_with(home: &Home, package: Option<&Path>) -> Result<()> {
+    if let Err(e) = supersede(home, package) {
+        eprintln!("oarbank-launcher: could not compare the agent with the installed package's: {e:#}");
+    }
     let Some(mut up) = home.read_upgrade() else { return Ok(()) };
     match up["state"].as_str() {
         Some("staged") => {
@@ -291,6 +348,10 @@ fn run_once(home: &Home, args: &[String]) -> Result<std::process::ExitStatus> {
     for (k, v) in runtime_env() {
         cmd.env(k, v);
     }
+    // the installed package's agent, which the agent reports and never self-updates below (nodeupdate.rs)
+    if let Some(p) = package_agent() {
+        cmd.env("OARBANK_PACKAGE_AGENT", p);
+    }
     let mut child = cmd.spawn()?;
     CHILD.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
     let st = child.wait();
@@ -407,5 +468,97 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Some("service-main") => svc::service_main(home, rest[1..].to_vec()),
         _ => bail!("usage: oarbank-launcher --home <dir> install <binary> | current | run [agent args...] | service ... | setup ... | remove ..."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(version: &str) -> Vec<u8> {
+        [&b"\x7fELF...."[..], format!("oarbank-agent-version:{version}\0").as_bytes(), b"rest"].concat()
+    }
+
+    /// An agent home whose `current` runs `version` (installed as `install` names it), and a package's agent beside.
+    fn world(current: &str, package: &str) -> (tempfile::TempDir, Home, PathBuf) {
+        let tmp = tempfile::Builder::new().prefix("oarbank-launcher-supersede-").tempdir().unwrap();
+        let home = Home(tmp.path().join("agent"));
+        std::fs::create_dir_all(&home.0).unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("channel-agent"), [agent(current), b"channel".to_vec()].concat()).unwrap();      // another sha
+        install(&home, &bin.join("channel-agent")).unwrap();
+        let pkg = bin.join("oarbank-agent");
+        std::fs::write(&pkg, agent(package)).unwrap();
+        (tmp, home, pkg)
+    }
+
+    fn running(home: &Home) -> String {
+        version_at(home, &home.current_target().unwrap()).unwrap()
+    }
+
+    /// The live 2.10.3 -> 2.10.4 case: a channel build from before the fleet release keeps `current`; the launcher's next
+    /// start runs the package's agent instead.
+    #[test]
+    fn an_older_channel_build_in_current_gives_way_to_the_packages_agent() {
+        let (_t, home, pkg) = world("2.10.3", "2.10.4");
+        assert_eq!(running(&home), "2.10.3");
+        before_start_with(&home, Some(&pkg)).unwrap();
+        assert_eq!(running(&home), "2.10.4");
+        assert_eq!(std::fs::read(home.current_bin()).unwrap(), agent("2.10.4"));
+        before_start_with(&home, Some(&pkg)).unwrap();                  // and stays
+        assert_eq!(running(&home), "2.10.4");
+    }
+
+    #[test]
+    fn a_staged_build_older_than_the_package_is_refused_and_never_started() {
+        let (_t, home, pkg) = world("2.10.4", "2.10.4");
+        let old = install(&home, &{
+            let p = home.0.join("old");
+            std::fs::write(&p, agent("2.10.3")).unwrap();
+            p
+        }).unwrap();
+        install(&home, &pkg).unwrap();
+        home.write_upgrade(&json!({"state": "staged", "target": format!("{old}/oarbank-agent{}", std::env::consts::EXE_SUFFIX),
+                                   "sha256": "ab", "version": "2.10.3"})).unwrap();
+        before_start_with(&home, Some(&pkg)).unwrap();
+        let up = home.read_upgrade().unwrap();
+        assert_eq!(up["state"], "failed");
+        assert!(up["error"].as_str().unwrap().contains("older than the installed package's agent 2.10.4"), "{up}");
+        assert_eq!(running(&home), "2.10.4");
+    }
+
+    /// A channel build newer than the package (promoted after it) still updates the node, on trial as before.
+    #[test]
+    fn a_newer_channel_build_still_updates_and_an_equal_one_is_left_alone() {
+        let (_t, home, pkg) = world("2.10.4", "2.10.4");
+        let newer = install(&home, &{
+            let p = home.0.join("new");
+            std::fs::write(&p, agent("2.10.5")).unwrap();
+            p
+        }).unwrap();
+        install(&home, &pkg).unwrap();
+        home.write_upgrade(&json!({"state": "staged", "target": format!("{newer}/oarbank-agent{}", std::env::consts::EXE_SUFFIX),
+                                   "sha256": "cd", "version": "2.10.5"})).unwrap();
+        before_start_with(&home, Some(&pkg)).unwrap();
+        assert_eq!(home.read_upgrade().unwrap()["state"], "trial");
+        assert_eq!(running(&home), "2.10.5");
+        before_start_with(&home, Some(&pkg)).unwrap();                  // on trial: the package does not interrupt it
+        assert_eq!(running(&home), "2.10.5");
+        // a channel build of the package's own version (another sha) is not replaced either
+        let (_t2, home2, pkg2) = world("2.10.4", "2.10.4");
+        let before = home2.current_target();
+        before_start_with(&home2, Some(&pkg2)).unwrap();
+        assert_eq!(home2.current_target(), before);
+    }
+
+    #[test]
+    fn without_a_package_agent_nothing_changes() {
+        let (_t, home, pkg) = world("2.10.3", "2.10.4");
+        before_start_with(&home, None).unwrap();
+        assert_eq!(running(&home), "2.10.3");
+        std::fs::write(&pkg, b"not an agent").unwrap();
+        before_start_with(&home, Some(&pkg)).unwrap();
+        assert_eq!(running(&home), "2.10.3");
     }
 }

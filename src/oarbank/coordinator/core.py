@@ -480,6 +480,11 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
              " WHERE node_id=?", (t, json.dumps(tel), json.dumps(cap),
                                   json.dumps(body.get("ready_datasets") or jl(node["ready_datasets_json"], [])),
                                   clock_offset(body, t, node.get("clock_offset_s")), nid))
+        # an agent after 2.10.4 says which version it runs on every heartbeat, not only in its hello
+        hv = body.get("agent_version")
+        if isinstance(hv, str) and hv != node.get("agent_version") and fleetupdates.vkey(hv):
+            db.x("UPDATE nodes SET agent_version=? WHERE node_id=?", (hv, nid))
+            node = {**node, "agent_version": hv}
         last = db.one("SELECT MAX(ts) m FROM node_samples WHERE node_id=?", (nid,))
         if not last or not last["m"] or t - last["m"] >= C.SAMPLE_EVERY:
             busy = db.one("SELECT COUNT(*) n FROM attempts WHERE node_id=? AND state='live'", (nid,))["n"]

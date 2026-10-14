@@ -937,6 +937,62 @@ def test_operator_actions(db, tmp_path):
         run_op(db, "updates.pause", "ro_nope")
 
 
+def test_a_fleet_release_supersedes_the_agent_channel_and_nothing_downgrades_the_node_after(db, tmp_path):
+    """The live 2.10.3 -> 2.10.4 update: the owner had pushed the old agent through the agent-only channel. Starting the
+    rollout retires that build, and once a node installed the release its heartbeats carry no agent_update (it used to
+    get the old channel build back: "-> 2.10.3 (channel build): draining")."""
+    from oarbank.coordinator import agentbuilds
+    from test_agent_selfupdate import agent_bytes
+    a = node(db, "a")
+    staged_sha = agentbuilds.stage(agent_bytes(OLD))["sha256"]
+    old = run_op(db, "agent.upload", None, {"sha256": staged_sha})["result"]["sha256"]
+    run_op(db, "agent.canary", old, {"nodes": ["a"]})
+    core.heartbeat(db, fresh(db, a), {"attempts": [], "agent_build": old})
+    run_op(db, "agent.promote", "agent", {"platform": "darwin-arm64"})
+    assert agentbuilds.channel(db, "darwin-arm64")["current"] == old
+    imported(db, tmp_path)
+    start(db)
+    assert agentbuilds.channel(db, "darwin-arm64")["current"] is None
+    assert db.q("SELECT kind FROM events WHERE kind='agent_build_retired'")
+    staged(db, a)
+    tick(db)
+    install_on(db, a)
+    reply = core.heartbeat(db, fresh(db, a), {"attempts": [], "agent_build": "e" * 64, "install": INSTALL})
+    assert reply["node_update"] is None and reply["agent_update"] is None
+    # even a channel that still held the old build (a coordinator from before this rule) assigns it to no updated node
+    db.x("UPDATE agent_channel SET current=? WHERE platform='darwin-arm64'", (old,))
+    assert core.heartbeat(db, fresh(db, a), {"attempts": [], "agent_build": "e" * 64})["agent_update"] is None
+    with pytest.raises(core.ApiError, match=f"older than fleet release {NEW}"):
+        run_op(db, "agent.canary", old, {"nodes": ["a"]})
+
+
+def test_a_node_that_falls_back_below_a_done_rollout_takes_the_release_again(db, tmp_path):
+    """A node the rollout updated that later runs an older agent (the old channel build took it down before this fix,
+    or someone installed an older package) is not left staged without `go` forever: the done rollout's catch-up takes
+    it to the release again."""
+    a = node(db, "a")
+    imported(db, tmp_path)
+    start(db)
+    staged(db, a)
+    tick(db)
+    install_on(db, a)
+    heartbeats(db, a)
+    tick(db)
+    rid = db.one("SELECT rollout_id FROM rollouts")["rollout_id"]
+    assert db.one("SELECT state FROM rollouts")["state"] == "done" and rn(db, a, rid)["state"] == "done"
+    hello(db, a, OLD)                                                # fell back
+    tick(db, a)
+    m = rn(db, a, rid)
+    assert m["state"] == "pending" and "fell back to agent" in m["error"]
+    assert db.q("SELECT 1 FROM events WHERE kind='rollout_node_fell_back'")
+    staged(db, a)
+    tick(db, a)
+    assert directive(db, a)["go"] is True
+    install_on(db, a)
+    assert rn(db, a, rid)["state"] == "done"
+    ok(db)
+
+
 def test_a_newer_release_supersedes_a_rollout(db, tmp_path):
     a = node(db, "a")
     imported(db, tmp_path, MID)

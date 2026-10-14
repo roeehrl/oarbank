@@ -94,6 +94,8 @@ def node(r, nid: str, now: float, manifest_for: Callable[[str], object]) -> dict
         "node": {"node_id": n["node_id"], "hostname": n["hostname"], "platform": platforms.node_platform(n),
                  "lifecycle": n["lifecycle"], "desired_state": n["desired_state"], "online": bool(hb and now - hb < C.OFFLINE_AFTER),
                  "agent_version": n.get("agent_version"), "agent_behind": agentbuilds.behind(n),
+                 # the running build beside the installed package's agent (they differ after an agent-only update)
+                 "agent_build": n.get("agent_build"), "agent_package": agentbuilds.package_floor(n),
                  "quarantine_reason": n.get("quarantine_reason")},
         "modules": {m: {"state": st.get("state"), "reason": st.get("reason")} for m, st in sorted(mods.items())},
         "doctor": doctor(doc), "gpu": gpu(facts, doc), "containers": (facts.get("containers") or None),

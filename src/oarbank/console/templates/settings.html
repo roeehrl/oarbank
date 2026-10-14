@@ -137,12 +137,13 @@ The mode is in Node defaults above.</p>
 <div class="card wide" id="releases">
   <div class="row"><b>Releases</b><span class="sp"></span>{% if modules_enabled %}{{ m.op_form("releases.build", "release", "Build releases", confirm="Build each fleet platform's release from the enabled modules? Nodes get a release once it is signed and promoted.") }}{% endif %}</div>
   {% if not modules_enabled %}<div class="small mut">None yet: a release is the bundle of the enabled modules; <a href="/modules">install and enable a module</a> first.</div>{% endif %}
-  <div class="small mut">After a module is enabled or changed, each platform's release waits for your signature:
-    <span class="mono">oarbank release sign &lt;release&gt; --promote</span>, run where the owner key is.</div>
+  <div class="small mut">After a module is enabled or changed, each platform's release that holds module code waits for
+    your signature: <span class="mono">oarbank release sign &lt;release&gt; --promote</span>, run where the owner key is.
+    A platform none of the enabled modules runs on gets an empty release, which needs no signature.</div>
   {{ m.release_banner(releases_awaiting) }}
   <table class="small"><tr><th>release</th><th>platform</th><th>status</th><th>contents</th><th>built</th><th class="actions"><span class="sr-only">actions</span></th></tr>
   {% for r in releases %}<tr><td class="mono nowrap">{{ r.release_id }}</td><td class="mono nowrap">{{ r.platform }}</td><td>{{ r.status }}
-    {% if r.awaiting %}<span class="chip warn" title="{{ r.awaiting.command }}">needs your signature</span>{% elif not r.signed and r.status != 'current' %}<span class="chip">unsigned</span>{% endif %}</td><td class="mono">{{ r.modules | join(', ') if r.modules else '(no module)' }}</td><td class="mut nowrap">{{ r.created_at | ago }}</td>
+    {% if r.awaiting %}<span class="chip warn" title="{{ r.awaiting.command }}">needs your signature</span>{% elif not r.signed and r.status != 'current' %}<span class="chip">unsigned</span>{% endif %}</td><td class="mono">{{ r.modules | join(', ') if r.modules else '(no module)' }}{% if not r.modules %} <span class="chip" title="an empty release carries no code, so nodes install it without the owner's signature">no signature needed</span>{% endif %}</td><td class="mut nowrap">{{ r.created_at | ago }}</td>
   <td class="actions">{% if r.awaiting %}<code class="small">{{ r.awaiting.command }}</code>{% endif %}
     {% if r.status != 'current' %}{{ m.op_form("releases.promote", r.release_id, "Promote…") }}{% endif %}
     <details class="small"><summary>signature</summary>

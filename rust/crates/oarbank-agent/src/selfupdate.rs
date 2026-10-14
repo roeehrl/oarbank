@@ -80,6 +80,12 @@ pub fn version_marker(data: &[u8]) -> Option<String> {
     None
 }
 
+/// Why an agent-only build of `version` may not replace this agent: it is older than the installed package's agent.
+pub fn superseded(version: &str, package: Option<String>) -> Option<String> {
+    package.filter(|pv| oarbank_core::fleet::newer(pv, version))
+        .map(|pv| format!("agent build {version} is older than the installed package's agent {pv}: the package supersedes it"))
+}
+
 impl SelfUpdate {
     pub fn open(l: &Layout) -> Self {
         let exe = std::env::current_exe().ok();
@@ -146,6 +152,12 @@ impl SelfUpdate {
             return false;
         }
         if self.refused.get(&sha).is_some_and(|until| now() < *until) {
+            return false;
+        }
+        // the installed package supersedes every older agent-only build: never downgrade below it (the launcher refuses
+        // such a build too); not remembered, as the package may later be rolled back below it
+        if let Some(error) = superseded(d["version"].as_str().unwrap_or(""), crate::nodeupdate::package_version()) {
+            self.state = json!({"state": "failed", "target": sha, "version": d["version"], "error": error, "at": now()});
             return false;
         }
         self.state = json!({"state": "staging", "target": sha, "version": d["version"], "at": now()});
@@ -237,5 +249,16 @@ mod tests {
         assert!(binary_platform(b"#!/bin/sh\n").is_none());
         let fake = [&b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01"[..], b"oarbank-agent-version:upgrade.json", b"....oarbank-agent-version:9.1.2\0"].concat();
         assert_eq!((binary_platform(&fake).as_deref(), version_marker(&fake).as_deref()), (Some("darwin-arm64"), Some("9.1.2")));
+    }
+
+    /// A channel build never takes a node below its installed package's agent; newer ones, and nodes without a
+    /// package, update as before.
+    #[test]
+    fn a_build_older_than_the_installed_package_is_superseded() {
+        let why = superseded("2.10.3", Some("2.10.4".into())).unwrap();
+        assert!(why.contains("older than the installed package's agent 2.10.4"), "{why}");
+        assert_eq!(superseded("2.10.4", Some("2.10.4".into())), None);
+        assert_eq!(superseded("2.10.5", Some("2.10.4".into())), None);
+        assert_eq!(superseded("2.10.3", None), None);
     }
 }

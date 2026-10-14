@@ -56,13 +56,14 @@
 {% endif %}
 {%- endmacro %}
 
-{# Releases waiting for the owner's signature (releases.awaiting): nothing new reaches those nodes until the owner signs
-   each one offline with the owner key. Shown on the Fleet, Modules and Settings pages. #}
+{# Releases waiting for the owner's signature (releases.awaiting): no new module code reaches those nodes until the owner
+   signs each one offline with the owner key. An empty release (no module for its platform) needs no signature and is
+   never listed. Shown on the Fleet, Modules and Settings pages. #}
 {% macro release_banner(items) -%}
 {% if items %}<div class="flash warn release-wait" role="status"><b>{{ items | length }} release{{ 's' if items | length != 1 }} waiting for your signature.</b>
-  Nodes get nothing new until you sign {{ 'them' if items | length != 1 else 'it' }}: run on the machine that holds the owner key
+  Their nodes get no new module code until you sign {{ 'them' if items | length != 1 else 'it' }}: run on the machine that holds the owner key
   <ul class="small">{% for a in items %}<li><span class="mono">{{ a.release_id }}</span> for {{ a.platform }}:
-    <span class="mono">{{ a.modules | join(', ') if a.modules else 'no module' }}</span> ({% if a.kind == 'node' %}the canary or pinned node{{ 's' if a.nodes | length != 1 }} {{ a.nodes | join(', ') }}{% else %}{{ a.nodes | length }} node{{ 's' if a.nodes | length != 1 }}{% endif %}):
+    <span class="mono">{{ a.modules | join(', ') }}</span> ({% if a.kind == 'node' %}the canary or pinned node{{ 's' if a.nodes | length != 1 }} {{ a.nodes | join(', ') }}{% else %}{{ a.nodes | length }} node{{ 's' if a.nodes | length != 1 }}{% endif %}):
     <code class="mono">{{ a.command }}</code></li>{% endfor %}</ul>
   <span class="small"><a href="/settings#releases">Releases in Settings</a></span></div>{% endif %}
 {%- endmacro %}

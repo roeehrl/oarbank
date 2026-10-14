@@ -654,8 +654,11 @@ def _clean_install(inst) -> dict | None:
     if not isinstance(inst, dict):
         return None
     fmt = inst.get("format") if inst.get("format") in (*PACKAGE_FORMATS, "dev") else None
+    pv = inst.get("package_version")
     return {"format": fmt, "scope": inst.get("scope") if inst.get("scope") in ("system", "personal") else None,
-            "updater": inst.get("updater") is True, "why": str(inst["why"])[:300] if inst.get("why") else None}
+            "updater": inst.get("updater") is True, "why": str(inst["why"])[:300] if inst.get("why") else None,
+            # the installed package's agent (agents after 2.10.4), which the agent-only channel never goes below (agentbuilds.py)
+            "package_version": pv if isinstance(pv, str) and len(pv) <= 64 and vkey(pv) else None}
 
 
 def observe(db: DB, node: dict, body: dict, heartbeat: bool = True):

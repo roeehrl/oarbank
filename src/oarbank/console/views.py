@@ -935,15 +935,10 @@ def agent_builds(r) -> dict:
     chans = {c["platform"]: {"current": c.get("current"), "previous": c.get("previous"), "canary": c.get("canary"),
                              "canary_nodes": jl(c.get("canary_nodes_json"), []) or []}
              for c in r.q("SELECT * FROM agent_channel ORDER BY platform")}
-    nodes = []
-    for n in r.q("SELECT node_id, hostname, platform, agent_version, agent_build, agent_update_json, last_heartbeat_at FROM nodes "
-                 "WHERE lifecycle NOT IN ('retired') ORDER BY hostname"):
-        ch = chans.get(n["platform"]) or {"current": None, "canary": None, "canary_nodes": []}
-        assigned = ch["canary"] if ch["canary"] and n["node_id"] in ch["canary_nodes"] else ch["current"]
-        behind = agentbuilds.behind(n)
-        nodes.append({**n, "update": jl(n["agent_update_json"], {}) or {}, "assigned": assigned,
-                      "assigned_version": ver.get(assigned), "canary": n["node_id"] in ch["canary_nodes"], "behind": behind,
-                      "up_to_date": (assigned is None or n["agent_build"] == assigned) and not (assigned is None and behind)})
+    from ..coordinator import platforms
+    # what each node runs, its installed package's agent, and its channel build unless the package supersedes it
+    nodes = [agentbuilds.node_view(n, chans.get(platforms.node_platform(n)), ver)
+             for n in r.q(f"SELECT {agentbuilds.NODE_COLUMNS} FROM nodes WHERE lifecycle NOT IN ('retired') ORDER BY hostname")]
     for plat, ch in chans.items():
         ch["ready"] = bool(ch["canary"]) and all(n["agent_build"] == ch["canary"] for n in nodes if n["canary"] and n["platform"] == plat)
     return {"builds": builds, "channels": chans, "versions": ver, "nodes": nodes}

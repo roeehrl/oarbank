@@ -477,11 +477,25 @@ def cmd_agent(a):
         for b in v["builds"]:
             signed = f"  signed seq {b['seq']}" if b.get("signature") else ""
             print(f"  {b['version']:<10} {b['sha256'][:12]}  {', '.join(b['platforms']):<28} {b['size'] // 1024} KB  by {b['uploaded_by']}{signed}")
+        if v.get("fleet_floor"):
+            print(f"fleet release {v['fleet_floor']}: channel builds older than it are retired")
         for n in v["nodes"]:
             u = n["update"]
-            state = "up to date" if n["up_to_date"] else f"-> {name(n['assigned'])}: {u.get('state') or 'pending'}"
+            floor = n.get("floor") or {}
+            if n.get("runs_older_than_package"):
+                state = n["runs_older_than_package"]
+            elif n["up_to_date"]:
+                state = "up to date"
+            elif n.get("assigned"):
+                state = f"-> {name(n['assigned'])} (channel build): {u.get('state') or 'pending'}"
+            else:
+                state = "no agent build assigned"
             err = f" ({u['error'][:80]})" if u.get("error") and not n["up_to_date"] else ""
-            print(f"  {n['hostname']:<22} runs {n['agent_version'] or '?':<8} {(n['agent_build'] or '')[:12]:<12}  {state}{err}")
+            # the installed package's agent beside the build that runs: they differ after an agent-only update
+            pkg = f"package {floor['version']:<8}" if floor.get("version") else f"package {'?':<8}"
+            print(f"  {n['hostname']:<22} runs {n['agent_version'] or '?':<8} {(n['agent_build'] or '')[:12]:<12}  {pkg}  {state}{err}")
+            if n.get("superseded"):
+                print(f"  {'':<22} {n['superseded']}")
         for plat, rd in sorted((v.get("readiness") or {}).items()):
             print(f"promote {plat} ready: {rd['ready']}  {rd['canary_nodes']}")
         return
@@ -917,6 +931,8 @@ def node_show(target: str, as_json: bool = False):
           + (f" QUARANTINED: {n['quarantine_reason']}" if n["quarantine_reason"] else ""))
     if n.get("agent_behind"):
         print(f"  update: {n['agent_behind']['text']}")
+    if n.get("agent_package"):
+        print(f"  agent: runs {n['agent_version'] or '?'} ({(n.get('agent_build') or '?')[:12]}); package: {n['agent_package']['text']}")
     if d.get("why"):
         print(f"  why: {d['why']['line']}")
     for m, st in d["modules"].items():
@@ -1699,7 +1715,7 @@ def cmd_release(a):
     if a.action == "build":
         out = run_op("releases.build", None, **ask)["result"]
         for r in out["releases"]:
-            print(f"{r['platform']:<15} {r['release_id']:<16} {r['status']:<9} {', '.join(r.get('modules') or []) or '(no module)'}"
+            print(f"{r['platform']:<15} {r['release_id']:<16} {r['status']:<9} {', '.join(r.get('modules') or []) or '(no module: needs no signature)'}"
                   + ("  waiting for your signature" if r["needs_signature"] else ""))
         unsigned = [r for r in out["releases"] if r["needs_signature"]]
         if unsigned:
@@ -1729,7 +1745,7 @@ def cmd_release(a):
         for r in rels:
             print(f"{r['release_id']:<16} {r.get('platform') or '-':<15} {r['status']:<9} {r['seq'] or '-':<4} "
                   f"{'signed' if r['signed'] else 'UNSIGNED':<8} {time.strftime('%m-%d %H:%M', time.localtime(r['created_at'])):<11} "
-                  f"{', '.join(r.get('modules') or []) or '(no module)'}"
+                  f"{', '.join(r.get('modules') or []) or '(no module: needs no signature)'}"
                   + ("  <- waiting for your signature" if r.get("awaiting") else ""))
         _print_awaiting([r["awaiting"] for r in rels if r.get("awaiting")], key)
 
@@ -1753,10 +1769,11 @@ def _print_awaiting(items: list, key) -> None:
     """The releases only the owner can let through, each with the command that does it."""
     if not items:
         return
-    print(f"\n{len(items)} release{'s' if len(items) != 1 else ''} waiting for your signature (nodes get nothing new until then):")
+    print(f"\n{len(items)} release{'s' if len(items) != 1 else ''} waiting for your signature (their nodes get no new module "
+          "code until then; an empty release, for a platform no module runs on, never waits):")
     for w in items:
         who = f"nodes {', '.join(w['nodes'])}" if w["kind"] == "node" else f"{len(w['nodes'])} {w['platform']} node(s)"
-        holds = ", ".join(w.get("modules") or []) or "no module"
+        holds = ", ".join(w.get("modules") or [])
         print(f"  {w['platform']:<15} {w['release_id']:<16} {holds}, for {who}\n    {w['command']}")
     if key is not None and not Path(key).exists():
         print(f"  (run these on the machine that holds the owner key; there is none at {key})")

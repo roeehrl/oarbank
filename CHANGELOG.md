@@ -24,6 +24,16 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Fixed
 
+- **A platform no module runs on no longer waits for the owner's signature.** With release signing on, a platform
+  none of the enabled modules runs on (a Windows PC when the only module is macOS-only) got a release with no module
+  that waited for the owner to sign it: its nodes never became ready, the console showed "1 release waiting for your
+  signature" and the `release_awaiting_owner` alert opened, and every module change built that empty release again for
+  another signature. The signature exists so nodes run only code the owner approved, and an empty release carries
+  none, so it now needs no signature: oarbankd makes it current at once and its nodes are ready with no module. The
+  agent installs an unsigned release only after checking it holds no module, no tool definition and no other file, and
+  still refuses any release with module code that is not signed. After the upgrade, empty releases still waiting are
+  retired, replaced and their alerts resolved; there is nothing to sign. Agents older than this change refuse the
+  unsigned empty release until they update.
 - **A freshly installed node pins its update trust when it joins.** The package pinned the fleet's owner keys at
   install time, before a fresh node had joined and had any, so `oarbank update plan` showed "no update trust is
   pinned" for it. Upgraded nodes were not affected. Joining as an administrator now leaves the pin pending: with

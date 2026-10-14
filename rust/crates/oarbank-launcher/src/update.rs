@@ -57,14 +57,9 @@ pub fn default_prefix() -> PathBuf {
     }
 }
 
-/// Where each package format installs the node's agent (scripts/package-*.sh, deploy/windows/oarbank-agent.wxs).
+/// Where each package format installs the node's agent (oarbank-core's `fleet::package_agent`).
 pub fn package_agent(format: &str) -> Option<PathBuf> {
-    match format {
-        "pkg" => Some(PathBuf::from("/Library/Oarbank/bin/oarbank-agent")),
-        "deb" | "rpm" => Some(PathBuf::from("/usr/lib/oarbank/oarbank-agent")),
-        "msi" => Some(default_prefix().join("oarbank-agent.exe")),
-        _ => None,
-    }
+    fleet::package_agent(format)
 }
 
 /// How this machine's node package was installed: macOS pkg, Windows MSI, a deb or rpm (the package database owns the
