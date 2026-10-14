@@ -95,9 +95,25 @@ pub fn is_efficiency_level(name: &str) -> bool {
     name.trim().eq_ignore_ascii_case("efficiency")
 }
 
-/// The level names macOS is known to report; any other is counted as a full core and logged once (`sysinfo`).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const KNOWN_LEVELS: [&str; 3] = ["Super", "Performance", "Efficiency"];
+/// The level names macOS is known to report (a macOS VM has one `Standard` level); any other is counted as a full core
+/// and logged once by the running agent (`warn_unknown_levels`).
+const KNOWN_LEVELS: [&str; 4] = ["Super", "Performance", "Efficiency", "Standard"];
+
+/// The facts' `cpu.levels` names that are not known (KNOWN_LEVELS): counted as full cores.
+pub fn unknown_levels(cpu: &Value) -> Vec<String> {
+    cpu["levels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str())
+        .filter(|n| !KNOWN_LEVELS.iter().any(|k| k.eq_ignore_ascii_case(n.trim()))).map(str::to_string).collect()
+}
+
+/// Logs, once per run, the core classes the facts name that are not known yet. Called by the running agent, never
+/// while collecting facts, so `oarbank-agent facts` prints JSON only.
+pub fn warn_unknown_levels(cpu: &Value) {
+    let unknown = unknown_levels(cpu);
+    if !unknown.is_empty() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| tracing::warn!(levels = ?unknown, "unknown Apple silicon core class: counted as full cores"));
+    }
+}
 
 /// The cores of a Mac, by class: `perf` counts every full core and `eff` the efficiency cores; `levels` lists Apple
 /// silicon's performance levels as macOS names them (perflevel0 first), for the console's breakdown.
@@ -249,11 +265,7 @@ pub fn windows_cores(buf: &[u8]) -> Option<(u64, u64)> {
 
 #[cfg(target_os = "macos")]
 fn sysinfo() -> SysInfo {
-    let MacCores { perf, eff, levels, unknown } = mac_cores(&mac_levels(), sysctl_u64("hw.physicalcpu"));
-    if !unknown.is_empty() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| tracing::warn!(levels = ?unknown, "unknown Apple silicon core class: counted as full cores"));
-    }
+    let MacCores { perf, eff, levels, .. } = mac_cores(&mac_levels(), sysctl_u64("hw.physicalcpu"));
     SysInfo { os_version: sysctl_string("kern.osproductversion"), os_build: sysctl_string("kern.osversion"),
               kernel: sysctl_string("kern.osrelease"), model: sysctl_string("machdep.cpu.brand_string"),
               perf, eff, levels, logical: sysctl_u64("hw.logicalcpu"), mem: sysctl_u64("hw.memsize"), ..Default::default() }
@@ -599,6 +611,14 @@ mod cores_tests {
                    json!({"model": "Apple M5 Max", "perf_cores": 18, "eff_cores": 0, "logical": 18,
                           "levels": [{"name": "Super", "cores": 6}, {"name": "Performance", "cores": 12}]}));
         assert_eq!(cpu_facts(None, Some(8), Some(4), &[], Some(20))["levels"], Value::Null);
+        // the names the running agent logs: none for known ones (a macOS VM's `Standard`), the rest by name
+        let vm = mac_cores(&levels(&[("Standard", 3)]), Some(3));
+        assert_eq!((vm.perf, vm.eff), (Some(3), Some(0)));
+        assert!(vm.unknown.is_empty());
+        assert!(unknown_levels(&cpu_facts(None, vm.perf, vm.eff, &vm.levels, Some(3))).is_empty());
+        let new = mac_cores(&levels(&[("Ultra", 4), ("Efficiency", 4)]), Some(8));
+        assert_eq!(unknown_levels(&cpu_facts(None, new.perf, new.eff, &new.levels, Some(8))), vec!["Ultra".to_string()]);
+        assert!(unknown_levels(&json!({"levels": null})).is_empty());
     }
 
     #[test]
