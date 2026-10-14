@@ -477,11 +477,19 @@ def test_a_grant_between_the_canary_and_its_release_runs_the_version_the_node_ru
 
 # ------------------------------------------------------------------ a module turned off on one node
 
-def test_a_module_turned_off_on_a_node_never_certifies_there(db):
+@pytest.fixture
+def fake_clock():
+    from oarbank.coordinator import clock
+    clock.set_fake(1_900_000_000.0)
+    yield clock
+    clock.set_fake(None)                 # never leak a frozen clock into the next test on this worker
+
+
+def test_a_module_turned_off_on_a_node_never_certifies_there(db, fake_clock):
     """`[relay] enabled` off for one node: after a new version reaches it (a canary here; a promotion alike) the module is
     `disabled` there, not `certifying`. It gets no golden jobs, raises no certifying_stuck, and an earlier stuck alert
     resolves. Turned on again, it re-certifies on the version its release carries."""
-    from oarbank.coordinator import clock
+    clock = fake_clock
     n = certify(db, enrolled_node(db, "canary")[1])
     modstore.install(db, bundle_of(relay_version("1.1.0")), self_test=False)
     planned(db, "modules.enable_canary", "relay@1.1.0", {"nodes": [n["node_id"]]})
