@@ -2,17 +2,15 @@
 operation endpoint. Runs a real oarbankd admin API on a loopback port and drives the console over HTTP."""
 import json
 import re
-import socket
 import threading
 import time
 from urllib.parse import unquote
 
 import pytest
-import uvicorn
 from fastapi.testclient import TestClient
 
 from helpers import sign_in, create_study, release_id, PARAMS, certify, enrolled_node, fresh, make_db
-from helpers import node_settings, put_node, set_fleet, set_node
+from helpers import node_settings, put_node, set_fleet, set_node, ServerThread
 from oarbank.console.app import console_app
 from oarbank.console.state import ConsoleState, wait_for_schema
 from oarbank.coordinator import app as coord_app
@@ -20,29 +18,8 @@ from oarbank.coordinator import app as coord_app
 SECRET = "s3cret-for-tests"
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class Server:
-    def __init__(self, app):
-        self.port = free_port()
-        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error"))
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
-
-    def __enter__(self):
-        self.thread.start()
-        for _ in range(100):
-            if self.server.started:
-                return self
-            time.sleep(0.05)
-        raise RuntimeError("server did not start")
-
-    def __exit__(self, *a):
-        self.server.should_exit = True
-        self.thread.join(5)
+class Server(ServerThread):
+    """oarbankd's admin API (or any app) on a loopback port for the length of a `with` block."""
 
 
 @pytest.fixture

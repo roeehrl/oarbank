@@ -2,52 +2,28 @@
 then identified only by its client certificate; renewal rotates it; retiring the node revokes it."""
 import base64
 import json
-import socket
 import ssl
-import threading
-import time
 
 import httpx
 import pytest
-import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.x509.oid import NameOID
 
-from helpers import FACTS, make_db, node_key_and_csr
+from helpers import FACTS, ServerThread, make_db, node_key_and_csr
 from oarbank.coordinator import app as coord_app, core, identity, tlsca
 from oarbank.coordinator.tlsproto import PeerCertH11
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+class TLSServer(ServerThread):
+    """The agent API over mutual TLS on a loopback port for the length of a `with` block."""
 
-
-class TLSServer:
     def __init__(self, db):
         home = db.root
         tlsca.ensure_ca(home, identity.fleet_id(db))
-        self.port = free_port()
-        cfg = uvicorn.Config(coord_app.agent_app(db), host="127.0.0.1", port=self.port, http=PeerCertH11,
-                             log_level="error", **tlsca.server_context(home, ["127.0.0.1"]))
-        self.server = uvicorn.Server(cfg)
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        super().__init__(coord_app.agent_app(db), http=PeerCertH11, **tlsca.server_context(home, ["127.0.0.1"]))
         self.url = f"https://127.0.0.1:{self.port}"
-
-    def __enter__(self):
-        self.thread.start()
-        for _ in range(200):
-            if self.server.started:
-                return self
-            time.sleep(0.025)
-        raise RuntimeError("server did not start")
-
-    def __exit__(self, *a):
-        self.server.should_exit = True
-        self.thread.join(5)
 
 
 def client(tmp_path, ca_pem, cert_pem=None, key=None, name="n"):
