@@ -215,6 +215,62 @@ def test_an_upgrade_refreshes_the_system_service_and_a_per_user_coordinator_is_m
     assert out.returncode == 0 and out.stdout == '' and out.stderr == '', out
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX shell')
+def test_the_postinstall_pins_the_coordinators_update_trust_after_a_refresh_or_a_migration(tmp_path):
+    """A coordinator upgraded (or migrated from per-user) by the pkg gets its update runner's trust from its home's
+    owner keys while the administrator installs, unless one is pinned; the migration's pin runs once the services
+    answer (its copied database gets the owner anchors from the new build). fleet-updates.md, D58."""
+    mac = Mac(tmp_path)
+    build = mac.build()
+    (build / 'install-oarbankd.sh').write_text('#!/bin/bash\necho "installer $*"\n')
+    data = mac.root / 'Library/Application Support/Oarbank'
+    calls = tmp_path / 'coordupdate-calls'
+    coordupdate = mac.app_bin / 'oarbank-coordupdate'
+    coordupdate.write_text(f'#!/bin/sh\necho "$*" >> "{calls}"\nexit "${{PIN_EXIT:-0}}"\n')
+    coordupdate.chmod(0o755)
+    expected = f'trust --from-home --home {data}/coordinator --state {data}/coordinator-update'
+    mac.record.parent.mkdir(parents=True)
+    mac.record.write_text('{"format": "1"}\n')
+    # an upgrade of a system service with no home yet: nothing to pin from
+    out = mac.run()
+    assert out.returncode == 0 and out.stdout.splitlines() == [f'installer --refresh --installed {build}'] and not calls.exists(), out
+    # a home and no trust: pinned from it, after the refresh
+    (data / 'coordinator').mkdir()
+    (data / 'coordinator/oarbank.sqlite3').write_bytes(b'')
+    out = mac.run()
+    assert out.returncode == 0 and out.stdout.splitlines() == [f'installer --refresh --installed {build}',
+                                                               "Oarbank: the coordinator's update trust is pinned"], out
+    assert calls.read_text().splitlines() == [expected]
+    # no owner keys yet: the runner pins at the first update (coordupdate leaves the pin pending)
+    calls.unlink()
+    out = subprocess.run(['/bin/sh', str(mac.script)], env={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'PIN_EXIT': '1'},
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.splitlines()[-1] == \
+        "Oarbank: the coordinator has no owner keys yet; its update runner pins them at the first update", out
+    # pinned already: left alone
+    calls.unlink()
+    (data / 'coordinator-update').mkdir()
+    (data / 'coordinator-update/trust.json').write_text('{}')
+    assert mac.run().returncode == 0 and not calls.exists()
+    (data / 'coordinator-update/trust.json').unlink()
+    # a per-user coordinator migrated: the migration makes the record, then the trust is pinned
+    mac.record.unlink()
+    agents = mac.root / 'Users/owner/Library/LaunchAgents'
+    agents.mkdir(parents=True)
+    (agents / 'dev.codonic.oarbank.oarbankd.plist').write_text('<plist/>')
+    (mac.app_bin / 'oarbank').write_text(f'#!/bin/sh\necho "migrate $*"\necho "{{}}" > "{mac.record}"\n')
+    out = mac.run()
+    assert out.returncode == 0 and out.stdout.splitlines() == [
+        f'migrate coordinator migrate --run --from-installer --build {build}',
+        'Oarbank: the coordinator now runs as a system service', "Oarbank: the coordinator's update trust is pinned"], out
+    assert calls.read_text().splitlines() == [expected]
+    # a migration that waits for its owner pins nothing
+    calls.unlink()
+    mac.record.unlink()
+    (mac.app_bin / 'oarbank').write_text('#!/bin/sh\nexit 3\n')
+    assert mac.run().returncode == 0 and not calls.exists()
+
+
 # The coordinator's interpreter runs module code: it is signed with deploy/macos/python.entitlements (library validation
 # off, so the wheels modules install load under the hardened runtime; docs/release-signing.md, "macOS code signatures")
 CHECK_SIGNING = REPO / 'scripts/check-macos-signing.py'

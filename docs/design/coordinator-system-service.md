@@ -177,8 +177,12 @@ never rewrites what it runs. oarbankd only asks, and a runner of root's does the
   self-update runs the package's build, not the self-updated one.
 - **Its own state, root's.** `<system data>/coordinator-update/` (0700):
   - `trust.json`: the owner keys. `coordupdate trust --from-home` copies them from the home's owner anchors (or its
-    pinned release key) only when none are pinned; `install-oarbankd` runs it at every install and refresh, so a package
-    upgrade pins them once the owner has keys. `--unsigned` is an administrator's explicit choice for a test fleet.
+    pinned release key) only when none are pinned; `install-oarbankd` runs it at every install and refresh, and the
+    pkg's and deb/rpm's postinstall once more after a refresh or a migration (a migrated database may get its owner
+    anchors only when the new build opens it). A home with no owner keys yet leaves `pin-pending`, and the runner pins
+    from the home when the first update request comes. `--unsigned` is an administrator's explicit choice for a test
+    fleet. A refusal for want of trust names the build's own runner (`sudo "<build>/bin/oarbank-coordupdate" trust
+    --from-home`; on macOS the build is inside Oarbank Coordinator.app, on no PATH).
   - `journal.json`.
   - `db-<id>.sqlite3`, the restore point, which the coordinator's account cannot alter.
   - `logs/`.

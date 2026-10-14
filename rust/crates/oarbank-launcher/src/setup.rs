@@ -266,6 +266,19 @@ pub fn setup_with(explicit_home: Option<&Path>, o: &SetupOpts) -> Result<PathBuf
             st.run(&format!("loginctl enable-linger {a}"), || { let _ = sh(&["loginctl", "enable-linger", a]); Ok(()) })?;
         }
     }
+    // a system node told what to join (a code or an address, from an administrator: `oarbank-node join`, the join
+    // window, managed policy, the package's own variables): root's update runner pins the owner keys the agent pins
+    // when it joins (docs/design/fleet-updates.md, "Trust"); the package's own pin ran before the node had any
+    let joining = system && (o.code.is_some() || o.coordinator.is_some());
+    if joining {
+        st.run("leave the update trust's pin pending", || {
+            if let Err(e) = crate::update::arm(&home, &home.parent().unwrap_or(&home).join("update"), "joining as an administrator") {
+                eprintln!("warning: the update trust's pin could not be left pending: {e:#}; pin it once joined with: \
+                           {}", crate::update::TRUST_REMEDY);
+            }
+            Ok(())
+        })?;
+    }
     // OARBANK_SETUP_NO_SERVICE: the same without loading a service, for `oarbank-node join` in tests and image builds
     if o.no_service || std::env::var_os("OARBANK_SETUP_NO_SERVICE").is_some() {
         println!("agent arguments: run {}", agent_args.join(" "));
@@ -284,6 +297,10 @@ pub fn setup_with(explicit_home: Option<&Path>, o: &SetupOpts) -> Result<PathBuf
     svc.push("--".into());
     svc.extend(agent_args);
     crate::service(&crate::Home(home.clone()), &svc)?;
+    // the runner, started now, pins as soon as the agent has joined and has the owner keys
+    if joining && !st.dry && explicit_home.is_none() {
+        crate::update::kick_runner();
+    }
     Ok(home)
 }
 

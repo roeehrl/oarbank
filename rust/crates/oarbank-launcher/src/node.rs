@@ -328,7 +328,14 @@ fn join_inner(explicit_home: Option<&Path>, o: &Opts, out: &mut Out) -> Result<V
         let same = decoded.as_ref().map(|c| c.urls.iter().any(|u| u.trim_end_matches('/') == cur)).unwrap_or(false)
             || coordinator.as_deref().is_some_and(|u| u.trim_end_matches('/') == cur);
         if same && !o.has("--force") {
-            return Ok(json!({"message": format!("This machine has already joined {cur}."), "coordinator": cur, "already": true}));
+            let mut r = json!({"message": format!("This machine has already joined {cur}."), "coordinator": cur, "already": true});
+            // a node that joined before its update trust was pinned (2.10.3/2.10.4's fresh installs): pinned now
+            if scope == "system" {
+                let line = pin_update_trust(&home, Duration::ZERO);
+                r["update_trust"] = json!(line.0);
+                r["message"] = json!(format!("{}\n{}", r["message"].as_str().unwrap_or(""), line.1));
+            }
+            return Ok(r);
         }
         if !o.has("--force") {
             return Err(fail("E_ALREADY_JOINED", format!("This machine belongs to {cur}. Leave that fleet first (oarbank-node leave), or join with --force."), 7));
@@ -382,7 +389,40 @@ fn join_inner(explicit_home: Option<&Path>, o: &Opts, out: &mut Out) -> Result<V
                          "staged": true, "restart": restart}));
     }
     let wait_s: u64 = o.val("--wait").and_then(|w| w.parse().ok()).unwrap_or(180);
-    follow(&home, since, Duration::from_secs(wait_s), out, restart)
+    let mut joined = follow(&home, since, Duration::from_secs(wait_s), out, restart)?;
+    if scope == "system" {
+        let line = pin_update_trust(&home, Duration::from_secs(TRUST_WAIT_S));
+        joined["update_trust"] = json!(line.0);
+        joined["message"] = json!(format!("{}\n{}", joined["message"].as_str().unwrap_or(""), line.1));
+    }
+    Ok(joined)
+}
+
+/// How long a joined `oarbank-node join` waits for the agent's owner keys: the first directive after joining brings them.
+const TRUST_WAIT_S: u64 = 60;
+
+/// A system node that joined: root's update trust, pinned from the owner keys the agent pinned (docs/design/fleet-updates.md,
+/// "Trust"), once it has them. Setup left the pin pending and started the runner, which pins too; this says how it
+/// went: (pinned, already, pending or failed; the line for the person).
+fn pin_update_trust(home: &Path, wait: Duration) -> (&'static str, String) {
+    use crate::update::{self, FromAgent};
+    let state = home.parent().unwrap_or(home).join("update");
+    let started = Instant::now();
+    loop {
+        match update::pin_from_agent(home, &state, "oarbank-node join") {
+            Ok(FromAgent::Pinned(t) | FromAgent::Already(t)) if t.mode == oarbank_core::fleet::Mode::Signed => {
+                return ("pinned", format!("Update trust: owner key set version {}{}; fleet updates can install here.", t.owner_version,
+                                          t.fleet_id.as_deref().map(|f| format!(" of {f}")).unwrap_or_default()));
+            }
+            Ok(FromAgent::Pinned(_) | FromAgent::Already(_)) => return ("already", "Update trust: unsigned (pinned earlier).".into()),
+            Ok(FromAgent::NotYet) if started.elapsed() < wait => std::thread::sleep(Duration::from_millis(500)),
+            Ok(FromAgent::NotYet) => {
+                return ("pending", format!("Update trust: the agent has no owner keys yet; the update runner pins them when it has \
+                                            (or pin them with: {}).", update::TRUST_REMEDY));
+            }
+            Err(e) => return ("failed", format!("Update trust could not be pinned ({e:#}); pin it with: {}", update::TRUST_REMEDY)),
+        }
+    }
 }
 
 /// The install plan in a child process (`setup --join-code-stdin`): its own output (paths, the service manager's

@@ -305,10 +305,14 @@ def start(db: DB, version: str, actor: str, params: dict | None = None, auto: bo
     if p["refused"]:
         raise RolloutError("; ".join(p["refused"]))
     for r in db.q("SELECT * FROM rollouts WHERE state IN ('running','paused','halted','rolling_back','done')"):
+        if r["state"] == "halted" and stopped_at_the_coordinator(db, r):
+            continue
         if r["state"] in ("halted", "rolling_back") or (r["state"] in ("running", "paused") and not F.newer(version, r["version"])):
             raise RolloutError(f"rollout {r['rollout_id']} ({r['version']}) is {r['state']}: "
                                + ("resume, roll back or let it finish first" if r["state"] != "rolling_back" else "wait for it"))
-    for r in db.q("SELECT rollout_id FROM rollouts WHERE state IN ('running','paused','done')"):
+    for r in db.q("SELECT * FROM rollouts WHERE state IN ('running','paused','done','halted')"):
+        if r["state"] == "halted" and not stopped_at_the_coordinator(db, r):
+            continue
         db.x("UPDATE rollouts SET state='superseded', updated_at=? WHERE rollout_id=?", (t, r["rollout_id"]))
         db.event("rollout_superseded", actor=actor, reason=f"{r['rollout_id']} by {version}")
     rid = "ro_" + secrets.token_hex(6)
@@ -330,6 +334,23 @@ def start(db: DB, version: str, actor: str, params: dict | None = None, auto: bo
     core._resolve_alert(db, "update_available", f"release:{version}")
     _advance(db, row(db, rid), t)
     return view_rollout(db, rid)
+
+
+def stopped_at_the_coordinator(db: DB, r: dict) -> bool:
+    """A rollout halted in its coordinator ring with nothing installed by it: no node was told to install (its rings
+    never started), and the coordinator's own update is not under way. A new start supersedes it (`oarbank update
+    coordinator <version>` after the coordinator's update was refused) instead of asking for a rollback, which would
+    have every node reinstall the release it runs."""
+    if r["state"] != "halted" or r["ring"] != "coordinator" or r["kind"] != "update":
+        return False
+    if db.one("SELECT 1 FROM rollout_nodes WHERE rollout_id=? AND (go=1 OR state IN (?,?,?,?))",
+              (r["rollout_id"], "done", *BUSY)):
+        return False
+    busy = getattr(_coordself(), "busy", None)
+    try:
+        return not (busy and busy(db))
+    except Exception:
+        return False
 
 
 def _add_member(db: DB, rid: str, m: dict, version: str, t: float):
@@ -518,7 +539,8 @@ def _tick_one(db: DB, rid: str, t: float):
     if r["ring"] == "coordinator":
         if F.newer(r["version"], F.coordinator_version()):
             st = coordinator_state(db)
-            if st and st.get("version") == r["version"] and st.get("state") in ("rolled_back", "refused", "failed"):
+            if st and st.get("version") == r["version"] and st.get("state") in ("rolled_back", "refused", "failed") \
+                    and not ("coord_retry_of" in r["policy"] and st.get("update_id") == r["policy"]["coord_retry_of"]):
                 halt(db, r, f"coordinator update {st['state']}: {st.get('error') or ''}".strip(), "system")
                 if st["state"] in ("rolled_back", "failed"):
                     core._alert(db, "coordinator_update_rolled_back", "coordinator",
@@ -809,10 +831,33 @@ def resume(db: DB, r: dict, actor: str) -> dict:
     from . import core
     if r["state"] not in ("paused", "halted"):
         raise RolloutError(f"rollout {r['rollout_id']} is {r['state']}: only a paused or halted rollout resumes")
+    retry = _coordinator_retry(db, r)
+    if retry:
+        # a refused or failed coordinator update (no update trust, a request no runner took): its cause may be fixed
+        # now, so the coordinator ring asks again, with a new request; the old outcome no longer halts the rollout
+        r["policy"].pop("coord_requested_at", None)
+        r["policy"]["coord_retry_of"] = retry["update_id"]
+        db.x("UPDATE rollouts SET policy_json=? WHERE rollout_id=?", (json.dumps(r["policy"]), r["rollout_id"]))
+        db.event("rollout_coordinator_retry", actor=actor,
+                 reason=f"{r['rollout_id']}: coordinator update {retry['update_id']} was {retry['state']}; asking again")
     db.x("UPDATE rollouts SET state='running', halted_reason=NULL, updated_at=? WHERE rollout_id=?", (clock.now(), r["rollout_id"]))
     core._resolve_alert(db, "rollout_halted", r["rollout_id"])
     db.event("rollout_resumed", actor=actor, reason=r["rollout_id"])
     return view_rollout(db, r["rollout_id"])
+
+
+def _coordinator_retry(db: DB, r: dict) -> dict | None:
+    """The coordinator update a resume asks again for: this rollout's, in its coordinator ring, refused (by the root
+    runner: no trust, a signature it could not check) or failed (no runner took the request, the spool could not be
+    written). Neither installed anything. A rolled-back one did: the new version failed its probation, so resuming
+    does not install it again (skip the coordinator with a new start of the rings, or roll back)."""
+    from . import fleetupdates as F
+    if r["ring"] != "coordinator" or not F.newer(r["version"], F.coordinator_version()):
+        return None
+    st = coordinator_state(db)
+    if st and st.get("version") == r["version"] and st.get("state") in ("refused", "failed"):
+        return st
+    return None
 
 
 def halt(db: DB, r: dict, reason: str, actor: str) -> dict:

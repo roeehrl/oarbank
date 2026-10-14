@@ -89,19 +89,13 @@ if ($LASTEXITCODE) { throw "wix build failed" }
 Sign $Msi
 Copy-Item "$Bin\oarbank-agent.exe" "$Out\oarbank-agent-$Version-windows-$Arch.exe"
 # the Group Policy template (deploy/windows/admx: oarbank.admx, en-US\oarbank.adml) for PolicyDefinitions or the Central
-# Store; the same for every architecture. Windows' own tar (bsdtar, not a Git for Windows tar earlier on PATH) writes the
-# zip, with forward slashes in its entry names (Windows PowerShell's Compress-Archive wrote backslashes). Both
-# architectures publish this one file, so it must be byte-identical: the entries get a fixed time, not the checkout's.
+# Store; the same for every architecture. Both architectures' jobs build this one file and both sums files name it, so
+# its bytes must not depend on the job: scripts/pack-zip.py writes the entries in a fixed order with forward slashes, a
+# fixed time and attributes, no extra fields, stored (Windows' tar wrote the checkout's times and its own extra fields
+# and deflate output, so v2.10.3's and v2.10.4's zip matched one sums file only).
 $Admx = "$Out\oarbank-agent-$Version-windows-admx.zip"
-Remove-Item -LiteralPath $Admx -Force -ErrorAction SilentlyContinue
-$AdmxSrc = Join-Path ([IO.Path]::GetTempPath()) "oarbank-admx-$PID"
-Remove-Item -LiteralPath $AdmxSrc -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item -Recurse "$Repo\deploy\windows\admx" $AdmxSrc
-Get-ChildItem -LiteralPath $AdmxSrc -Recurse | ForEach-Object { $_.LastWriteTimeUtc = [DateTime]::new(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Utc) }
-& "$env:SystemRoot\System32\tar.exe" -a -c -f $Admx -C $AdmxSrc oarbank.admx en-US/oarbank.adml
-$AdmxExit = $LASTEXITCODE
-Remove-Item -LiteralPath $AdmxSrc -Recurse -Force -ErrorAction SilentlyContinue
-if ($AdmxExit) { throw "zipping the Group Policy template failed" }
+uv run --no-project --python 3.12 python -I -B "$Repo\scripts\pack-zip.py" $Admx "$Repo\deploy\windows\admx" oarbank.admx en-US/oarbank.adml
+if ($LASTEXITCODE) { throw "zipping the Group Policy template failed" }
 # collect the hashes before writing: the sums file matches the same pattern
 $Sums = @(Get-ChildItem "$Out\oarbank-agent-$Version-windows-$Arch*" | Where-Object Extension -ne ".wixpdb") + @(Get-Item -LiteralPath $Admx) |
   Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
