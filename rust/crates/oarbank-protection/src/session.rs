@@ -246,8 +246,8 @@ struct Wanted {
 }
 
 /// Whether the system service serves its session helpers (the heartbeat's `protection.session_helpers`). While it does
-/// not, no helper can report: other accounts' processes go unread (on macOS unlisted), so a rule that matches them may
-/// match none, and the console says so (`PROTECTION_SESSION_HELPER_UNAVAILABLE`).
+/// not, no helper can report: other accounts' processes are evaluated from what the service reads itself, fail-safe
+/// (`ProcessRecord::without_helper`), and the console says so (`PROTECTION_SESSION_HELPER_UNAVAILABLE`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Serving {
     /// Where helpers connect: the socket's path, or the pipe's name.
@@ -271,6 +271,9 @@ pub struct SessionHub {
     accounts: Mutex<HashMap<Principal, Option<String>>>,
     /// Whether helpers are served (None: nothing tried to serve them).
     serving: Mutex<Option<Serving>>,
+    /// Everyone a helper has reported for since the service started (fresh or not): their processes stay the owner's
+    /// after the helper goes away, evaluated without it (fail-safe).
+    known: Mutex<HashSet<Principal>>,
 }
 
 impl std::fmt::Debug for SessionHub {
@@ -313,6 +316,7 @@ impl SessionHub {
         if r.v != PROTOCOL {
             return;
         }
+        self.known.lock().unwrap_or_else(|e| e.into_inner()).insert(who);
         let mut all = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let e = all.entry(who).or_insert_with(|| Entry {
             at: Instant::now(),
@@ -485,6 +489,11 @@ impl SessionHub {
         self.fresh(|e| e.keys().copied().collect())
     }
 
+    /// Everyone a helper has reported for since the service started, whether it still reports or not.
+    pub fn known(&self) -> Vec<Principal> {
+        self.known.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect()
+    }
+
     /// A process's GPU busy fraction as its helper read it: Some(Some(b)) known, Some(None) unreadable there too,
     /// None when no helper speaks for it.
     pub fn gpu_busy(&self, pid: i32) -> Option<Option<f64>> {
@@ -655,6 +664,7 @@ mod tests {
         hub.gone(ada);
         assert_eq!(hub.identity(12, 2000), None);
         assert!(hub.principals().is_empty());
+        assert_eq!(hub.known(), [ada], "a helper that went away is still known: its person's processes stay listed");
     }
 
     fn usage(pid: i32, start_us: u64, cpu_s: f64, footprint_gb: f64) -> Usage {

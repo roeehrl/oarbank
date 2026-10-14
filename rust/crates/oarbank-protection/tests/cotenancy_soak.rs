@@ -83,7 +83,7 @@ impl OwnerSources for Host {
 }
 
 fn raw(pid: i32, start: u64, path: &str) -> RawProcess {
-    RawProcess { pid, ppid: 1, start_us: start, path: Some(path.into()), comm: String::new(), cpu_s: 0.0, footprint_gb: 1.0 }
+    RawProcess { pid, ppid: 1, start_us: start, path: Some(path.into()), comm: String::new(), cpu_s: 0.0, footprint_gb: 1.0, ..Default::default() }
 }
 
 #[test]

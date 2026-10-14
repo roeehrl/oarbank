@@ -244,20 +244,28 @@ def runtime_conditions(tel: dict) -> list[dict]:
         out.append({"code": "PROTECTION_PRESENCE_UNKNOWN", "tone": "warn", "values": {"why": why},
                     "message": f"whether someone is at the machine cannot be read ({why}); it counts as someone present"})
     # a system service that cannot serve its session helpers (an upgraded Mac without the socket's directory): other
-    # accounts' processes go unread (on macOS unseen), so a rule on a program in a person's home may match none of them
-    # and leave it unprotected without a word. The agent keeps trying; this says so meanwhile
+    # accounts' processes are evaluated from what the agent reads itself, fail-safe (an unread fact matches, unknown use
+    # counts as active), so protection over-applies rather than miss them. The agent keeps trying; this says so meanwhile
     helpers = prot.get("session_helpers") or {}
     if helpers and helpers.get("serving") is False:
         why = helpers.get("error") or "not served"
         rules = ", ".join(str(r.get("id")) for r in prot.get("rules") or [] if r.get("id")) or "none"
         out.append({"code": "PROTECTION_SESSION_HELPER_UNAVAILABLE", "tone": "bad", "values": {"why": why, "rules": rules},
-                    "message": f"session helper unavailable ({why}): protected processes in other accounts may not match "
-                               f"(rules: {rules}); the agent keeps trying to serve them"})
+                    "message": f"session helper unavailable ({why}): other accounts' processes are evaluated without "
+                               f"session helper (fail-safe) (rules: {rules}); the agent keeps trying to serve them"})
     for r in prot.get("rules") or []:
         if r.get("unreadable"):
             out.append({"code": "PROTECTION_UNREADABLE", "tone": "acc", "values": {"rule": r["id"], "n": r["unreadable"]},
-                        "message": f"rule {r['id']} matched {r['unreadable']} processes whose path or arguments could not be "
-                                   "read (counted as matches)"})
+                        "message": f"rule {r['id']} matched {r['unreadable']} processes whose path, arguments or identity "
+                                   "could not be read (counted as matches)"})
+        # a person's processes listed without their session helper (none connected, or its report stale): the rule
+        # still holds them, from what the agent reads itself (docs/design/protection.md, "Without a session helper")
+        if r.get("without_helper"):
+            out.append({"code": "PROTECTION_WITHOUT_HELPER", "tone": "warn",
+                        "values": {"rule": r["id"], "n": r["without_helper"]},
+                        "message": f"rule {r['id']}: {r['without_helper']} processes evaluated without session helper "
+                                   "(fail-safe): what only their helper reads counts as matching, unknown use as active, "
+                                   "reserved at its last reading or a bounded default"})
     for rule in prot.get("no_instruction_counters") or []:
         out.append({"code": "PROTECTION_NO_IPC_COUNTERS", "tone": "warn", "values": {"rule": rule},
                     "message": f"rule {rule} protects ipc_ratio, but this node's processes have no instruction or cycle "

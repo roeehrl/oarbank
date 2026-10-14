@@ -2,15 +2,15 @@
 //! person logged in (logind's user sessions) or reporting through a session helper. Any account may read
 //! another's `stat`, `status`, `cmdline` and `schedstat`; the executable link (and the open files the GPU meter
 //! reads) need ptrace access to the process, so the system service takes another account's executable paths from
-//! that account's session helper, and without one they are unreadable (and count as matching).
+//! that account's session helper, and without one they are unreadable (and count as matching). A person's account
+//! stays the owner's when its session is not in front, when its helper has gone, and (logind unreadable) always.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use super::logind;
-use crate::presence::logind::people;
-use crate::procinfo::procfs::{self, Reader};
+use crate::procinfo::procfs::{self, Owners, Reader};
 use crate::session::{Principal, SessionHub};
 use crate::signals::ProcCounters;
 use crate::table::{ProcessSource, RawProcess, SigningIdentity, SourceError};
@@ -27,20 +27,15 @@ pub fn start_time_us(pid: i32) -> Option<u64> {
     reader().start_time_us(pid)
 }
 
-/// The accounts whose processes are the owner's: the agent's own, every logged-in person's, and every account a
-/// session helper reports for.
-pub fn owner_uids(hub: Option<&SessionHub>) -> HashSet<u32> {
+/// The accounts whose processes are the owner's ([`Owners::new`]).
+pub fn owners(hub: Option<&SessionHub>) -> Owners {
+    let sessions = logind::sessions();
+    let helpers = hub.map(SessionHub::known).unwrap_or_default().into_iter().filter_map(|p| match p {
+        Principal::Uid(u) => Some(u),
+        Principal::Session(_) => None,
+    });
     // SAFETY: getuid cannot fail.
-    let mut uids = HashSet::from([unsafe { libc::getuid() }]);
-    if let Some(s) = logind::sessions() {
-        uids.extend(people(&s).map(|s| s.uid));
-    }
-    for p in hub.map(SessionHub::principals).unwrap_or_default() {
-        if let Principal::Uid(u) = p {
-            uids.insert(u);
-        }
-    }
-    uids
+    Owners::new(unsafe { libc::getuid() }, sessions.as_deref().map(|s| s.as_slice()), helpers)
 }
 
 /// The owner's processes (read-only).
@@ -60,10 +55,10 @@ impl NativeProcessSource {
 
 impl ProcessSource for NativeProcessSource {
     fn list(&mut self, excluding: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError> {
-        let owners = owner_uids(self.hub.as_deref());
+        let owners = owners(self.hub.as_deref());
         let entries = self
             .reader
-            .list(|uid| owners.contains(&uid), excluding)
+            .list(|uid| owners.contains(uid), excluding)
             .ok_or_else(|| SourceError::Unreadable("/proc cannot be listed".into()))?;
         let hub = self.hub.as_deref();
         let helped: HashSet<u32> = hub
@@ -75,6 +70,8 @@ impl ProcessSource for NativeProcessSource {
                 Principal::Session(_) => None,
             })
             .collect();
+        // SAFETY: getuid cannot fail.
+        let own = unsafe { libc::getuid() };
         Ok(entries
             .into_iter()
             // a process whose path only its account's helper may read is listed once the helper has described it
@@ -92,6 +89,9 @@ impl ProcessSource for NativeProcessSource {
                 comm: e.comm,
                 cpu_s: e.cpu_s,
                 footprint_gb: e.footprint_gb,
+                // another account's with no helper reporting: its path is unreadable (and matches); use is read here
+                without_helper: e.uid != own && !helped.contains(&e.uid),
+                usage_unread: false,
             })
             .collect())
     }

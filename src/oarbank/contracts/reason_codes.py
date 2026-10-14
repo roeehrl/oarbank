@@ -206,10 +206,12 @@ CODES: list[ReasonCode] = [
       "in front", "P4"),
     C("PROTECTION_PRESENCE_UNKNOWN", "protection", "Whether someone is at the machine cannot be read ({why}); it counts "
       "as someone present", "P4"),
-    C("PROTECTION_SESSION_HELPER_UNAVAILABLE", "protection", "Session helper unavailable ({why}): protected processes in "
-      "other accounts may not match (rules: {rules})", "P3"),
-    C("PROTECTION_UNREADABLE", "protection", "Rule {rule} matched {n} processes whose path or arguments could not be read "
-      "(counted as matches)", "P5"),
+    C("PROTECTION_SESSION_HELPER_UNAVAILABLE", "protection", "Session helper unavailable ({why}): other accounts' "
+      "processes are evaluated without session helper (fail-safe) (rules: {rules})", "P3"),
+    C("PROTECTION_UNREADABLE", "protection", "Rule {rule} matched {n} processes whose path, arguments or identity could not "
+      "be read (counted as matches)", "P5"),
+    C("PROTECTION_WITHOUT_HELPER", "protection", "Rule {rule}: {n} processes evaluated without session helper (fail-safe): "
+      "what only their helper reads counts as matching, unknown use as active", "P4"),
     C("PROTECTION_NO_LOWERING", "protection", "This node cannot lower fleet jobs (no delegated cgroup with the cpu "
       "controller): pausable jobs are paused instead", "P3"),
     C("PROTECTION_NO_IPC_COUNTERS", "protection", "Rule {rule} protects ipc_ratio, but this node's processes have no "

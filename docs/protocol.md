@@ -150,7 +150,7 @@ their process groups, deletes their workspaces, and does not report them.
                "disk_free_gb": 350.2, "services_running": ["example/vm"], "services_reserved_gb": 8.0,
                "services_held": {"example/model": "preempt_memory"},
                "guard": "clear", "protection": {"mode": "moderate", "active": ["…"], "rules": [{"id": "…", "active": true,
-               "processes": 3, "unreadable": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
+               "processes": 3, "unreadable": 0, "without_helper": 0, "cpu_cores": 0.5, "footprint_gb": 4.1}], "constraint": {…}, "rung": 0,
                "budget_cores": 6, "front": "app 812 (lsappinfo)", "source_error": null, "lowering": true}},
  "capacity": { …Capacity… },
  "attempts": [{"attempt_id": 123, "phase": "staging|running|<runner phase>|paused|checkpointing|uploading", "cpu_s": 55.2,
@@ -196,8 +196,12 @@ their process groups, deletes their workspaces, and does not report them.
 - **`telemetry.protection.session_helpers`** (a system install's service): whether it serves its session helpers,
   `{"at": "<socket path or pipe name>", "serving": false, "error": "cannot create …: Permission denied (os error 13)",
   "failures": 4}`. While it does not, the agent tries again every 15 s and the console shows
-  `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes go unread (on macOS unlisted), so rules may miss
-  them. Absent in a personal install.
+  `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes are evaluated without session helper (fail-safe;
+  docs/design/protection.md, "Without a session helper"). Absent in a personal install.
+- **`telemetry.protection.rules[].without_helper`**: how many of the rule's processes were listed without their
+  account's session helper (none connected, or its report older than 10 s) and evaluated fail-safe; the console shows
+  `PROTECTION_WITHOUT_HELPER` while it is above 0. A rule's `cpu_cores` and `footprint_gb` then include the estimate
+  for the processes whose use could not be read.
 - **`telemetry.protection`** also carries, for co-tenancy (docs/design/gpu-cotenancy.md): `phases` (every `during`
   block: `{"key": "trainer#0", "rule": "trainer", "block": 0, "on": false, "since": 1790000000.0, "readable": true,
   "reader": "agent|helper|exec", "tags": ["uplink"], "immediate": true}`), `progress` (each `progress_rate` source:

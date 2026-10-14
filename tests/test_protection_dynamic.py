@@ -252,7 +252,7 @@ def test_a_service_without_its_session_helpers_says_rules_may_miss_other_account
     c = conds[0]
     assert c["tone"] == "bad" and c["values"]["rules"] == "editor" and "Permission denied" in c["values"]["why"]
     assert c["message"].startswith("session helper unavailable (cannot create") and \
-        "protected processes in other accounts may not match" in c["message"]
+        "evaluated without session helper (fail-safe)" in c["message"]
     # served, or a personal install (no hub at all): nothing to say
     up = {"protection": {"rules": [{"id": "editor"}], "session_helpers": {"at": sock, "serving": True, "failures": 0}}}
     assert protection.runtime_conditions(up) == [] and protection.runtime_conditions({"protection": {"rules": []}}) == []
@@ -262,6 +262,44 @@ def test_a_service_without_its_session_helpers_says_rules_may_miss_other_account
     assert [x["code"] for x in st["conditions"]] == ["PROTECTION_SESSION_HELPER_UNAVAILABLE"]
     rows = {r.code: r.detail for r in explain.node_doc(db, node["node_id"]).summary}
     assert rows["PROTECTION_SESSION_HELPER_UNAVAILABLE"]["rules"] == "editor"
+
+
+def test_processes_evaluated_without_their_session_helper_say_so(db, capsys):
+    # a person's trainer while their session helper is not connected (or its reports stopped): the agent still lists
+    # it from what it reads itself and evaluates it fail-safe. Node conditions, explain and `oarbank protection show`
+    # say so, with the rule and how many of its processes
+    from oarbank.cli.main import print_protection
+    from oarbank.console.views import node_conditions
+    node = certify(db, enrolled_node(db, "mac")[1])
+    sock = "/Library/Application Support/Oarbank/run/session.sock"
+    tel = {"protection": {"rules": [{"id": "trainer", "active": True, "processes": 9, "unreadable": 9, "without_helper": 9,
+                                     "cpu_cores": 4.0, "footprint_gb": 8.0, "reason": "active"},
+                                    {"id": "editor", "active": False, "processes": 0, "unreadable": 0, "without_helper": 0}],
+                          "session_helpers": {"at": sock, "serving": False, "failures": 2, "error": "not served"}}}
+    conds = protection.runtime_conditions(tel)
+    assert [c["code"] for c in conds] == ["PROTECTION_SESSION_HELPER_UNAVAILABLE", "PROTECTION_UNREADABLE",
+                                          "PROTECTION_WITHOUT_HELPER"]
+    c = conds[2]
+    assert c["values"] == {"rule": "trainer", "n": 9} and c["tone"] == "warn"
+    assert c["message"].startswith("rule trainer: 9 processes evaluated without session helper (fail-safe)")
+    assert "evaluated without session helper (fail-safe)" in conds[0]["message"]
+    # the reason code's own text says the same
+    from oarbank.contracts import reason_codes as rc
+    code = next(x for x in rc.CODES if x.code == "PROTECTION_WITHOUT_HELPER")
+    assert "evaluated without session helper (fail-safe)" in code.render(rule="t", n=1)
+    assert any(x["code"] == "PROTECTION_WITHOUT_HELPER" for x in node_conditions({"tel": tel, "cap": {}}))
+    db.x("UPDATE nodes SET telemetry_json=? WHERE node_id=?", (json.dumps(tel), node["node_id"]))
+    rows = {r.code: r.detail for r in explain.node_doc(db, node["node_id"]).summary}
+    assert rows["PROTECTION_WITHOUT_HELPER"] == {"rule": "trainer", "n": 9}
+    st = protection.status(db, node["node_id"])                       # `oarbank protection show <node>`
+    assert "PROTECTION_WITHOUT_HELPER" in [x["code"] for x in st["conditions"]]
+    print_protection(st)
+    out = capsys.readouterr().out
+    assert "PROTECTION_WITHOUT_HELPER: rule trainer: 9 processes evaluated without session helper (fail-safe)" in out
+    # with the helper reporting (or a personal install), nothing to say
+    tel["protection"]["rules"][0]["without_helper"] = 0
+    tel["protection"]["session_helpers"]["serving"] = True
+    assert [c["code"] for c in protection.runtime_conditions(tel)] == ["PROTECTION_UNREADABLE"]
 
 
 def test_paused_attempts_keep_their_lease(db):

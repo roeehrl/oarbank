@@ -348,6 +348,45 @@ pub mod procfs {
             }
         }
     }
+
+    /// People's accounts on Linux (login.defs' UID_MIN and UID_MAX defaults): system accounts sit below, `nobody`
+    /// (65534) and the subordinate ids rootless containers map to (100000 up) above.
+    pub const PERSON_UIDS: std::ops::RangeInclusive<u32> = 1000..=60000;
+
+    /// Whose processes are the owner's on Linux (docs/design/protection.md, "Whose processes").
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Owners {
+        pub uids: std::collections::HashSet<u32>,
+        /// logind could not be asked who is logged in: every person's account counts (fail-safe).
+        pub any_person: bool,
+    }
+
+    impl Owners {
+        /// The agent's own account; every account with a person's logind session, in front or not (a session switched
+        /// away from, or one left closing with its processes still running); every account a session helper has
+        /// reported for since the service started, whether it still reports or not; and when logind cannot be asked,
+        /// every person's account ([`PERSON_UIDS`]). The last three keep a person's programs listed, and evaluated
+        /// fail-safe, when the helper that would describe them is gone.
+        pub fn new(
+            own: u32,
+            sessions: Option<&[crate::presence::logind::Session]>,
+            helpers: impl IntoIterator<Item = u32>,
+        ) -> Self {
+            let mut uids: std::collections::HashSet<u32> = helpers.into_iter().collect();
+            uids.insert(own);
+            if let Some(s) = sessions {
+                uids.extend(s.iter().filter(|s| s.is_person()).map(|s| s.uid));
+            }
+            Self {
+                uids,
+                any_person: sessions.is_none(),
+            }
+        }
+
+        pub fn contains(&self, uid: u32) -> bool {
+            self.uids.contains(&uid) || (self.any_person && PERSON_UIDS.contains(&uid))
+        }
+    }
 }
 
 /// Windows: the process list `NtQuerySystemInformation(SystemProcessInformation)` returns (one call, no handle
@@ -569,6 +608,43 @@ pub mod nt {
 mod tests {
     use super::procfs::*;
     use std::collections::HashMap;
+
+    /// The owner's accounts on Linux: a person's session counts whether it is in front or not (switched away, or left
+    /// closing with programs running), an account whose helper reported stays one after the helper goes, and with
+    /// logind unreadable every person's account counts, never the system's, `nobody` or a container's subordinate ids.
+    #[test]
+    fn whose_processes_linux_protects_fails_safe() {
+        use crate::presence::logind::Session;
+        let session = |uid: u32, class: &str, state: &str, active: bool| Session {
+            uid,
+            class: class.into(),
+            state: state.into(),
+            active,
+            ..Session::default()
+        };
+        let sessions = vec![
+            session(1000, "user", "active", true),
+            session(1001, "user", "online", false), // switched away on the seat
+            session(1002, "user", "closing", false), // logged out, a program left running
+            session(1003, "greeter", "active", true),
+            session(1004, "manager", "online", false),
+        ];
+        let o = Owners::new(990, Some(&sessions), [1005]);
+        for uid in [990, 1000, 1001, 1002, 1005] {
+            assert!(o.contains(uid), "{uid}");
+        }
+        for uid in [1003, 1004, 1006, 0] {
+            assert!(!o.contains(uid), "{uid}");
+        }
+        let blind = Owners::new(990, None, []);
+        assert!(blind.any_person);
+        for uid in [990, 1000, 1500, 60000] {
+            assert!(blind.contains(uid), "{uid}");
+        }
+        for uid in [0, 999, 65534, 100000, 165536] {
+            assert!(!blind.contains(uid), "{uid}");
+        }
+    }
 
     /// `/proc/<pid>/stat` of a Python process whose command holds a space and parentheses (Ubuntu 26.04, 7.0).
     const STAT: &str = "4242 (py (train) x) S 2171 4242 2171 34816 4242 4194304 18234 0 37 0 1520 230 0 0 20 0 9 0 \

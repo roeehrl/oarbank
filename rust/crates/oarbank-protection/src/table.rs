@@ -25,6 +25,11 @@ pub struct RawProcess {
     pub cpu_s: f64,
     /// Physical footprint, GB.
     pub footprint_gb: f64,
+    /// Listed without its account's session helper (none connected, or its report stale): see
+    /// [`ProcessRecord::without_helper`].
+    pub without_helper: bool,
+    /// `cpu_s` and `footprint_gb` are not readings of now; `footprint_gb` above 0 is the last one its helper reported.
+    pub usage_unread: bool,
 }
 
 /// The code-signing identity of a running process (None: unsigned, ad hoc, or not readable).
@@ -32,6 +37,9 @@ pub struct RawProcess {
 pub struct SigningIdentity {
     pub team_id: Option<String>,
     pub signing_id: Option<String>,
+    /// The identity could not be read (another account's process whose executable this account may not read), as
+    /// opposed to code that carries none: a rule's signing keys then count as holding (fail-safe).
+    pub unreadable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -54,6 +62,11 @@ pub trait ProcessSource: Send {
     fn satisfies(&mut self, pid: i32, requirement: &str) -> bool;
     /// The bundle identifier of the app bundle an executable path sits in.
     fn bundle_id(&mut self, path: &str) -> Option<String>;
+    /// Whether an executable sits in an app bundle whose identifier this account cannot read (asked only when
+    /// [`ProcessSource::bundle_id`] gave none).
+    fn bundle_unreadable(&mut self, _path: &str) -> bool {
+        false
+    }
 }
 
 /// A source for platforms whose backend has not been written yet: an empty table and an error, so only the
@@ -88,6 +101,10 @@ struct Identity {
     bundle_id: Option<String>,
     argv: Option<Vec<String>>,
     requirements: HashMap<String, bool>,
+    /// The signing identity could not be read (see [`SigningIdentity::unreadable`]).
+    signing_unread: bool,
+    /// The bundle id could not be read.
+    bundle_unread: bool,
     /// A fact a rule needs (path or arguments) was unreadable when this process was last listed.
     unreadable_seen: bool,
     /// The executable this identity was resolved for (path, short name): an exec changes them, and everything above
@@ -147,6 +164,8 @@ pub struct ProcessTable {
     source: Box<dyn ProcessSource>,
     identities: HashMap<ProcessKey, Identity>,
     last_cpu: HashMap<ProcessKey, (f64, f64)>,
+    /// Each process's last measured CPU rate (cores): what it counts at while its use cannot be read.
+    last_rate: HashMap<ProcessKey, f64>,
 }
 
 impl ProcessTable {
@@ -155,6 +174,7 @@ impl ProcessTable {
             source,
             identities: HashMap::new(),
             last_cpu: HashMap::new(),
+            last_rate: HashMap::new(),
         }
     }
 
@@ -163,13 +183,23 @@ impl ProcessTable {
     fn identity(&mut self, key: ProcessKey, p: &RawProcess) -> Identity {
         match self.identities.get(&key) {
             Some(id) if id.same_program(p) => id.clone(),
-            old => Identity {
-                bundle_id: p.path.as_deref().and_then(|path| self.source.bundle_id(path)),
-                path: p.path.clone(),
-                comm: p.comm.clone(),
-                unreadable_seen: old.is_some_and(|o| o.unreadable_seen),
-                ..Identity::default()
-            },
+            old => {
+                let bundle_id = p.path.as_deref().and_then(|path| self.source.bundle_id(path));
+                // another account's executable in a bundle this account may not read, or one whose path it may not
+                let bundle_unread = bundle_id.is_none()
+                    && match p.path.as_deref() {
+                        Some(path) => self.source.bundle_unreadable(path),
+                        None => p.without_helper,
+                    };
+                Identity {
+                    bundle_id,
+                    bundle_unread,
+                    path: p.path.clone(),
+                    comm: p.comm.clone(),
+                    unreadable_seen: old.is_some_and(|o| o.unreadable_seen),
+                    ..Identity::default()
+                }
+            }
         }
     }
 
@@ -208,6 +238,7 @@ impl ProcessTable {
             .rules
             .iter()
             .any(|r| r.match_.path_prefix.is_some() || r.match_.path_contains.is_some());
+        let need_bundle = config.rules.iter().any(|r| !r.match_.bundle_ids.is_empty());
         let requirements: Vec<String> = {
             let mut v: Vec<String> = config
                 .rules
@@ -230,6 +261,7 @@ impl ProcessTable {
             }
             if need_signing && id.team_id.is_none() && id.signing_id.is_none() {
                 let s = self.source.signing(rp.pid);
+                id.signing_unread = s.unreadable;
                 id.team_id = Some(s.team_id.unwrap_or_default());
                 id.signing_id = Some(s.signing_id.unwrap_or_default());
             }
@@ -244,7 +276,10 @@ impl ProcessTable {
             // kernel no longer answers for it): on a busy machine some do every tick, and each would switch on
             // every such rule. So an unreadable process is listed from its second sighting on: one unreadable for
             // good (another account's) is protected a tick later, one that was dying never matches.
-            let unreadable = (need_argv && id.argv.is_none()) || (need_path && rp.path.is_none());
+            let unreadable = (need_argv && id.argv.is_none())
+                || (need_path && rp.path.is_none())
+                || (need_signing && id.signing_unread)
+                || (need_bundle && id.bundle_unread);
             let held_back = unreadable && !id.unreadable_seen;
             id.unreadable_seen = unreadable;
             let rec = ProcessRecord {
@@ -265,15 +300,27 @@ impl ProcessTable {
                     .collect(),
                 cpu_s: rp.cpu_s,
                 footprint_gb: rp.footprint_gb,
+                without_helper: rp.without_helper,
+                signing_unread: id.signing_unread,
+                bundle_unread: id.bundle_unread,
+                usage_unread: rp.usage_unread,
             };
             self.identities.insert(key, id);
-            if let Some(&(t, cpu)) = self.last_cpu.get(&key) {
-                if now > t {
-                    snap.cpu_cores
-                        .insert(key, ((rec.cpu_s - cpu) / (now - t)).max(0.0));
+            if rec.usage_unread {
+                // no reading now: the last measured rate, if any (none: the evaluator's conservative stand-in)
+                if let Some(&r) = self.last_rate.get(&key) {
+                    snap.cpu_cores.insert(key, r);
                 }
+            } else {
+                if let Some(&(t, cpu)) = self.last_cpu.get(&key) {
+                    if now > t {
+                        let r = ((rec.cpu_s - cpu) / (now - t)).max(0.0);
+                        snap.cpu_cores.insert(key, r);
+                        self.last_rate.insert(key, r);
+                    }
+                }
+                self.last_cpu.insert(key, (now, rec.cpu_s));
             }
-            self.last_cpu.insert(key, (now, rec.cpu_s));
             if held_back {
                 snap.cpu_cores.remove(&key);
                 continue;
@@ -282,6 +329,7 @@ impl ProcessTable {
         }
         self.identities.retain(|k, _| seen.contains(k));
         self.last_cpu.retain(|k, _| seen.contains(k));
+        self.last_rate.retain(|k, _| seen.contains(k));
         Ok(snap)
     }
 

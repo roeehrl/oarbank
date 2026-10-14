@@ -2,7 +2,8 @@
 //! for the path, CPU and footprint, sysctl KERN_PROCARGS2 for argv, the app bundle's Info.plist for the bundle id.
 //! libproc's BSD info (macOS 27), rusage and argv answer only about the caller's own processes; `kern.proc` and the
 //! executable's path answer about every account's, so the system service lists the people's processes from those
-//! and takes the rest from their session helpers.
+//! and takes the rest from their session helpers; a person without one keeps their processes listed from what the
+//! service reads, evaluated fail-safe.
 
 use std::collections::HashSet;
 use std::mem;
@@ -332,83 +333,199 @@ pub fn bundle_id_for_path(p: &str) -> Option<String> {
     cf::to_string(cf::dict_get_str(dict.get(), "CFBundleIdentifier"))
 }
 
+/// Whether a uid is a person's account: macOS gives people uids from 501 up and its own accounts (`_`-prefixed
+/// daemons, root) ones below 500; `nobody` and the other negative ids are above 2^31.
+pub fn is_person_uid(uid: u32) -> bool {
+    (501..0x8000_0000).contains(&uid)
+}
+
+/// `sysctl {CTL_KERN, KERN_PROC, KERN_PROC_ALL}`: every process of every account.
+pub fn kinfo_all() -> Vec<KinfoProc> {
+    kern_proc(libc::KERN_PROC_ALL, 0)
+}
+
+/// What the process table reads from the kernel, behind a trait so that tests give it a process table of their own.
+pub(crate) trait Kernel {
+    /// The agent's own account.
+    fn uid(&self) -> u32;
+    /// Every process of one account.
+    fn of(&self, uid: u32) -> Vec<KinfoProc>;
+    /// Every process of every account.
+    fn all(&self) -> Vec<KinfoProc>;
+    fn path(&self, pid: i32) -> Option<String>;
+    /// (cumulative CPU seconds, footprint GB); None for another account's process (rusage answers only about the
+    /// caller's own, unless it is root).
+    fn cpu_and_footprint(&self, pid: i32) -> Option<(f64, f64)>;
+}
+
+/// The live kernel.
+struct Live;
+
+impl Kernel for Live {
+    fn uid(&self) -> u32 {
+        // SAFETY: getuid cannot fail.
+        unsafe { libc::getuid() }
+    }
+    fn of(&self, uid: u32) -> Vec<KinfoProc> {
+        kinfo_of(uid)
+    }
+    fn all(&self) -> Vec<KinfoProc> {
+        kinfo_all()
+    }
+    fn path(&self, pid: i32) -> Option<String> {
+        path(pid)
+    }
+    fn cpu_and_footprint(&self, pid: i32) -> Option<(f64, f64)> {
+        cpu_and_footprint(pid)
+    }
+}
+
+/// What the table keeps between listings about other accounts' processes.
+#[derive(Debug, Default)]
+pub(crate) struct Others {
+    /// Each one's last footprint its helper reported (GB), while it runs: what it counts at once its helper is gone.
+    last_footprint: std::collections::HashMap<(i32, u64), f64>,
+    /// The pids listed in the last listing (their code-signing identity may be unreadable to this account).
+    pids: HashSet<i32>,
+}
+
+/// One listing (the [`NativeProcessSource`]'s doc). An account whose helper reports has its processes listed once the
+/// helper described them, with the arguments and use it read; every other person's account (no helper connected, or
+/// its last report older than [`crate::session::STALE`]) has its processes listed from what this account reads
+/// itself, marked `without_helper`, and evaluated fail-safe: their arguments are unreadable (and match), and their use
+/// unless rusage answers is `usage_unread` at the helper's last footprint for the process, if any.
+pub(crate) fn list_with(
+    k: &dyn Kernel,
+    hub: Option<&SessionHub>,
+    others: &mut Others,
+    excluding: &HashSet<i32>,
+) -> Result<Vec<RawProcess>, SourceError> {
+    let uid = k.uid();
+    // the system service lists every account's processes at once; a personal agent only its own
+    let all = hub.map(|_| k.all());
+    let mine: Vec<KinfoProc> = match &all {
+        Some(a) => a.iter().filter(|p| p.uid == uid).cloned().collect(),
+        None => k.of(uid),
+    };
+    if mine.is_empty() {
+        return Err(SourceError::Unreadable(
+            "sysctl kern.proc lists none of this account's processes".into(),
+        ));
+    }
+    let live = |p: &KinfoProc| !p.zombie && !excluding.contains(&p.pid);
+    // a zombie has exited: it holds no memory or CPU and no longer has a path
+    let mut out: Vec<RawProcess> = mine
+        .into_iter()
+        .filter(live)
+        .map(|p| {
+            let (cpu_s, footprint_gb) = k.cpu_and_footprint(p.pid).unwrap_or((0.0, 0.0));
+            RawProcess {
+                pid: p.pid,
+                ppid: p.ppid,
+                start_us: p.start_us,
+                path: k.path(p.pid),
+                comm: p.comm,
+                cpu_s,
+                footprint_gb,
+                ..RawProcess::default()
+            }
+        })
+        .collect();
+    let (Some(hub), Some(all)) = (hub, all) else {
+        return Ok(out);
+    };
+    let helped: HashSet<u32> = hub
+        .principals()
+        .into_iter()
+        .filter_map(|p| match p {
+            Principal::Uid(u) => Some(u),
+            Principal::Session(_) => None,
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    others.pids.clear();
+    for p in all.into_iter().filter(|p| p.uid != uid && live(p)) {
+        let key = (p.pid, p.start_us);
+        if helped.contains(&p.uid) {
+            // listed once its helper has described it (at most one report after it started): until then its
+            // arguments are unreadable, and it would match every rule they decide
+            let Some(claim) = hub.identity(p.pid, p.start_us) else {
+                continue;
+            };
+            // a process its helper has not measured yet has used nothing so far
+            let usage = hub.usage(p.pid).filter(|x| x.start_us == p.start_us);
+            if let Some(u) = usage {
+                others.last_footprint.insert(key, u.footprint_gb);
+            }
+            seen.insert(key);
+            others.pids.insert(p.pid);
+            out.push(RawProcess {
+                pid: p.pid,
+                ppid: p.ppid,
+                start_us: p.start_us,
+                path: k.path(p.pid).or(claim.path),
+                comm: p.comm,
+                cpu_s: usage.map_or(0.0, |x| x.counters.cpu_s),
+                footprint_gb: usage.map_or(0.0, |x| x.footprint_gb),
+                ..RawProcess::default()
+            });
+        } else if is_person_uid(p.uid) {
+            // a person whose helper is not connected (or stopped reporting): their programs stay protected from what
+            // this account reads itself (fail-safe), until the helper's report replaces it
+            seen.insert(key);
+            others.pids.insert(p.pid);
+            let measured = k.cpu_and_footprint(p.pid);
+            out.push(RawProcess {
+                pid: p.pid,
+                ppid: p.ppid,
+                start_us: p.start_us,
+                path: k.path(p.pid),
+                comm: p.comm,
+                cpu_s: measured.map_or(0.0, |m| m.0),
+                footprint_gb: measured.map_or_else(|| others.last_footprint.get(&key).copied().unwrap_or(0.0), |m| m.1),
+                without_helper: true,
+                usage_unread: measured.is_none(),
+            });
+        }
+    }
+    others.last_footprint.retain(|k, _| seen.contains(k));
+    Ok(out)
+}
+
 /// The macOS process table (read-only): the agent's own account's processes, and in the system service (`hub`) those
-/// of every account a session helper reports for, with the arguments and resource use their helper read.
+/// of every person's account: with the arguments and resource use their session helper read where one reports, and
+/// without one from what the service reads itself, evaluated fail-safe (docs/design/protection.md, "Without a session
+/// helper").
 #[derive(Debug, Default)]
 pub struct NativeProcessSource {
     hub: Option<Arc<SessionHub>>,
+    others: Others,
 }
 
 impl NativeProcessSource {
     pub fn new(hub: Option<Arc<SessionHub>>) -> Self {
-        Self { hub }
+        Self {
+            hub,
+            others: Others::default(),
+        }
     }
 }
 
 impl ProcessSource for NativeProcessSource {
     fn list(&mut self, excluding: &HashSet<i32>) -> Result<Vec<RawProcess>, SourceError> {
-        // SAFETY: getuid cannot fail.
-        let uid = unsafe { libc::getuid() };
-        let mine = kinfo_of(uid);
-        if mine.is_empty() {
-            return Err(SourceError::Unreadable(
-                "sysctl kern.proc lists none of this account's processes".into(),
-            ));
-        }
-        let live = |k: &KinfoProc| !k.zombie && !excluding.contains(&k.pid);
-        // a zombie has exited: it holds no memory or CPU and no longer has a path
-        let mut out: Vec<RawProcess> = mine
-            .into_iter()
-            .filter(live)
-            .map(|k| {
-                let (cpu_s, footprint_gb) = cpu_and_footprint(k.pid).unwrap_or((0.0, 0.0));
-                RawProcess {
-                    pid: k.pid,
-                    ppid: k.ppid,
-                    start_us: k.start_us,
-                    path: path(k.pid),
-                    comm: k.comm,
-                    cpu_s,
-                    footprint_gb,
-                }
-            })
-            .collect();
-        let Some(hub) = self.hub.as_deref() else {
-            return Ok(out);
-        };
-        for p in hub.principals() {
-            let Principal::Uid(u) = p else { continue };
-            if u == uid {
-                continue;
-            }
-            for k in kinfo_of(u).into_iter().filter(live) {
-                // listed once its helper has described it (at most one report after it started): until then its
-                // arguments are unreadable, and it would match every rule they decide
-                let Some(claim) = hub.identity(k.pid, k.start_us) else {
-                    continue;
-                };
-                // a process its helper has not measured yet has used nothing so far
-                let usage = hub.usage(k.pid).filter(|x| x.start_us == k.start_us);
-                out.push(RawProcess {
-                    pid: k.pid,
-                    ppid: k.ppid,
-                    start_us: k.start_us,
-                    path: path(k.pid).or(claim.path),
-                    comm: k.comm,
-                    cpu_s: usage.map_or(0.0, |x| x.counters.cpu_s),
-                    footprint_gb: usage.map_or(0.0, |x| x.footprint_gb),
-                });
-            }
-        }
-        Ok(out)
+        list_with(&Live, self.hub.as_deref(), &mut self.others, excluding)
     }
 
     fn argv(&mut self, pid: i32, start_us: u64) -> Option<Vec<String>> {
         argv(pid).or_else(|| self.hub.as_ref()?.identity(pid, start_us)?.argv)
     }
 
+    /// An identity that cannot be read is unreadable only for another account's process (its executable may sit
+    /// where this account cannot read it); one of this account's that fails to read has exited.
     fn signing(&mut self, pid: i32) -> SigningIdentity {
-        security::signing(pid)
+        let mut s = security::signing(pid);
+        s.unreadable &= self.others.pids.contains(&pid);
+        s
     }
 
     fn satisfies(&mut self, pid: i32, requirement: &str) -> bool {
@@ -418,11 +535,145 @@ impl ProcessSource for NativeProcessSource {
     fn bundle_id(&mut self, path: &str) -> Option<String> {
         bundle_id_for_path(path)
     }
+
+    fn bundle_unreadable(&mut self, path: &str) -> bool {
+        bundle_unreadable(path)
+    }
+}
+
+/// Whether an executable sits in an app bundle whose Info.plist this account may not read (a bundle in a person's
+/// home): its bundle id is unknown, not absent.
+pub fn bundle_unreadable(p: &str) -> bool {
+    let Some(i) = p.find(".app/Contents/") else {
+        return false;
+    };
+    let plist = format!("{}.app/Contents/Info.plist", &p[..i]);
+    std::fs::File::open(plist).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{ProcClaim, Report, Usage, PROTOCOL};
+    use crate::signals::ProcCounters;
+
+    /// An injected process table: the service account (uid 299), a person (501) and root.
+    struct Table {
+        procs: Vec<KinfoProc>,
+        /// What rusage answers (only about the service's own processes, as without root).
+        rusage: std::collections::HashMap<i32, (f64, f64)>,
+    }
+
+    impl Kernel for Table {
+        fn uid(&self) -> u32 {
+            299
+        }
+        fn of(&self, uid: u32) -> Vec<KinfoProc> {
+            self.procs.iter().filter(|p| p.uid == uid).cloned().collect()
+        }
+        fn all(&self) -> Vec<KinfoProc> {
+            self.procs.clone()
+        }
+        fn path(&self, pid: i32) -> Option<String> {
+            Some(match pid {
+                10 => "/usr/local/bin/oarbank-agent".into(),
+                600 => "/Users/p/Trainer/releases/3/worker".into(),
+                601 => "/bin/sh".into(),
+                _ => format!("/bin/p{pid}"),
+            })
+        }
+        fn cpu_and_footprint(&self, pid: i32) -> Option<(f64, f64)> {
+            self.rusage.get(&pid).copied()
+        }
+    }
+
+    fn kp(pid: i32, ppid: i32, uid: u32) -> KinfoProc {
+        KinfoProc { pid, ppid, uid, start_us: 1000 + pid as u64, comm: format!("p{pid}"), zombie: false }
+    }
+
+    fn world() -> Table {
+        Table {
+            procs: vec![
+                kp(10, 1, 299),
+                kp(1, 0, 0),
+                kp(50, 1, 0),
+                kp(600, 1, 501),
+                kp(601, 600, 501),
+                KinfoProc { zombie: true, ..kp(602, 600, 501) },
+                kp(700, 1, 4294967294), // nobody
+                kp(800, 1, 88),         // a system account (_windowserver)
+            ],
+            rusage: std::collections::HashMap::from([(10, (1.0, 0.1))]),
+        }
+    }
+
+    fn report(pids: &[(i32, f64)]) -> Report {
+        Report {
+            v: PROTOCOL,
+            live: pids.iter().map(|&(p, _)| (p, 1000 + p as u64)).collect(),
+            procs: pids
+                .iter()
+                .map(|&(p, _)| ProcClaim { pid: p, start_us: 1000 + p as u64, path: None, argv: Some(vec![format!("a{p}")]) })
+                .collect(),
+            usage: pids
+                .iter()
+                .map(|&(p, fp)| Usage { pid: p, start_us: 1000 + p as u64, counters: ProcCounters::default(), footprint_gb: fp })
+                .collect(),
+            ..Report::default()
+        }
+    }
+
+    fn pids(v: &[RawProcess]) -> Vec<i32> {
+        let mut p: Vec<i32> = v.iter().map(|p| p.pid).collect();
+        p.sort();
+        p
+    }
+
+    /// The system service lists a person's processes whether or not their session helper is connected: without one
+    /// from what it reads itself (path, parent, short name; rusage unreadable), marked for the fail-safe evaluation;
+    /// with one as the helper describes them; and after the helper goes, at the footprint it last reported. A personal
+    /// agent lists only its own account's, and nobody lists the system's accounts' or `nobody`'s.
+    #[test]
+    fn a_person_without_a_session_helper_is_listed_fail_safe() {
+        let k = world();
+        let none = HashSet::new();
+        let mut others = Others::default();
+        // a personal agent: its own account only
+        assert_eq!(pids(&list_with(&k, None, &mut others, &none).unwrap()), [10]);
+        // the system service, no helper connected
+        let hub = SessionHub::new();
+        let out = list_with(&k, Some(&hub), &mut others, &none).unwrap();
+        assert_eq!(pids(&out), [10, 600, 601]);
+        let t = out.iter().find(|p| p.pid == 600).unwrap();
+        assert!(t.without_helper && t.usage_unread && t.footprint_gb == 0.0, "{t:?}");
+        assert_eq!(t.path.as_deref(), Some("/Users/p/Trainer/releases/3/worker"));
+        assert_eq!(out.iter().find(|p| p.pid == 601).unwrap().ppid, 600, "the tree is kept for `descendants`");
+        let me = out.iter().find(|p| p.pid == 10).unwrap();
+        assert!(!me.without_helper && !me.usage_unread && me.footprint_gb == 0.1);
+        // the helper reports 600 (601 not yet described): its report replaces the fallback
+        let person = crate::session::Principal::Uid(501);
+        hub.accept(person, report(&[(600, 6.5)]), |pid, _| pid == 600 || pid == 601);
+        let out = list_with(&k, Some(&hub), &mut others, &none).unwrap();
+        assert_eq!(pids(&out), [10, 600], "a process its helper has not described yet waits one report");
+        let t = out.iter().find(|p| p.pid == 600).unwrap();
+        assert!(!t.without_helper && !t.usage_unread && t.footprint_gb == 6.5, "{t:?}");
+        // the helper goes: back to the fallback, at the footprint it last reported
+        hub.gone(person);
+        let out = list_with(&k, Some(&hub), &mut others, &none).unwrap();
+        assert_eq!(pids(&out), [10, 600, 601]);
+        let t = out.iter().find(|p| p.pid == 600).unwrap();
+        assert!(t.without_helper && t.usage_unread && t.footprint_gb == 6.5, "{t:?}");
+        assert!(others.pids.contains(&600) && !others.pids.contains(&10));
+        // the agent's own groups stay out
+        let out = list_with(&k, Some(&hub), &mut others, &HashSet::from([601])).unwrap();
+        assert_eq!(pids(&out), [10, 600]);
+    }
+
+    #[test]
+    fn people_are_the_accounts_from_501() {
+        assert!(is_person_uid(501) && is_person_uid(502) && is_person_uid(70000));
+        assert!(!is_person_uid(0) && !is_person_uid(88) && !is_person_uid(500) && !is_person_uid(4294967294));
+    }
 
     /// `sysctl kern.proc` read at the offsets above says what libproc says about this process; its short name keeps
     /// p_comm's 16 characters, where libproc's BSD info keeps 15.

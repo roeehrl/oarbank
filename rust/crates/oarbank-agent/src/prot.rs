@@ -449,7 +449,7 @@ fn log_serving(s: &P::session::Serving) {
     } else {
         tracing::warn!(at = %s.at, error = s.error.as_deref().unwrap_or(""), retry_s = P::platform::SERVE_RETRY.as_secs(),
                        "cannot serve session helpers: other accounts' paths, arguments, display and input stay unreadable, \
-                        and protection rules may not match their processes; trying again");
+                        and protection evaluates their processes without session helper (fail-safe); trying again");
     }
 }
 
@@ -806,8 +806,8 @@ mod e2e {
     }
 
     /// A system service that cannot serve its session helpers says so in the heartbeat, where the console turns it into
-    /// a node condition (`PROTECTION_SESSION_HELPER_UNAVAILABLE`): rules may miss other accounts' processes, which on
-    /// an upgraded Mac without the socket's directory matched none. A personal install reports nothing of the kind.
+    /// a node condition (`PROTECTION_SESSION_HELPER_UNAVAILABLE`): other accounts' processes are evaluated without
+    /// their helpers (fail-safe). A personal install reports nothing of the kind.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_service_that_cannot_serve_session_helpers_says_so_in_its_heartbeat() {

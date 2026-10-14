@@ -184,7 +184,7 @@ fn a_day_of_duty_governing() {
         {
             let mut w = host.0.lock().unwrap();
             w.procs = vec![RawProcess { pid: 7, ppid: 1, start_us: trainer_start, path: Some("/opt/trainer/train".into()),
-                                        comm: String::new(), cpu_s: 0.0, footprint_gb: 1.0 }];
+                                        comm: String::new(), cpu_s: 0.0, footprint_gb: 1.0, ..Default::default() }];
             *w.gpu.entry(7).or_insert(0.0) += 1.7e9;
             for j in &jobs {
                 let u = if j.paused {
