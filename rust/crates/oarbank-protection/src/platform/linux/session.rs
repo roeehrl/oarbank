@@ -111,6 +111,7 @@ impl Collector {
             gpu_unknown,
             usage: vec![],
             sources: vec![],
+            version: None, // the loop that sends it sets it
         }
     }
 }

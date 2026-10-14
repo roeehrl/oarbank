@@ -70,6 +70,28 @@ app reads as unknown, which counts as in front and shows as a node condition. Th
 every account's processes and paths (`sysctl kern.proc`, libproc), code-signing identity where it may read the
 executable, GPU time and the HID idle time.
 
+### Session helpers across updates
+
+A session helper runs the installed package's agent binary (launchd's LaunchAgent, the systemd user unit and the
+Windows elevated helper all start the one beside the launcher), so it should run the package's version. That is not
+always the service's own version: an agent-only channel build may be newer than the package. In 2.10.4 and earlier nothing
+restarted helpers after an update. A Windows helper started on 10/11 survived both the 2.10.3 and the 2.10.4 package
+updates and kept describing its person's processes with old code. Now:
+- **Versions.** Every report carries the helper's `version`, and the heartbeat lists each connected helper beside the
+  expected version.
+- **A restart request.** The service asks a helper of another version, on that helper's own connection, to exit
+  (`restart`). It asks again for the same version only after 10 minutes, since a helper started again from an unchanged
+  binary would only churn. Its supervisor then starts the installed binary.
+- **Packages replace old helpers.** A helper too old to say its version, or to understand the request, is replaced by
+  the package install:
+  - **macOS.** The pkg postinstall kickstarts the LaunchAgent in every GUI domain with a console login or a running
+    helper. When that fails it ends the helper, and launchd starts it again.
+  - **Linux.** The deb/rpm postinstall ends every running helper, and its user manager starts it again
+    (`Restart=always`).
+  - **Windows.** The MSI restarts the elevated helper. When it starts, it ends any session helper it did not start (the
+    installed agent's executable in a person's session) before starting its own in each session.
+- **The condition.** `PROTECTION_SESSION_HELPER_OUTDATED` names the helpers that are not current.
+
 ### Without a session helper
 
 *Decision (protected programs have priority; protection fails safe).* A person's processes are never invisible because
