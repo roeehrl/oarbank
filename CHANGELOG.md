@@ -4,16 +4,67 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
-## Unreleased
+## 2.10.4 (2026-10-14)
 
-A machine re-added to the tailnet keeps its node. Applying a tag in the Tailscale admin console makes a machine a new
-Tailscale device. The coordinator refused the node's certificate from there, and approving the agent's new enrollment
-made a second node with fleet defaults. The paused state, per-node module switches, caps, protection, labels and
-groups stayed on the old, offline record. The new enrollment's CSR is signed with the node's existing key, and the
-coordinator now recognises it. Approving it keeps the node id, settings and history, and moves the node to the new
-device. A machine that cannot prove a node's key but has a known node's host name still becomes a new node. The
-approval preview, `oarbank status` and the console say so and offer to retire the old record. Nodes that already
-re-enrolled before this fix stay two records: set the new node's settings again, then retire the old one.
+A fix release for 2.10.3. Module SDK: **oarbank-sdk 1.7.0**, unchanged; its runner protocol now spells out how a
+runner's `fault` and `retryable` combine, which this release acts on. Coming from 2.8 or earlier, read the
+[2.10.3](#2103-2026-10-13) and [2.9.0](#290-shipped-in-2103) sections as well.
+
+### Fixed
+
+- **A machine re-added to the tailnet keeps its node.** Applying a tag in the Tailscale admin console makes a machine a
+  new Tailscale device. The coordinator refused the node's certificate from there, and approving the agent's new
+  enrollment made a second node with fleet defaults. The paused state, per-node module switches, caps, protection,
+  labels and groups stayed on the old, offline record. The new enrollment's CSR is signed with the node's existing key,
+  and the coordinator now recognises it. Approving it keeps the node id, settings and history, and moves the node to
+  the new device. A machine that cannot prove a node's key but has a known node's host name still becomes a new node.
+  The approval preview, `oarbank status` and the console say so and offer to retire the old record.
+- **Module readiness no longer fails when a node's container runtime is missing pieces.** The readiness API and
+  `oarbank module ready` returned an error for modules that need the `containers` pool; they now name each missing
+  piece with the fix the agent reported.
+- **Missing container prerequisites are re-checked, and stale Colima instances recover.** A runtime piece installed
+  after the agent started is picked up within a minute, on a doctor run or on Re-detect, without a restart. A Colima
+  instance left broken by a killed VM is force-stopped and started again, a bounded number of times, and a failed start
+  is retried with a backoff instead of on every protection tick. A stopping agent stops its VMs.
+- **Probes and services run again when a module's tool grants change.** A probe that ran before its host tool was
+  resolved no longer stays `undetected` until its period ends.
+- **A job whose runner declares it can never succeed ends at once.** `fault: "job"` (or exit 2 with `failure.json`) or
+  `retryable: false` now fails the job immediately: it is not retried on other nodes and not quarantined.
+  `fault: "job"` with `retryable: true` spends one of the stage's retries, as `fault: "job"` did before. The failure's
+  reason, code and detail are kept and shown by `oarbank job show`, Explain, the campaign summary and the console, and
+  modules receive them in `campaign.tick` and `host.jobs.query`. A golden job that ends this way fails the module's
+  certification on that node.
+- **Protected processes are evaluated fail-safe without a session helper.** On macOS a person's processes are listed
+  and matched even when their session helper is not connected; facts that cannot be read count as holding, and usage
+  that cannot be measured counts within bounded reservations. Linux covers inactive sessions and accounts whose helper
+  went away the same way.
+- **Session helpers are served after an upgrade.** The agent makes the helpers' socket directory when it is missing,
+  keeps retrying to serve them, and reports when they are not served (`PROTECTION_SESSION_HELPER_UNAVAILABLE`, and a
+  failing `helpers` row in `oarbank-node doctor`). The macOS package makes the directory on upgrade.
+- **Presence counts what a person is actually doing.** On macOS a Screen Sharing viewer counts only while one is
+  connected, not whenever the daemon runs. On Linux ssh logins are ignored, as on macOS. The why line names the signal
+  that counted someone present.
+- **Apple silicon cores are classed by level name.** Chips whose levels are named "Super" and "Performance" (with no
+  efficiency cores) were given half their capacity for the second level; they now get full slots, and the why line and
+  console name each level.
+- **`max_slots` is described as a CPU-slot budget,** not a job count, and settings warn when it is below an enabled
+  stage's `resources.cpu`. `jobs` limits how many jobs run at once.
+- **The macOS node and coordinator apps' settings window has a right margin.**
+
+### New
+
+- **Open the console from another device.** `console_listen` (Settings → Access) chooses where the console listens:
+  `localhost`, `tailscale`, IP addresses or `all`. `console_https` set to `tailscale` serves the console over https on
+  the machine's tailnet name through `tailscale serve`, so passkeys work from other devices.
+- **An account menu in the console header,** with clearer password and sign-in help on the Access page.
+
+### Changes on upgrade
+
+- Nodes that already re-enrolled as a second record before this release stay two records: set the new node's settings
+  again, then retire the old one.
+- On Macs whose CPU levels are named "Super" and "Performance", the node's slot count rises and its co-tenancy
+  certificates are earned again once, since their hardware string changes.
+- A setting of `max_slots 1` meant to run one job at a time should become `jobs 1`.
 
 ## 2.10.3 (2026-10-13)
 
