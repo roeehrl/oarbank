@@ -210,7 +210,7 @@ impl OwnerSources for Sources {
 
 fn raw(pid: i32, path: &str) -> RawProcess {
     RawProcess { pid, ppid: 1, start_us: 1000 + pid as u64, path: Some(path.into()), comm: String::new(), cpu_s: 0.0,
-                 footprint_gb: 1.0 }
+                 footprint_gb: 1.0, ..Default::default() }
 }
 
 /// A GPU trainer protected by a gpu_share target (so the GPU gate holds), with a progress source.

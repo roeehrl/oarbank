@@ -63,7 +63,8 @@ pub use dynamic::{
     DynInputs, DynJob, DynOutputs, DynamicController, ProtectedSignal, ProxyValidation, ThrottleDoc,
 };
 pub use evaluator::{
-    CombinedConstraint, ConstraintVector, ProtectionEvent, RuleEvaluator, RuleReport, RuleState,
+    group_use, CombinedConstraint, ConstraintVector, ProtectionEvent, RuleEvaluator, RuleReport, RuleState,
+    UNMEASURED_CPU_CORES, UNMEASURED_FOOTPRINT_GB, UNMEASURED_GROUP_CPU_CORES, UNMEASURED_GROUP_FOOTPRINT_GB,
 };
 pub use gpu::{GpuBusy, GpuTimes};
 pub use gpu_duty::{DutyEvent, DutyGovernor, DutyInputs, DutyOutputs, DutySignal, DutyUnit};

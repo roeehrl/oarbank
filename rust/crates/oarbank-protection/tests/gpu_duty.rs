@@ -411,7 +411,7 @@ fn trainer(gpu_jobs: &str) -> (ProtectionController, Scripted, Arc<DecisionJourn
     {
         let mut w = host.0.lock().unwrap();
         w.procs = vec![RawProcess { pid: 7, ppid: 1, start_us: 1007, path: Some("/opt/trainer/train".into()),
-                                    comm: String::new(), cpu_s: 0.0, footprint_gb: 1.0 }];
+                                    comm: String::new(), cpu_s: 0.0, footprint_gb: 1.0, ..Default::default() }];
         w.rate = 10.0;
         w.readable = true;
     }

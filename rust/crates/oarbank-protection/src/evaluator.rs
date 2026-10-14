@@ -220,6 +220,46 @@ impl Serialize for CombinedConstraint {
     }
 }
 
+/// What a process whose use cannot be read now and was never measured counts as (another account's process listed
+/// without its session helper; docs/design/protection.md, "Without a session helper"): one core and 1 GB, at most
+/// `UNMEASURED_GROUP_*` a rule's group, so a rule that matches every such process (an argument key) reserves a bounded
+/// amount. A process measured before (by its helper, before the helper went away) counts at its last reading.
+pub const UNMEASURED_CPU_CORES: f64 = 1.0;
+pub const UNMEASURED_FOOTPRINT_GB: f64 = 1.0;
+pub const UNMEASURED_GROUP_CPU_CORES: f64 = 4.0;
+pub const UNMEASURED_GROUP_FOOTPRINT_GB: f64 = 8.0;
+
+/// A group's CPU cores and footprint (GB) this tick, and whether any of its processes' use is unknown. A process
+/// whose use cannot be read counts at its last reading (its last measured rate, its helper's last footprint), and one
+/// never measured at the `UNMEASURED_*` stand-ins, capped per group.
+pub fn group_use(group: &[ProcessRecord], cpu_cores: &HashMap<ProcessKey, f64>) -> (f64, f64, bool) {
+    let (mut cpu, mut mem, mut stand_cpu, mut stand_mem) = (0.0, 0.0, 0.0, 0.0);
+    let mut unknown = false;
+    for p in group {
+        let rate = cpu_cores.get(&p.key()).copied();
+        if !p.usage_unread {
+            cpu += rate.unwrap_or(0.0);
+            mem += p.footprint_gb;
+            continue;
+        }
+        unknown = true;
+        match rate {
+            Some(r) => cpu += r,
+            None => stand_cpu += UNMEASURED_CPU_CORES,
+        }
+        if p.footprint_gb > 0.0 {
+            mem += p.footprint_gb;
+        } else {
+            stand_mem += UNMEASURED_FOOTPRINT_GB;
+        }
+    }
+    (
+        cpu + stand_cpu.min(UNMEASURED_GROUP_CPU_CORES),
+        mem + stand_mem.min(UNMEASURED_GROUP_FOOTPRINT_GB),
+        unknown,
+    )
+}
+
 /// Per-rule activity with HTCondor-style asymmetric timing: a rule becomes active after its condition held
 /// for `enter_for_s` and inactive after it has been false for `exit_after_s`. A reserve-only rule enters at
 /// once (reserving is the least intrusive action and must not lag the protected process).
@@ -242,6 +282,9 @@ pub struct RuleReport {
     pub processes: usize,
     /// Processes matched only because a fact a key needs could not be read (counted as matches, fail-safe).
     pub unreadable: usize,
+    /// Processes in the group listed without their account's session helper (evaluated fail-safe: unread facts
+    /// match, unknown use counts as active and at its last reading or the conservative stand-in).
+    pub without_helper: usize,
     pub cpu_cores: f64,
     pub footprint_gb: f64,
     pub reason: String,
@@ -251,7 +294,8 @@ impl RuleReport {
     pub fn to_json(&self) -> Value {
         serde_json::json!({
             "id": self.id, "active": self.active, "processes": self.processes, "unreadable": self.unreadable,
-            "cpu_cores": rounded(self.cpu_cores, 2), "footprint_gb": rounded(self.footprint_gb, 2), "reason": self.reason,
+            "without_helper": self.without_helper, "cpu_cores": rounded(self.cpu_cores, 2),
+            "footprint_gb": rounded(self.footprint_gb, 2), "reason": self.reason,
         })
     }
 }
@@ -330,11 +374,9 @@ impl RuleEvaluator {
                 .iter()
                 .filter(|p| matcher::check(p, &rule.match_) == Match::Unreadable)
                 .count();
-            let cpu: f64 = group
-                .iter()
-                .map(|p| cpu_cores.get(&p.key()).copied().unwrap_or(0.0))
-                .sum();
-            let mem: f64 = group.iter().map(|p| p.footprint_gb).sum();
+            let without_helper = group.iter().filter(|p| p.without_helper).count();
+            // use that cannot be read counts at its last reading or a bounded stand-in, and as over any threshold
+            let (cpu, mem, use_unknown) = group_use(&group, cpu_cores);
             let mut st = self.states.remove(&rule.id).unwrap_or_default();
             st.history
                 .push(GroupSample::new(now, cpu, mem, group.len()));
@@ -354,10 +396,10 @@ impl RuleEvaluator {
             let mut cond = !group.is_empty();
             if cond && !aw.present {
                 cond = false;
-                if aw.cpu_cores_gt.is_some_and(|x| cpu > x) {
+                if aw.cpu_cores_gt.is_some_and(|x| use_unknown || cpu > x) {
                     cond = true;
                 }
-                if aw.footprint_gb_gt.is_some_and(|x| mem > x) {
+                if aw.footprint_gb_gt.is_some_and(|x| use_unknown || mem > x) {
                     cond = true;
                 }
                 // the app in front is (or is not) one of the group's processes; an unknown front app satisfies
@@ -464,6 +506,7 @@ impl RuleEvaluator {
                 active: active && !rule.ignore,
                 processes: group.len(),
                 unreadable,
+                without_helper,
                 cpu_cores: cpu,
                 footprint_gb: mem,
                 reason: reason.into(),

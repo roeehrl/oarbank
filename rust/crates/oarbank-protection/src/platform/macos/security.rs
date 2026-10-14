@@ -53,9 +53,13 @@ fn sec_code(pid: i32) -> Option<Owned> {
     Owned::from_create(code)
 }
 
-/// Team ID and signing identifier (None for unsigned or ad-hoc code, or a process that is gone).
+/// Team ID and signing identifier (None for unsigned or ad-hoc code). `unreadable` when Security could not read it:
+/// a process that is gone, or another account's whose executable this account may not read.
 pub fn signing(pid: i32) -> SigningIdentity {
-    let none = SigningIdentity::default();
+    let none = SigningIdentity {
+        unreadable: true,
+        ..SigningIdentity::default()
+    };
     let Some(code) = sec_code(pid) else {
         return none;
     };
@@ -87,6 +91,7 @@ pub fn signing(pid: i32) -> SigningIdentity {
     SigningIdentity {
         team_id: team,
         signing_id: ident,
+        unreadable: false,
     }
 }
 

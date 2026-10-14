@@ -44,9 +44,11 @@ or reschedules a process outside its spawn registry or the owner's delegations.
 ## Whose processes
 
 The owner's processes are those of the agent's own account (the personal scope runs as the person) and, for a system
-install, of the people using the machine: on macOS every account a session helper reports for (each GUI login runs
-one); on Linux every person logged in (systemd-logind's user sessions) or reporting through a session helper; on
-Windows each person's own processes in their session. A system install's agent runs as a service account that may not
+install, of the people using the machine: on macOS every person's account (uid 501 and up), described by its session
+helper where one reports (each GUI login runs one); on Linux every person with a logind session (in front or not, or
+left closing with programs running), every account a session helper has reported for since the service started, and,
+when logind cannot be asked, every person's account (uid 1000 to 60000); on Windows each person's own processes in
+their session. A system install's agent runs as a service account that may not
 read everything about another account's processes: on macOS their arguments, CPU time, footprint and scheduler
 counters (rusage) and the app in front of their session; on Linux their executable path and open files (ptrace
 access); on Windows their command line (a process handle); and on Linux and Windows their display and input. A
@@ -61,11 +63,55 @@ window (macOS, Windows) and the last input (Windows). The endpoint names the acc
 account or session that started when the claim says, and it forgets a helper ten seconds after its last report. A
 process of a person whose helper reports is listed once the helper has described it, at most one report after it
 started; until then it would match every rule whose facts only the helper can read. A helper can only describe its own
-person's work. Without one, those facts are unreadable and the fail-safe rules apply; on Windows the system's own
-processes in that person's session then count as the owner's too. On macOS a person without a helper (logged in only
-over ssh, or before their helper's first report) is not seen; when that is the console's account, the front app reads
-as unknown, which counts as in front and shows as a node condition. The macOS service reads the rest itself: every
-account's processes and paths (`sysctl kern.proc`, libproc), code-signing identity, GPU time and the HID idle time.
+person's work. Without one (none connected, or its last report older than ten seconds), the person's processes are
+still listed and evaluated fail-safe (below, "Without a session helper"); on Windows the system's own processes in that
+person's session then count as the owner's too. When the person without a helper is the console's account, the front
+app reads as unknown, which counts as in front and shows as a node condition. The macOS service reads the rest itself:
+every account's processes and paths (`sysctl kern.proc`, libproc), code-signing identity where it may read the
+executable, GPU time and the HID idle time.
+
+### Without a session helper
+
+*Decision (protected programs have priority; protection fails safe).* A person's processes are never invisible because
+their session helper is not connected, has stopped reporting, or cannot be served (`PROTECTION_SESSION_HELPER_UNAVAILABLE`).
+Before this, the macOS service listed another account's processes only once its helper had described them, so a rule on
+a program in a person's home matched none of them while the helper was down and the program was silently unprotected.
+Now the service lists them from what it reads itself and every rule evaluates them fail-safe; the helper's report, once
+it comes, replaces this fallback for the processes it describes.
+
+- **What is read.** macOS: pid, parent, start time, uid and short name from `sysctl kern.proc` (one `KERN_PROC_ALL`
+  call a tick, as cheap as the per-account calls it replaces), the executable's path from `proc_pidpath`, and CPU time
+  and footprint from `proc_pid_rusage` where it answers (it does not for another account's process unless the service
+  is root). Linux: everything but the executable's path, which stays unreadable without the helper. Windows: everything
+  but the command line. Nothing new is sampled: the tick's cadence (2 s) is unchanged.
+- **Matching.** A key whose fact is unreadable counts as holding, as for any unreadable fact: arguments, a code-signing
+  identity Security cannot read (an executable in a person's home the service account may not read, as opposed to
+  unsigned code, which never matches), a bundle id whose `Info.plist` it may not read, and on Linux the path. Such a
+  process takes part from its second sighting, as every unreadable one does. `tree = "descendants"` follows the parent
+  pids the kernel reports, so a matched program's whole tree is protected.
+- **Activity.** A `cpu_cores_gt` or `footprint_gb_gt` threshold over a group with a process whose use cannot be read
+  counts as exceeded; an unknown front app counts as in front and unreadable GPU use as busy, as before. Caps, pauses,
+  lowering and GPU holds of such a rule therefore apply while any matched process runs.
+- **Reservations stay bounded.** A rule's reserve expression is evaluated as usual over the group's history, where a
+  process whose use cannot be read counts at its last reading: the footprint its helper last reported (kept by the
+  service while the process runs) and its last measured CPU rate. A process never measured counts at 1 GB and one core
+  (`UNMEASURED_FOOTPRINT_GB`, `UNMEASURED_CPU_CORES`), at most 8 GB and 4 cores a rule's group
+  (`UNMEASURED_GROUP_*`): an argument key matches every such process of the person, and the stand-ins must not grow
+  with them. So `peak(300s).footprint + 2` over a helperless trainer measured at 12 GB before its helper went reserves
+  14 GB plus at most 8 for its unmeasured processes, and over one never measured at most 10 GB. The memory floors,
+  which read system-wide memory and need no helper, still catch what the estimate misses.
+- **Shown.** A rule's report counts the processes it holds this way (`without_helper`), the console, explain and
+  `oarbank protection show` list `PROTECTION_WITHOUT_HELPER` ("rule ...: n processes evaluated without session helper
+  (fail-safe)") while it is above 0, and `PROTECTION_SESSION_HELPER_UNAVAILABLE` says the same of a service that cannot
+  serve its helpers at all.
+- **Trade-off.** A rule keyed on arguments (`argv_regex`, a `path_contains` marker that sits in an argument) holds
+  every process of a person without a helper, so it is active whenever that person runs anything: protection
+  over-applies rather than misses the program. Keying such a rule on the path, where the path carries the marker,
+  keeps it precise without the helper.
+- **Per OS.** macOS: as above. Linux had the same gap for a person whose session was not in front (switched away on
+  the seat), left closing after logout, or whose helper had gone, and for everyone when logind could not be asked:
+  those accounts are now the owner's too. Windows already listed every process of a session without a helper as the
+  owner's; its processes are now marked and reported the same way.
 
 ## Module services
 
@@ -143,7 +189,7 @@ A rule has a matcher, a tree scope, an activity condition, actions and timing.
 - **Matchers:** code-signing identity (Team ID and signing identifier, or a designated requirement), bundle id, path
   prefix or substring, and an argv pattern. A signature survives updates and relocation; a path does not; argv is the
   only way to tell one interpreter's script from another's. A key whose fact the agent cannot read (another account's
-  path or arguments) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
+  path, arguments, code-signing identity or bundle id) counts as holding, so a failed lookup never leaves a process unprotected; a rule's report counts
   the processes it matched that way (`unreadable`). Such a process takes part from its second sighting on (the next
   tick): an owner's process whose facts fail to read is nearly always one exiting between the listing and the read,
   and on a busy machine those would otherwise switch every such rule on every few ticks. Identity is read once per
@@ -225,15 +271,15 @@ desktop), presence that cannot be read (`PROTECTION_PRESENCE_UNKNOWN`: counts as
 presence is a desktop session or a local text session with a terminal that has had input, only when logind cannot be
 asked or such a session's input time cannot be read, never because of ssh or a user manager; on macOS when the HID
 idle time cannot be read, or `screensharingd` runs and its connections cannot be read), processes matched
-only because their path or arguments were unreadable (`PROTECTION_UNREADABLE`), an `ipc_ratio` rule whose processes
+only because their path, arguments or identity were unreadable (`PROTECTION_UNREADABLE`), an `ipc_ratio` rule whose processes
 have no instruction or cycle counters (`PROTECTION_NO_IPC_COUNTERS`: a virtual machine; the metric is unknown, so the
 budget does not grow on it), and a node that cannot lower its jobs (`PROTECTION_NO_LOWERING`: pausable jobs are paused
 instead). A system install's service that cannot serve its session helpers (`PROTECTION_SESSION_HELPER_UNAVAILABLE`:
 the socket's directory missing and not the service account's to make, or the pipe's name taken) reads no other
-account's process arguments (on macOS it lists none of their processes), so a rule on a person's program may match
-nothing; the agent makes the socket's directory when it may and tries again every 15 s, the macOS package's upgrade
-and `sudo oarbank-node service refresh --system` make the directory, and `oarbank-node doctor` fails its `helpers` row
-meanwhile.
+account's process arguments (on macOS nor their resource use), and evaluates their processes without session helper
+(fail-safe; `PROTECTION_WITHOUT_HELPER` per rule, "Without a session helper" above); the agent makes the socket's
+directory when it may and tries again every 15 s, the macOS package's upgrade and `sudo oarbank-node service refresh
+--system` make the directory, and `oarbank-node doctor` fails its `helpers` row meanwhile.
 
 ## Capacity
 
@@ -367,6 +413,7 @@ trainer; for a CPU-bound protected process `ipc_ratio` did (r = 0.97, full sign 
 | Default | Value |
 |---|---|
 | Sample period | 2 s |
+| Unmeasured process without its session helper | 1 GB and 1 core; at most 8 GB and 4 cores a rule's group |
 | Rule enter / exit | 4 s / 60 s |
 | Resume cooldown | 120 s × 2^(activations in the last hour), at most 3,840 s |
 | L1 interval and step | 60 s; +1 core, ×0.5 on a violation |

@@ -298,7 +298,7 @@ fn telemetry_and_status_shapes() {
     assert_eq!(t["active"], json!(["gpu-app"]));
     assert_eq!(
         t["rules"],
-        json!([{"id": "gpu-app", "active": true, "processes": 1, "unreadable": 0, "cpu_cores": 0.0,
+        json!([{"id": "gpu-app", "active": true, "processes": 1, "unreadable": 0, "without_helper": 0, "cpu_cores": 0.0,
                                     "footprint_gb": 4.0, "reason": "active"}])
     );
     assert_eq!(t["constraint"]["reserved_mem_gb"], json!(6.0));
@@ -412,6 +412,7 @@ impl ProcessSource for Shared {
         SigningIdentity {
             team_id: (pid == 7).then(|| "ABCDE12345".into()),
             signing_id: Some(format!("id.{pid}")),
+            unreadable: false,
         }
     }
     fn satisfies(&mut self, pid: i32, _: &str) -> bool {
@@ -445,6 +446,7 @@ fn raw(pid: i32, ppid: i32, path: &str, cpu_s: f64) -> RawProcess {
         comm: String::new(),
         cpu_s,
         footprint_gb: 1.0,
+        ..RawProcess::default()
     }
 }
 

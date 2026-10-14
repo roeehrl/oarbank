@@ -355,6 +355,8 @@ impl ProcessSource for NativeProcessSource {
                 .cloned()
                 .collect()
         };
+        // the sessions whose helper reports now; a process in any other is the owner's without one (fail-safe)
+        let helped = self.hub.as_ref().map(|h| h.principals()).unwrap_or_default();
         let mut out = Vec::with_capacity(procs.len());
         let mut seen = HashSet::with_capacity(procs.len());
         for p in procs {
@@ -383,6 +385,8 @@ impl ProcessSource for NativeProcessSource {
                 comm: p.image_name.clone(),
                 cpu_s: p.cpu_s(),
                 footprint_gb: p.private_ws_bytes as f64 / GB,
+                without_helper: !personal && !helped.contains(&Principal::Session(p.session)),
+                usage_unread: false,
             });
         }
         self.known.retain(|k, _| seen.contains(k));

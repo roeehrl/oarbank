@@ -15,7 +15,7 @@ use std::time::Instant;
 pub use front::{x11_front, FrontReader};
 pub use gpu::{gpu_times, nvml, process_gpu};
 pub use logind::{sessions, NativePresence};
-pub use procs::{owner_uids, reader, start_time_us, NativeProcessSource, ProcessCounters};
+pub use procs::{owners, reader, start_time_us, NativeProcessSource, ProcessCounters};
 pub use session::{run_helper, serve, socket_path};
 
 use crate::gpu::{GpuTimes, LinuxGpu};

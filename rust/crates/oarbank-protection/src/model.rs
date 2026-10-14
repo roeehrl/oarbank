@@ -27,6 +27,18 @@ pub struct ProcessRecord {
     pub cpu_s: f64,
     /// Physical footprint (includes GPU allocations in unified memory), GB.
     pub footprint_gb: f64,
+    /// Listed without its account's session helper (none connected, or its last report too old): what only the
+    /// helper reads is unknown, and every rule evaluates it fail-safe (docs/design/protection.md, "Without a session
+    /// helper").
+    pub without_helper: bool,
+    /// The code-signing identity (and with it any requirement) could not be read: a key on it counts as holding.
+    pub signing_unread: bool,
+    /// The bundle id could not be read (the path, or the bundle's Info.plist, is not readable): a key on it holds.
+    pub bundle_unread: bool,
+    /// `cpu_s` and `footprint_gb` are not readings of now (another account's process without its helper): a CPU or
+    /// footprint threshold counts as exceeded, and the group's use is estimated (`footprint_gb` above 0 is the last
+    /// reading; see the evaluator's `UNMEASURED_*`).
+    pub usage_unread: bool,
 }
 
 impl ProcessRecord {

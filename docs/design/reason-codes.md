@@ -124,8 +124,9 @@ Generated from `oarbank.contracts.reason_codes`. Module codes use `<module-short
 | `S16_GUARD` | Refused to act on process {pid}: it is not in the spawn registry ({why}) | P3 | – | – | – |
 | `PROTECTION_FRONT_UNKNOWN` | The front app cannot be read here ({why}); frontmost rules count it as in front | P4 | – | – | – |
 | `PROTECTION_PRESENCE_UNKNOWN` | Whether someone is at the machine cannot be read ({why}); it counts as someone present | P4 | – | – | – |
-| `PROTECTION_SESSION_HELPER_UNAVAILABLE` | Session helper unavailable ({why}): protected processes in other accounts may not match (rules: {rules}) | P3 | – | – | – |
-| `PROTECTION_UNREADABLE` | Rule {rule} matched {n} processes whose path or arguments could not be read (counted as matches) | P5 | – | – | – |
+| `PROTECTION_SESSION_HELPER_UNAVAILABLE` | Session helper unavailable ({why}): other accounts' processes are evaluated without session helper (fail-safe) (rules: {rules}) | P3 | – | – | – |
+| `PROTECTION_UNREADABLE` | Rule {rule} matched {n} processes whose path, arguments or identity could not be read (counted as matches) | P5 | – | – | – |
+| `PROTECTION_WITHOUT_HELPER` | Rule {rule}: {n} processes evaluated without session helper (fail-safe): what only their helper reads counts as matching, unknown use as active | P4 | – | – | – |
 | `PROTECTION_NO_LOWERING` | This node cannot lower fleet jobs (no delegated cgroup with the cpu controller): pausable jobs are paused instead | P3 | – | – | – |
 | `PROTECTION_NO_IPC_COUNTERS` | Rule {rule} protects ipc_ratio, but this node's processes have no instruction or cycle counters (a virtual machine): the metric is unknown and the fleet's CPU budget does not grow | P4 | – | – | – |
 | `PROTECTION_SOURCE_ERROR` | The process table cannot be read: {error} | P3 | – | – | – |

@@ -38,26 +38,37 @@ pub enum Match {
     No,
     /// Every key holds.
     Yes,
-    /// No key fails, but one needs a fact the agent could not read (another account's path or arguments).
-    /// It counts as a match: a failed identity lookup never leaves a process unprotected.
+    /// No key fails, but one needs a fact the agent could not read (another account's path, arguments, code-signing
+    /// identity or bundle id). It counts as a match: a failed identity lookup never leaves a process unprotected.
     Unreadable,
 }
 
 /// Check one process against the match keys: all given keys must hold; an empty key is no key.
 pub fn check(p: &ProcessRecord, m: &ProcessMatch) -> Match {
     let mut unreadable = false;
+    // a signing key that does not hold on an identity the agent could not read might hold on the real one
+    let mut signing = |holds: bool| -> bool {
+        if holds {
+            return true;
+        }
+        if p.signing_unread {
+            unreadable = true;
+            return true;
+        }
+        false
+    };
     if let Some(r) = key_set(&m.requirement) {
-        if !p.requirements_met.contains(r) {
+        if !signing(p.requirements_met.contains(r)) {
             return Match::No;
         }
     }
     if let Some(t) = key_set(&m.team_id) {
-        if p.team_id.as_deref() != Some(t) {
+        if !signing(p.team_id.as_deref() == Some(t)) {
             return Match::No;
         }
     }
     if let Some(i) = key_set(&m.identifier) {
-        if p.signing_id.as_deref() != Some(i) {
+        if !signing(p.signing_id.as_deref() == Some(i)) {
             return Match::No;
         }
     }
@@ -67,7 +78,10 @@ pub fn check(p: &ProcessRecord, m: &ProcessMatch) -> Match {
             .as_ref()
             .is_some_and(|b| m.bundle_ids.contains(b))
     {
-        return Match::No;
+        if !(p.bundle_unread && p.bundle_id.is_none()) {
+            return Match::No;
+        }
+        unreadable = true;
     }
     if let Some(pre) = key_set(&m.path_prefix) {
         match &p.path {
