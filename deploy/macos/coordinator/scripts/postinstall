@@ -16,6 +16,11 @@
 #     move to that person.
 #   - A first install: nothing more. The services start from the setup wizard, which asks for an administrator once
 #     (the agent address is the person's choice).
+#   - Whichever it was, a system service with no update trust yet gets it here, while an administrator installs: the
+#     owner keys its home pinned (oarbank-coordupdate trust --from-home; fleet-updates.md, D58). The refresh pins it
+#     too, but a migration's copied database may get its owner anchors only once the new build has opened it, after
+#     the services' install: this runs once they answer. A home with no owner keys yet leaves the pin pending, and the
+#     runner makes it at the first update request.
 # Output lands in /var/log/install.log, which every account can read: nothing here prints a key or a code. It always
 # exits 0: the programs are installed whatever happens here.
 set -u
@@ -33,8 +38,18 @@ for name in oarbank oarbank-setup; do
     /bin/ln -sfn "$BIN/$name" "$link" || echo "Oarbank: could not link $link to $BIN/$name"
 done
 
+DATA="/Library/Application Support/Oarbank"
+pin_trust() {
+    [ -f "$RECORD" ] && [ -f "$DATA/coordinator/oarbank.sqlite3" ] || return 0
+    [ -f "$DATA/coordinator-update/trust.json" ] && return 0
+    "$BIN/oarbank-coordupdate" trust --from-home --home "$DATA/coordinator" --state "$DATA/coordinator-update" >/dev/null 2>&1 \
+        && echo "Oarbank: the coordinator's update trust is pinned" \
+        || echo "Oarbank: the coordinator has no owner keys yet; its update runner pins them at the first update"
+}
+
 if [ -f "$RECORD" ]; then
     /bin/bash "$ROOT/install-oarbankd.sh" --refresh --installed "$ROOT" || echo "Oarbank: the coordinator's services could not be refreshed; run: sudo oarbank-setup"
+    pin_trust
     exit 0
 fi
 per_user=
@@ -44,7 +59,7 @@ done
 if [ -n "$per_user" ]; then
     "$BIN/oarbank" coordinator migrate --run --from-installer --build "$ROOT"
     case $? in
-        0) echo "Oarbank: the coordinator now runs as a system service" ;;
+        0) echo "Oarbank: the coordinator now runs as a system service"; pin_trust ;;
         3) echo "Oarbank: the coordinator keeps running per-user until its owner moves it (Oarbank Coordinator offers it)" ;;
         *) echo "Oarbank: the move to a system service did not complete; the per-user coordinator runs as before" \
                 "(/Library/Application Support/Oarbank/coordinator-migration.json says why)" ;;

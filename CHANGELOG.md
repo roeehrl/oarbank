@@ -17,6 +17,12 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   `sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent` on macOS,
   `sudo oarbank-launcher update-trust --from-agent` on Linux, and `oarbank-node update-trust --from-agent` in an
   elevated prompt on Windows. Before, the plan showed `update-trust` without `--from-agent`, which only prints usage.
+- **The coordinator pins its own update trust after a migration or an upgrade.** A coordinator moved from per-user to
+  the system service by the 2.10.3 pkg could miss its update trust, and `oarbank update start` stopped with "no update
+  trust on this machine". The pkg's (and deb's and rpm's) postinstall now pins it from the coordinator's owner keys
+  once the services run. A home with no owner keys yet leaves the pin pending, and the runner pins it at the first
+  update request. The refusal names the runnable command, `sudo "<build>/bin/oarbank-coordupdate" trust --from-home`
+  (on macOS the build is inside Oarbank Coordinator.app), instead of a bare `coordupdate`.
 - **The Windows Group Policy template zip is the same file for both architectures.** The x64 and arm64 jobs each
   built `oarbank-agent-<version>-windows-admx.zip` with different bytes, so the published zip matched only one of the
   two `SHA256SUMS-agent-*-windows-*` files (2.10.3 and 2.10.4). It is now written reproducibly: fixed order, time and

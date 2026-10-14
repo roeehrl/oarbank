@@ -225,6 +225,11 @@ class PackagingTests(unittest.TestCase):
         code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
         self.assertIn('/bin/bash "$ROOT/install-oarbankd.sh" --refresh --installed "$ROOT"', code)
         self.assertIn('"$ROOT/bin/oarbank" coordinator migrate --run --from-installer --build "$ROOT"', code)
+        # the update runner's trust, from the home's owner keys, after the refresh and after a migration (fleet-updates.md)
+        self.assertIn('"$ROOT/bin/oarbank-coordupdate" trust --from-home --home "$DATA/coordinator" --state "$DATA/coordinator-update"', code)
+        self.assertIn('[ -f "$DATA/coordinator-update/trust.json" ] && return 0', code)
+        self.assertLess(code.index('--refresh --installed "$ROOT"'), code.index("    pin_trust\n"))
+        self.assertIn('--build "$ROOT" \\\n    && pin_trust \\\n', code)
         self.assertNotIn("set -e", code)
         self.assertTrue(text.rstrip().endswith("exit 0"))
 
