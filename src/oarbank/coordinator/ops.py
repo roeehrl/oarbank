@@ -1596,14 +1596,13 @@ def _build(db, req):
                             "module and enable it (Modules page, or `oarbank module enable <name>@<version>`): its release "
                             "is then built for every platform in the fleet.")
     out = releases.sync(db)
-    need = releases.signature_required(db)
     rows = {r["release_id"]: r for r in db.q("SELECT release_id, status, sha256, signature, composition_json FROM releases "
                                              "WHERE release_id IN "
                                              f"({','.join('?' * len(out['defaults']))})", tuple(out["defaults"].values()))}
     built = []
     for plat, rid in out["defaults"].items():
         r = rows[rid]
-        unsigned = need and not r["signature"]
+        unsigned = releases.needs_signature(db, r)                    # an empty release (no module) needs none
         built.append({"platform": plat, "release_id": rid, "status": r["status"], "sha256": r["sha256"], "needs_signature": unsigned,
                       "modules": releases.contents(r["composition_json"]),
                       **({"next": f"oarbank release sign {rid} --promote"} if unsigned or r["status"] != "current" else {})})
