@@ -10,6 +10,8 @@
   {% if I.lock_notes %}<div class="flash warn small" role="note"><b>The lock overrides values set below it</b> (they are kept, and apply again when the lock goes):
     <ul>{% for x in I.lock_notes %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
   {% if I.protection_notes %}<ul class="small mut">{% for x in I.protection_notes %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+  {% if I.warnings %}<div class="flash warn small" role="note"><b>Check before saving</b>:
+    <ul>{% for x in I.warnings %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
   {% if I._diff %}<table class="small"><caption class="sr-only">Nodes whose effective value changes</caption>
   <tr><th scope="col">node</th><th scope="col">setting</th><th scope="col">now</th><th scope="col">after saving</th><th scope="col">from</th></tr>
   {% for x in I._diff %}<tr><td>{{ x.hostname }}</td><td>{{ x.label }}</td><td class="mono">{{ x.old_text }}</td><td class="mono"><b>{{ x.new_text }}</b></td><td>{{ x.source }}</td></tr>{% endfor %}</table>{% endif %}
@@ -26,6 +28,8 @@
   <h2 class="small-h">{{ title }}</h2><ul class="small">{% for c in items %}<li>{{ c }}</li>{% endfor %}</ul>{% endfor %}
   {% if I.lock_notes %}<div class="flash warn small" role="note"><b>A lock in the file overrides values set below it</b>:
     <ul>{% for x in I.lock_notes %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
+  {% if I.warnings %}<div class="flash warn small" role="note"><b>Check before saving</b>:
+    <ul>{% for x in I.warnings %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}
   {% if I.nodes_changed %}<details class="small"{% if I.nodes_changed | length < 12 %} open{% endif %}><summary>{{ I.nodes_changed | length }} node value{{ 's' if I.nodes_changed | length != 1 }} change</summary>
     <ul>{% for x in I.nodes_changed %}<li>{{ x }}</li>{% endfor %}</ul></details>{% endif %}
   {% if I.notes %}<div class="small" role="note"><b>Not imported</b><ul>{% for x in I.notes %}<li>{{ x }}</li>{% endfor %}</ul></div>{% endif %}

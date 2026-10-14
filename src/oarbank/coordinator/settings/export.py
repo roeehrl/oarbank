@@ -425,7 +425,7 @@ def preview(db, text) -> dict:
     return {"summary": summary, "empty": not n, "scope": doc.get("scope"), "module": doc.get("module"),
             "changes": sp["changes"] if sp else [], "nodes_changed": sp["nodes_changed"] if sp else [],
             "nodes_unaffected": sp["nodes_unaffected"] if sp else [], "lock_notes": sp["lock_notes"] if sp else [],
-            **words, "notes": plan["notes"],
+            "warnings": sp["warnings"] if sp else [], **words, "notes": plan["notes"],
             "then": "applied as one operation: groups, labels and tools first, then the values as one change set",
             "_plan": plan, "_tier": tier, "_count": n}
 

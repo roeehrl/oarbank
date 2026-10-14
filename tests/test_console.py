@@ -709,7 +709,7 @@ def test_the_node_settings_tab_shows_each_setting_with_its_source(env):
     assert_clean(text)
     for label in ("Memory kept for the system", "Memory kept for the person using it", "Jobs while someone is using this computer",
                   "Idle time before the computer counts as free", "Screen sharing counts as someone using it", "Run jobs on battery",
-                  "Fit jobs into the memory free now", "Memory per job slot", "Threads per job", "Most jobs at once",
+                  "Fit jobs into the memory free now", "Memory per job slot", "Threads per job", "CPU slots for jobs (cores)",
                   "Job priority (nice)", "Hard limits", "CPU cores", "Concurrent jobs", "Schedule", "Cap enforcement",
                   "Modules on this node", "Run this module", "Services that do not run"):
         assert label in text, label

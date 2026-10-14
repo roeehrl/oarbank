@@ -128,6 +128,12 @@ def _stage_reasons(name: str, stage, node: dict, tool_ids: set, has_release: boo
     cores = platforms.cores(facts)
     if cores and cores < res.cpu:
         out.append(f"has {cores} cores; the stage needs {res.cpu:g}")
+    from . import nodepolicy
+    from .settings.apply import flat_values
+    cpu = (stage.for_platform(plat) if plat else stage).requires.resources.cpu
+    short = nodepolicy.slot_budget_short(flat_values(node).get("max_slots"), cpu, stage.name)
+    if short:
+        out.append(short)
     return out
 
 
