@@ -1003,6 +1003,38 @@ def node_show(target: str, as_json: bool = False):
         print(f"    everything else inherited: oarbank settings get --node {n['hostname']}")
 
 
+def admission_params(a) -> dict:
+    """`oarbank node approve|approve-code` options: what the node starts as (docs/design/node-enrollment.md,
+    "Admission"). `--set key=value` is a node setting (`<module>:key=value` for a module's), its value read as
+    `oarbank settings set` reads one."""
+    out = {}
+    if a.state:
+        out["state"] = a.state
+    mods = {**{m: False for m in a.module_off or []}, **{m: True for m in a.module_on or []}}
+    clash = set(a.module_off or []) & set(a.module_on or [])
+    if clash:
+        sys.exit(f"--module-off and --module-on both name {', '.join(sorted(clash))}")
+    if mods:
+        out["modules"] = mods
+    sets = []
+    for x in a.set or []:
+        key, eq, raw = x.partition("=")
+        if not eq or not key.strip():
+            sys.exit(f"--set {x!r}: key=value (a module's own setting: <module>:key=value)")
+        mod, colon, name = key.strip().partition(":")
+        mod, name = (mod, name) if colon else ("", mod)
+        sets.append({"key": name, "value": _setting_value(name, raw), **({"module": mod} if mod else {})})
+    if sets:
+        out["settings"] = sets
+    for k in ("labels", "groups"):
+        v = [y.strip() for x in getattr(a, k) or [] for y in x.split(",") if y.strip()]
+        if v:
+            out[k] = v
+    if a.adopt_settings_from:
+        out["adopt_settings_from"] = a.adopt_settings_from
+    return out
+
+
 def cmd_node(a):
     if a.action == "show":
         return node_show(a.target, a.json)
@@ -1016,9 +1048,9 @@ def cmd_node(a):
         sig = signing.sign(stmt, Path(a.key) if a.key else signing.DEFAULT_KEY)
         res = run_op("nodes.sign_statement", a.target, {"statement": stmt, "signature": sig}, a.reason, True)
     elif a.action == "approve":
-        res = run_op("nodes.admit", a.target, reason=a.reason, yes=a.yes)
+        res = run_op("nodes.admit", a.target, admission_params(a), a.reason, a.yes, a.confirm)
     elif a.action == "approve-code":
-        res = run_op("nodes.admit_code", None, {"user_code": a.target}, a.reason, a.yes)
+        res = run_op("nodes.admit_code", None, {"user_code": a.target, **admission_params(a)}, a.reason, a.yes, a.confirm)
     elif a.action == "reject":
         res = run_op("nodes.reject_enrollment", a.target, reason=a.reason, yes=a.yes)
     elif a.action == "mode":
@@ -2081,6 +2113,20 @@ def parser() -> argparse.ArgumentParser:
     n.add_argument("value", nargs="?", help="state: active|paused|draining; mode: " + "|".join(PROTECTION_MODES)
                                             + "; label: labels, comma-separated")
     n.add_argument("--remove", action="store_true", help="label: remove these labels instead of adding them")
+    # approve / approve-code: what the node starts as, written with its approval (docs/design/node-enrollment.md)
+    n.add_argument("--state", choices=["active", "paused", "draining"],
+                   help="approve: the node's state from the start (paused: no jobs, no certification goldens, until resumed)")
+    n.add_argument("--module-off", action="append", metavar="MODULE", help="approve: turn this module off on the node")
+    n.add_argument("--module-on", action="append", metavar="MODULE",
+                   help="approve: turn this module on on the node (with new_node_modules none)")
+    n.add_argument("--set", action="append", metavar="KEY=VALUE",
+                   help="approve: a setting of the node's own (<module>:key=value for a module's), checked as settings set checks it")
+    n.add_argument("--labels", action="append", metavar="L1,L2", help="approve: the node's labels")
+    n.add_argument("--groups", action="append", metavar="G1,G2", help="approve: owner groups that list the node")
+    n.add_argument("--adopt-settings-from", metavar="OLD_NODE",
+                   help="approve: this is the same machine as OLD_NODE (a node it looks like, offline): carry its settings, "
+                        "state, labels, groups, protection, holds and pins over, and retire it (asks you to type its name)")
+    n.add_argument("--confirm", help="approve --adopt-settings-from: the old node's name, typed")
     n.add_argument("--json", action="store_true", help="show: the node's detail document as JSON")
     n.add_argument("--key", help="sign: the owner's release key (default: the configured one)")
     n.add_argument("--reason")

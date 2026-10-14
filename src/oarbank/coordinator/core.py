@@ -156,16 +156,22 @@ def enroll(db: DB, hostname: str, facts: dict, peer_ip: str, csr: str, join: str
     return {"enrollment_id": eid, "status": "approved", "join": "approved"}
 
 
-def admit_by_user_code(db: DB, user_code: str, actor: str) -> dict:
+def admit_by_user_code(db: DB, user_code: str, actor: str, admission: dict | None = None) -> dict:
     """Approve the pending enrollment whose node shows this device code (made within the last day)."""
+    e = user_code_enrollment(db, user_code)
+    return {"enrollment_id": e["enrollment_id"], **approve_enrollment(db, e["enrollment_id"], actor, admission=admission)}
+
+
+def user_code_enrollment(r, user_code: str) -> dict:
+    """The pending enrollment (made within the last day) whose node shows this device code, or ApiError."""
     code = normalize_user_code(user_code)
     if not code:
         raise ApiError(400, "bad_user_code", "a machine's code is 8 letters, like WDJB-MJHT")
-    e = db.one("SELECT enrollment_id FROM enrollments WHERE user_code=? AND status='pending' AND created_at>? "
-               "ORDER BY created_at DESC", (code, now() - 86400))
+    e = r.one("SELECT * FROM enrollments WHERE user_code=? AND status='pending' AND created_at>? "
+              "ORDER BY created_at DESC", (code, now() - 86400))
     if not e:
         raise ApiError(404, "not_found", f"no machine is waiting with the code {code}")
-    return {"enrollment_id": e["enrollment_id"], **approve_enrollment(db, e["enrollment_id"], actor)}
+    return e
 
 
 def enroll_status(db: DB, eid: str) -> dict:
@@ -181,38 +187,22 @@ def enroll_status(db: DB, eid: str) -> dict:
         return {"status": e["status"]}
 
 
-def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -> dict:
+def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None, admission: dict | None = None) -> dict:
     """Approve an enrollment: the node gets its client certificate. A request that proves a node's key (its CSR is
     signed by the key of the node's current or previous certificate), else one from the node's Tailscale device, keeps
     that node's id, settings and history, and re-pins it to the request's Tailscale device (nodeidentity.py). Its name
     is `label` (a join code's), else a label it already had, else the hostname it reported; a labelled node keeps its
-    name when its agent reports another one (hello)."""
-    from . import nodeidentity
-    label = (label or "").strip() or None
+    name when its agent reports another one (hello).
+
+    `admission` (admission.parse) is what the node starts as: its state, module switches, settings, labels and groups,
+    or the settings of the old node it replaces; a new node without them follows the fleet's onboarding policy. They
+    are written in this transaction, before the enrollment is approved, so the agent never sees the node without
+    them (admission.py)."""
     with db.tx():
         e = db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,))
         if not e or e["status"] != "pending":
             raise ApiError(409, "not_pending", eid)
-        label = label or e["requested_name"]
-        facts = jl(e["facts_json"], {})
-        # Re-enrolment of a known node (by its key, else its Tailscale device) keeps its node_id, settings and history.
-        ident = nodeidentity.of_enrollment(db, e)
-        node_id = ident["node_id"] or "n_" + secrets.token_hex(4)
-        if ident["node_id"]:
-            db.x("UPDATE nodes SET lifecycle='enrolled', facts_json=?, hostname=COALESCE(?, label, ?), label=COALESCE(?, label),"
-                 " ts_ip=?, ts_node_id=COALESCE(?, ts_node_id), quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
-                 (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], e["ts_node_id"], node_id))
-            if ident["ts_changed"]:
-                db.event("node_tailscale_repinned", actor=actor, node_id=node_id, enrollment_id=eid,
-                         reason=f"{ident['old_ts_node_id']} -> {e['ts_node_id']} (re-enrolment proved the node key)")
-        else:
-            # nothing of its settings is copied: it inherits the defaults, the fleet's and its groups' values (settings/)
-            db.x("INSERT INTO nodes(node_id,ts_node_id,hostname,label,ts_ip,facts_json,lifecycle,desired_state,created_at)"
-                 " VALUES(?,?,?,?,?,?,'enrolled','active',?)",
-                 (node_id, e["ts_node_id"], label or e["hostname"], label, e["peer_ip"], json.dumps(facts), now()))
-        db.x("UPDATE nodes SET platform=?, os=?, arch=?, os_version=? WHERE node_id=?", (*_platform_cols(facts), node_id))
-        from .settings import apply as settings_apply
-        settings_apply.sync_nodes(db, [node_id])
+        node_id, ident, adm = admit_node(db, e, actor, label, admission)
         from . import tlsca
         try:
             cert = tlsca.issue_client(Path(db.path).parent, e["csr_pem"], node_id)
@@ -225,10 +215,40 @@ def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None) -
              (node_id, now(), actor, json.dumps(cert), eid))
         db.event("enroll_approved", actor=actor, node_id=node_id, enrollment_id=eid,
                  reason=f"re-enrolment ({ident['via']})" if ident["node_id"] else
-                 ("new node; looks like " + ", ".join(n["node_id"] for n in ident["lookalikes"]))
-                 if ident["lookalikes"] else None)
-    releases.ensure(db, platforms.facts_platform(facts)["platform"])
-    return {"node_id": node_id}
+                 ("new node; looks like " + ", ".join(n["node_id"] for n in ident["lookalikes"])
+                  + ("; the owner confirmed it is the same machine" if adm.get("carried_over") else ""))
+                 if ident["lookalikes"] else None, **({"admission": adm} if adm else {}))
+    releases.ensure(db, platforms.facts_platform(jl(e["facts_json"], {}))["platform"])
+    return {"node_id": node_id, **({"admission": adm} if adm else {})}
+
+
+def admit_node(db: DB, e: dict, actor: str, label: str | None = None, admission: dict | None = None) -> tuple:
+    """The node an approval makes or keeps, with its admission options written (inside the caller's transaction; the
+    approval, and its preview, which rolls back): (node_id, identity, what the options did)."""
+    from . import admission as adm_mod, nodeidentity
+    label = (label or "").strip() or e["requested_name"] or None
+    facts = jl(e["facts_json"], {})
+    # Re-enrolment of a known node (by its key, else its Tailscale device) keeps its node_id, settings and history.
+    ident = nodeidentity.of_enrollment(db, e)
+    node_id = ident["node_id"] or "n_" + secrets.token_hex(4)
+    if ident["node_id"]:
+        db.x("UPDATE nodes SET lifecycle='enrolled', facts_json=?, hostname=COALESCE(?, label, ?), label=COALESCE(?, label),"
+             " ts_ip=?, ts_node_id=COALESCE(?, ts_node_id), quarantine_reason=NULL, want_doctor=1 WHERE node_id=?",
+             (json.dumps(facts), label, e["hostname"], label, e["peer_ip"], e["ts_node_id"], node_id))
+        if ident["ts_changed"]:
+            db.event("node_tailscale_repinned", actor=actor, node_id=node_id, enrollment_id=e["enrollment_id"],
+                     reason=f"{ident['old_ts_node_id']} -> {e['ts_node_id']} (re-enrolment proved the node key)")
+    else:
+        # nothing of its settings is copied: it inherits the defaults, the fleet's and its groups' values (settings/),
+        # unless the owner says it is the same machine as a node it looks like (admission.py)
+        db.x("INSERT INTO nodes(node_id,ts_node_id,hostname,label,ts_ip,facts_json,lifecycle,desired_state,created_at)"
+             " VALUES(?,?,?,?,?,?,'enrolled','active',?)",
+             (node_id, e["ts_node_id"], label or e["hostname"], label, e["peer_ip"], json.dumps(facts), now()))
+    db.x("UPDATE nodes SET platform=?, os=?, arch=?, os_version=? WHERE node_id=?", (*_platform_cols(facts), node_id))
+    adm = adm_mod.apply(db, node_id, admission, ident, actor, e["enrollment_id"])
+    from .settings import apply as settings_apply
+    settings_apply.sync_nodes(db, [node_id])
+    return node_id, ident, adm
 
 
 def _platform_cols(facts: dict) -> tuple:
@@ -589,6 +609,9 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
     reports = doc.get("modules") or {}
     states = node_modules(node)
     off = modstore.disabled_names(db, node)
+    # a node that is not active (paused, draining) gets no certification goldens: it was told to take no work, and a
+    # node approved paused never runs one before its owner resumes it (admission.py)
+    may_certify = node["desired_state"] == "active"
     for name in modcalls.enabled(db):
         rep, st = reports.get(name), states.get(name, {})
         s = st.get("state")
@@ -609,6 +632,8 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
                 bad = [c["name"] for c in rep.get("checks", []) if not c.get("ok")]
                 _set_module_state(db, nid, name, state="doctor_failed", reason=", ".join(bad))
                 _alert(db, f"doctor_failed:{name}", nid, f"{node['hostname']}: {name} doctor failed: {', '.join(bad)}")
+            continue
+        if not may_certify:
             continue
         if s == "golden_failed" and node["release_id"] == rel_id and now() - (st.get("at") or 0) > C.RECERT_EVERY:
             _set_module_state(db, nid, name, golden_failures=0)
@@ -720,6 +745,8 @@ def run_pending_goldens(db: DB, node_id: str | None = None) -> int:
     rows = db.q("SELECT * FROM nodes WHERE node_id=?", (node_id,)) if node_id else \
         db.q("SELECT * FROM nodes WHERE lifecycle='ready'")
     for node in rows:
+        if node["desired_state"] != "active":
+            continue                      # paused or draining: a pending golden request waits (admission.py)
         off = modstore.disabled_names(db, node)
         for module, st in node_modules(node).items():
             if not (st.get("state") == "certifying" and st.get("goldens_pending")) or module in off:
@@ -2107,6 +2134,28 @@ def set_campaign_state(db: DB, campaign_id: str, action: str, actor: str):
             for j in db.q("SELECT job_id FROM jobs WHERE campaign_id=? AND state IN ('pending','leased')", (campaign_id,)):
                 cancel_job(db, j["job_id"], actor)
         db.event("campaign_" + action, actor=actor, campaign_id=campaign_id)
+
+
+def retire_node(db: DB, node_id: str, actor: str, reason: str | None = None) -> int:
+    """Retire a node (inside the caller's transaction): its certificate and key hashes go, so it is never adopted again;
+    work pinned to it (a run_all job, its golden jobs) can never run anywhere else and is cancelled, or its campaign
+    stays running for ever; its own secret values go with it. Returns the number of pinned jobs cancelled."""
+    db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL, client_key_sha256=NULL,"
+         " client_key_prev_sha256=NULL WHERE node_id=?", (node_id,))
+    pinned = pinned_open(db, node_id)
+    for jid in pinned:
+        cancel_job(db, jid, actor)
+    from . import modsecrets
+    modsecrets.drop_node(db, node_id)
+    db.event("node_retired", actor=actor, node_id=node_id,
+             reason="; ".join(x for x in (reason, f"{len(pinned)} pinned jobs cancelled" if pinned else None) if x) or None)
+    return len(pinned)
+
+
+def pinned_open(db: DB, node_id: str) -> list[int]:
+    """The node's open pinned jobs (pending or leased, targeted at it)."""
+    return [r["job_id"] for r in db.q("SELECT job_id FROM jobs WHERE target_node=? AND state IN ('pending','leased')",
+                                      (node_id,))]
 
 
 def set_node_state(db: DB, node_id: str, desired: str, actor: str):
