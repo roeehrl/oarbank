@@ -6,7 +6,28 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ## Unreleased
 
+### Added
+
+- **Say when a node runs its container VM: `containers` = `always`, `on_demand` or `off`.** Since 2.9 every node
+  whose release has a module with sandbox containers started its Colima VM (or WSL containers session) and kept it,
+  whether or not it ever got container work, holding 8 GB or more on small machines. The node, group or fleet setting
+  `containers` (Settings → Containers; `oarbank settings set containers on_demand --node mini`) now decides. `always`
+  is the default and keeps the old behaviour. `on_demand`, recommended where container work is occasional, keeps the
+  runtime stopped until container work waits for the node: the coordinator tells one stopped node to start when the
+  fleet's running runtimes have no room for the waiting work, and the agent stops it again after
+  `containers_idle_stop_s` (600 s) without container work. A stopped VM holds no memory. `off` never runs it: the
+  node reports its runtime `disabled`, takes no container work (its jobs explain `CONTAINERS_DISABLED` with the fix)
+  and certifies only the stages that need no containers. A machine's managed policy may set it, tighten-only. On Linux,
+  where the host's engine is not a VM, `on_demand` runs as `always`. Agents older than 2.11 ignore the setting, but
+  the coordinator still keeps container work off a node set to `off`.
+
 ### Fixed
+
+- **`vm_mem_gb` and `vm_cpus` size the container VM.** The owner's settings never reached Colima, the WSL containers
+  session or the Linux engine's budget, so every runtime got the RAM-based default (8 GB on a 24 GB Mac, whatever was
+  set). The agent now makes its runtime at the configured size, within half the host's memory and its processors, and
+  restarts an idle VM at the new size when the settings change or when it finds the VM running at another size. The
+  `containers` pool follows the size (2 GB gives none). The node's line shows the configured size beside the running one.
 
 - **A freshly installed node pins its update trust when it joins.** The package pinned the fleet's owner keys at
   install time, before a fresh node had joined and had any, so `oarbank update plan` showed "no update trust is

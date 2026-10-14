@@ -468,7 +468,8 @@ def pools_of_disabled(disabled: list[str]) -> set[str]:
 def node_class(node: dict | None, name: str) -> dict:
     """What golden.list may know about a node (NodeClass): platform, OS version, CPU, GPUs and the GPU APIs its doctor
     reports, capabilities and pools, never its identity. Pools: those the node reports (its agent's own, such as `containers` from its container runtime,
-    and running services') and those its services provide, which count as available although an on-demand service may
+    which also counts while a stopped on-demand runtime could start and never where containers are off, and running
+    services') and those its services provide, which count as available although an on-demand service may
     not run yet, unless the owner disabled every service that provides it here. Capabilities: those its doctor report
     names for the module (services and healthy probes, such as a tool probe) and its enabled services'."""
     import json as _json
@@ -476,7 +477,10 @@ def node_class(node: dict | None, name: str) -> dict:
     from .core import node_disabled_services
     disabled = node_disabled_services(node) if node else []
     facts = _json.loads((node or {}).get("facts_json") or "{}") or {} if node else {}
-    reported = (_json.loads((node or {}).get("capacity_json") or "{}") or {}).get("pools") or {} if node else {}
+    from .core import _node_pools_possible
+    # what the node reports, its stopped on-demand container runtime's startable pools, none of the agent's container
+    # pools where containers are off (containers.py): such a node gets only its goldens that need no containers
+    reported = _node_pools_possible(node) if node else {}
     off = pools_of_disabled(disabled)
     pools = {p: 1 for p, k in reported.items() if isinstance(k, (int, float)) and k > 0 and p not in off}
     caps = node_capabilities(node, name) if node else set()

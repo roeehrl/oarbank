@@ -55,6 +55,9 @@ class NodeView:
     current_release: str | None
     pool_cap: dict                    # pools the node offers (core._node_pools)
     pool_use: dict = field(default_factory=dict)
+    pool_startable: dict = field(default_factory=dict)   # pools a stopped on-demand container runtime offers once started
+    containers_mode: str = "always"   # the node's `containers` setting (containers.py)
+    containers_start_s: int = 60      # how long its runtime takes to start
     failed_here: set = field(default_factory=set)
     pool_jobs_only: bool = False
     gpu_cap: int | None = None        # the agent's gpu_jobs ceiling (None: not limited)
@@ -322,6 +325,17 @@ def placement(job: dict, nv: NodeView, now: float, *, dep_done: bool, campaign_s
         if not (res.get("pools") or res.get("needs_pools")):
             return [R("pools", "POOL_EXHAUSTED", True, None, None)]
         out = []
+        wanted = [*(res.get("needs_pools") or []), *(res.get("pools") or {})]
+        for p in dict.fromkeys(wanted):
+            # the agent's container pools: off on this node, or a stopped on-demand runtime (it starts for the work)
+            if p in ("containers", "gpu") and int(nv.pool_cap.get(p, 0)) <= 0 and "containers" in wanted:
+                if nv.containers_mode == "off":
+                    out.append(R(f"containers on (pool {p})", "CONTAINERS_DISABLED", False, "off", "always or on_demand"))
+                    return out
+                if int(nv.pool_startable.get(p, 0)) > 0:
+                    out.append(R(f"container runtime running (pool {p})", "CONTAINERS_STOPPED", False,
+                                 "stopped", nv.containers_start_s))
+                    return out
         for p in res.get("needs_pools") or []:
             out.append(R(f"pool({p}) exists", "POOL_ABSENT", int(nv.pool_cap.get(p, 0)) > 0, nv.pool_cap.get(p, 0), "> 0"))
         for p, k in (res.get("pools") or {}).items():

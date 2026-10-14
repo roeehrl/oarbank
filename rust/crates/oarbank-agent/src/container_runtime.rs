@@ -163,6 +163,20 @@ pub trait ContainerRuntime: Send + Sync {
     }
     /// The agent is stopping: leave the runtime so the next agent can start it (macOS: stop the VMs, within `budget`).
     fn shutdown(&self, _budget: Duration) {}
+    /// Stop the runtime now, within `budget`: an on-demand runtime idle for its idle time, containers turned off, or a VM
+    /// to restart at a new size (macOS: the VMs; Windows: the WSL containers session; Linux: nothing, the host's engine
+    /// stays). The agent drops the runtime after it; a later start makes a new one.
+    fn stop(&self, budget: Duration) {
+        self.shutdown(budget)
+    }
+    /// The VM size this runtime starts its VM at (memory GB, CPUs); None: no VM of its own (Linux).
+    fn size(&self) -> Option<(f64, u32)> {
+        None
+    }
+    /// The size of the VM running now, when the runtime knows it (macOS: `colima status`).
+    fn actual_size(&self) -> Option<(f64, u32)> {
+        None
+    }
 }
 
 /// How often the agent re-probes a runtime that is missing a prerequisite (or, on macOS, whose start failed and whose
@@ -471,6 +485,42 @@ fn remove_labelled(cli: impl Fn(&[&str], u64) -> Result<Exec, String>, filter: &
     ids
 }
 
+/// The owner's VM size settings (the limits' `vm_mem_gb` and `vm_cpus`): the container runtime's VM is made at this
+/// size, and the agent restarts an idle VM when they change (2.10.4 and earlier never passed them on: every runtime got
+/// the RAM-based default whatever the owner set).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Caps {
+    pub mem_gb: Option<f64>,
+    pub cpus: Option<u32>,
+}
+
+impl Caps {
+    /// The caps in a directive's (or the settings table's) `limits`.
+    pub fn of(limits: &serde_json::Value) -> Caps {
+        Caps { mem_gb: limits["vm_mem_gb"].as_f64().filter(|m| *m > 0.0),
+               cpus: limits["vm_cpus"].as_u64().filter(|c| *c > 0).map(|c| c.min(u32::MAX as u64) as u32) }
+    }
+}
+
+/// The runtime VM's memory and CPUs on this host: `sizing`'s budget (the owner's caps, else the RAM-based default)
+/// within what the host has. A VM asked for more processors than the host has does not start (`E_FAIL` on a 4-core
+/// runner asked for 6), and one taking more than half the host's memory starves it.
+pub fn vm_size(ram_gb: f64, logical: u32, caps: Caps) -> (f64, u32) {
+    let (mem_gb, cpus, _) = sizing(ram_gb, caps.mem_gb, caps.cpus);
+    (mem_gb.min((ram_gb / 2.0).floor()).max(1.0), cpus.min(logical).max(1))
+}
+
+/// The host's RAM (GB) and logical processors, which `vm_size` bounds a VM by (read once: the protection tick asks).
+pub fn host_size() -> (f64, u32) {
+    static SIZE: std::sync::OnceLock<(f64, u32)> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| (crate::host::memory().ram_gb, std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)))
+}
+
+/// Two VM sizes are the same within what the runtimes round to (Colima and WSL take whole MiB; Colima reports GiB).
+pub fn same_size(a: (f64, u32), b: (f64, u32)) -> bool {
+    (a.0 - b.0).abs() < 0.3 && a.1 == b.1
+}
+
 /// The container VM (or engine) memory budget by host RAM: <= 32 GB: 8, >= 96 GB: 32, else 12; the owner's cap
 /// replaces it. CPUs: the owner's, else 8 on >= 96 GB and 6 otherwise. Tokens: floor((M - 1.5) / 2.5).
 pub fn sizing(ram_gb: f64, vm_mem_gb: Option<f64>, vm_cpus: Option<u32>) -> (f64, u32, u32) {
@@ -647,14 +697,14 @@ impl ColimaRuntime {
     pub fn new(layout: &crate::paths::Layout, profile: Profile) -> Self {
         let host = crate::colima::detect(&layout.home);
         let shared = std::sync::Arc::new(MacShared::new(crate::colima::Report::of(&host, crate::colima::State::Absent), layout.home.clone(), false));
-        Self::with(layout, profile, host.dirs, shared)
+        Self::with(layout, profile, host.dirs, shared, Caps::default())
     }
 
-    fn with(layout: &crate::paths::Layout, profile: Profile, dirs: crate::colima::Dirs, shared: std::sync::Arc<MacShared>) -> Self {
-        let ram = crate::facts::sysctl_u64("hw.memsize").unwrap_or(0) as f64 / 1073741824.0;
-        let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
-        // the budget the other runtimes get, within what the host has (half its memory, its processors)
-        let (mem, cpus) = crate::wslc::session_size(ram, logical);
+    fn with(layout: &crate::paths::Layout, profile: Profile, dirs: crate::colima::Dirs, shared: std::sync::Arc<MacShared>, caps: Caps) -> Self {
+        // the budget the other runtimes get (the owner's vm_mem_gb and vm_cpus, else by RAM), within what the host has
+        let (ram, logical) = host_size();
+        let (mem, cpus) = vm_size(ram, logical, caps);
+        shared.update(|r| (r.vm_mem_gb, r.vm_cpus) = (mem, cpus));
         ColimaRuntime {
             profile, dirs, work: layout.work(), modules_data: layout.module_data(), docker_config: layout.run().join("docker"),
             log: layout.logs().join(format!("colima-{}.log", profile.name())), vm_cpus: cpus, vm_mem_gb: mem,
@@ -663,11 +713,22 @@ impl ColimaRuntime {
         }
     }
 
-    /// Both profiles of this agent with one report, which `publish` writes to the agent's state file.
-    pub fn pair(layout: &crate::paths::Layout, publish: bool) -> (ColimaRuntime, ColimaRuntime) {
+    /// Both profiles of this agent with one report, which `publish` writes to the agent's state file, their VMs sized by
+    /// the owner's `caps`.
+    pub fn pair(layout: &crate::paths::Layout, publish: bool, caps: Caps) -> (ColimaRuntime, ColimaRuntime) {
         let host = crate::colima::detect(&layout.home);
         let shared = std::sync::Arc::new(MacShared::new(crate::colima::Report::of(&host, crate::colima::State::Absent), layout.home.clone(), publish));
-        (Self::with(layout, Profile::Cpu, host.dirs.clone(), shared.clone()), Self::with(layout, Profile::Gpu, host.dirs, shared))
+        (Self::with(layout, Profile::Cpu, host.dirs.clone(), shared.clone(), caps), Self::with(layout, Profile::Gpu, host.dirs, shared, caps))
+    }
+
+    /// The running profile's size as `colima status <profile> --json` reports it (memory in bytes from colima 0.10, GiB
+    /// before; `cpu`).
+    fn running_size(&self) -> Option<(f64, u32)> {
+        let r = quick(&self.colima_cmd(&["status", self.profile.name(), "--json"]), &self.colima_env(), 20).ok()?;
+        if !r.ok() {
+            return None;
+        }
+        crate::colima::status_size(&serde_json::from_slice(&r.stdout).unwrap_or_default())
     }
 
     /// This runtime's `containers` pool size, once ready.
@@ -908,6 +969,9 @@ impl ColimaRuntime {
             (r.missing, r.colima_home) = (vec![], now.colima_home.clone());
         });
         let started = self.start_profile();
+        // the size the VM runs at (one started before at another size keeps it until it is restarted)
+        let actual = started.as_ref().ok().and_then(|_| self.running_size());
+        self.shared.update(|r| (r.actual_mem_gb, r.actual_cpus) = (actual.map(|a| a.0), actual.map(|a| a.1)));
         match &started {
             Ok(()) => self.shared.reset(),
             Err(_) => {
@@ -1100,6 +1164,24 @@ impl ContainerRuntime for ColimaRuntime {
     fn shutdown(&self, budget: Duration) {
         self.stop_vm(budget)
     }
+
+    /// Stop the VM now; the report no longer claims a running VM's size.
+    fn stop(&self, budget: Duration) {
+        self.stop_vm(budget);
+        if self.profile == Profile::Cpu {
+            self.shared.update(|r| (r.actual_mem_gb, r.actual_cpus) = (None, None));
+        }
+    }
+
+    fn size(&self) -> Option<(f64, u32)> {
+        Some((self.vm_mem_gb, self.vm_cpus))
+    }
+
+    /// The CPU profile's VM size as it last came up (None before it is ready).
+    fn actual_size(&self) -> Option<(f64, u32)> {
+        let r = self.shared.snapshot();
+        (self.profile == Profile::Cpu && r.ready()).then_some(()).and(r.actual_mem_gb.zip(r.actual_cpus))
+    }
 }
 
 // MARK: Linux: the host's own engine
@@ -1121,12 +1203,12 @@ pub struct NativeRuntime {
 #[cfg(target_os = "linux")]
 impl NativeRuntime {
     /// The engine on PATH (or the usual places), when there is one.
-    pub fn detect(layout: &crate::paths::Layout, ram_gb: f64) -> Option<NativeRuntime> {
+    pub fn detect(layout: &crate::paths::Layout, ram_gb: f64, caps: Caps) -> Option<NativeRuntime> {
         let find = |n: &str| ["/usr/bin", "/usr/local/bin", "/bin"].iter().map(|d| Path::new(d).join(n)).find(|p| executable(p));
         let cli = find("podman").or_else(|| find("docker"))?;
         let home = engine_home(std::env::var_os("HOME").map(PathBuf::from), &layout.home);
-        // the same budget a Mac's VM would get
-        let (mem_gb, _, _) = sizing(ram_gb, None, None);
+        // the same budget a Mac's VM would get (the owner's vm_mem_gb, else by RAM): its `containers` pool
+        let (mem_gb, _, _) = sizing(ram_gb, caps.mem_gb, None);
         let gpu = cdi_spec(&CDI_DIRS.map(Path::new));
         Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb, gpu })
     }
@@ -1340,28 +1422,34 @@ pub fn runtime_name() -> Option<String> {
 /// session on Windows (one runtime for both; it reports what is missing itself, so it always exists there).
 #[cfg(target_os = "macos")]
 pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
-    for_node_mac(layout, false)
+    for_node_mac(layout, false, Caps::default())
 }
 
 /// The agent's runtimes on macOS: always (the report says what is missing), the GPU profile beside the CPU one on
 /// Apple silicon; `publish` (the agent) writes the report to the state file the facts read.
 #[cfg(target_os = "macos")]
-pub fn for_node_mac(layout: &crate::paths::Layout, publish: bool) -> Option<Containers> {
-    let (cpu, gpu) = ColimaRuntime::pair(layout, publish);
+pub fn for_node_mac(layout: &crate::paths::Layout, publish: bool, caps: Caps) -> Option<Containers> {
+    let (cpu, gpu) = ColimaRuntime::pair(layout, publish, caps);
     let arm = cpu.arm;
     Some(Containers { cpu: std::sync::Arc::new(cpu), gpu: arm.then(|| std::sync::Arc::new(gpu) as std::sync::Arc<dyn ContainerRuntime>) })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
-    let rt: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(NativeRuntime::detect(layout, crate::host::memory().ram_gb)?);
+    for_node_with(layout, Caps::default())
+}
+
+/// This node's runtimes with the owner's VM size settings (the agent's; `for_node` is the CLI's).
+#[cfg(target_os = "linux")]
+pub fn for_node_with(layout: &crate::paths::Layout, caps: Caps) -> Option<Containers> {
+    let rt: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(NativeRuntime::detect(layout, crate::host::memory().ram_gb, caps)?);
     let gpu = rt.gpu_device().is_some().then(|| rt.clone());
     Some(Containers { cpu: rt, gpu })
 }
 
 #[cfg(windows)]
-pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
-    let rt: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(crate::wslc::WslcRuntime::start(layout, crate::host::memory().ram_gb));
+pub fn for_node_with(layout: &crate::paths::Layout, caps: Caps) -> Option<Containers> {
+    let rt: std::sync::Arc<dyn ContainerRuntime> = std::sync::Arc::new(crate::wslc::WslcRuntime::start(layout, crate::host::memory().ram_gb, caps));
     Some(Containers { cpu: rt.clone(), gpu: Some(rt) })
 }
 
@@ -1442,7 +1530,7 @@ pub mod tests {
     fn a_private_engine_keeps_its_state_to_itself() {
         let (_home, home) = temp("private-engine");
         let layout = crate::paths::Layout::new(home.join("agent"));
-        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
+        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0, Caps::default()) else {
             eprintln!("no container engine here: skipped");
             return;
         };
@@ -1498,7 +1586,7 @@ pub mod tests {
     fn the_native_runtime_runs_a_real_container() {
         let (_home, home) = temp("native");
         let layout = crate::paths::Layout::new(home.clone());
-        let Some(rt) = NativeRuntime::detect(&layout, 16.0) else {
+        let Some(rt) = NativeRuntime::detect(&layout, 16.0, Caps::default()) else {
             eprintln!("no container engine here: skipped");
             return;
         };
@@ -1564,6 +1652,22 @@ pub mod tests {
         assert_eq!(tokens(1.0), 0);
     }
 
+    /// The owner's vm_mem_gb and vm_cpus size every VM runtime (2.10.4 sized them by RAM alone, whatever the owner
+    /// set: a 24 GB Mac with vm_mem_gb = 2 still got 8 GB), within what the host has; 2 GB offers no containers token.
+    #[test]
+    fn the_owners_caps_size_the_vm_within_the_host() {
+        let caps = |m: Option<f64>, c: Option<u32>| Caps { mem_gb: m, cpus: c };
+        assert_eq!(vm_size(24.0, 10, Caps::default()), (8.0, 6));
+        assert_eq!(vm_size(24.0, 10, caps(Some(2.0), None)), (2.0, 6));
+        assert_eq!(tokens(vm_size(24.0, 10, caps(Some(2.0), None)).0), 0);
+        assert_eq!(vm_size(24.0, 10, caps(Some(6.5), Some(4))), (6.5, 4));
+        assert_eq!(vm_size(24.0, 4, caps(Some(20.0), Some(8))), (12.0, 4), "at most half the RAM and the host's processors");
+        assert_eq!(crate::wslc::session_size(24.0, 10), vm_size(24.0, 10, Caps::default()));
+        assert_eq!(Caps::of(&serde_json::json!({"vm_mem_gb": 2, "vm_cpus": 3})), caps(Some(2.0), Some(3)));
+        assert_eq!(Caps::of(&serde_json::json!({"vm_mem_gb": null})), Caps::default());
+        assert!(same_size((8.0, 6), (8.2, 6)) && !same_size((2.0, 6), (8.0, 6)) && !same_size((8.0, 6), (8.0, 4)));
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn start_mounts_only_the_agent_directories_and_docker_never_uses_the_user_context() {
@@ -1601,7 +1705,7 @@ pub mod tests {
     fn the_gpu_profile_is_a_krunkit_vm_of_its_own() {
         let (_base, base) = temp("gpu");
         let l = crate::paths::Layout::new(base.join("agent"));
-        let (mut cpu, mut g) = ColimaRuntime::pair(&l, false);
+        let (mut cpu, mut g) = ColimaRuntime::pair(&l, false, Caps::default());
         for r in [&mut cpu, &mut g] {
             r.dirs = crate::colima::dirs(&l.home, None);
             (r.vm_cpus, r.vm_mem_gb, r.arm) = (6, 10.0, true);
@@ -1777,7 +1881,7 @@ pub mod tests {
     fn a_missing_piece_stops_the_bring_up_and_the_report_says_which() {
         let (_base, base) = temp("missing");
         let l = crate::paths::Layout::new(base.join("agent"));
-        let (mut c, _) = ColimaRuntime::pair(&l, true);
+        let (mut c, _) = ColimaRuntime::pair(&l, true, Caps::default());
         let root_owned = PathBuf::from("/oarbank-test-not-writable/colima");
         c.dirs = crate::colima::Dirs { home: root_owned.clone(), config: root_owned.clone(), colima_home: Some(root_owned) };
         if crate::colima::creatable(&c.dirs.config) {
@@ -1886,7 +1990,7 @@ exit 2
 
         fn runtime(dir: &Path, tools: &Path) -> ColimaRuntime {
             let l = crate::paths::Layout::new(dir.join("a"));
-            let (mut c, _) = ColimaRuntime::pair(&l, true);
+            let (mut c, _) = ColimaRuntime::pair(&l, true, Caps::default());
             c.dirs = crate::colima::dirs(&l.home, None);
             (c.tools, c.rosetta) = (vec![tools.to_path_buf()], dir.join("libRosettaRuntime"));
             c
@@ -2061,7 +2165,7 @@ exit 2
             eprintln!("krunkit (or Colima or docker) is not installed: brew tap slp/krun && brew trust slp/krun && brew install krunkit");
             return;
         }
-        let (cpu, mut g) = ColimaRuntime::pair(&layout, false);
+        let (cpu, mut g) = ColimaRuntime::pair(&layout, false, Caps::default());
         cpu.set_report(crate::colima::Report::of(&host, crate::colima::State::Ready));
         assert_eq!(g.gpu_device().as_deref(), Some("/dev/dri"));
         (g.vm_cpus, g.vm_mem_gb) = (4, 4.0);

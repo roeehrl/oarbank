@@ -1474,7 +1474,7 @@ print(json.dumps(out))
         use crate::imageset::tests::{set, Key, Store};
         let t = tmp();
         let layout = crate::paths::Layout::new(t.path().join("agent"));
-        let Some(rt) = NativeRuntime::detect(&layout, 16.0) else {
+        let Some(rt) = NativeRuntime::detect(&layout, 16.0, crate::container_runtime::Caps::default()) else {
             eprintln!("no container engine here: skipped");
             return;
         };
@@ -1645,7 +1645,7 @@ print(json.dumps(out))
         use crate::imageset::tests::{serve, Key, Store};
         let t = tmp();
         let layout = crate::paths::Layout::new(t.path().join("agent"));
-        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0) else {
+        let Some(mut rt) = NativeRuntime::detect(&layout, 16.0, crate::container_runtime::Caps::default()) else {
             eprintln!("no container engine here: skipped");
             return;
         };

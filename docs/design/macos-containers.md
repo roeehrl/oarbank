@@ -114,6 +114,47 @@ access from a daemon. If either fails, the fallback is below.
    on a node its host agent did not survive a `launchctl kickstart -k`, which left the stale instance above. The next
    agent starts the VM again (`starting`, then `ready`).
 
+### When the runtime runs (the `containers` setting, 2.11)
+
+Since 2.9 every node whose release has a module approved for containers ran its VM from then on, whether or not it
+ever got container work, and the VM's default size (8 GB up to 32 GB of RAM, 12 GB up to 96 GB, then 32 GB) came out
+of machines that also run the owner's memory-heavy programs. The owner's node, group or fleet setting `containers`
+decides now (Settings → Containers, or `oarbank settings set containers on_demand --node <node>`):
+
+- **`always`** (the default, as before): the runtime comes up when a release wants containers and stays up.
+- **`on_demand`** (recommended for a node that runs container work only now and then, such as a module whose
+  container stage is a 50 s scoring step: one or two container nodes are enough): the runtime stays stopped until
+  container work waits for this node. A stopped VM holds no memory and no reservation. While stopped the node reports
+  `containers.state: "stopped"` and, in its heartbeat, the pool it would offer as `startable` (protocol.md, "Capacity
+  and host protection"). Placement counts that pool for whether the node could ever run the work (readiness, its
+  goldens, retries and replicas), but claim grants nothing against it; the job explains `CONTAINERS_STOPPED`. The
+  coordinator's heartbeat reply says `containers_wanted` when container work the node could run waits and the fleet's
+  running runtimes, with those told to start in the last 5 minutes, have too few free `containers` tokens for it (or
+  its own goldens wait), so one waiting job starts one VM, not every one. The agent then starts the runtime (or for a
+  grant that needs containers), measures how long that took (`start_s`, shown with the node), and stops it again after
+  `containers_idle_stop_s` (600 s by default, at least 60) without a container job or the hint; a hint that comes back
+  in that time keeps it up. A start that fails keeps the node from offering the pool for 30 minutes. On Linux, whose
+  engine is the host's and not a VM, `on_demand` runs as `always`.
+- **`off`**: the agent never starts the runtime (one still running stops once its container jobs end) and reports
+  `containers.state: "disabled"`, not `missing` or `failed`. The coordinator counts no `containers` or `gpu` pool for
+  the node, whatever an agent that has not applied it yet reports, so its container jobs explain `CONTAINERS_DISABLED`
+  with the fix. Its golden jobs see no `containers` pool (`node_class`): a module's goldens for such a node are those
+  of its stages that need none, as on any node without the pool. Turning containers off, or on again, certifies the
+  node's modules again (their goldens differ).
+
+`containers` is managed (a machine's policy may set it, tighten-only: `always` < `on_demand` < `off`). The mode is kept
+in `state/containers-setting.json`, so a restarted agent starts no VM before the coordinator has answered.
+
+**The VM's size** is the owner's `vm_mem_gb` and `vm_cpus` (caps, node or fleet), else the RAM-based default, within
+half the host's memory and its processors (`container_runtime::vm_size`). Up to 2.10.4 those settings never reached
+the runtime: every VM got the default whatever the owner set (a 24 GB Mac with `vm_mem_gb = 2` ran an 8 GB VM). Now the
+agent makes its runtimes at the configured size, and when the settings change (or it finds the VM running at another
+size, from `colima status`) it stops the idle runtime and starts it at the new size once no container job is live
+(once per mismatch, so a VM that cannot be resized is not restarted again and again). The `containers` pool follows the
+size, floor((GB − 1.5) / 2.5) tokens: 2 GB gives none, which is how a node is kept from running container work while
+its runtime stays up. The node's line (`oarbank node show`, the node page) reads, for instance, `containers = always ·
+running · VM 2 GB, 6 CPUs (running at 8 GB, 6 CPUs: restarts at the new size when idle)`.
+
 ### The GPU profile
 
 The `oarbank-gpu` VM still starts with the first job that reserved the `gpu` pool (a second resident VM of the same size

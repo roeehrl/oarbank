@@ -133,7 +133,13 @@ spec/platforms.md):
   reports its Colima runtime the same way ([design/macos-containers.md](design/macos-containers.md)): `runtime`
   (`colima`), the same `state` values, `profile`, `colima_home`, `platforms`, `missing`, `detail` when failed, and
   `gpu_profile` (`{profile, state, missing}`: `unavailable`, `on_demand`, `starting`, `ready`, `failed`); its `gpu` is
-  `virtio-gpu:venus` only while the runtime is ready and krunkit is installed.
+  `virtio-gpu:venus` only while the runtime is ready and krunkit is installed. macOS and Windows also report `vm`:
+  `{mem_gb, cpus}`, the size the runtime starts its VM at (the owner's `vm_mem_gb` and `vm_cpus`, else by RAM), and on
+  macOS `actual_mem_gb` and `actual_cpus`, the size it runs at (a VM started before a change keeps its size until the
+  agent restarts it idle).
+  While the agent runs no runtime by the owner's choice (the `containers` setting; [design/macos-containers.md](design/macos-containers.md),
+  "When the runtime runs") the report is its own: `state` `disabled` (containers = off) or `stopped` (containers =
+  on_demand, nothing waiting; `missing` with `missing` when a prerequisite is not there), `mode`, `detail` and `vm`.
 
 `hostname` is the name the node reports: the machine's host name, or `OARBANK_NODE_NAME` in the agent's
 environment when the owner names it. The coordinator names the node after it, unless the node enrolled with a
@@ -1062,7 +1068,28 @@ Cores are physical (`perf + eff/2`); the formulas and the per-OS readings are in
 agent's own `containers` pool (its container runtime, while it can run containers: a Windows node whose session is not
 ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI; never on macOS) (a
 node that reports none is offered no pool work). The facts' `containers.gpu` says which: `cdi:<kind>` or
-`undetected`. They are computed after:
+`undetected`. Where the owner set containers = off the coordinator counts neither pool, whatever the agent reports.
+
+Beside `capacity`, every heartbeat carries the runtime's `containers` (the coordinator keeps it as the capacity's
+`container_runtime`):
+```json
+{"mode": "on_demand", "state": "stopped", "startable": {"containers": 2, "gpu": 1}, "start_s": 45, "idle_stop_s": 600,
+ "vm": {"mem_gb": 6.5, "cpus": 6}}
+```
+`mode` is the `containers` setting in force (`always`, `on_demand`, `off`); `state` is `running`, `starting`, `failed`
+or `missing` while the agent holds a runtime, else `stopped` (on demand), `disabled` (off), `absent` (no release
+needs containers), `missing` or `failed` (an on-demand start failed in the last 30 minutes). `startable` is what a
+stopped on-demand runtime offers once started (`gpu` when it gave containers the GPU when it last ran): placement counts
+it for whether the node could ever run a job (readiness, goldens, retries and replicas) but claim grants nothing against
+it, and explain says `CONTAINERS_STOPPED`. `start_s` is how long its last start took (60 before one), `vm` the VM size.
+For an on-demand node every heartbeat reply carries `containers_wanted`: true while container work the node could run
+waits and the fleet's running runtimes (and those already told to start in the last 5 minutes) have too few free
+`containers` tokens for it, or while its own golden jobs wait; a running runtime is told so while such work waits. The
+agent starts its runtime when told, or when a grant needs containers, and stops it after `containers_idle_stop_s`
+without a container job or the hint. A runtime whose VM size differs from `vm_mem_gb` and `vm_cpus` is restarted at the
+new size once no container job is live (once per mismatch).
+
+They are computed after:
 
 - user caps, thermal state, battery and user presence;
 - running jobs and the memory services hold;
