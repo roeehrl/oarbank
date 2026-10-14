@@ -6,6 +6,22 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ## Unreleased
 
+### Added
+
+- **Approve a machine with what it starts as.** `oarbank node approve` and `approve-code` take `--state paused`,
+  `--module-off <module>` (and `--module-on`), `--set key=value` (`<module>:key=value` for a module's own setting),
+  `--labels` and `--groups`; the console's waiting card has **Approve with options…** with a review. They are written in
+  the same step that creates the node and issues its certificate, so a machine that must run no work is never granted a
+  job or a certification golden before you can pause it. A paused node, and a module turned off on a node, get no
+  certification goldens.
+- **The same machine, reinstalled.** For a waiting machine that looks like a known node but cannot prove it is,
+  `--adopt-settings-from <old node>` (console: "This is the same machine: carry over its settings and retire the old
+  record") carries the old node's settings, state, module switches, protection, update hold and pin, labels and groups
+  over and retires the old record, in one audited step. You type the old node's name to confirm; it is refused while the
+  old node is online and for a request that proves a node's key.
+- **Safer onboarding.** The fleet settings `new_node_state` (`active` or `paused`) and `new_node_modules` (`all` or
+  `none`) set what every new node starts as, a join code's automatic approvals included.
+
 ### Fixed
 
 - **A freshly installed node pins its update trust when it joins.** The package pinned the fleet's owner keys at

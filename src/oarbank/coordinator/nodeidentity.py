@@ -14,7 +14,8 @@ automatically does not), since a copied key and a re-added machine look the same
 
 A request that does not prove a node but reports a known node's host name is a machine that lost its key (reinstalled,
 or a different machine with the same name). Approving it makes a new node; the preview says so, and that the old node's
-settings will not apply, and offers retiring the old record.
+settings will not apply, and offers retiring the old record, or, when the owner knows it is the same machine, carrying
+the old node's settings over and retiring it in the approval (admission.py, `adopt_settings_from`).
 
 These functions only read (`r` is the coordinator DB or the console's reader).
 """
@@ -104,4 +105,6 @@ def impact(r, e: dict | None) -> dict:
                         f"old node's settings (paused, module switches, caps, protection, labels, groups) do NOT apply "
                         f"to it"),
             "old_record": [f"retire {n['node_id']} once the new node runs: oarbank op nodes.retire {n['node_id']} "
-                           f"(or Retire on the waiting card)" for n in i["lookalikes"]]}
+                           f"(or Retire on the waiting card); if it is the same machine, carry its settings over and "
+                           f"retire it in the approval: oarbank node approve {e.get('enrollment_id')} "
+                           f"--adopt-settings-from {n['node_id']}" for n in i["lookalikes"]]}

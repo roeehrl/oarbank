@@ -57,6 +57,7 @@ revoked) are recorded as `join_code_refused` events with the source address.
 
 Operations: `nodes.join_code {label, ttl_s, uses, approve, system, containers}`, `nodes.join_codes` (list, with each
 code's enrollments), `nodes.revoke_join_code {target: code id}`, `nodes.admit_code {user_code}` (device code, below).
+`nodes.admit` and `nodes.admit_code` take the admission options ([Admission](#admission-what-a-node-starts-as)).
 CLI: `oarbank join-code [--label] [--ttl] [--uses N] [--approve|--no-approve] [--system] [--containers]`,
 `oarbank join-codes`, `oarbank join-code revoke <id>`, `oarbank node approve-code <CODE>`.
 
@@ -89,7 +90,59 @@ enrolls again (`unauthorized`: every agent version does this).
 - **A lookalike is a new node.** A request that proves no node but reports a known node's host name belongs to a
   machine that lost its key (reinstalled, or another machine with that name). Approving it makes a new node. The
   preview, `oarbank status` and the console's waiting card warn that the old node's settings will NOT apply, say
-  whether the hardware facts match too, and offer retiring the old record (`nodes.retire`).
+  whether the hardware facts match too, and offer retiring the old record (`nodes.retire`), or declaring it the same
+  machine ([below](#the-same-machine)).
+
+## Admission: what a node starts as
+
+Approving a machine used to make a node that was `active` with the fleet's defaults, and the owner could pause it or
+turn modules off only once it existed. In that window it could be granted jobs and certification goldens, so a machine
+that must run no work at all could not be approved safely. An approval now carries what the node starts as, written in
+the transaction that creates the node and issues its certificate (`coordinator/admission.py`):
+
+| Option (`params`) | CLI (`oarbank node approve <eid>`, `approve-code <CODE>`) | Effect |
+|---|---|---|
+| `state`: `active`, `paused`, `draining` | `--state paused` | The node's desired state from the start |
+| `modules`: `{module: false \| true}` | `--module-off <m>`, `--module-on <m>` | The node's own `[module] enabled` |
+| `settings`: `[{key, value, module}]` | `--set key=value`, `--set <module>:key=value` | Node-scoped settings, checked by the settings registry and `settings.apply`'s plan (scopes, locks, cross-checks) |
+| `labels`: `[label]` | `--labels a,b` | The node's owner labels |
+| `groups`: `[group]` | `--groups g1,g2` | Owner groups that list the node (explicit members) |
+| `adopt_settings_from`: node | `--adopt-settings-from <old node>` | [The same machine](#the-same-machine) |
+
+- **Atomic.** The options are written after the node row and before the certificate is stored on the enrollment, in
+  one transaction. The agent fetches its certificate only once that commits, so no session, claim or golden can see the
+  node without them. A refused option (an unknown key, a value the registry refuses, a lock, an unknown group or
+  module, a module that is not installed) refuses the approval: no node, no certificate, the request stays pending.
+- **Preview.** The approval's preview runs the same code in a transaction it rolls back. It shows what the node starts
+  as (`starts`), the modules off there, the settings it sets as `settings.apply` words them, labels and groups, and
+  refuses what the approval would refuse.
+- **No work.** A paused (or draining) node is never granted a job, and no certification golden is made for it
+  (`_lifecycle_step` queues goldens only on an active node). A module off on a node is never certified there: no golden
+  is made for it, and a pending golden request for it waits. Resuming the node, or turning the module on, certifies it
+  as usual.
+- **Onboarding policy.** A new node with no choice of its own follows the fleet settings `new_node_state` (`active` or
+  `paused`) and `new_node_modules` (`all` or `none`: every installed module off on the node, except one a lock holds
+  on). They apply to every approval that makes a new node, a join code's automatic one included. An approval's own
+  options win; a re-enrolled node (it proved its key) keeps its own settings, and options given for it change it.
+- **Console.** Each waiting card has **Approve with options…**: the state, each module (runs/off), the node's own
+  settings (one `key=value` per line), labels and groups. **Review…** shows the preview before anything changes.
+
+### The same machine
+
+A lookalike (above) is a new node, and the owner may know it is the old machine, reinstalled. `adopt_settings_from`
+(console: "This is the same machine: carry over its settings and retire the old record") is that statement, made
+explicitly by the owner. In the approval's transaction it copies the old node's node-scoped settings (module switches,
+caps, protection, update hold and pin, and every other key), its desired state, owner labels, explicit group
+memberships, module version pins, site and owner-given name to the new node, retires the old node (its certificate and
+key hashes cleared, pinned jobs cancelled, its own secret values dropped) and records `node_adopted`. Explicit options
+in the same approval apply on top. The fleet's onboarding policy does not apply.
+
+It is never automatic and carries no credential: the new node keeps its own key and certificate, and secrets set for
+the old node are not copied. It is refused (409 `adopt_refused`) for a request that proves a node's key (the copied-key
+case of [Re-enrolment](#re-enrolment-a-node-is-its-key) stays as it is: that request keeps the node, or is rejected),
+for a node the request does not look like, and for an old node that is still online (a machine that runs it cannot be
+the one asking). Because it retires a node, the approval is T3, like `nodes.retire`: the owner types the old node's
+name.
 
 ## The node's states and status document
 

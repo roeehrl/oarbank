@@ -36,6 +36,7 @@
     <span class="chip">{{ e.status }}</span>
   {% endif %}
 </div>
+{% if e.status == 'pending' %}{{ m.admit_options(e, admit_choices, return_to=back, newtab=newtab) }}{% endif %}
 {% endfor %}
 {% if jc.state == 'active' %}
 <p class="mut waiting" role="status">{% if jc.enrollments %}Waiting for more machines ({{ jc.max_uses - jc.uses }} {{ 'use' if jc.max_uses - jc.uses == 1 else 'uses' }} left)…{% else %}Waiting for a machine to use this code…{% endif %}</p>
