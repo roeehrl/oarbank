@@ -41,6 +41,11 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   certifying, or one recording a version its node's release did not carry, is still a violation. A claim in the moment
   between starting a canary and building its release was granted the canary's version while the node still ran, and
   was certified on, the previous one; it is now granted the version its release carries.
+- **A module turned off on a node no longer certifies there.** After a promotion or canary, a module turned off for
+  one node (`oarbank settings set enabled false --module <name> --node <node>`) still went to `certifying` there,
+  queued golden jobs for it and raised `certifying_stuck` after 30 minutes. It is now shown as `disabled` on that
+  node, with no goldens and no alert; an open `certifying_stuck` alert for it resolves. Turned on again, it
+  re-certifies.
 
 ## 2.10.4 (2026-10-14)
 

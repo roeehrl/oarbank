@@ -930,6 +930,8 @@ certification run there (docs/design/stage-gating.md). Release-install refusals 
   is granted only its goldens; the jobs it was granted before keep running and their results are accepted, because
   the certification they were granted under stands. When a new certification passes its goldens, or the goldens fail
   (`golden_failed`), the jobs still running under the old one stop (revoked, uncharged) and are queued again.
+- **A module turned off on a node** (its effective `[module] enabled` is false) is `disabled` there: it holds no
+  certification, runs no goldens and raises no `certifying_stuck`. Turned on again, it re-certifies.
 - **Goldens come from the module.** For the node's class (platform, OS version, CPU, GPUs and GPU APIs, pools and
   capabilities, never its identity), the module returns its goldens (`golden.list`), builds each one's spec (`spec.build`), and
   judges the result (`golden.compare`, or the evaluated digest against `expected.digest`). A golden limited to other

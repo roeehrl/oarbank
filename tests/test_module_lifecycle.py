@@ -10,7 +10,7 @@ import pytest
 from oarbank.coordinator import core, modcalls, modstore, ops, releases
 from oarbank_sdk import bundle as B
 
-from helpers import (CAPACITY, sign_in, DOCTOR_OK, FACTS, PARAMS, READY, RELAY_DIR, SCENES, certify, create_study,
+from helpers import (CAPACITY, settings_apply, sign_in, DOCTOR_OK, FACTS, PARAMS, READY, RELAY_DIR, SCENES, certify, create_study,
                      enrolled_node, fresh, golden_result, make_db, relay_result, scratch)
 
 
@@ -473,3 +473,39 @@ def test_a_grant_between_the_canary_and_its_release_runs_the_version_the_node_ru
     releases.sync(db)
     assert releases.composition_of(db, releases.assigned(db, fresh(db, n)))["relay"]["version"] == "1.1.0"
     assert invariants.check_all(db) == []
+
+
+# ------------------------------------------------------------------ a module turned off on one node
+
+def test_a_module_turned_off_on_a_node_never_certifies_there(db):
+    """`[relay] enabled` off for one node: after a new version reaches it (a canary here; a promotion alike) the module is
+    `disabled` there, not `certifying`. It gets no golden jobs, raises no certifying_stuck, and an earlier stuck alert
+    resolves. Turned on again, it re-certifies on the version its release carries."""
+    from oarbank.coordinator import clock
+    n = certify(db, enrolled_node(db, "canary")[1])
+    modstore.install(db, bundle_of(relay_version("1.1.0")), self_test=False)
+    planned(db, "modules.enable_canary", "relay@1.1.0", {"nodes": [n["node_id"]]})
+    rehello(db, n)
+    assert state(db, n)["state"] == "certifying"
+    clock.advance(core.CERTIFYING_GRACE_S + 60)
+    core.reap(db)                                                          # stuck before it is turned off
+    assert db.one("SELECT 1 FROM alerts WHERE rule='certifying_stuck:relay' AND state='open'")
+    settings_apply(db, {"scope": "node", "scope_id": n["node_id"], "module": "relay", "key": "enabled", "value": False})
+    core.heartbeat(db, fresh(db, n), {"capacity": CAPACITY, "doctor": DOCTOR_OK, "attempts": [], "ready_datasets": READY})
+    st = state(db, n)
+    assert (st["state"], st["generation"]) == ("disabled", -1)
+    assert not db.q("SELECT 1 FROM jobs WHERE kind='golden' AND target_node=? AND module='relay' AND state IN "
+                    "('pending','leased')", (n["node_id"],))
+    assert claim(db, n) == []
+    clock.advance(core.CERTIFYING_GRACE_S + 60)
+    core.reap(db)
+    assert not db.one("SELECT 1 FROM alerts WHERE rule='certifying_stuck:relay' AND state='open'")
+    rehello(db, n)                                                         # a new release or doctor run changes nothing
+    assert state(db, n)["state"] == "disabled" and core.run_pending_goldens(db, n["node_id"]) == 0
+    assert state(db, n, "toy")["state"] == "certified"                    # other modules untouched
+    settings_apply(db, {"scope": "node", "scope_id": n["node_id"], "module": "relay", "key": "enabled", "reset": True})
+    core.heartbeat(db, fresh(db, n), {"capacity": CAPACITY, "doctor": DOCTOR_OK, "attempts": [], "ready_datasets": READY})
+    assert state(db, n)["state"] == "certifying"
+    run_goldens(db, n)
+    assert state(db, n)["state"] == "certified"
+    assert releases.composition_of(db, fresh(db, n)["release_id"])["relay"]["version"] == "1.1.0"

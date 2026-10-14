@@ -583,9 +583,14 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
     doc = jl(node["doctor_json"]) or {}
     reports = doc.get("modules") or {}
     states = node_modules(node)
+    off = modstore.disabled_names(db, node)
     for name in modcalls.enabled(db):
         rep, st = reports.get(name), states.get(name, {})
         s = st.get("state")
+        if name in off:                   # turned off on this node: never certified or certifying here, no goldens
+            if s not in (None, "disabled"):
+                _module_off(db, nid, name)
+            continue
         if rep is None:
             continue                      # agent hasn't doctored this module (yet)
         health = rep.get("health")
@@ -604,7 +609,7 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
             _set_module_state(db, nid, name, golden_failures=0)
             queue_goldens(db, nid, name)
             continue
-        if s in (None, "doctor_failed", "undetected", "revoked") and node["release_id"] == rel_id:
+        if s in (None, "doctor_failed", "undetected", "revoked", "disabled") and node["release_id"] == rel_id:
             _resolve_alert(db, f"doctor_failed:{name}", nid)
             queue_goldens(db, nid, name)
             continue
@@ -623,6 +628,18 @@ def _lifecycle_step(db: DB, node: dict, facts: dict):
             if reasons:
                 db.event("recertify", node_id=nid, reason=f"{name}: {','.join(reasons)}", module=name)
                 queue_goldens(db, nid, name)
+
+
+def _module_off(db: DB, node_id: str, module: str):
+    """The module is turned off on the node (its effective `[module] enabled`): it holds no certification there and
+    runs no goldens. Turned on again, it re-certifies like a module that was never certified there."""
+    _cancel_goldens(db, node_id, module, "module_disabled")
+    _set_module_state(db, node_id, module, state="disabled", generation=-1, goldens_pending=False,
+                      reason="turned off on this node")
+    _end_superseded(db, node_id, module, -1, "module_disabled")
+    for rule in ("certifying_stuck", "doctor_failed", "golden_failed", "no_golden"):
+        _resolve_alert(db, f"{rule}:{module}", node_id)
+    db.event("module_disabled_here", node_id=node_id, reason=module, module=module)
 
 
 def _cancel_goldens(db: DB, node_id: str, module: str, why: str):
@@ -698,8 +715,9 @@ def run_pending_goldens(db: DB, node_id: str | None = None) -> int:
     rows = db.q("SELECT * FROM nodes WHERE node_id=?", (node_id,)) if node_id else \
         db.q("SELECT * FROM nodes WHERE lifecycle='ready'")
     for node in rows:
+        off = modstore.disabled_names(db, node)
         for module, st in node_modules(node).items():
-            if not (st.get("state") == "certifying" and st.get("goldens_pending")):
+            if not (st.get("state") == "certifying" and st.get("goldens_pending")) or module in off:
                 continue
             ver = node_runs(db, node, module)
             try:
@@ -1988,11 +2006,14 @@ def reap(db: DB):
             db.event("job_quarantined", job_id=j["job_id"], campaign_id=j["campaign_id"],
                      reason="replicas disagree and no uninvolved node can break the tie")
         placed = placement.reap(db)
-    for n in db.q("SELECT node_id, hostname, modules_json, capacity_json FROM nodes WHERE lifecycle='ready'"):
+    for n in db.q("SELECT node_id, hostname, modules_json, capacity_json, settings_json FROM nodes WHERE lifecycle='ready'"):
         if not (jl(n["capacity_json"], {}) or {}).get("admit", True):
             continue          # yielding (user present, a protected app, schedule): not claiming, not stuck
+        off = modstore.disabled_names(db, n)
         for mname, st in (jl(n["modules_json"], {}) or {}).items():
-            if st.get("state") == "certifying" and not _can_serve(st):
+            if mname in off:
+                _resolve_alert(db, f"certifying_stuck:{mname}", n["node_id"])   # off here: not stuck, never certifying
+            elif st.get("state") == "certifying" and not _can_serve(st):
                 # goldens that never finish (e.g. the Mac sleeps through every run) no longer block work (F5),
                 # but the operator must hear about it (TLA+ review follow-up)
                 _alert(db, f"certifying_stuck:{mname}", n["node_id"],
