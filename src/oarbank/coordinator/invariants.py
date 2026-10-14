@@ -10,7 +10,7 @@ Safety (must hold after every committed transaction):
       another job with the same job_key
   S3  a canonical result came from an attempt of the job's current generation
   S4  no lost job: every leased job has at least one live attempt
-  S5  pending / done / cancelled / quarantined jobs have no live attempts
+  S5  pending / done / cancelled / quarantined / failed jobs have no live attempts
   S6  accepted results are exactly the canonical ones, except results superseded by a later generation
   S7  live attempts only run on ready (not quarantined/retired) nodes
   S8  a live non-golden attempt runs a module certified on its node, under the current certification, or is an attempt
@@ -58,7 +58,7 @@ Safety (must hold after every committed transaction):
   S31 every `go` was granted while the node was eligible: online, inside its window, not held, not pinned to another
       version (from the rollout journal: each grant with the eligibility recorded beside it)
 Liveness (checked by the simulator at the end of a run under bounded faults):
-  L1  every job reaches done, cancelled or quarantined
+  L1  every job reaches done, cancelled, quarantined or failed
 """
 import bisect
 import json
@@ -107,7 +107,7 @@ def s4_no_lost_job(db: DB):
 
 def s5_no_live_on_settled(db: DB):
     return _v(db.q("SELECT j.job_id, j.state, a.attempt_id FROM jobs j JOIN attempts a ON a.job_id=j.job_id "
-                   "WHERE a.state='live' AND j.state IN ('pending','done','cancelled','quarantined')"),
+                   "WHERE a.state='live' AND j.state IN ('pending','done','cancelled','quarantined','failed')"),
               "S5 job {job_id} is {state} but attempt {attempt_id} is live")
 
 
@@ -581,7 +581,7 @@ def check_all(db: DB) -> list[str]:
 
 
 def l1_all_settled(db: DB, campaign_id: str | None = None) -> list[str]:
-    q = "SELECT job_id, state FROM jobs WHERE state NOT IN ('done','cancelled','quarantined')"
+    q = "SELECT job_id, state FROM jobs WHERE state NOT IN ('done','cancelled','quarantined','failed')"
     args = ()
     if campaign_id:
         q += " AND campaign_id=?"

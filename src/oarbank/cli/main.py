@@ -880,6 +880,13 @@ def cmd_fleet(a):
             print(f"  containers {ct.get('state')}: {ct['detail']}")
     for e in d["enrollments"]:
         print(f"PENDING enrollment {e['enrollment_id']} from {e['hostname']} ({e['peer_ip']})  -> oarbank node approve {e['enrollment_id']}")
+        ident = e.get("identity") or {}
+        if ident.get("node_id"):
+            print(f"  re-enrolment of {ident['hostname']} ({ident['node_id']}): keeps its node id and settings"
+                  + ("; its Tailscale device changed" if ident.get("ts_changed") else ""))
+        for n in ident.get("lookalikes") or []:
+            print(f"  WARNING looks like {n['hostname']} ({n['node_id']}) but cannot prove it: approving makes a NEW node "
+                  f"without that node's settings; retire the old one with: oarbank op nodes.retire {n['node_id']}")
     for c in d["campaigns"]:
         j = c["jobs"]
         print(f"campaign {c['campaign_id']} {c['module']:<11} {c['name']:<30} {c['state']:<8} {j['d'] or 0}/{j['n']} done, "
@@ -1417,6 +1424,12 @@ def print_job(d: dict) -> None:
           + (f"  dataset {j['dataset_id']}" if j["dataset_id"] else "")
           + f"  priority {j['priority'] or 0}  generation {j['generation']}  failures {j['exec_failures']}  "
             f"expirations {j['expirations']}" + (f"  target {j['target_node']}" if j["target_node"] else ""))
+    f = d.get("failure")
+    if f:
+        print(("failure: " if j["state"] in ("failed", "quarantined") else "last failure: ") + (f.get("code") or f.get("reason") or "?")
+              + (f" (fault {f['fault']})" if f.get("fault") else "")
+              + (" - not retried: its runner declared it can never succeed" if f.get("final") else "")
+              + (f"\n  {f['detail']}" if f.get("detail") else ""))
     print("attempts:" + ("" if d["attempts"] else " none yet"))
     for x in d["attempts"]:
         r = x["resume"]

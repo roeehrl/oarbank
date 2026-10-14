@@ -826,7 +826,11 @@ mod imp {
                 }
             };
             loop {
-                self.set(self.report(State::Starting));
+                // a `missing` session stays so until its prerequisites are there (create): the agent's periodic re-probe
+                // kicks it, and missing -> starting -> missing on every look would send the facts again each time
+                if self.shared.report.lock().unwrap().state != State::Missing {
+                    self.set(self.report(State::Starting));
+                }
                 match self.create(&sdk) {
                     Ok(Some(session)) => {
                         let mut ev: HANDLE = std::ptr::null_mut();
@@ -866,6 +870,9 @@ mod imp {
             if !missing.is_empty() {
                 self.set(Report { missing, ..self.report(State::Missing) });
                 return Err(());
+            }
+            if self.shared.report.lock().unwrap().state == State::Missing {
+                self.set(self.report(State::Starting));
             }
             let (session, adopted) = match self.open(sdk) {
                 Ok(s) => s,
