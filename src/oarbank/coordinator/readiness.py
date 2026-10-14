@@ -309,7 +309,7 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
             signed.append({"status": "done", "text": f"{p}: {cur['release_id']} is current"})
         elif cand:
             built.append({"status": "done", "text": f"{p}: {cand['release_id']}"})
-            if releases.signature_required(db) and not cand["signature"]:
+            if releases.needs_signature(db, cand):
                 holds = ", ".join(releases.contents(cand["composition_json"]))
                 signed.append({"status": "blocked", "sign": True, "text": f"{p}: {cand['release_id']} ({holds}) waits for your signature",
                                "command": f"oarbank release sign {cand['release_id']} --promote"})
@@ -323,7 +323,7 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
     others = [a for a in awaiting if a["platform"] not in supported]
     for a in others:      # releases of the fleet's other platforms: their nodes need them to become ready at all
         signed.append({"status": "blocked", "sign": True, "text": f"{a['platform']}: {a['release_id']} "
-                       f"({', '.join(a.get('modules') or []) or 'no module'}) waits for your signature too "
+                       f"({', '.join(a.get('modules') or [])}) waits for your signature too "
                        f"(its nodes need it to become ready; {name} does not run there)", "command": a["command"]})
     if not enabled:
         steps.append(_step("built", "Release built per platform", "waiting", "after it is enabled: a release is the bundle of the "

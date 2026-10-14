@@ -1683,7 +1683,7 @@ def cmd_release(a):
     if a.action == "build":
         out = run_op("releases.build", None, **ask)["result"]
         for r in out["releases"]:
-            print(f"{r['platform']:<15} {r['release_id']:<16} {r['status']:<9} {', '.join(r.get('modules') or []) or '(no module)'}"
+            print(f"{r['platform']:<15} {r['release_id']:<16} {r['status']:<9} {', '.join(r.get('modules') or []) or '(no module: needs no signature)'}"
                   + ("  waiting for your signature" if r["needs_signature"] else ""))
         unsigned = [r for r in out["releases"] if r["needs_signature"]]
         if unsigned:
@@ -1713,7 +1713,7 @@ def cmd_release(a):
         for r in rels:
             print(f"{r['release_id']:<16} {r.get('platform') or '-':<15} {r['status']:<9} {r['seq'] or '-':<4} "
                   f"{'signed' if r['signed'] else 'UNSIGNED':<8} {time.strftime('%m-%d %H:%M', time.localtime(r['created_at'])):<11} "
-                  f"{', '.join(r.get('modules') or []) or '(no module)'}"
+                  f"{', '.join(r.get('modules') or []) or '(no module: needs no signature)'}"
                   + ("  <- waiting for your signature" if r.get("awaiting") else ""))
         _print_awaiting([r["awaiting"] for r in rels if r.get("awaiting")], key)
 
@@ -1737,10 +1737,11 @@ def _print_awaiting(items: list, key) -> None:
     """The releases only the owner can let through, each with the command that does it."""
     if not items:
         return
-    print(f"\n{len(items)} release{'s' if len(items) != 1 else ''} waiting for your signature (nodes get nothing new until then):")
+    print(f"\n{len(items)} release{'s' if len(items) != 1 else ''} waiting for your signature (their nodes get no new module "
+          "code until then; an empty release, for a platform no module runs on, never waits):")
     for w in items:
         who = f"nodes {', '.join(w['nodes'])}" if w["kind"] == "node" else f"{len(w['nodes'])} {w['platform']} node(s)"
-        holds = ", ".join(w.get("modules") or []) or "no module"
+        holds = ", ".join(w.get("modules") or [])
         print(f"  {w['platform']:<15} {w['release_id']:<16} {holds}, for {who}\n    {w['command']}")
     if key is not None and not Path(key).exists():
         print(f"  (run these on the machine that holds the owner key; there is none at {key})")

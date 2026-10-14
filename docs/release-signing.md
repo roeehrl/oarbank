@@ -8,7 +8,7 @@ not sign: the keys live with the owner, not on the coordinator.
 
 | What | Statement names | Signed with | Command |
 |---|---|---|---|
-| A release (the module composition for one platform) | release id, bundle sha256, a rising seq | the release key | `oarbank release sign <release> [--promote]` |
+| A release (the module composition for one platform) holding module code; an [empty release](#empty-releases) needs none | release id, bundle sha256, a rising seq | the release key | `oarbank release sign <release> [--promote]` |
 | An agent build | the binary's sha256, version, platforms, a rising seq | the release key | `oarbank agent sign <build>` |
 | A fleet release (`oarbank-fleet-<v>.json`: every package, agent and coordinator build of a version) | the manifest's sha256, version, its seq | an owner key | `oarbank update sign <version>` |
 | A coordinator build (what a move installs) | the archive's sha256, version, platform, a rising seq | an owner key | `oarbank coordinator-build sign <build>` |
@@ -37,12 +37,14 @@ do not create a second key set. For manual/archive setup or keys held on another
 ## After enabling a module: sign each platform's release
 
 Enabling, upgrading, canarying, pinning or rolling back a module changes what nodes run, so oarbankd builds a new
-release for every platform of the fleet (a macOS and a Windows node: two releases, one of them perhaps without the
-module, where it does not run). With signing on, each one stays a **candidate** and no node gets anything until the
-owner signs it, on the machine that holds the owner key:
+release for every platform of the fleet (a macOS and a Windows node: two releases). With signing on, each one that
+holds module code stays a **candidate** and no node gets it until the owner signs it, on the machine that holds the
+owner key. A platform none of the enabled modules runs on gets an [empty release](#empty-releases) instead, which
+needs no signature: it is current at once and its nodes become ready with no module.
 
 ```bash
-oarbank release list                         # RELEASE, PLATFORM, STATUS, SIGNED, CONTENTS (module@version), and
+oarbank release list                         # RELEASE, PLATFORM, STATUS, SIGNED, CONTENTS (module@version, or
+                                             # "(no module: needs no signature)"), and
                                              # the releases waiting for your signature, each with its command
 oarbank release sign <release> --promote     # once per waiting platform release
 oarbank release sign <release>               # a canary or pinned node's own release (never --promote it)
@@ -57,7 +59,34 @@ with each release's platform, contents and command; the `release_awaiting_owner:
 minutes; it clears when the release is signed and current, or a newer build replaces it); each waiting node's card
 ("release needs your signature"); the node's explain (`RELEASE_UNSIGNED`, with the command); and the module's
 readiness checklist. A node with no release at all says why: `NO_RELEASE` (no module enabled yet),
-`RELEASE_UNSIGNED` (its release waits for the owner), `RELEASE_PENDING` (it is installing it).
+`RELEASE_UNSIGNED` (its release waits for the owner), `RELEASE_PENDING` (it is installing it). None of this ever
+names an empty release.
+
+## Empty releases
+
+A release whose platform (or, for a canary or pinned node, whose node) runs no enabled module is **empty**: its
+`modules.json` lists no module and no tool definition, and its `MANIFEST.json` lists `modules.json` alone. The
+signature exists so that nodes run only code the owner approved; an empty release carries none, so it needs no
+signature, and asking for one would only make the owner sign the same nothing again after every module change.
+
+- **Coordinator.** oarbankd promotes (or assigns) an empty release as soon as it builds it, signing on or off. It is
+  never a candidate waiting for the owner: no banner, no `release_awaiting_owner` alert, no `RELEASE_UNSIGNED`, no
+  "sign" step in a module's readiness checklist. A module change that keeps a platform empty builds the same empty
+  release again (same id), so nothing changes for its nodes.
+- **Agent.** A node with a pinned release key installs a release without a statement and signature only if it is
+  exactly empty: after unpacking it (at most 64 KiB) and before switching to it, the agent checks that `modules.json`
+  lists no module and no tool definition, that `MANIFEST.json` vouches for `modules.json` alone, and that the
+  directory holds nothing else; the same check runs when the release is already on disk under that id. Anything else
+  unsigned is refused (`unsigned release refused: a release key is pinned and it holds 1 module(s) ...`), as is a
+  directive with half a signature, a forged one or one for another release. The node then runs no module and is
+  ready: it reports the empty release as the one it runs, and the coordinator counts it as ready with no module.
+- **What it does not protect.** A coordinator can send an empty release to a node that ran modules, which stops
+  them there. That is no new power: a coordinator can already stop giving a node work. What it can never do is make
+  a node run module code, or a tool definition's version command, that the owner did not sign.
+- **Upgrading.** An older oarbankd held empty releases for the owner's signature (and put the fleet's tool
+  definitions in them). After the upgrade, oarbankd's background loop builds and promotes each platform's empty
+  release, retires the waiting empty candidates and resolves their alerts; there is nothing to sign. An agent older
+  than this change still refuses an unsigned empty release; it takes it once updated.
 
 ## What nodes do
 
@@ -66,9 +95,10 @@ The signature checks are always compiled into the agent; there is no unsigned bu
 - **Pinning.** A node pins the release key and the owner key set the first time its coordinator advertises them.
   The coordinator's own identity is pinned before that (its CIK, through the enrollment or a join code), so the
   keys come from the coordinator the node trusts.
-- **Refusing.** Once a key is pinned, a node refuses an unsigned release, agent build or coordinator build, one
-  signed by another key, and one whose seq is not above the highest it accepted (no rollback to an older signed
-  statement). A coordinator build must also name the node's platform.
+- **Refusing.** Once a key is pinned, a node refuses an unsigned release (unless it is
+  [empty](#empty-releases)), agent build or coordinator build, one signed by another key, and one whose seq is not
+  above the highest it accepted (no rollback to an older signed statement). A coordinator build must also name the
+  node's platform.
 - **Moves.** A node that pinned the owner keys follows a move only with an owner signature on the statement, after
   its time lock.
 - **Rotation.** A new owner set is accepted only when every new key and one key of the current set signed it, and
@@ -165,7 +195,11 @@ to these interpreters, so every module process runs under that signature.
 
 `tests/test_signing.py` and `tests/test_coordinator_move.py` cover the statements and the owner rules;
 `tests/test_release_signing_ux.py` the waiting releases (one build per platform and composition, the banner, alert,
-reason codes and `oarbank release list`) and the module readiness checklist;
+reason codes and `oarbank release list`), the module readiness checklist, and empty releases (never waiting, module
+code still waiting, the upgrade clearing old empty candidates); the agent's `signing` and `release` unit tests refuse
+an unsigned release with a module, a tool definition or any other file and take an empty one;
+`tests/rust/test_agent_release_empty.py` runs it against real processes: with the key pinned, a node no module runs
+on installs its empty release unsigned and is ready, then gets a release with module code only once it is signed;
 `tests/rust/test_agent_tuf.py` installs a vendor-listed agent build and refuses an unlisted one;
 `tests/rust/test_agent_coordinator_install_signed.py` runs a whole signed move against real processes: the owner key
 set pinned by the agent, a signed coordinator build installed by it, and an owner-signed move it follows.

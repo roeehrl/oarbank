@@ -263,7 +263,7 @@ their process groups, deletes their workspaces, and does not report them.
 | Directive | Meaning |
 |---|---|
 | `now` | oarbankd's clock when it answered (see Clocks). |
-| `release` | The release this node must run: its own composition, or the current one (see Releases). `null` when the node already runs it. `statement` and `signature` are present only with release signing. |
+| `release` | The release this node must run: its own composition, or the current one (see Releases). `null` when the node already runs it. `statement` and `signature` are present only with release signing, and are `null` for an empty release (no module), which needs no signature. |
 | `cancel` | Stop the attempt and `release(reason=user_cancel)`. |
 | `revoke` | Another attempt won, or the module was disabled: kill silently, no report. |
 | `run_doctor`, `recertify` | Run every module's doctor again; send hello again (certification restarts). |
@@ -631,6 +631,12 @@ image's cosign signature (or its index membership) with it before the runtime pu
 - **Signing** is on by default (D31; `OARBANK_RELEASE_SIGNING=0` is developer mode): a release is the signed lock of
   module digests, and agents pin the key and refuse unsigned and rolled-back releases (docs/release-signing.md). The
   platform is bound into the signed sha256 through `modules.json`.
+- **Empty releases.** A platform (or a canary or pinned node) no enabled module runs on gets an empty release:
+  `modules.json` with `"modules": []` and `"tools": {}`, and `MANIFEST.json` listing `modules.json` alone. It needs no
+  signature: the coordinator makes it current as soon as it is built and sends it with `statement` and `signature`
+  `null`. An agent with a pinned key installs such an unsigned release only after checking, on the unpacked files and
+  before switching to it, that it is exactly that (at most 64 KiB to download); any other unsigned release is refused.
+  The node then runs no module and is ready (docs/release-signing.md, "Empty releases").
 
 ## Agent self-update
 
