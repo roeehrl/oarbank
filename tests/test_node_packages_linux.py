@@ -213,7 +213,7 @@ class Sandbox:
         self.bin.mkdir()
         self.launcher = self.bin / "oarbank-launcher"
         write_fake(self.launcher, FAKE_LAUNCHER)
-        for tool in ("systemctl", "loginctl", "chown"):
+        for tool in ("systemctl", "loginctl", "chown", "pkill"):
             write_fake(self.bin / tool, FAKE_TOOL)
         os.symlink(shutil.which("rm"), self.bin / "rm")      # postremove's purge
         self.var = root / "var-lib-oarbank"
@@ -333,6 +333,8 @@ def test_an_upgrade_of_a_joined_node_makes_the_packages_agent_current_renders_it
     assert post.tools()[:2] == [["chown", "-R", "oarbank:oarbank", f"{home}/versions"],
                                 ["chown", "-h", "oarbank:oarbank", f"{home}/current"]]
     assert ["systemctl", "try-restart", "dev.codonic.oarbank.agent.service"] not in post.tools()
+    # every person's session helper restarts on the new binary (its user manager starts it again)
+    assert ["pkill", "-TERM", "-f", "^/usr/lib/oarbank/oarbank-agent session-helper"] in post.tools()
     assert r.stdout.splitlines() == ["Oarbank: upgraded; the service restarted on the new launcher"]
     # a launcher that cannot install or refresh (an edited unit): the service still restarts on the new launcher
     post.rcs(1)

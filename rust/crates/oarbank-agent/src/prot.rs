@@ -51,6 +51,12 @@ pub struct Protection {
     hub: Option<Arc<P::session::SessionHub>>,
 }
 
+/// The version session helpers should run: the installed package's agent, whose binary they run (launchd, systemd and
+/// the Windows elevated helper start the one beside the launcher), else this agent's own.
+pub fn expected_helper_version(package: Option<String>) -> String {
+    package.unwrap_or_else(|| crate::VERSION.to_string())
+}
+
 impl Protection {
     /// `session_hub`: serve session helpers (a system install's service), whose reports tell what the
     /// service's own account may not read.
@@ -63,6 +69,11 @@ impl Protection {
         #[cfg(not(target_os = "macos"))]
         let registry = Arc::new(P::SpawnRegistry::new(Box::new(ContainerActuator), Some(journal.clone()), store));
         let hub = session_hub.then(P::session::SessionHub::new);
+        if let Some(h) = &hub {
+            // helpers run the installed package's agent binary, not a channel build this service may run: they should
+            // report its version (this agent's own without a package's launcher); one of another is asked to restart
+            h.set_expected_version(Some(expected_helper_version(crate::nodeupdate::package_version())));
+        }
         let hub_keep = hub.clone();
         if let Some(h) = &hub {
             // tried again until it serves (an upgraded node may lack the socket's directory until its installer makes
@@ -83,7 +94,13 @@ impl Protection {
     /// Whether the session helpers are served (a system install's service), for the heartbeat and the status document:
     /// `{at, serving, error, failures}`. None: this agent serves none.
     pub fn session_helpers(&self) -> Option<Value> {
-        self.hub.as_ref()?.serving().and_then(|s| serde_json::to_value(s).ok())
+        let hub = self.hub.as_ref()?;
+        let mut v = hub.serving().and_then(|s| serde_json::to_value(s).ok())?;
+        // each connected helper's version beside the one expected: a helper left running old code (an update that did
+        // not restart it) is a node condition (PROTECTION_SESSION_HELPER_OUTDATED)
+        v["expected_version"] = json!(hub.expected_version());
+        v["helpers"] = serde_json::to_value(hub.helpers()).unwrap_or(json!([]));
+        Some(v)
     }
 
     /// Give the controller the event path's fast pause over the agent's job table (D51): an immediate rule's phase
@@ -805,6 +822,13 @@ mod e2e {
                    wake: Default::default(), stop_by: None }
     }
 
+    /// Helpers run the installed package's binary: its version is the one they should report, not a channel build's.
+    #[test]
+    fn session_helpers_should_run_the_installed_packages_version() {
+        assert_eq!(expected_helper_version(Some("2.10.4".into())), "2.10.4");
+        assert_eq!(expected_helper_version(None), crate::VERSION);
+    }
+
     /// A system service that cannot serve its session helpers says so in the heartbeat, where the console turns it into
     /// a node condition (`PROTECTION_SESSION_HELPER_UNAVAILABLE`): other accounts' processes are evaluated without
     /// their helpers (fail-safe). A personal install reports nothing of the kind.
@@ -825,6 +849,8 @@ mod e2e {
         assert_eq!((h["serving"].as_bool(), h["at"].as_str()), (Some(false), socket.to_str()), "{h}");
         assert!(h["error"].as_str().is_some_and(|e| e.contains("Not a directory")), "{h}");
         assert_eq!(p.session_helpers().as_ref(), Some(h));
+        // no helper connected yet; the one they should run is this agent's own here (no package's launcher)
+        assert_eq!((h["expected_version"].as_str(), h["helpers"].as_array().map(Vec::len)), (Some(crate::VERSION), Some(0)), "{h}");
         let mut personal = Protection::new(&l, false);
         personal.tick(&d, &Table::default(), &json!({"cpu": {"logical": 4}}));
         assert!(personal.telemetry["protection"].get("session_helpers").is_none() && personal.session_helpers().is_none());

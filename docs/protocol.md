@@ -205,7 +205,12 @@ their process groups, deletes their workspaces, and does not report them.
   `{"at": "<socket path or pipe name>", "serving": false, "error": "cannot create …: Permission denied (os error 13)",
   "failures": 4}`. While it does not, the agent tries again every 15 s and the console shows
   `PROTECTION_SESSION_HELPER_UNAVAILABLE`: other accounts' processes are evaluated without session helper (fail-safe;
-  docs/design/protection.md, "Without a session helper"). Absent in a personal install.
+  docs/design/protection.md, "Without a session helper"). Absent in a personal install. It also carries
+  `expected_version`, the version helpers should run (the installed package's agent, whose binary they run), and
+  `helpers: [{who: "uid:<n>"|"session:<n>", account, version, current}]`, each connected helper with the version it
+  reports (null: a helper of 2.10.4 or earlier, which does not say). A helper of another version is asked once on its
+  connection to exit (`{"v": 2, "restart": "<why>"}`), and its supervisor starts the installed binary again; the
+  console shows `PROTECTION_SESSION_HELPER_OUTDATED` while one is not current.
 - **`telemetry.protection.rules[].without_helper`**: how many of the rule's processes were listed without their
   account's session helper (none connected, or its report older than 10 s) and evaluated fail-safe; the console shows
   `PROTECTION_WITHOUT_HELPER` while it is above 0. A rule's `cpu_cores` and `footprint_gb` then include the estimate
