@@ -10,7 +10,7 @@ from cryptography.x509.oid import NameOID
 
 from helpers import FACTS, make_db, node_key_and_csr, run_op, set_node
 from oarbank.contracts import impact as impact_text
-from oarbank.coordinator import clock, core, joincodes, ops
+from oarbank.coordinator import clock, core, joincodes, nodeidentity, ops
 
 from test_console import env  # noqa: F401  (the console fixture: oarbankd + console + a session)
 
@@ -184,6 +184,55 @@ def test_the_previous_key_proves_the_node_while_renewing_and_a_retired_node_is_n
     assert "re_enrolment_of" not in imp and imp["new_node"] is True and "warning" not in imp   # retired: no lookalike
 
 
+def identity(db, eid) -> dict:
+    return nodeidentity.of_enrollment(db, db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (eid,)))
+
+
+def test_a_retired_node_is_not_what_a_request_from_its_tailscale_device_is(db, tailnet):
+    tailnet[OLD_IP] = "ts-old"
+    _, old, _ = join(db, node_key_and_csr()[0], OLD_IP)
+    core.set_node_state(db, old, "paused", "owner")
+    set_node(db, old, "enabled", False, module="toy")
+    run_op(db, "nodes.retire", old)
+    assert node(db, old)["ts_node_id"] == "ts-old"                         # the retired record keeps its StableID
+    # the machine enrolls again from the same Tailscale device with a new key: it is a new machine, and the retired
+    # record is neither the node it keeps nor one it looks like
+    e = core.enroll(db, "host-a", {**FACTS, "hostname": "host-a"}, OLD_IP, csr_for(node_key_and_csr()[0]))
+    i = identity(db, e["enrollment_id"])
+    assert (i["node_id"], i["via"], i["lookalikes"]) == (None, None, [])
+    imp = preview(db, e["enrollment_id"])
+    assert imp["new_node"] is True and "re_enrolment_of" not in imp and "warning" not in imp and "old_record" not in imp
+    assert old not in str(imp)
+    new = run_op(db, "nodes.admit", e["enrollment_id"])["result"]["node_id"]
+    assert new != old and db.one("SELECT COUNT(*) n FROM nodes")["n"] == 2
+    o = node(db, old)                                                     # still retired, untouched
+    assert (o["lifecycle"], o["desired_state"], o["client_cert_fp"], o["client_key_sha256"]) == ("retired", "paused",
+                                                                                                 None, None)
+    n = node(db, new)                                                     # a new node: the fleet's defaults
+    assert (n["ts_node_id"], n["desired_state"]) == ("ts-old", "active") and "toy" not in disabled(db, new)
+    assert db.one("SELECT reason FROM events WHERE kind='enroll_approved' AND node_id=?", (new,))["reason"] is None
+    assert core.auth_cert(db, der_of(core.enroll_status(db, e["enrollment_id"])["cert_pem"]), OLD_IP)["node_id"] == new
+    # the retired record and the new node now share the StableID: a later request from that device is the live node
+    e2 = core.enroll(db, "host-a", {**FACTS, "hostname": "host-a"}, OLD_IP, csr_for(node_key_and_csr()[0]))
+    i2 = identity(db, e2["enrollment_id"])
+    assert (i2["node_id"], i2["via"]) == (new, "tailscale")
+    assert new in preview(db, e2["enrollment_id"])["re_enrolment_of"]
+
+
+def test_a_join_code_never_brings_a_retired_node_back(db, tailnet):
+    tailnet[OLD_IP] = "ts-old"
+    _, old, _ = join(db, node_key_and_csr()[0], OLD_IP)
+    run_op(db, "nodes.retire", old)
+    code = joincodes.create(db, urls=["https://127.0.0.1:7443"], pins=["ab" * 32], cik="AA" * 21 + "A=",
+                            actor="owner", uses=5, approve=True)
+    e = core.enroll(db, "host-a", {**FACTS, "hostname": "host-a"}, OLD_IP, csr_for(node_key_and_csr()[0]),
+                    join=joincodes.decode(code["code"])["token"])
+    assert e["status"] == "approved"                                      # a new machine, as the code admits them
+    new = db.one("SELECT node_id FROM enrollments WHERE enrollment_id=?", (e["enrollment_id"],))["node_id"]
+    assert new != old and node(db, old)["lifecycle"] == "retired" and node(db, new)["lifecycle"] == "enrolled"
+    assert db.one("SELECT COUNT(*) n FROM events WHERE kind='enroll_approved' AND node_id=?", (old,))["n"] == 1
+
+
 def test_the_fleet_page_says_which_waiting_machine_keeps_a_node_and_which_becomes_a_new_one(env, monkeypatch):
     c, db, state = env["c"], env["db"], env["state"]
     devices = {OLD_IP: "ts-old", NEW_IP: "ts-new"}
@@ -197,3 +246,21 @@ def test_the_fleet_page_says_which_waiting_machine_keeps_a_node_and_which_become
     assert "re-enrolment</span> of" in fleet and "its Tailscale device changed" in fleet
     assert "new node</span> looks like" in fleet and "(same hardware)" in fleet and "NEW node" in fleet
     assert 'action="/do/nodes.retire"' in fleet and f'name="target" value="{nid}"' in fleet
+
+
+def test_the_fleet_page_shows_a_machine_on_a_retired_nodes_device_as_new_and_how_a_node_matched(env, monkeypatch):
+    c, db, state = env["c"], env["db"], env["state"]
+    devices = {OLD_IP: "ts-old", NEW_IP: "ts-new"}
+    monkeypatch.setattr(core, "tailscale_whois", lambda ip: {"ts_node_id": devices[ip]} if ip in devices else None)
+    _, old, _ = join(db, node_key_and_csr()[0], OLD_IP)
+    run_op(db, "nodes.retire", old)
+    _, live, _ = join(db, node_key_and_csr()[0], NEW_IP, name="host-b")
+    # a new key from the retired node's device, and a new key from the live node's device
+    core.enroll(db, "host-a", {**FACTS, "hostname": "host-a"}, OLD_IP, csr_for(node_key_and_csr()[0]))
+    core.enroll(db, "host-b", {**FACTS, "hostname": "host-b"}, NEW_IP, csr_for(node_key_and_csr()[0], "host-b"))
+    state.rebuild()
+    fleet = c.get("/frag/fleet").text
+    assert f"/nodes/{old}" not in fleet and "new node</span> looks like" not in fleet   # no match, no lookalike
+    assert fleet.count("re-enrolment</span> of") == 1                                  # only the live node's device
+    assert f"host-b</a>: it comes from the node's Tailscale device and keeps" in fleet
+    assert "it proves the node's key" not in fleet
