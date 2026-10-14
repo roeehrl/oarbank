@@ -184,9 +184,11 @@ SECTIONS = {
                               "off there (docs/protocol.md, \"Module cleanup\")."),
     "network": ("Network", "Inbound listeners and how they are checked from outside (docs/design/inbound-listeners.md)."),
     "updates": ("Updates", "How new Oarbank releases reach the coordinator and the nodes (docs/design/fleet-updates.md)."),
+    "onboarding": ("New machines", "What a machine you approve starts as, until you change it (an approval's own choices "
+                                   "win: docs/design/node-enrollment.md, \"Admission\")."),
 }
 NODE_SECTIONS = ("memory", "presence", "jobs", "caps", "storage", "protection", "network", "updates")
-FLEET_SECTIONS = ("notifications", "access", "verification")
+FLEET_SECTIONS = ("notifications", "access", "verification", "onboarding")
 # the core keys every module has, set as `[module] <key>` (docs/design/settings.md, "Module settings")
 MODULE_CORE_KEYS = ("enabled", "services.disabled", "pipeline", "replica_rate")
 
@@ -344,6 +346,19 @@ SETTINGS = (
             "the fleet's (the higher applies).",
             {"type": "number", "minimum": 0, "maximum": 1}, default=0.03, scopes=("fleet",), merge="max",
             applies="coordinator", section="verification", lockable=False, qualifier="optional", campaign=True),
+    # ---------------------------------------------------------------- new machines (docs/design/node-enrollment.md, "Admission")
+    Setting("new_node_state", "A new node starts",
+            "active: a machine you approve takes work once its modules are certified; paused: it joins paused, takes no "
+            "jobs (certification goldens included) and runs no workloads until you resume it. Applied when it is "
+            "approved, in the same step; an approval may choose otherwise, and a re-enrolled node keeps its own state.",
+            {"type": "string", "enum": ["active", "paused"]}, default="active", scopes=("fleet",), applies="coordinator",
+            section="onboarding", lockable=False),
+    Setting("new_node_modules", "Modules on a new node",
+            "all: every module runs on a machine you approve (as the fleet and its groups say); none: the approval turns "
+            "every installed module off on that node (its own value), so it is certified for nothing until you turn "
+            "modules on. A module installed later is not turned off by this.",
+            {"type": "string", "enum": ["all", "none"]}, default="all", scopes=("fleet",), applies="coordinator",
+            section="onboarding", lockable=False),
     # ---------------------------------------------------------------- fleet updates (docs/design/fleet-updates.md, D60)
     Setting("update_auto", "Update automatically",
             "on: a newly imported signed release starts a rollout by itself (inside each node's window); notify: the "

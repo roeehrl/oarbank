@@ -355,22 +355,65 @@ for _op, _st in (("fleet.pause", "paused"), ("fleet.halt", "halted"), ("fleet.re
 
 # ------------------------------------------------------------------ nodes
 
-def _admit_impact(db, e: dict | None) -> dict:
-    """The enrollment, and whether approving it keeps a known node or makes a new one (warning when it looks like a
-    known node it cannot prove it is: nodeidentity.py)."""
-    from . import nodeidentity
+def _admission(fn):
+    """Run an approval step, its refusals as the operation's (a settings refusal keeps its per-change errors)."""
+    from .admission import AdmissionError
+    try:
+        return fn()
+    except AdmissionError as e:
+        raise OpError(e.status, e.code, e.detail, extra={"errors": e.errors} if e.errors else None)
+
+
+def _admission_params(req) -> dict:
+    from . import admission
+    return _admission(lambda: admission.parse(req.params))
+
+
+def _admit_impact(db, req, e: dict | None) -> dict:
+    """The enrollment, whether approving it keeps a known node or makes a new one (warning when it looks like a known
+    node it cannot prove it is: nodeidentity.py), and what the node starts as: its admission options and the fleet's
+    onboarding policy, previewed by running the approval and rolling it back (admission.preview)."""
+    from . import admission, nodeidentity
     if not e:
         return {"enrollment": None}
     full = db.one("SELECT * FROM enrollments WHERE enrollment_id=?", (e["enrollment_id"],))
-    return {"enrollment": e, **nodeidentity.impact(db, full)}
+    out = {"enrollment": e, **nodeidentity.impact(db, full)}
+    adm = _admission_params(req)
+    if full["status"] != "pending":
+        return out
+    start = _admission(lambda: admission.preview(db, full, adm))
+    if start.get("same_machine"):           # the owner says it is the old node: the warning is answered
+        out.pop("old_record", None)
+        out["warning"] = (f"you confirm this machine is {adm['adopt']}: its settings move to the new node and the old "
+                          "record is retired (it cannot be undone by un-retiring)")
+    return {**out, **start}
+
+
+def _admit_tier(req) -> str:
+    """T3 when the approval retires the old record it replaces (as nodes.retire is), else the registry's T2."""
+    return "T3" if (req.params or {}).get("adopt_settings_from") else "T2"
+
+
+def _admit_name(db, req) -> str:
+    """What a T3 approval (one that retires the node it replaces) must type: that node's name."""
+    who = (req.params or {}).get("adopt_settings_from")
+    n = db.one("SELECT hostname FROM nodes WHERE node_id=? OR hostname=?", (who, who)) if who else None
+    return n["hostname"] if n else str(req.target)
+
+
+def _enrollment_row(db, r):
+    return db.one("SELECT enrollment_id, hostname, peer_ip, status FROM enrollments WHERE enrollment_id=?", (r.target,))
 
 
 @handler("nodes.admit", target_type="enrollment",
-         snapshot=lambda db, r: db.one("SELECT enrollment_id, status, hostname FROM enrollments WHERE enrollment_id=?", (r.target,)),
-         impact=lambda db, r: _admit_impact(db, db.one("SELECT enrollment_id, hostname, peer_ip, status FROM enrollments "
-                                                       "WHERE enrollment_id=?", (r.target,))))
+         snapshot=lambda db, r: db.one("SELECT enrollment_id, status, hostname, node_id FROM enrollments WHERE enrollment_id=?",
+                                       (r.target,)),
+         impact=lambda db, r: _admit_impact(db, r, _enrollment_row(db, r)), tier=_admit_tier, name=_admit_name)
 def _admit(db, req):
-    return core.approve_enrollment(db, req.target, req.actor)
+    """Approve an enrollment, with what the node starts as (admission.py): state, module switches, settings, labels,
+    groups, or the settings of the old node it replaces (which is then retired)."""
+    adm = _admission_params(req)
+    return _admission(lambda: core.approve_enrollment(db, req.target, req.actor, admission=adm))
 
 
 @handler("nodes.reject_enrollment", target_type="enrollment",
@@ -419,7 +462,7 @@ def _recertify(db, req):
 
 
 def _pinned_open(db, nid) -> list[int]:
-    return [r["job_id"] for r in db.q("SELECT job_id FROM jobs WHERE target_node=? AND state IN ('pending','leased')", (nid,))]
+    return core.pinned_open(db, nid)
 
 
 def _retire_impact(db, r) -> dict:
@@ -433,17 +476,8 @@ def _retire_impact(db, r) -> dict:
          impact=_retire_impact)
 def _retire(db, req):
     nid = _nid(db, req)
-    db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL, client_key_sha256=NULL,"
-         " client_key_prev_sha256=NULL WHERE node_id=?", (nid,))
-    # work pinned to this node (a run_all job, its golden jobs) can never run anywhere else: settle it, or its campaign
-    # stays running for ever
-    pinned = _pinned_open(db, nid)
-    for jid in pinned:
-        core.cancel_job(db, jid, req.actor)
-    from . import modsecrets
-    modsecrets.drop_node(db, nid)                    # the node's own secret values go with it
-    db.event("node_retired", actor=req.actor, node_id=nid, reason=f"{len(pinned)} pinned jobs cancelled" if pinned else None)
-    return {"lifecycle": "retired", "pinned_jobs_cancelled": len(pinned)}
+    n = core.retire_node(db, nid, req.actor)
+    return {"lifecycle": "retired", "pinned_jobs_cancelled": n}
 
 
 # ------------------------------------------------------------------ protection (on the settings chain)
@@ -2531,9 +2565,10 @@ def _user_code_enrollment(db, r):
 
 
 @handler("nodes.admit_code", target_type="enrollment",
-         impact=lambda db, r: _admit_impact(db, _user_code_enrollment(db, r)))
+         impact=lambda db, r: _admit_impact(db, r, _user_code_enrollment(db, r)), tier=_admit_tier, name=_admit_name)
 def _admit_code(db, req):
-    return core.admit_by_user_code(db, req.params.get("user_code") or req.target or "", req.actor)
+    adm = _admission_params(req)
+    return _admission(lambda: core.admit_by_user_code(db, req.params.get("user_code") or req.target or "", req.actor, adm))
 
 
 @handler("modules.cli_token", target_type="module", target=_module_name)
