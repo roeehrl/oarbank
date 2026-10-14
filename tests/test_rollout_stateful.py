@@ -22,9 +22,10 @@ from hypothesis import HealthCheck, event, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
+import oarbank.coordinator as coordinator_pkg
 from oarbank.coordinator import clock, core, fleetupdates as F, invariants, rollouts as RO
 
-from helpers import enrolled_node, facts_for, fresh, make_db, run_op, set_node
+from helpers import enrolled_node, facts_for, fresh, make_db, rmtree_patient, run_op, set_node
 
 OLD, NEW, NEXT = "2.9.0", "2.10.0", "2.11.0"
 INSTALL = {"format": "tar", "scope": "system", "updater": True, "why": None}
@@ -53,10 +54,11 @@ class RolloutMachine(RuleBasedStateMachine):
                 release=st.sampled_from([NEW, NEW, NEXT]), start_now=st.sampled_from([True, True, True, False]))
     def setup(self, rings, windows, release, start_now):
         clock.set_fake(1_800_000_000.0)
-        self.tmp = tempfile.TemporaryDirectory()
-        self.db = make_db(Path(self.tmp.name) / "oarbank.sqlite3", modules=())
+        self.tmp = tempfile.mkdtemp(prefix="oarbank-rollout-")
+        self.db = make_db(Path(self.tmp) / "oarbank.sqlite3", modules=())
         self.coord = NEW                                   # the coordinator's own version (it may update itself)
-        self._saved = (F.coordinator_version, sys.modules.get("oarbank.coordinator.coordself"), RO._spawn)
+        self._saved = (F.coordinator_version, sys.modules.get("oarbank.coordinator.coordself"), RO._spawn,
+                       getattr(coordinator_pkg, "coordself", None))
         F.coordinator_version = lambda: self.coord
         RO._spawn = lambda fn: None                       # the periodic check never reaches the network here
         fake = types.ModuleType("oarbank.coordinator.coordself")
@@ -69,7 +71,8 @@ class RolloutMachine(RuleBasedStateMachine):
             return fake.current
         fake.request, fake.state = request, lambda db: fake.current
         self.coordself = fake
-        sys.modules["oarbank.coordinator.coordself"] = fake
+        # rollouts' `from . import coordself` reads the package attribute first (set by the import above): replace both
+        sys.modules["oarbank.coordinator.coordself"] = coordinator_pkg.coordself = fake
         self.target = release
         self.nodes, self.window, self.held, self.online, self.phase, self.agents = [], [], [], [], [], []
         self.reported_phase = []
@@ -89,25 +92,37 @@ class RolloutMachine(RuleBasedStateMachine):
             if self.window[i]:
                 set_node(self.db, n["node_id"], "update_window", self.window[i])
         for v in (OLD, NEW, NEXT):
-            F.import_dir(self.db, release_dir(Path(self.tmp.name) / v, v), "test")
+            F.import_dir(self.db, release_dir(Path(self.tmp) / v, v), "test")
         self.halted_grants: dict = {}
         self.grants_seen: set = set()
         if start_now:
             self.start(False, None, True, None)
 
     def teardown(self):
-        if hasattr(self, "db"):
-            try:
-                self.settle()
-            finally:
-                F.coordinator_version, saved, RO._spawn = self._saved
-                if saved is None:
-                    sys.modules.pop("oarbank.coordinator.coordself", None)
-                else:
-                    sys.modules["oarbank.coordinator.coordself"] = saved
-                clock.set_fake(None)
-                self.db.conn.close()
-                self.tmp.cleanup()
+        try:
+            if hasattr(self, "db"):
+                try:
+                    self.settle()
+                finally:
+                    # a coordinator update's prepare runs on a thread with a connection of its own: let it finish (and
+                    # close that connection) before the database goes, or Windows refuses to remove the files
+                    for job in list(RO._PREPARING.values()):
+                        assert job["done"].wait(30), "a coordinator update's prepare did not finish"
+                    RO._PREPARING.clear()
+                    F.coordinator_version, saved, RO._spawn, saved_attr = self._saved
+                    if saved is None:
+                        sys.modules.pop("oarbank.coordinator.coordself", None)
+                    else:
+                        sys.modules["oarbank.coordinator.coordself"] = saved
+                    if saved_attr is None:
+                        coordinator_pkg.__dict__.pop("coordself", None)
+                    else:
+                        coordinator_pkg.coordself = saved_attr
+                    clock.set_fake(None)
+                    self.db.conn.close()
+        finally:
+            if hasattr(self, "tmp"):
+                rmtree_patient(self.tmp)
 
     # ------------------------------------------------------------------ the agents
     def node(self, i):

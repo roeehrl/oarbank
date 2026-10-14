@@ -383,3 +383,24 @@ def windows_powershell(*args, **run):
     import subprocess
     env = {k: v for k, v in (run.pop("env", None) or os.environ).items() if k.upper() != "PSMODULEPATH"}
     return subprocess.run(["powershell", "-NoProfile", *args], env=env, **run)
+
+
+def rmtree_patient(path, wait_s: float = 10.0):
+    """Remove the tree at `path`, retrying with a short backoff while Windows refuses (WinError 32: another process,
+    such as an antivirus scanner or the search indexer, briefly holds a file just written). Raises if it still cannot:
+    the tree is never silently left behind."""
+    import shutil
+    import time
+    deadline = time.monotonic() + wait_s
+    delay = .05
+    while True:
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)

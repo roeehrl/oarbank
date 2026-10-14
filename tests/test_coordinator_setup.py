@@ -609,10 +609,19 @@ def test_close_has_no_marker_and_requires_capability(wizard):
 def test_main_exits_when_browser_is_gone_without_installing(wizard, monkeypatch):
     monkeypatch.setattr(setup, "Wizard", lambda _: wizard)
     real_server = setup.SetupServer
-    monkeypatch.setattr(setup, "SetupServer", lambda w, port: real_server(w, port, idle_timeout=.01))
+    servers = []
+
+    def short_idle(w, port):
+        servers.append(real_server(w, port, idle_timeout=.01))
+        return servers[-1]
+    monkeypatch.setattr(setup, "SetupServer", short_idle)
     start = time.monotonic()
     assert setup.main(["--root", str(wizard.root), "--no-browser"]) == 0
-    assert time.monotonic() - start < 2
+    # it ended because nobody came back within the idle timeout (not the 180 s default, not a finished wizard); the
+    # deadline is generous because a loaded CI runner can stall this process for tens of seconds
+    (server,) = servers
+    assert not server.finished and time.monotonic() - server.last_activity >= server.idle_timeout == .01
+    assert time.monotonic() - start < 60
     assert not wizard.backend.installs and not wizard.marker.exists()
 
 
