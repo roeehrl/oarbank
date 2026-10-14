@@ -17,6 +17,11 @@ or a different machine with the same name). Approving it makes a new node; the p
 settings will not apply, and offers retiring the old record, or, when the owner knows it is the same machine, carrying
 the old node's settings over and retiring it in the approval (admission.py, `adopt_settings_from`).
 
+A retired node is closed: no request is that node. Retiring clears its key hashes, so no CSR proves it; it keeps the
+Tailscale StableID it last had, but a request from that device is not matched to it either; and it is no lookalike. A
+machine whose record was retired and enrolls again, from the same Tailscale device or another, is a new node, and its
+retired record's settings cannot be carried over (admission.adopt_target refuses it).
+
 These functions only read (`r` is the coordinator DB or the console's reader).
 """
 from . import clock, config as C, tlsca
@@ -65,11 +70,14 @@ def lookalikes(r, e: dict, exclude: set) -> list[dict]:
 def of_enrollment(r, e: dict) -> dict:
     """What approving this enrollment does to node identity:
     {node_id: the node it keeps (None: a new node), via: "node_key"|"tailscale"|None, ts_changed: bool,
-     old_ts_node_id, lookalikes: [...] (only when it becomes a new node)}."""
+     old_ts_node_id, lookalikes: [...] (only when it becomes a new node)}. A retired node is never the node it keeps,
+    nor a lookalike."""
     node = proven_node(r, e.get("csr_pem"))
     via = "node_key" if node else None
     if not node and e.get("ts_node_id"):
-        node = r.one("SELECT * FROM nodes WHERE ts_node_id=?", (e["ts_node_id"],))
+        # a retired node keeps the StableID it last had, and a new node from that device may share it: neither makes the
+        # request the retired node, whose record is closed (re-enrolling it would un-retire it)
+        node = r.one("SELECT * FROM nodes WHERE ts_node_id=? AND lifecycle!='retired'", (e["ts_node_id"],))
         via = "tailscale" if node else None
     ts_changed = bool(node and via == "node_key" and e.get("ts_node_id") and node["ts_node_id"]
                       and node["ts_node_id"] != e["ts_node_id"])

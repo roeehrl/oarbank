@@ -190,7 +190,8 @@ def enroll_status(db: DB, eid: str) -> dict:
 def approve_enrollment(db: DB, eid: str, actor: str, label: str | None = None, admission: dict | None = None) -> dict:
     """Approve an enrollment: the node gets its client certificate. A request that proves a node's key (its CSR is
     signed by the key of the node's current or previous certificate), else one from the node's Tailscale device, keeps
-    that node's id, settings and history, and re-pins it to the request's Tailscale device (nodeidentity.py). Its name
+    that node's id, settings and history, and re-pins it to the request's Tailscale device; a retired node is never kept
+    this way, and the request makes a new node (nodeidentity.py). Its name
     is `label` (a join code's), else a label it already had, else the hostname it reported; a labelled node keeps its
     name when its agent reports another one (hello).
 
@@ -228,7 +229,8 @@ def admit_node(db: DB, e: dict, actor: str, label: str | None = None, admission:
     from . import admission as adm_mod, nodeidentity
     label = (label or "").strip() or e["requested_name"] or None
     facts = jl(e["facts_json"], {})
-    # Re-enrolment of a known node (by its key, else its Tailscale device) keeps its node_id, settings and history.
+    # Re-enrolment of a known node (by its key, else its Tailscale device; never a retired node) keeps its node_id,
+    # settings and history.
     ident = nodeidentity.of_enrollment(db, e)
     node_id = ident["node_id"] or "n_" + secrets.token_hex(4)
     if ident["node_id"]:

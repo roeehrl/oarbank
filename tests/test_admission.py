@@ -252,6 +252,42 @@ def test_the_same_machine_is_never_automatic_and_is_refused_where_it_cannot_be_t
     assert db.one("SELECT status FROM enrollments WHERE enrollment_id=?", (eid,))["status"] == "pending"
 
 
+def test_a_retired_node_is_never_carried_over(db, tailnet):
+    _, old, _ = join(db, node_key_and_csr()[0], OLD_IP)
+    set_node(db, old, "max_slots", 3)
+    run_op(db, "nodes.retire", old)
+    # the machine enrolls again, from the retired node's own Tailscale device (which the record still names) and from
+    # another: the retired record is no lookalike, and naming it (by id or name) is refused, not quietly ignored
+    for ip in (OLD_IP, NEW_IP):
+        eid = enroll(db, "host-a", ip)
+        assert "old_record" not in plan(db, eid, {})["impact"]
+        for who in (old, "host-a"):
+            with pytest.raises(ops.OpError) as err:
+                plan(db, eid, {"adopt_settings_from": who})
+            assert err.value.code == "adopt_refused" and f"host-a ({old}) is retired" in err.value.detail
+            with pytest.raises(admission.AdmissionError) as err:                 # the approval itself, unpreviewed
+                core.approve_enrollment(db, eid, "test", admission=admission.parse({"adopt_settings_from": who}))
+            assert err.value.code == "adopt_refused"
+        assert node(db, old)["lifecycle"] == "retired"
+        assert db.one("SELECT status FROM enrollments WHERE enrollment_id=?", (eid,))["status"] == "pending"
+        assert db.one("SELECT COUNT(*) n FROM nodes")["n"] == 1
+        core.reject_enrollment(db, eid, "test")
+    with pytest.raises(ops.OpError) as err:
+        plan(db, enroll(db, "host-a", NEW_IP), {"adopt_settings_from": "no-such-node"})
+    assert err.value.code == "unknown_node"
+    # a request from a live node's own Tailscale device (a new key) keeps that node: nothing to carry over, and the
+    # refusal says how it matched (it proves no key)
+    _, live, _ = join(db, node_key_and_csr()[0], OTHER_IP, name="other")
+    eid = enroll(db, "other", OTHER_IP)
+    with pytest.raises(ops.OpError) as err:
+        plan(db, eid, {"adopt_settings_from": live})
+    assert err.value.code == "adopt_refused"
+    assert f"comes from the Tailscale device of other ({live})" in err.value.detail
+    # named by its host name, the old node is found, not the approval's own new node of that name
+    imp = plan(db, enroll(db, "other", FOURTH_IP), {"adopt_settings_from": "other"})["impact"]
+    assert any(f"retired other ({live})" in x for x in imp["same_machine"])
+
+
 # ------------------------------------------------------------------ the console
 
 def test_the_approve_dialog_offers_the_options_and_the_same_machine_and_reviews_them(env, monkeypatch):
