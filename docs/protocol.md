@@ -925,6 +925,11 @@ certification run there (docs/design/stage-gating.md). Release-install refusals 
 - **Per node and module.** A node is certified per (node, module), keyed by the module's content digest in
   the node's release. A new version re-certifies that module on that node and nothing else.
   Re-certification also happens after a platform or OS version change, and periodically.
+- **Work across a re-certification.** A grant runs the version the node's release carries, which its certification
+  is on (a canary or promotion reaches a node with its release). While the module re-certifies (`certifying`) the node
+  is granted only its goldens; the jobs it was granted before keep running and their results are accepted, because
+  the certification they were granted under stands. When a new certification passes its goldens, or the goldens fail
+  (`golden_failed`), the jobs still running under the old one stop (revoked, uncharged) and are queued again.
 - **Goldens come from the module.** For the node's class (platform, OS version, CPU, GPUs and GPU APIs, pools and
   capabilities, never its identity), the module returns its goldens (`golden.list`), builds each one's spec (`spec.build`), and
   judges the result (`golden.compare`, or the evaluated digest against `expected.digest`). A golden limited to other

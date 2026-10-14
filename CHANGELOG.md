@@ -4,6 +4,19 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+A coordinator update is no longer refused while a module re-certifies around running work. When a canary (or a
+promotion, a platform or OS change, or the periodic re-certification) reached a node, that node's module went to
+`certifying` while the jobs it had been granted on the previous version kept running, as designed. The S8 invariant
+counted those jobs as running uncertified, so `oarbank update start` refused the update ("the new build's self-test
+failed ... S8 attempt ... state=certifying") and the console raised an invariant alert. The certification a job was
+granted under now stands until a new one passes its goldens or the goldens fail. Jobs still running at that point are
+stopped and queued again, uncharged; their results were refused anyway. A job granted while the node was certifying,
+or one recording a version its node's release did not carry, is still a violation. A claim in the moment between
+starting a canary and building its release was granted the canary's version while the node still ran, and was
+certified on, the previous one; it is now granted the version its release carries.
+
 ## 2.10.4 (2026-10-14)
 
 A fix release for 2.10.3. Module SDK: **oarbank-sdk 1.7.0**, unchanged; its runner protocol now spells out how a

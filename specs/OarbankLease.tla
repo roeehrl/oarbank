@@ -68,9 +68,13 @@ CONSTANTS
     CertifyingGrace,          \* = TRUE   ... only until CERTIFYING_GRACE_S has passed (F5; bb04f9d)
     GoldenFailLimit,          \* = TRUE   MAX_EXEC_FAILURES golden failures per (node, module) -> golden_failed,
                               \*          goldens cancelled, no breaker; queue_goldens cancels stale sets (F6)
+    CertifyEndsSuperseded,    \* = TRUE   _certify (a new generation) and _golden_failed (generation -1) end the
+                              \*          node's live attempts granted under the certification they end
     \* Environment (not code):
     CertifyMayStall,          \* TRUE: a node's golden jobs may neither pass nor fail (leases keep expiring),
                               \*       so passing them (Recertify) is not fair
+    RecertifyCertified,       \* TRUE: a certified module re-certifies (a new version: a canary or promotion; a
+                              \*       platform or OS change; RECERT_EVERY) while its work runs (BeginRecertify)
     GoldenFailNodes,          \* nodes whose golden jobs always fail (they never recertify)
     \* the module host: module code runs out of process and completion needs the module's verdict.
     ModuleFaults,             \* environment: the module host may be down (bounded by MaxFaults)
@@ -86,7 +90,8 @@ ASSUME MaxAtt \in Nat /\ MaxFaults \in Nat /\ MaxUserOps \in Nat
 ASSUME {FaultyAlwaysWrong, ClaimReadsNodeInTx, DisputeFencesParties, DisputeBumpsGen, SettledJobFence,
         SelfInconsistencyConvicts, ReplicaNeedsEligible, ReapCancelsReplica, CompleteFencesQuarantine,
         BreakerFencesAttempts, StrictFailedHere, CertifyingIsEligible, CertifyingGrace,
-        GoldenFailLimit, CertifyMayStall, ModuleFaults, AwaitHoldsLease} \subseteq BOOLEAN
+        GoldenFailLimit, CertifyEndsSuperseded, CertifyMayStall, RecertifyCertified, ModuleFaults,
+        AwaitHoldsLease} \subseteq BOOLEAN
 ASSUME GoldenFailNodes \subseteq Nodes
 
 Jobs      == EvalJobs \cup ReplicaJobs
@@ -116,7 +121,8 @@ VARIABLES
     nextAtt,   \* next attempt id
     cert,      \* DB modules_json[m].generation per node; negative = revoked (core.py writes -1)
     brk,       \* DB modules_json[m].state='revoked' with the generation kept (pre-27aa459 breaker)
-    cfy,       \* DB modules_json[m].state='certifying' (golden jobs queued after a revocation)
+    cfy,       \* DB modules_json[m].state='certifying': golden jobs queued after a revocation (cert < 0), or
+               \* a certified module re-certifying (cert > 0, the certification standing: BeginRecertify)
     gold,      \* per node: [gfd: state='golden_failed', gfail: golden_failures, sets: pending golden
                \*  sets, graceOver: CERTIFYING_GRACE_S passed since certifying_since,
                \*  gcons: history, golden failures since the last certification or golden_failed]
@@ -171,7 +177,7 @@ Init ==
     /\ cfy = [n \in Nodes |-> FALSE]
     /\ gold = [n \in Nodes |-> [gfd |-> FALSE, gfail |-> 0, sets |-> 0, graceOver |-> FALSE, gcons |-> 0]]
     /\ quar = [n \in Nodes |-> FALSE]
-    /\ ghost = [staleCanon |-> FALSE, grantToQuar |-> FALSE, canonFromQuar |-> FALSE,
+    /\ ghost = [staleCanon |-> FALSE, grantToQuar |-> FALSE, grantToCfy |-> FALSE, canonFromQuar |-> FALSE,
                 canonFromUncert |-> FALSE, honestConvicted |-> FALSE, convicted |-> {},
                 revived |-> FALSE, moduleCharged |-> FALSE]
     /\ up = TRUE
@@ -194,6 +200,9 @@ SetDB(d) == /\ att' = d.att /\ job' = d.job /\ quar' = d.quar /\ ghost' = d.ghos
 
 LiveIn(A, j) == {a \in AttIds : A[a].st = "live" /\ A[a].j = j}
 Certified(n) == cert[n] > 0 /\ ~brk[n]
+\* claim() grants work only where the module is 'certified': not while it (re-)certifies
+Grantable(n) == Certified(n) /\ ~cfy[n]
+LiveOn(A, n) == {a \in AttIds : A[a].st = "live" /\ A[a].n = n}
 \* _eligible_nodes() and _stranded_disputes(): ready, and certified or (code) certifying
 EligibleIn(Q, m) ==
     ~Q[m] /\ (Certified(m) \/ (CertifyingIsEligible /\ cfy[m] /\ ~(CertifyingGrace /\ gold[m].graceOver)))
@@ -412,11 +421,11 @@ CompleteTx(m, h, ok) ==
 
 (* Coordinator: claim()                                                     *)
 
-NodeOK(n) == ~quar[n] /\ Certified(n)          \* lifecycle='ready' and module certified
+NodeOK(n) == ~quar[n] /\ Grantable(n)         \* lifecycle='ready' and module certified
 
 \* _other_node_can_take(j, n): another ready, certified node that neither failed j nor is in its dispute
 OtherCanTake(j, n) ==
-    \E m \in Nodes \ {n} : ~quar[m] /\ Certified(m) /\ m \notin FailedNodes(att, j) /\ m \notin job[j].disp
+    \E m \in Nodes \ {n} : ~quar[m] /\ Grantable(m) /\ m \notin FailedNodes(att, j) /\ m \notin job[j].disp
 
 Excluded(n, j) ==
     \/ n \in job[j].disp
@@ -433,7 +442,7 @@ Grant(n, j, cg, ok) ==
     /\ nextAtt' = nextAtt + 1
     /\ running' = IF ok THEN [running EXCEPT ![n] = @ \cup {nextAtt}] ELSE running
     /\ faults' = IF ok THEN faults ELSE faults + 1
-    /\ ghost' = [ghost EXCEPT !.grantToQuar = @ \/ quar[n]]
+    /\ ghost' = [ghost EXCEPT !.grantToQuar = @ \/ quar[n], !.grantToCfy = @ \/ cfy[n]]
 
 \* Proposed fix for finding F1: the node row is (re-)read inside the claim transaction.
 ClaimAtomic(n, j, ok) ==
@@ -541,6 +550,18 @@ RetryGoldenFailed(n) ==
     /\ UNCHANGED <<modUp, job, att, nextAtt, cert, brk, quar, ghost, up, snap, inflight, running, asleep,
                    outbox, net, faults, userOps>>
 
+\* _lifecycle_step -> queue_goldens() on a certified module (its digest changed: a canary or promotion reached the
+\* node's release; a platform or OS version change; RECERT_EVERY): 'certifying' with the generation kept. The
+\* certification stands for the attempts granted under it, which keep running; no new work is granted (Grantable).
+\* Bounded by the fault budget like the other environment events.
+BeginRecertify(n) ==
+    /\ RecertifyCertified /\ faults < MaxFaults /\ up /\ Certified(n) /\ ~cfy[n] /\ ~gold[n].gfd /\ ~quar[n]
+    /\ cfy' = [cfy EXCEPT ![n] = TRUE]
+    /\ gold' = [gold EXCEPT ![n] = QueueGoldens(@)]
+    /\ faults' = faults + 1
+    /\ UNCHANGED <<modUp, job, att, nextAtt, cert, brk, quar, ghost, up, snap, inflight, running, asleep,
+                   outbox, net, userOps>>
+
 \* CERTIFYING_GRACE_S passes while the node is certifying (abstract time).
 GraceExpires(n) ==
     /\ cfy[n] /\ ~gold[n].graceOver
@@ -555,6 +576,8 @@ GraceExpires(n) ==
 \*            golden_failed, generation -1, alert) and no breaker; otherwise a trip revokes the
 \*            module and the next doctor pass re-queues goldens.
 \*   before:  no golden limit; a trip revokes and re-queues (stale set kept).
+\* A module re-certifying (cert > 0) loses its certification either way (generation -1): a trip revokes its
+\* live attempts (_revoke_quiet), golden_failed ends them when CertifyEndsSuperseded (_end_superseded).
 GoldenFail(n, trip) ==
     /\ up /\ cfy[n] /\ ~quar[n]
     /\ n \in GoldenFailNodes \/ faults < MaxFaults
@@ -562,26 +585,33 @@ GoldenFail(n, trip) ==
     /\ LET g     == gold[n]
            gc    == IF g.gcons < MaxExecFailures + 1 THEN g.gcons + 1 ELSE g.gcons
            limit == GoldenFailLimit /\ g.gfail + 1 >= MaxExecFailures
-       IN IF limit
-          THEN /\ gold' = [gold EXCEPT ![n] = [g EXCEPT !.gfd = TRUE, !.gfail = g.gfail + 1, !.sets = 0,
-                                                      !.gcons = 0]]
-               /\ cfy' = [cfy EXCEPT ![n] = FALSE]
-          ELSE /\ gold' = [gold EXCEPT ![n] = [g EXCEPT !.gfail = IF GoldenFailLimit THEN g.gfail + 1 ELSE 0,
-                                                      !.gcons = gc]]
-               /\ cfy' = [cfy EXCEPT ![n] = ~trip]
-    /\ UNCHANGED <<modUp, job, att, nextAtt, cert, brk, quar, ghost, up, snap, inflight, running, asleep,
-                   outbox, net, userOps>>
+       IN /\ IF limit
+             THEN /\ gold' = [gold EXCEPT ![n] = [g EXCEPT !.gfd = TRUE, !.gfail = g.gfail + 1, !.sets = 0,
+                                                         !.gcons = 0]]
+                  /\ cfy' = [cfy EXCEPT ![n] = FALSE]
+             ELSE /\ gold' = [gold EXCEPT ![n] = [g EXCEPT !.gfail = IF GoldenFailLimit THEN g.gfail + 1 ELSE 0,
+                                                         !.gcons = gc]]
+                  /\ cfy' = [cfy EXCEPT ![n] = ~trip]
+          /\ cert' = [cert EXCEPT ![n] = IF (limit \/ trip) /\ @ > 0 THEN -@ ELSE @]
+          /\ IF cert[n] > 0 /\ ((trip /\ ~limit) \/ (limit /\ CertifyEndsSuperseded))
+             THEN SetDB(EndNF(CurDB, LiveOn(att, n), "revoked", TRUE))
+             ELSE UNCHANGED <<job, att, quar, ghost>>
+    /\ UNCHANGED <<modUp, nextAtt, brk, up, snap, inflight, running, asleep, outbox, net, userOps>>
 
 \* golden jobs pass -> _golden_done() -> _certify(): a new, larger cert generation, counter reset.
 \* (brk: the pre-27aa459 breaker left the generation positive; it recertifies directly.)
+\* A re-certified module (cert > 0) supersedes the certification its live attempts were granted under:
+\* _end_superseded ends them when CertifyEndsSuperseded (complete() would refuse their results).
 Recertify(n) ==
     /\ up /\ (cfy[n] \/ brk[n]) /\ ~quar[n] /\ n \notin GoldenFailNodes
     /\ cert' = [cert EXCEPT ![n] = IF cert[n] < 0 THEN -cert[n] + 1 ELSE cert[n] + 1]
     /\ brk' = [brk EXCEPT ![n] = FALSE]
     /\ cfy' = [cfy EXCEPT ![n] = FALSE]
     /\ gold' = [gold EXCEPT ![n] = [@ EXCEPT !.gfail = 0, !.sets = 0, !.gcons = 0]]
-    /\ UNCHANGED <<modUp, job, att, nextAtt, quar, ghost, up, snap, inflight, running, asleep,
-                   outbox, net, faults, userOps>>
+    /\ IF CertifyEndsSuperseded /\ cfy[n] /\ cert[n] > 0
+       THEN SetDB(EndNF(CurDB, LiveOn(att, n), "revoked", TRUE))
+       ELSE UNCHANGED <<job, att, quar, ghost>>
+    /\ UNCHANGED <<modUp, nextAtt, up, snap, inflight, running, asleep, outbox, net, faults, userOps>>
 
 \* quarantine() called by an operator (reason without "nondeterminism": nothing invalidated).
 AdminQuarantine(n) ==
@@ -722,6 +752,7 @@ Next ==
     \/ \E j \in Jobs : ReapStranded(j) \/ ReapReplica(j)
     \/ \E n \in Nodes : RevokeModule(n) \/ BeginCertify(n) \/ Recertify(n) \/ AdminQuarantine(n)
     \/ \E n \in Nodes : RetryGoldenFailed(n) \/ GraceExpires(n) \/ \E t \in BOOLEAN : GoldenFail(n, t)
+    \/ \E n \in Nodes : BeginRecertify(n)
     \/ Crash \/ Restart
     \/ \E j \in Jobs : Retry(j) \/ Cancel(j)
     \/ \E n \in Nodes, a \in AttIds, v \in Values : Finish(n, a, v)
@@ -788,11 +819,15 @@ DoneHasCanonical ==
         /\ att[job[j].canon].j = j
         /\ att[job[j].canon].rcan
 
-\* Extra (S7, S8): live attempts run only on ready nodes, under the current certification.
+\* Extra (S7, S8): live attempts run only on ready nodes, under the current certification. A module
+\* re-certifying (cfy, cert > 0) is still certified for the attempts granted under it.
 LiveOnReadyCertified ==
     \A a \in AttIds : att[a].st = "live" =>
         /\ ~quar[att[a].n]
         /\ Certified(att[a].n) /\ att[a].cg = cert[att[a].n]
+
+\* Extra (S8, claim): no attempt is granted where the module is certifying (re-certification included).
+NoGrantWhileCertifying == ~ghost.grantToCfy
 
 \* Extra: no result from a node quarantined at acceptance time becomes canonical.
 NoCanonicalFromQuarantined == ~ghost.canonFromQuar
@@ -889,6 +924,12 @@ W_GoldenFailed == ~\E n \in Nodes : gold[n].gfd
 \* A certifying node's grace expired and the reaper cancelled a replica only it could have run.
 W_GraceExpiredReplicaCancelled ==
     ~\E n \in Nodes, r \in Jobs : cfy[n] /\ gold[n].graceOver /\ ~IsEval(r) /\ job[r].st = "cancelled"
+
+\* Work granted before a re-certification still runs while the module re-certifies.
+W_LiveWhileRecertifying == ~\E a \in AttIds : att[a].st = "live" /\ cfy[att[a].n] /\ cert[att[a].n] > 0
+
+\* A result of work granted before a re-certification became canonical while the module re-certified.
+W_CanonicalWhileRecertifying == ~\E a \in AttIds : att[a].rcan /\ cfy[att[a].n] /\ cert[att[a].n] > 0
 
 JobSymmetry == Permutations(EvalJobs)    \* only sound when ReplicaJobs = {}
 =============================================================================

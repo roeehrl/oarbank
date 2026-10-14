@@ -640,9 +640,44 @@ def _golden_failed(db: DB, node_id: str, module: str, failures: int, reason: str
     _cancel_goldens(db, node_id, module, "golden_failed")
     _set_module_state(db, node_id, module, state="golden_failed", golden_failures=failures, generation=-1,
                       reason=f"{failures} golden failures (last: {reason})")
+    _end_superseded(db, node_id, module, -1, "golden_failed")
     db.event("golden_failed", node_id=node_id, reason=f"{module}: {failures} failures, last {reason}", module=module)
     _alert(db, f"golden_failed:{module}", node_id,
            f"{module}: golden jobs failed {failures} times on this node (last: {reason}); not certified", priority="high")
+
+
+def node_runs(db: DB, node: dict, module: str) -> str | None:
+    """The version of a module a node runs: the one its installed release carries. A canary, pin or promotion reaches a
+    node only with its release, so until the node installs it (and re-certifies on it) the node runs, and is certified
+    on, the version before; the channel's version for the node (modstore.version_for_node) is the fallback for a
+    release that does not name one."""
+    v = (releases.composition_of(db, node.get("release_id")).get(module) or {}).get("version")
+    return v or modstore.version_for_node(db, module, node["node_id"])
+
+
+def _cert_exempt(module: str, version: str | None, stage: str | None) -> bool:
+    """Does a job of this stage, run by this version of the module, need no certification (Manifest.certification_exempt)?"""
+    try:
+        man = modcalls.info_for(module, version).manifest
+    except KeyError:
+        i = modcalls.CATALOG.get(module)
+        man = i.manifest if i else None
+    return man is not None and man.certification_exempt(stage)
+
+
+def _end_superseded(db: DB, node_id: str, module: str, generation: int, why: str):
+    """A certification ended (a new generation passed its goldens, or the goldens failed): end the node's live attempts of
+    the module granted under another one. complete() would refuse their results (release_invalid), so they stop now and
+    their jobs return to the queue, uncharged. Re-certification itself ends nothing: the certification an attempt was
+    granted under stands until this (or a revocation) ends it (S8). Golden jobs and stages that need no certification
+    never depended on it."""
+    for a in db.q("SELECT a.attempt_id, a.cert_generation, a.module_version, j.stage FROM attempts a "
+                  "JOIN jobs j ON j.job_id=a.job_id WHERE a.node_id=? AND a.state='live' AND j.module=? AND j.kind!='golden'",
+                  (node_id, module)):
+        if a["cert_generation"] == generation or _cert_exempt(module, a["module_version"], a["stage"]):
+            continue
+        _end_attempt(db, a["attempt_id"], "revoked", why, count_failure=False)
+        _push(db, node_id, "revoke", a["attempt_id"])
 
 
 def queue_goldens(db: DB, node_id: str, module: str):
@@ -666,7 +701,7 @@ def run_pending_goldens(db: DB, node_id: str | None = None) -> int:
         for module, st in node_modules(node).items():
             if not (st.get("state") == "certifying" and st.get("goldens_pending")):
                 continue
-            ver = modstore.version_for_node(db, module, node["node_id"])
+            ver = node_runs(db, node, module)
             try:
                 goldens = modcalls.goldens(db, module, node, ver)
             except (ModuleUnavailable, ModuleError) as e:
@@ -711,6 +746,7 @@ def _certify(db: DB, node_id: str, module: str, note: str = ""):
     digest = (releases.composition_of(db, node["release_id"]).get(module) or {}).get("digest")
     _set_module_state(db, node_id, module, state="certified", generation=gen, release=node["release_id"], digest=digest,
                       platform=fp["platform"], os_version=fp["os_version"], certified_at=now(), reason=None, golden_failures=0)
+    _end_superseded(db, node_id, module, gen, "certification_superseded")
     db.x("UPDATE nodes SET cert_os_version=? WHERE node_id=?", (fp["os_version"], node_id))
     db.x("UPDATE nodes SET breaker_failures=0 WHERE node_id=?", (node_id,))
     db.event("certified", node_id=node_id, reason=f"{module} generation {gen} {note}".strip(), module=module)
@@ -1102,6 +1138,7 @@ def claim(db: DB, node: dict, body: dict) -> dict:
             "WHERE a.state='live' GROUP BY j.campaign_id")}
         weights = {r["campaign_id"]: r["weight"] or 1 for r in db.q("SELECT campaign_id, weight FROM campaigns WHERE state='running'")}
         bindings: dict = {}               # units and datasets read in this transaction; first claims bind into it (D33)
+        runs: dict = {}                   # {module: the version the node runs} (node_runs)
         cands.sort(key=lambda j: (-(j["priority"] or 0),
                                   per_campaign.get(j["campaign_id"], 0) / max(weights.get(j["campaign_id"], 1), 1e-6),
                                   -(j["subpriority"] or 0), j["job_id"]))
@@ -1125,7 +1162,11 @@ def claim(db: DB, node: dict, body: dict) -> dict:
                 continue
             placement.bind_on_claim(db, j, node, bindings)
             need_cpu, need_mem = float(res.get("cpu", 1)), float(res.get("mem_gb", 1.0))
-            ver = modstore.version_for_node(db, j["module"], nid)
+            # the version the node's release carries, which its certification is on: never a canary or promotion it has not
+            # installed yet (the channel moves first, the node's release after it)
+            if j["module"] not in runs:
+                runs[j["module"]] = node_runs(db, node, j["module"])
+            ver = runs[j["module"]]
             # the runner gets a SpecEnvelope: the module's payload plus what the stage reserves and its inputs
             spec = envelope(db, j, ver, res, arts_box.get("arts") if j["depends_on"] else None, platform=node.get("platform"))
             gen = nv.states.get(j["module"], {}).get("generation", 0)
