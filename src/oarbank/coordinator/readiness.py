@@ -416,7 +416,7 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
     if any(excluded.values()):
         sitems.append({"status": "blocked", "stage": "", "needs": "", "text": "every stage: these nodes may run none of it",
                        "groups": _group([(n["hostname"], excluded[n["node_id"]]) for n in mine if excluded[n["node_id"]]])})
-    for stg in man.stages:
+    for stg in man.job_stages():                          # the cleanup stage runs on no node as a job
         reasons, capable = [], []
         for n in mine:
             why = _stage_reasons(name, stg, n, tool_ids, has(comp_of.get(n.get("release_id") or "")))
@@ -449,7 +449,7 @@ def module(db: DB, name: str, now: float | None = None, version: str | None = No
         steps.append(_step("nodes", "Nodes that can run it", "waiting", "after the fleet has a node of a platform it supports",
                            items=sitems))
     elif lacking:
-        needs.append("a node for every stage" if len(lacking) == len(man.stages) > 1 else f"a node for {', '.join(lacking)}")
+        needs.append("a node for every stage" if len(lacking) == len(man.job_stages()) > 1 else f"a node for {', '.join(lacking)}")
         steps.append(_step("nodes", "Nodes that can run it", "blocked",
                            f"no node meets what {_plural(len(lacking), 'stage')} ({', '.join(lacking)}) require{'s' if len(lacking) == 1 else ''}: "
                            "the reasons per node say what to install or set", items=sitems))

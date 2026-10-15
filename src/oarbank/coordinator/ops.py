@@ -1073,6 +1073,31 @@ def _disable(db, req):
     return _lifecycle(fn)(db, req)
 
 
+def _purge_plan(db, r) -> dict:
+    """modules.purge's plan (modcleanup.plan): the nodes where the module's data goes, those where it is enabled."""
+    from . import modcleanup
+    try:
+        return modcleanup.plan(db, r.target, r.params.get("node"), bool(r.params.get("all")))
+    except modcleanup.PurgeError as e:
+        raise OpError(e.status, e.code, e.detail)
+
+
+def _purge_snap(db, r) -> dict:
+    """Where the module's purge is still pending (the nodes have not reported it deleted yet)."""
+    from . import modcleanup
+    return {"purging": sorted(n["hostname"] for n in db.q("SELECT hostname, purge_json FROM nodes WHERE purge_json IS NOT NULL")
+                              if r.target in modcleanup.purges(n))}
+
+
+@handler("modules.purge", target_type="module", target=_module_name, snapshot=_purge_snap,
+         impact=lambda db, r: {k: v for k, v in _purge_plan(db, r).items() if not k.startswith("_")})
+def _purge(db, req):
+    """Delete what a module left on a node, or on every node where it is turned off, at once (docs/protocol.md, "Module
+    cleanup"); refused where it is enabled."""
+    from . import modcleanup
+    return modcleanup.purge(db, req.target, _purge_plan(db, req)["_targets"], req.actor)
+
+
 @handler("modules.pin", target_type="module", target=_module_version, atomic=False, snapshot=_channel_snap)
 def _mpin(db, req):
     def fn(db, req):

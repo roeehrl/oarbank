@@ -274,6 +274,10 @@ def auth_cert(db: DB, der: bytes | None, peer_ip: str) -> dict:
     nid, fp = tlsca.node_of(der), tlsca.fingerprint(der)
     node = db.one("SELECT * FROM nodes WHERE node_id=? AND (client_cert_fp=? OR client_cert_prev_fp=?)", (nid, fp, fp)) \
         if nid else None
+    if not node and nid and db.one("SELECT 1 FROM nodes WHERE node_id=? AND lifecycle='retired'", (nid,)):
+        # retiring cleared the node's certificate: its agent learns it was retired (it stops and deletes what its modules
+        # left) instead of asking to join again as a new machine
+        raise ApiError(403, "node_retired", nid)
     if not node:
         raise ApiError(401, "unauthorized", "unknown or replaced client certificate")
     if fp == node["client_cert_fp"] and node["client_cert_prev_fp"]:     # the renewed certificate is in use: retire the old
@@ -364,7 +368,14 @@ def _node_directives(db: DB, node: dict) -> dict:
             # inbound listeners: the kill switch, dial-back probes, reachability, the observed address (listeners.py)
             **_listener_directives(db, node),
             # what this node runs of the modules' workloads, with each seat's fence and lease (docs/design/workloads.md)
-            "workloads": workloads.directives(db, node)}
+            "workloads": workloads.directives(db, node),
+            # the modules the owner purged there (modcleanup.py)
+            **_cleanup_directives(db, node)}
+
+
+def _cleanup_directives(db: DB, node: dict) -> dict:
+    from . import modcleanup
+    return modcleanup.directives(db, node)
 
 
 def _listener_directives(db: DB, node: dict) -> dict:
@@ -529,6 +540,8 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
             db.x("UPDATE nodes SET services_json=?, services_at=? WHERE node_id=?", (json.dumps(rep), t, nid))
         wl_ack = workloads.observe(db, node, body)       # workloads' state, seats given up, report events
         _observe_listeners(db, node, body, peer_ip)
+        from . import modcleanup
+        clean_ack = modcleanup.observe(db, node, body)   # what modules keep there, and what the node deleted
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
         _lifecycle_step(db, node, jl(node["facts_json"], {}))
         node = db.one("SELECT * FROM nodes WHERE node_id=?", (nid,))
@@ -557,6 +570,8 @@ def heartbeat(db: DB, node: dict, body: dict, peer_ip: str = "") -> dict:
         d["journal_ack"] = ack
     if wl_ack is not None:
         d["workload_reports_ack"] = wl_ack
+    if clean_ack is not None:
+        d["module_cleanup_ack"] = clean_ack
     return d
 
 

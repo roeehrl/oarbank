@@ -332,6 +332,8 @@ struct Shared {
     verifier: Arc<Verifier>,
     /// The set images this attempt ran, `{set, image}`, for its report (the coordinator audits each first run).
     ran_images: std::sync::Mutex<Vec<Value>>,
+    /// Every image this attempt pulled or ran, with its platform: the module's images on the node (cleanup.rs).
+    used_images: std::sync::Mutex<Vec<(String, String)>>,
     /// Set when the attempt ends: refuses new requests and cancels the running container.
     closed: AtomicBool,
     inflight: AtomicUsize,
@@ -341,6 +343,15 @@ struct Shared {
     /// One run at a time: each is clamped to the attempt's whole reservation, so concurrent runs would oversubscribe
     /// it (and a timed-out run is then the only container to remove).
     gate: tokio::sync::Mutex<()>,
+}
+
+impl Shared {
+    fn used(&self, image: &str, platform: &str) {
+        let mut u = self.used_images.lock().unwrap();
+        if !u.iter().any(|(i, p)| i == image && p == platform) {
+            u.push((image.to_string(), platform.to_string()));
+        }
+    }
 }
 
 struct Inflight<'a>(&'a Shared);
@@ -432,8 +443,12 @@ async fn pull(sh: &Arc<Shared>, req: &Value) -> Result<Value, Refusal> {
     verified(sh, set, &image, &platform).await?;
     ready(sh, &platform).await?;
     let p2 = platform.clone();
+    let (i2, p3) = (image.clone(), platform.clone());
     match blocking(sh, move |s| s.runtime.pull(&image, &p2)).await? {
-        Ok(()) => Ok(json!({"ok": true})),
+        Ok(()) => {
+            sh.used(&i2, &p3);
+            Ok(json!({"ok": true}))
+        }
         Err(e) if e.contains("no matching manifest") => Err(Refusal::new("platform_unavailable", e)),
         Err(e) => Err(Refusal::new("pull_failed", e)),
     }
@@ -541,6 +556,7 @@ async fn run(sh: &Arc<Shared>, req: &Value) -> Result<Value, Refusal> {
         }
     }
     ready(sh, &spec.platform).await?;
+    sh.used(&spec.image, &spec.platform);                // a run pulls an image that is not there yet
     let _gate = sh.gate.lock().await;
     if sh.closed.load(Ordering::SeqCst) {
         return Ok(cancelled());
@@ -633,7 +649,7 @@ impl Broker {
         let out_dir = hold_dir(&out)?;
         let listener = listen(&bind, &scope.grant)?;
         let shared = Arc::new(Shared {
-            scope, runtime, verifier, ran_images: std::sync::Mutex::new(Vec::new()), closed: AtomicBool::new(false), inflight: AtomicUsize::new(0), counter: AtomicU64::new(0),
+            scope, runtime, verifier, ran_images: std::sync::Mutex::new(Vec::new()), used_images: Default::default(), closed: AtomicBool::new(false), inflight: AtomicUsize::new(0), counter: AtomicU64::new(0),
             ran: AtomicBool::new(false), gate: tokio::sync::Mutex::new(()),
         });
         let task = tokio::spawn(accept(listener, shared.clone()));
@@ -651,6 +667,11 @@ impl Broker {
     /// The set images the attempt ran so far, `[{set, image}]`.
     pub fn ran_images(&self) -> Vec<Value> {
         self.shared.ran_images.lock().unwrap().clone()
+    }
+
+    /// Every image the attempt pulled or ran, with its platform.
+    pub fn used_images(&self) -> Vec<(String, String)> {
+        self.shared.used_images.lock().unwrap().clone()
     }
 }
 

@@ -270,6 +270,7 @@ def node_doc(db: DB, node_id: str, body: dict | None = None, now: float | None =
     # what host protection cannot read or do there now, and the fail-safe default it applies instead
     summary += [X.SummaryRow(code=c["code"], detail=c["values"]) for c in protection.runtime_conditions(jl(n["telemetry_json"], {}) or {})]
     summary += _listener_rows(n)
+    summary += _storage_rows(db, n, now)
     head = X.Headline(code="OK", text="Admitting work") if ff is None else \
         X.Headline(code=ff.code, text=f"Not admitting: {ff.predicate} (observed {ff.observed}, required {ff.required})")
     if ff is not None and ff.code == "PROTECTION_ACTIVE":     # which rule: work comes back once it clears
@@ -298,6 +299,13 @@ def _listener_rows(n: dict) -> list:
     """The node's listener conditions (listeners.explain_rows): a listener the agent refused, a doctor result to fix."""
     from . import listeners
     return [X.SummaryRow(code=c["code"], detail=c["detail"]) for c in listeners.explain_rows(n)]
+
+
+def _storage_rows(db: DB, n: dict, now: float) -> list:
+    """The node's module data conditions (modcleanup.explain_rows): a module's data it deletes and when, a dataset cache
+    over its cap, a cleanup stage that failed."""
+    from . import modcleanup
+    return [X.SummaryRow(code=c["code"], detail=c["detail"]) for c in modcleanup.explain_rows(db, n, now)]
 
 
 def explain(db: DB, kind: str, ident: str) -> X.ExplainDocument | None:

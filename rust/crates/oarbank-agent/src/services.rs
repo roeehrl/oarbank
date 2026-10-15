@@ -762,6 +762,9 @@ pub struct ServiceManager {
     gpu_apis: Vec<String>,
     /// The listener hub's listening sockets for `listen_fd` listeners, by service.
     listen_fds: ListenFds,
+    /// The modules turned off on this node: none of their code runs here (no probe either), and the agent makes no data
+    /// directory for them (cleanup.rs deletes it).
+    modules_off: BTreeSet<String>,
 }
 
 /// The work left on services and probes a release no longer has (`configure`): an op still in flight on one, and the
@@ -785,7 +788,14 @@ impl ServiceManager {
         ServiceManager { layout, runtime, registry, manage: manage_services, node_id: String::new(), limits: json!({}),
                          modules: BTreeMap::new(), proxies: HashMap::new(), shared: SharedRef::default(),
                          last_live: BTreeSet::new(), fingerprint_every: Duration::from_secs(20),
-                         reap_every: Duration::from_secs(60), gpu_apis: vec![], listen_fds: ListenFds::default() }
+                         reap_every: Duration::from_secs(60), gpu_apis: vec![], listen_fds: ListenFds::default(),
+                         modules_off: BTreeSet::new() }
+    }
+
+    /// The modules turned off on this node, for the next `configure`: their probes do not run, their services stay
+    /// disabled (the policy's `disabled_services` lists them) and no data directory is made for them.
+    pub fn set_modules_off(&mut self, off: &BTreeSet<String>) {
+        self.modules_off = off.clone();
     }
 
     /// The GPU APIs the host provides (a new probe): a service whose `gpu.apis_any` they no longer meet is withdrawn and
@@ -858,7 +868,9 @@ impl ServiceManager {
         let python = self.runtime.module_python(&release.dir, &name);
         let venv = Some(release.dir.join("venvs").join(&name)).filter(|v| v.exists());
         let data = self.layout.module_data().join(&name);
-        crate::fsutil::private_dir(&data.join("tmp"))?;
+        if !self.modules_off.contains(&name) {
+            crate::fsutil::private_dir(&data.join("tmp"))?;
+        }
         let grants = self.layout.run().join("services").join(&name);
         let mut settings = policy["module_settings"][&name].clone();
         if settings.is_null() {
@@ -891,7 +903,11 @@ impl ServiceManager {
         for entry in &release.modules {
             let Some(name) = entry["name"].as_str().map(str::to_string) else { continue };
             let sd: Vec<ServiceDecl> = entry["services"].as_array().into_iter().flatten().filter_map(ServiceDecl::parse).collect();
-            let pd: Vec<ProbeDecl> = entry["probes"].as_array().into_iter().flatten().filter_map(ProbeDecl::parse).collect();
+            let pd: Vec<ProbeDecl> = if self.modules_off.contains(&name) {
+                vec![]                                            // a module turned off here runs nothing here
+            } else {
+                entry["probes"].as_array().into_iter().flatten().filter_map(ProbeDecl::parse).collect()
+            };
             if sd.is_empty() && pd.is_empty() {
                 continue;
             }
@@ -1017,7 +1033,9 @@ impl ServiceManager {
             if s.busy {
                 continue;
             }
-            if s.refresh || s.last_fingerprint.is_none_or(|t| now.duration_since(t) >= self.fingerprint_every) {
+            // a module turned off on the node runs nothing there: its services are not even fingerprinted
+            let off = self.modules_off.contains(&s.module);
+            if !off && (s.refresh || s.last_fingerprint.is_none_or(|t| now.duration_since(t) >= self.fingerprint_every)) {
                 s.busy = true;
                 s.refresh = false;
                 todo.push((k.clone(), Job::Fingerprint));
@@ -1973,6 +1991,23 @@ mod tests {
         m.configure(&fx.release, &off, None);                    // disabled while running and idle: stopped
         assert!(tick_until(&mut m, &need(&[]), &[], false, 20.0, |m| m.running().is_empty()));
         assert_eq!(fx.calls("vm", "stop"), 1);
+    }
+
+    /// A module turned off on the node runs nothing there, not even its probes, and gets no data directory (so the one
+    /// cleanup deletes stays gone); turned on again, its probes run again.
+    #[test]
+    fn a_module_turned_off_runs_no_probe_and_gets_no_data_directory() {
+        let fx = Fx::new("off", json!([svc("vm", json!({}))]), json!([{"name": "java17", "exec": ["{bundle}/probe.sh"], "period_s": 1}]));
+        let rt = Runtime { python: PathBuf::from("/usr/bin/python3"), uv: None, site_dirs: vec![], roots: vec![], host_provided: None };
+        let mut m = ServiceManager::new(fx.layout(), rt, None, true);
+        m.set_modules_off(&BTreeSet::from(["mod".to_string()]));
+        m.configure(&fx.release, &json!({"disabled_services": ["mod/vm"]}), Some("node-1"));
+        tick_for(&mut m, &need(&[]), &[], false, 2.0);
+        assert!(!fx.data().exists() && m.capabilities().is_empty() && m.report()["probes"].as_array().unwrap().is_empty());
+        m.set_modules_off(&BTreeSet::new());
+        m.configure(&fx.release, &json!({}), Some("node-1"));
+        assert!(tick_until(&mut m, &need(&[]), &[], false, 20.0, |m| m.capabilities().contains(&"java17".to_string())));
+        assert!(fx.data().join("tmp").is_dir());
     }
 
     #[test]

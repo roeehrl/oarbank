@@ -49,11 +49,13 @@ The keys, by section:
   advanced `nice` (not applied by agents yet), `hard_limits`.
 - **Caps** (merge `min`; enforcement `max`, hard over soft): `cpu_cores`, `mem_gb`, `jobs`, `schedule`, `enforce`;
   advanced `vm_mem_gb`, `vm_cpus` (the container runtime's VM size, and a module VM service's; an idle container VM is
-  restarted at the new size), `disk_gb`, `staging_mbps`.
+  restarted at the new size), `disk_gb` (the dataset cache, enforced from 2.11), `staging_mbps`.
 - **Containers** ([macos-containers.md](macos-containers.md), "When the runtime runs"): `containers` (`always`, the
   default; `on_demand`, recommended: the runtime runs only while container work waits for the node; `off`: never, and
   the node takes no container work; managed, off is stricter), advanced `containers_idle_stop_s` (600 s: how long an
   on-demand runtime stays up without container work). Both travel to agents in the policy.
+- **Module data**: `module_retention_days`, how long a node keeps what a module left there after the module is turned
+  off on it (7 days; 0 deletes at once; [protocol.md](../protocol.md), "Module cleanup").
 - **Network** ([inbound-listeners.md](inbound-listeners.md)): `inbound_listeners` (off: no listener opens and every
   router mapping is removed; managed, off is stricter), advanced `listener_port_range` (the internal ports listeners
   bind, default `41000-41999`); fleet only, both null by default so no third party is contacted:

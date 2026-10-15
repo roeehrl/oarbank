@@ -138,6 +138,8 @@ impl Checkpointer {
 /// without a download), uploaded as a blob, and the checkpoint is recorded for the attempt.
 pub async fn upload(api: &Api, layout: &Layout, aid: i64, t: &Taken) -> Result<Value> {
     let mut files = vec![];
+    // the cache names them before they are in it (cache.rs collects blobs nothing names)
+    crate::cache::used(layout, &[], &t.files.iter().map(|f| f.2.clone()).collect::<Vec<_>>(), None);
     for (name, path, digest, size) in &t.files {
         let cached = crate::staging::blob_path(layout, digest);
         if !cached.exists() {

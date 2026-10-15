@@ -3,10 +3,12 @@
 mod agent;
 mod api;
 mod broker;
+mod cache;
 #[cfg(target_os = "linux")]
 mod cgroup;
 mod check;
 mod checkpoints;
+mod cleanup;
 mod clock;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod colima;
@@ -242,6 +244,10 @@ enum Cmd {
     /// still have their recorded start times are signalled.
     #[command(name = "stop-workloads", hide = true)]
     StopWorkloads,
+    /// Remove the container images this home's modules pulled (an uninstall with --purge, a node leaving its fleet):
+    /// those of a runtime that runs now.
+    #[command(name = "remove-images", hide = true)]
+    RemoveImages,
     /// Apply a sandbox profile to this process, then exec argv (internal: how module processes start).
     #[command(name = "sandbox-exec", hide = true)]
     SandboxExec {
@@ -411,6 +417,12 @@ fn main() -> anyhow::Result<()> {
         Cmd::StopWorkloads => {
             for k in workloads::stop_all_recorded(&layout) {
                 println!("ended workload {k}");
+            }
+            Ok(())
+        }
+        Cmd::RemoveImages => {
+            for line in cleanup::remove_all_images(&layout) {
+                println!("{line}");
             }
             Ok(())
         }

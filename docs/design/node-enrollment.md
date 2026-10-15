@@ -194,6 +194,7 @@ coordinator refuses, or a pin mismatch, ends the attempt with an error and delet
 | `E_CLOCK_SKEW` | this computer's clock is more than 5 minutes off | after fixing |
 | `E_NOT_ACTIVE` | the coordinator is a standby or handed off | yes |
 | `E_APPROVAL_DENIED` | the owner rejected this machine | no |
+| `E_RETIRED` | the owner retired this node: leave, then join again (docs/protocol.md, "Module cleanup") | no |
 | `E_ALREADY_JOINED` | joined to another coordinator (`--force` leaves it first) | — |
 | `E_PRIVILEGE` | a system install needs root / an administrator | — |
 

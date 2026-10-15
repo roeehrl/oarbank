@@ -99,6 +99,45 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   queued golden jobs for it and raised `certifying_stuck` after 30 minutes. It is now shown as `disabled` on that
   node, with no goldens and no alert; an open `certifying_stuck` alert for it resolves. Turned on again, it
   re-certifies.
+- **A retired node's agent learns it was retired.** Retiring clears the node's certificate, so its agent was refused as
+  an unknown certificate, asked to join again as a new machine and kept its router mappings. The coordinator now
+  answers `node_retired`: the agent stops its jobs, services, workloads and listeners (releasing its router mappings),
+  deletes what its modules left after a day, and waits; `oarbank-node status` shows `E_RETIRED`.
+- **A module turned off on a node runs nothing there either.** Its services stopped, but its doctor, its probes and its
+  services' fingerprints still ran: module code on a node where the owner had turned it off. They run again once it is
+  turned on.
+
+### New
+
+- **When a module leaves a node, what it put there goes.** A module's processes write only to its data directory, their
+  work directories, the dataset cache and the container runtime, so the node deletes all of it without the module's
+  help: its data directory, the cached datasets no other module there uses, and the container images it pulled that no
+  other module uses. A module turned off on the node goes after the new setting `module_retention_days` (fleet, group
+  or node; 7 days by default, 0 at once), and turning it back on in that time keeps everything. A module no longer in
+  the node's release, or on a retired node, goes after at most a day. Before it deletes, the node runs the module's
+  cleanup stage, if it declares one (oarbank-sdk 1.8, `stages[].cleanup`), so the module can release state outside the
+  node; a failure is reported and the deletion goes ahead.
+- **`oarbank module purge <module> --node N | --all`** deletes it at once (T2, previewed; `--yes` skips the question). It
+  is refused on a node where the module is enabled; `--all` purges it where it is turned off. The node page has a
+  **Delete now** button for each module leaving it.
+- **Per-module disk use.** `oarbank node show` and the node page list what each module keeps on the node (its data
+  directory, cached datasets and images) and, for a module that is leaving, when its data goes and why. `oarbank explain
+  node` names `MODULE_DATA_SCHEDULED`, `MODULE_CLEANUP_FAILED` and `DISK_CACHE_OVER_CAP`; each deletion is a
+  `module_data_deleted` event.
+- **The dataset cache is collected and capped.** The node records which modules use each cached dataset. A dataset
+  goes with the last module that used it, and one no module used (a prefetch, a cache from before this release) once
+  it was not used for the retention, at least a day. `disk_gb`, declared before and enforced now, caps the cache: above
+  it the least recently used datasets that no job on the node holds or waits for go first.
+- **`oarbank-uninstall --purge` and `oarbank-node leave` remove the container images** the node's modules pulled into
+  an engine outside the node's home (Docker on Linux) before they delete the home.
+
+### Changes on upgrade
+
+- A node's dataset cache from before this release has no record of which module used each dataset: a dataset no job
+  uses within the retention (7 days by default) is deleted, and staged again when a job needs it.
+- A module with a cleanup stage needs `requires.core >= 2.11`.
+- A node whose agent is older than this release deletes nothing and refuses `module_retention_days` (its Settings tab
+  says so) until it is updated.
 
 ## 2.10.4 (2026-10-14)
 

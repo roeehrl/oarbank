@@ -763,6 +763,14 @@ mod imp {
             self.remove_labelled(&format!("label={ATTEMPT_LABEL}={attempt_id}"))
         }
 
+        fn remove_image(&self, image: &str) -> Result<(), String> {
+            let r = self.cli(&["image", "rm", &qualified(image)], 120);
+            if let Ok(x) = &r {
+                self.noticed(x);
+            }
+            crate::cleanup::removed(r)
+        }
+
         fn pool_tokens(&self) -> u32 {
             if self.snapshot().ready() { tokens(self.mem_gb) } else { 0 }
         }

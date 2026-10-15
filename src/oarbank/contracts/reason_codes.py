@@ -133,6 +133,13 @@ CODES: list[ReasonCode] = [
       "P3", remedies=["listeners.probe"]),
     C("FIREWALL_BLOCKED", "node_admission", "Listener {listener}: this machine's firewall blocks incoming connections: {text}",
       "P3"),
+    # module cleanup (modcleanup.py): what a module that left the node keeps there goes; conditions, work goes on
+    C("MODULE_DATA_SCHEDULED", "node_admission", "What module {module} left on this node ({size}) is deleted {when} ({why})",
+      remedies=["modules.purge", "settings.apply"]),
+    C("MODULE_CLEANUP_FAILED", "node_admission", "Module {module}'s cleanup stage failed on this node, and its data was "
+      "deleted anyway: {detail}", "P3"),
+    C("DISK_CACHE_OVER_CAP", "node_admission", "The node's dataset cache holds {used}, over its {cap} cap (disk_gb): what is "
+      "left is in use by its jobs or wanted by pending work", "P3", remedies=["settings.apply"]),
 
     # ---------------------------------------------------------------- protection (the agent's decision journal and capacity)
     C("PROTECTION_CONFIG", "protection", "Protection config applied (mode {mode}, rules {rules})"),

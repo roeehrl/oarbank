@@ -245,6 +245,8 @@ pub async fn run(ctx: Arc<Ctx>, grant: Value, deadline: Option<Instant>) {
     let aid = grant["attempt_id"].as_i64().unwrap_or(0);
     let ws = ctx.layout.work().join(aid.to_string());
     let started = Instant::now();
+    // what it stages stays in the dataset cache until it ends (cache.rs)
+    let _held = crate::cache::hold(&strings(&grant["spec"]["datasets"]), &checkpoint_digests(&grant));
     let ran_images = Mutex::new(Vec::new());
     let outcome = match execute(&ctx, &grant, &ws, deadline, &ran_images).await {
         Ok(o) => o,
@@ -256,6 +258,15 @@ pub async fn run(ctx: Arc<Ctx>, grant: Value, deadline: Option<Instant>) {
     report(&ctx, aid, &ws, outcome, started.elapsed(), images, &secrets_of(&grant)).await;
     ctx.table.lock().unwrap().remove(&aid);
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
+}
+
+/// The blobs of the checkpoint a grant resumes from.
+fn checkpoint_digests(grant: &Value) -> Vec<String> {
+    grant["checkpoint"]["files"].as_array().into_iter().flatten().filter_map(|f| f["digest"].as_str().map(str::to_string)).collect()
 }
 
 /// A runner's settings: the module's own node settings with the grant's `settings` (the job's campaign overrides of
@@ -317,6 +328,8 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     set_phase(&ctx.table, aid, "staging");
     stage_workspace(ctx, spec, ws).await?;
     crate::checkpoints::stage_resume(&ctx.api, &ctx.layout, grant, ws).await?;
+    // the module uses these datasets and blobs on this node: they stay while it does (cache.rs)
+    crate::cache::used(&ctx.layout, &strings(&spec["datasets"]), &checkpoint_digests(grant), Some(module));
     if let Some(s) = stop_of(&ctx.table, aid) {
         return Ok(Outcome::Stopped(s));
     }
@@ -398,6 +411,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     // a broker only for a job whose stage runs containers (it reserves the agent's containers pool); a module's other
     // stages, its goldens among them, need no container runtime on the node
     let runs_containers = (!images.is_empty() || !sets.is_empty()) && needs.iter().any(|p| p == "containers");
+    let mut image_rt = None;
     let broker = if !runs_containers {
         None
     } else {
@@ -407,6 +421,7 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
         let gpu = res["pools"]["gpu"].as_i64().unwrap_or(0) > 0;
         // a job that reserved the gpu pool runs every container on the GPU runtime (macOS: the krunkit VM)
         let rt = rts.for_job(gpu);
+        image_rt = Some((rt.clone(), gpu));
         let sets = sets.iter().map(oarbank_core::images::ContainerSet::from_json).collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("the release's container sets: {e}"))?;
         let job_images = grant["images"].as_array().cloned().unwrap_or_default().iter()
@@ -695,10 +710,19 @@ async fn execute(ctx: &Ctx, grant: &Value, ws: &Path, hard_deadline: Option<Inst
     }
     crate::sys::release(pid);
     drop(proxy);
+    let mut used_images = vec![];
     if let Some(b) = &broker {
         *ran_images.lock().unwrap() = b.ran_images();
+        used_images = b.used_images();
     }
     drop(broker);                                              // stops serving and removes this attempt's containers
+    if let (Some((rt, gpu)), false) = (image_rt, used_images.is_empty()) {
+        // the module's images on this node, removed when it is deleted here (cleanup.rs)
+        let (l, m) = (Layout::new(ctx.layout.home.clone()), module.to_string());
+        let _ = tokio::task::spawn_blocking(move || for (image, platform) in used_images {
+            crate::cleanup::record_image(&l, &m, &image, &platform, gpu, || rt.image_size(&image));
+        }).await;
+    }
     drop(connectors);                                          // closes them and tells each service the attempt ended
     if let Some(e) = escaped {
         return Ok(Outcome::Failed { reason: "sandbox_escape".into(), exit_code: status.code(), fault: Some("job".into()), failure: None,

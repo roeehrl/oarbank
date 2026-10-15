@@ -237,10 +237,12 @@ pub fn staging_now(id: &str) -> bool {
 pub async fn stage(api: &Api, l: &Layout, id: &str) -> Result<()> {
     let lock = staging_lock(id);
     let _one = lock.lock().await;
+    let _held = crate::cache::hold(&[id.to_string()], &[]);       // the cache keeps it while it is staged
     let m = manifest(api, l, id).await?;
     for f in m["files"].as_array().cloned().unwrap_or_default() {
         fetch_blob(api, l, &f).await?;
     }
+    crate::cache::used(l, &[id.to_string()], &[], None);
     Ok(())
 }
 

@@ -86,9 +86,10 @@ def test_enroll_by_csr_then_the_node_is_its_certificate(db, tmp_path):
         with pytest.raises(httpx.HTTPError):
             client(tmp_path, ca_pem, stray["cert_pem"], stray_key, name="stray").post(f"{s.url}/v1/agent/heartbeat",
                                                                                        json={"attempts": []}).json()
-        # 6. retiring the node revokes its certificate
+        # 6. retiring the node revokes its certificate: its agent is told so (it stops and deletes what its modules left)
         db.x("UPDATE nodes SET lifecycle='retired', client_cert_fp=NULL, client_cert_prev_fp=NULL WHERE node_id=?", (node_id,))
-        assert c2.post(f"{s.url}/v1/agent/heartbeat", json={"attempts": []}).status_code == 401
+        r = c2.post(f"{s.url}/v1/agent/heartbeat", json={"attempts": []})
+        assert (r.status_code, r.json()["error"]) == (403, "node_retired")
 
 
 def test_certificates_are_p256_with_strict_extensions(db, tmp_path):

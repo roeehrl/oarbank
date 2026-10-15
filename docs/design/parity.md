@@ -2,7 +2,7 @@
 
 Generated from the registries and the sources by `python -m oarbank.contracts.docs`. Every operation must be reachable from the API (`POST /api/v1/ops/<id>` or its own route), the CLI (its own `oarbank` command, or `oarbank op <id>`) and the console (a form for it in a template); every explain kind from all three; every reason code's remedies must be operations.
 
-**0 gaps.** 124 operations, 2 explain kinds, 195 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
+**0 gaps.** 125 operations, 2 explain kinds, 198 reason codes. Module operations (`mod.<module>.<verb>`) are generic: the API endpoint, `oarbank mod <module> <verb>`, and the module's own pages and panels (rendered by the host from the module's declarations).
 
 ## Operations
 
@@ -48,6 +48,7 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `modules.promote` | T2 | yes | `oarbank module promote <name>[@<canary version>]` | yes |
 | `modules.rollback` | T1 | yes | `oarbank module rollback <name>` | yes |
 | `modules.disable` | T1 | yes | `oarbank module disable <name>` | yes |
+| `modules.purge` | T2 | yes | `oarbank module purge <name> --node <node>`<br>`oarbank module purge <name> --all` | yes |
 | `modules.pin` | T1 | yes | `oarbank module pin|unpin <name>@<version> --node <node>` | yes |
 | `modules.restart_host` | T0 | yes | `oarbank op modules.restart_host` | yes |
 | `releases.build` | T1 | yes | `oarbank release build` | yes |
@@ -178,6 +179,8 @@ Generated from the registries and the sources by `python -m oarbank.contracts.do
 | `PORT_TAKEN` | `listeners.configure` |
 | `NO_MAPPING_PROTOCOL` | `listeners.configure` |
 | `MAPPED_UNREACHABLE` | `listeners.probe` |
+| `MODULE_DATA_SCHEDULED` | `modules.purge`, `settings.apply` |
+| `DISK_CACHE_OVER_CAP` | `settings.apply` |
 | `WORKLOAD_UNASSIGNED` | `workloads.assign` |
 | `WORKLOAD_SEAT_ELSEWHERE` | `workloads.unassign` |
 | `WORKLOAD_WITHDRAWN` | `workloads.restart` |

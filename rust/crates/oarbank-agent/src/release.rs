@@ -79,6 +79,21 @@ pub fn current(l: &Layout) -> Option<Release> {
     load(&l.releases().join(target)).ok()
 }
 
+/// An installed release by id.
+pub fn by_id(l: &Layout, id: &str) -> Option<Release> {
+    (id.starts_with("r_") && !id.contains(['/', '\\', '.'])).then(|| load(&l.releases().join(id)).ok()).flatten()
+}
+
+/// The newest installed release that holds `module` (a module no longer in the current one: its cleanup stage runs from
+/// there).
+pub fn holding(l: &Layout, module: &str) -> Option<Release> {
+    let mut rels: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(l.releases()).ok()?.filter_map(|e| e.ok()).map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("r_")))
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p))).collect();
+    rels.sort();
+    rels.into_iter().rev().filter_map(|(_, p)| load(&p).ok()).find(|r| r.module(module).is_some())
+}
+
 /// Unpack a release tarball: only regular files and directories whose names are PortablePaths, never links or
 /// devices, never outside `dest`; then MANIFEST.json must vouch for every byte and mode.
 pub fn unpack(tarball: &Path, dest: &Path) -> Result<()> {
@@ -197,14 +212,19 @@ pub fn switch(l: &Layout, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Keep the current release and the one before it.
+/// Keep the current release and the one before it, and those holding the bundle of a module whose deletion is still
+/// pending (its cleanup stage runs from there: cleanup.rs).
 fn prune(l: &Layout, keep: &str) {
     let Ok(rd) = std::fs::read_dir(l.releases()) else { return };
+    let pending = crate::cleanup::kept_releases(l);
     let mut old: Vec<(std::time::SystemTime, PathBuf)> = rd.filter_map(|e| e.ok()).map(|e| e.path())
         .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("r_") && n != keep))
         .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p))).collect();
     old.sort();
     for (_, p) in old.iter().rev().skip(1) {
+        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| pending.contains(n)) {
+            continue;
+        }
         let _ = std::fs::remove_dir_all(p);
     }
 }
