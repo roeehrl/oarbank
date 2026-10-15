@@ -4,9 +4,15 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
-## Unreleased
+## 2.11.0 (2026-10-15)
 
-### Added
+Module SDK: **oarbank-sdk 1.8.0**, which adds the cleanup stage (`stages[].cleanup`, `requires.core >= 2.11`). This
+release says when a node runs its container VM and sizes it as set, approves a machine with what it starts as, deletes
+what a module left on a node once it leaves, and fixes certification around running work, empty releases, update
+trust on fresh nodes, session helpers across updates and retired nodes. Read **Changes on upgrade** below. Coming
+from 2.10.3 or earlier, read the [2.10.4](#2104-2026-10-14) section as well.
+
+### New
 
 - **Say when a node runs its container VM: `containers` = `always`, `on_demand` or `off`.** Since 2.9 every node
   whose release has a module with sandbox containers started its Colima VM (or WSL containers session) and kept it,
@@ -33,9 +39,43 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   old node is online and for a request that proves a node's key.
 - **Safer onboarding.** The fleet settings `new_node_state` (`active` or `paused`) and `new_node_modules` (`all` or
   `none`) set what every new node starts as, a join code's automatic approvals included.
+- **When a module leaves a node, what it put there goes.** A module's processes write only to its data directory, their
+  work directories, the dataset cache and the container runtime, so the node deletes all of it without the module's
+  help: its data directory, the cached datasets no other module there uses, and the container images it pulled that no
+  other module uses. A module turned off on the node goes after the new setting `module_retention_days` (fleet, group
+  or node; 7 days by default, 0 at once), and turning it back on in that time keeps everything. A module no longer in
+  the node's release, or on a retired node, goes after at most a day. Before it deletes, the node runs the module's
+  cleanup stage, if it declares one (oarbank-sdk 1.8, `stages[].cleanup`), so the module can release state outside the
+  node; a failure is reported and the deletion goes ahead.
+- **`oarbank module purge <module> --node N | --all`** deletes it at once (T2, previewed; `--yes` skips the question). It
+  is refused on a node where the module is enabled; `--all` purges it where it is turned off. The node page has a
+  **Delete now** button for each module leaving it.
+- **Per-module disk use.** `oarbank node show` and the node page list what each module keeps on the node (its data
+  directory, cached datasets and images) and, for a module that is leaving, when its data goes and why. `oarbank explain
+  node` names `MODULE_DATA_SCHEDULED`, `MODULE_CLEANUP_FAILED` and `DISK_CACHE_OVER_CAP`; each deletion is a
+  `module_data_deleted` event.
+- **The dataset cache is collected and capped.** The node records which modules use each cached dataset. A dataset
+  goes with the last module that used it, and one no module used (a prefetch, a cache from before this release) once
+  it was not used for the retention, at least a day. `disk_gb`, declared before and enforced now, caps the cache: above
+  it the least recently used datasets that no job on the node holds or waits for go first.
+- **`oarbank-uninstall --purge` and `oarbank-node leave` remove the container images** the node's modules pulled into
+  an engine outside the node's home (Docker on Linux) before they delete the home.
 
 ### Fixed
 
+- **A node's installed package is its floor; an older agent-only channel build no longer takes it back.** After the
+  2.10.3 to 2.10.4 fleet update, nodes running 2.10.4 were sent back to the 2.10.3 build promoted earlier on the
+  agent-only channel, and then sat staged for 2.10.4 without a go. A channel build older than the node's installed
+  package, or the fleet release it last installed, is now never assigned. Starting a rollout retires older channel
+  builds, and canary, promotion and rollback refuse them. The launcher refuses an older staged build. `oarbank agent
+  list`, the Agent page and `oarbank node show` show the running build beside the package floor, and say when a channel
+  build is superseded or a node runs below its package.
+- **Session helpers restart onto the installed agent after an update.** A session helper could survive package updates
+  and keep describing its person's processes to host protection with old code. A helper now reports its version, and
+  the agent asks one of another version to exit so its supervisor starts the installed binary. Helpers too old for that
+  are replaced by the package install itself: the macOS, deb and rpm postinstalls, and the Windows elevated helper.
+  The heartbeat lists each helper's version, and the node shows `PROTECTION_SESSION_HELPER_OUTDATED` while one is not
+  current.
 - **`vm_mem_gb` and `vm_cpus` size the container VM.** The owner's settings never reached Colima, the WSL containers
   session or the Linux engine's budget, so every runtime got the RAM-based default (8 GB on a 24 GB Mac, whatever was
   set). The agent now makes its runtime at the configured size, within half the host's memory and its processors, and
@@ -106,30 +146,6 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 - **A module turned off on a node runs nothing there either.** Its services stopped, but its doctor, its probes and its
   services' fingerprints still ran: module code on a node where the owner had turned it off. They run again once it is
   turned on.
-
-### New
-
-- **When a module leaves a node, what it put there goes.** A module's processes write only to its data directory, their
-  work directories, the dataset cache and the container runtime, so the node deletes all of it without the module's
-  help: its data directory, the cached datasets no other module there uses, and the container images it pulled that no
-  other module uses. A module turned off on the node goes after the new setting `module_retention_days` (fleet, group
-  or node; 7 days by default, 0 at once), and turning it back on in that time keeps everything. A module no longer in
-  the node's release, or on a retired node, goes after at most a day. Before it deletes, the node runs the module's
-  cleanup stage, if it declares one (oarbank-sdk 1.8, `stages[].cleanup`), so the module can release state outside the
-  node; a failure is reported and the deletion goes ahead.
-- **`oarbank module purge <module> --node N | --all`** deletes it at once (T2, previewed; `--yes` skips the question). It
-  is refused on a node where the module is enabled; `--all` purges it where it is turned off. The node page has a
-  **Delete now** button for each module leaving it.
-- **Per-module disk use.** `oarbank node show` and the node page list what each module keeps on the node (its data
-  directory, cached datasets and images) and, for a module that is leaving, when its data goes and why. `oarbank explain
-  node` names `MODULE_DATA_SCHEDULED`, `MODULE_CLEANUP_FAILED` and `DISK_CACHE_OVER_CAP`; each deletion is a
-  `module_data_deleted` event.
-- **The dataset cache is collected and capped.** The node records which modules use each cached dataset. A dataset
-  goes with the last module that used it, and one no module used (a prefetch, a cache from before this release) once
-  it was not used for the retention, at least a day. `disk_gb`, declared before and enforced now, caps the cache: above
-  it the least recently used datasets that no job on the node holds or waits for go first.
-- **`oarbank-uninstall --purge` and `oarbank-node leave` remove the container images** the node's modules pulled into
-  an engine outside the node's home (Docker on Linux) before they delete the home.
 
 ### Changes on upgrade
 

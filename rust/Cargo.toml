@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/oarbank-core", "crates/oarbank-core-py", "crates/oarbank-protection", "crates/oarbank-agent", "crates/oarbank-launcher", "crates/oarbank-portmap"]
 
 [workspace.package]
-version = "2.10.4"
+version = "2.11.0"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 authors = ["Codonic"]
