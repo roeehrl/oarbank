@@ -41,7 +41,7 @@ x86_64 package builds on Apple silicon with the `x86_64-apple-darwin` Rust targe
 ## 1. The coordinator
 
 Download the native coordinator installer for your computer from the
-[2.10.4 release](https://github.com/roeehrl/oarbank/releases/tag/v2.10.4) and verify it against its `SHA256SUMS` file.
+[2.11.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.11.0) and verify it against its `SHA256SUMS` file.
 On macOS, double-click the `.pkg` and follow Installer, then open **Oarbank Coordinator** in Applications.
 On Linux, install the `.deb` or `.rpm` with your package manager, then launch **Oarbank Coordinator** from the
 application menu or run `oarbank-coordinator`. On Windows, run the `.msi`, then open **Oarbank Coordinator** from Start.
@@ -404,7 +404,7 @@ while it runs.
 **Update trust.** The runner trusts only owner keys an administrator pinned on that machine. Installing a 2.10 (or
 later) package by hand on a node that has joined pins them: the postinstall (or the MSI) runs
 `oarbank-launcher update-trust --from-agent`, which copies the owner keys the agent pinned when it joined. On a fresh
-install the node joins after its package, so from 2.10.5 the pin waits: once the node joins (`oarbank-node join`, the
+install the node joins after its package, so from 2.11 the pin waits: once the node joins (`oarbank-node join`, the
 join window, a management profile or policy, or a join code given to the package), the runner pins the owner keys as
 soon as the agent has them, and `oarbank-node join` says so. A node that joined with 2.10.3 or 2.10.4 before its trust
 was pinned gets it at its next package install, or by hand:
@@ -513,7 +513,7 @@ krunkit is installed; their VM starts with the first GPU job.
 ## Linux nodes
 
 Built for x86-64 and arm64; the sandbox needs Linux 6.2 or later (6.12 for every capability: see the SDK's
-spec/sandbox/backends/linux.md), and `systemd`. The published 2.10.4 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
+spec/sandbox/backends/linux.md), and `systemd`. The published 2.11.0 Linux binaries require glibc 2.39 or newer; they are built and checked on Ubuntu 24.04.
 
 ```bash
 scripts/package-linux.sh                     # on a Linux machine with nFPM: dist/*.deb, *.rpm and a tarball

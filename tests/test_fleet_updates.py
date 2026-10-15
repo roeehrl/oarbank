@@ -18,7 +18,7 @@ from oarbank.coordinator import config as C
 from helpers import agent_client, enrolled_node, facts_for, fresh, make_db, node_headers, run_op, set_fleet, set_node
 
 T0 = 1_800_000_000.0                   # a Friday, 08:00 UTC
-OLD, MID, NEW, NEXT = "2.9.0", "2.9.5", __version__, "2.11.0"     # NEW is this coordinator's own version
+OLD, MID, NEW, NEXT = "2.9.0", "2.9.5", __version__, "2.12.0"     # NEW is this coordinator's own version
 INSTALL = {"format": "tar", "scope": "system", "updater": True, "why": None}
 
 

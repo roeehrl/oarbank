@@ -246,6 +246,14 @@ def promoted(db, node, version) -> str:
     return sha
 
 
+@pytest.fixture
+def coordinator_2104(monkeypatch):
+    """The 2.10.3 -> 2.10.4 floor cases run on a 2.10.4 coordinator, so a 2.10.4 agent is not also behind it."""
+    import oarbank
+    monkeypatch.setattr(oarbank, "__version__", "2.10.4")
+
+
+@pytest.mark.usefixtures("coordinator_2104")
 def test_a_fleet_release_the_node_installed_supersedes_an_older_channel_build(db):
     """The live 2.10.3 -> 2.10.4 case: the 2.10.3 build pushed through the channel stays current; once the node installed
     the 2.10.4 fleet release (its package's agent runs), the channel must not take it back down to 2.10.3."""
@@ -264,6 +272,7 @@ def test_a_fleet_release_the_node_installed_supersedes_an_older_channel_build(db
     assert r["runs_older_than_package"].endswith("the fleet rollout takes it to the release again")
 
 
+@pytest.mark.usefixtures("coordinator_2104")
 def test_the_package_version_the_agent_reports_is_the_floor_too(db):
     """A package installed by hand (installer -pkg, msiexec): the agent reports its package's agent version."""
     _, a = enrolled_node(db, "mini")
@@ -281,6 +290,7 @@ def test_the_package_version_the_agent_reports_is_the_floor_too(db):
     assert row(db, "mini")["package_version"] is None
 
 
+@pytest.mark.usefixtures("coordinator_2104")
 def test_a_newer_channel_build_still_updates_and_rolls_back_to_the_package_version(db):
     """A channel build newer than the package (promoted after it) updates the node; abandoning it takes the node back to
     a build of its package's version, never below."""
@@ -340,6 +350,7 @@ def test_the_cli_shows_the_package_beside_what_runs(db, capsys, monkeypatch):
     assert "channel build 2.10.3 is older than agent 2.10.4 from its installed package" in out
 
 
+@pytest.mark.usefixtures("coordinator_2104")
 def test_the_agent_page_shows_the_package_and_the_superseded_channel_build(tmp_path):
     from fastapi.testclient import TestClient
     from oarbank.console.app import console_app
