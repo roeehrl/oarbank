@@ -4,7 +4,10 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
-## Unreleased
+## 2.11.1 (2026-10-16)
+
+A fix release for 2.11.0. Module SDK: **oarbank-sdk 1.8.0**, unchanged. Coming from 2.10, read the
+[2.11.0](#2110-2026-10-15) section as well.
 
 ### Fixed
 

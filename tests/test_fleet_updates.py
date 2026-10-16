@@ -211,7 +211,7 @@ def preview(db, op, target=None, params=None):
     (lambda d: {**d, "type": "other"}, "oarbank-fleet-release"),
     (lambda d: {**d, "version": "2.10"}, "not a release version"),
     (lambda d: {**d, "seq": 0}, "positive integer"),
-    (lambda d: {**d, "stops": ["2.11.0"]}, "older than the release"),
+    (lambda d: {**d, "stops": [NEW]}, "older than the release"),
     (lambda d: {**d, "agent_min": "x"}, "agent_min"),
     (lambda d: {**d, "artifacts": []}, "non-empty"),
     (lambda d: {**d, "artifacts": [{**d["artifacts"][0], "name": "../evil"}]}, "plain file name"),

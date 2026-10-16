@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-agent"
-version = "2.11.0"
+version = "2.11.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-core"
-version = "2.11.0"
+version = "2.11.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-core-py"
-version = "2.11.0"
+version = "2.11.1"
 dependencies = [
  "oarbank-core",
  "pyo3",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-launcher"
-version = "2.11.0"
+version = "2.11.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-portmap"
-version = "2.11.0"
+version = "2.11.1"
 dependencies = [
  "hex",
  "igd-next",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "oarbank-protection"
-version = "2.11.0"
+version = "2.11.1"
 dependencies = [
  "fancy-regex",
  "libc",

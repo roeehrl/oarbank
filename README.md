@@ -35,13 +35,14 @@ the owner's own work first, every job in the operating system's sandbox.</p>
   <sub>The console with a made-up demo fleet. <a href="https://codonic.dev/apps/oarbank#inside">Watch the 20-second clip on codonic.dev</a>.</sub>
 </p>
 
-> **Release 2.11.0** is out: say when a node runs its container VM (`always`, `on_demand` or `off`) and how big it is,
-> approve a machine with the state, modules and settings it starts with, delete what a module left on a node once it
-> leaves, and a retired node's agent that stops instead of joining again. It builds on 2.10's internet-facing modules,
-> long-running workloads and co-tenancy certificates. See the [changelog](CHANGELOG.md) for what changes on upgrade.
+> **Release 2.11.1**, a fix release for 2.11.0, is out. 2.11 lets you say when a node runs its container VM (`always`,
+> `on_demand` or `off`) and how big it is, approve a machine with the state, modules and settings it starts with, delete
+> what a module left on a node once it leaves, and a retired node's agent that stops instead of joining again. It builds
+> on 2.10's internet-facing modules, long-running workloads and co-tenancy certificates. See the
+> [changelog](CHANGELOG.md) for what changes on upgrade.
 > Installers (macOS pkg for Apple silicon and Intel, deb and rpm, Windows MSI), one-line installers and native
 > coordinator installers are on the
-> [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.11.0).
+> [release page](https://github.com/roeehrl/oarbank/releases/tag/v2.11.1).
 > [Get started](https://docs.codonic.dev/oarbank/get-started) walks through the setup.
 
 ## What it does
@@ -110,7 +111,7 @@ the reference module above, sums integers and checks each answer.
 
 ## Install
 
-Download the packages for your computers from the [2.11.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.11.0), check the
+Download the packages for your computers from the [2.11.1 release](https://github.com/roeehrl/oarbank/releases/tag/v2.11.1), check the
 [Requirements](https://docs.codonic.dev/oarbank/operate/requirements), and follow
 [Get started](https://docs.codonic.dev/oarbank/get-started) or [docs/install.md](docs/install.md). To build the
 packages yourself: `scripts/package-macos.sh`, `scripts/package-linux.sh`, `scripts/package-windows.ps1` for agents;
@@ -184,7 +185,7 @@ jobs. If you already run a cluster scheduler on dedicated servers, keep it.
 
 ## FAQ
 
-**Can I install it today?** Yes: the [2.11.0 release](https://github.com/roeehrl/oarbank/releases/tag/v2.11.0) has the installers for macOS, Linux and Windows.
+**Can I install it today?** Yes: the [2.11.1 release](https://github.com/roeehrl/oarbank/releases/tag/v2.11.1) has the installers for macOS, Linux and Windows.
 [Get started](https://docs.codonic.dev/oarbank/get-started) has the requirements and the steps.
 
 **What do I need?** Two or more computers that can reach one another: a Mac, a Linux machine or a Windows PC for the
