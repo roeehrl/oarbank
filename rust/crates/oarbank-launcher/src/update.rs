@@ -304,7 +304,7 @@ impl Installer for OsInstaller {
         if v.as_deref() != Some(release) {
             return Err(format!("{} is version {}, not {release}", bin.display(), v.unwrap_or_else(|| "unknown".into())));
         }
-        crate::install(&self.home, &bin).map(|_| ()).map_err(|e| format!("{e:#}"))
+        crate::make_current(&self.home, &bin, &data, crate::install)
     }
 
     fn current_agent(&self) -> Option<String> {
