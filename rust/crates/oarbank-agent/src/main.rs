@@ -401,6 +401,11 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())).with_env_filter(
         tracing_subscriber::EnvFilter::try_from_env("OARBANK_LOG").unwrap_or_else(|_| "info".into())).init();
     let cli = Cli::parse();
+    // what the agent starts does not keep its output open after it ends (the sandbox launcher hands its own on)
+    #[cfg(windows)]
+    if !matches!(cli.cmd, Cmd::SandboxExec { .. }) {
+        sys::keep_std_handles();
+    }
     let layout = paths::Layout::new(cli.home.unwrap_or_else(paths::agent_home));
     let rt = tokio::runtime::Runtime::new()?;
     match cli.cmd {

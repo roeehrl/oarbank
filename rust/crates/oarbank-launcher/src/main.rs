@@ -53,16 +53,25 @@ impl Home {
         std::fs::read_to_string(self.current()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
 
-    /// Point `current` at `rel` (a path relative to the home) atomically.
+    /// Point `current` at `rel` (a path relative to the home) atomically. Idempotent: `current` already naming `rel`
+    /// (before, or after a rename that failed: the launcher and the update runner both point it) is success.
     fn point(&self, rel: &str) -> Result<()> {
+        if self.current_target().as_deref() == Some(rel) {
+            return Ok(());
+        }
         let tmp = self.0.join(".current.tmp");
         let _ = std::fs::remove_file(&tmp);
         #[cfg(unix)]
         std::os::unix::fs::symlink(rel, &tmp)?;
         #[cfg(not(unix))]
         std::fs::write(&tmp, rel)?;
-        std::fs::rename(&tmp, self.current())?;
-        Ok(())
+        match rename(&tmp, &self.current()) {
+            Err(_) if self.current_target().as_deref() == Some(rel) => {
+                let _ = std::fs::remove_file(&tmp);
+                Ok(())
+            }
+            r => Ok(r?),
+        }
     }
 
     fn read_upgrade(&self) -> Option<Value> {
@@ -79,31 +88,88 @@ impl Home {
     }
 }
 
-/// Install a binary as a version and make it current (first install, or by hand).
+/// How long a rename that Windows refuses for a moment is retried: another process (an antivirus scan, a reader) has the
+/// file open without FILE_SHARE_DELETE, or a lock on it, until it closes it.
+const RENAME_RETRY: Duration = Duration::from_secs(30);
+
+/// ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION: what a rename on Windows fails with while
+/// another process has the file open. Nothing is transient elsewhere.
+fn transient(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// `op`, again after a transient error (backing off from 100 ms to 5 s) until `budget` has been slept.
+fn retrying<T>(budget: Duration, mut op: impl FnMut() -> std::io::Result<T>, transient: impl Fn(&std::io::Error) -> bool,
+               mut sleep: impl FnMut(Duration)) -> std::io::Result<T> {
+    let (mut slept, mut delay) = (Duration::ZERO, Duration::from_millis(100));
+    loop {
+        match op() {
+            Err(e) if transient(&e) && slept < budget => {
+                let d = delay.min(budget - slept);
+                sleep(d);
+                slept += d;
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+            r => return r,
+        }
+    }
+}
+
+/// Rename `from` over `to`, retrying what Windows refuses for a moment.
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    retrying(RENAME_RETRY, || std::fs::rename(from, to), transient, std::thread::sleep)
+}
+
+/// Where `install` puts the agent `data` (relative to the home): `versions/<version>-<sha12>/oarbank-agent`.
+fn install_path(data: &[u8]) -> Option<String> {
+    let version = marker(data, b"oarbank-agent-version:")?;
+    Some(format!("versions/{version}-{}/oarbank-agent{}", &sha256_hex(data)[..12], std::env::consts::EXE_SUFFIX))
+}
+
+/// Install a binary as a version and make it current (first install, or by hand). Idempotent: a version already
+/// installed is not written again. On Windows it could not be: that version's agent may be running, and Windows refuses
+/// to replace a running program's file (ERROR_ACCESS_DENIED), as when the update runner makes the package's agent
+/// current after the package's setup and the launcher have already started it.
 fn install(home: &Home, binary: &Path) -> Result<String> {
     let data = std::fs::read(binary).with_context(|| format!("reading {}", binary.display()))?;
-    let version = marker(&data, b"oarbank-agent-version:").context("the binary embeds no oarbank-agent version")?;
-    let sha = sha256_hex(&data);
-    let rel = format!("versions/{version}-{}", &sha[..12]);
-    let dir = home.0.join(&rel);
+    let target = install_path(&data).context("the binary embeds no oarbank-agent version")?;
+    let (rel, name) = target.rsplit_once('/').expect("versions/<v>/<name>");
+    let dir = home.0.join(rel);
     std::fs::create_dir_all(&dir)?;
-    let name = format!("oarbank-agent{}", std::env::consts::EXE_SUFFIX);
-    let dst = dir.join(&name);
-    let tmp = dir.join(".oarbank-agent.tmp");
-    std::fs::write(&tmp, &data)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    let dst = dir.join(name);
+    if std::fs::read(&dst).ok().as_deref() != Some(&data[..]) {
+        let tmp = dir.join(".oarbank-agent.tmp");
+        std::fs::write(&tmp, &data)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        rename(&tmp, &dst)?;
     }
-    std::fs::rename(&tmp, &dst)?;
-    home.point(&format!("{rel}/{name}"))?;
+    home.point(&target)?;
+    let rel = rel.to_string();
     // an agent-only self-update staged or on trial would put its own build back over this one at the next start
     // (before_start): the installed agent wins, and the coordinator offers that update again if it still applies
     if home.read_upgrade().is_some_and(|u| matches!(u["state"].as_str(), Some("staged" | "trial"))) {
         let _ = std::fs::remove_file(home.upgrade());
     }
     Ok(rel)
+}
+
+/// The update runner's step: make the package's agent `bin` (its content `data`) current with `install`. Installing
+/// failing while `current` already names this very build (the package's setup, or the launcher at its start, made it
+/// current) is success: the node runs the release, and the rollout must not count a failure or roll it back.
+fn make_current(home: &Home, bin: &Path, data: &[u8], install: impl FnOnce(&Home, &Path) -> Result<String>)
+                -> std::result::Result<(), String> {
+    match install(home, bin) {
+        Ok(_) => Ok(()),
+        Err(e) if install_path(data).is_some_and(|t| home.current_target().as_deref() == Some(t.as_str())) => {
+            eprintln!("oarbank-launcher: current already names {}: {e:#}", bin.display());
+            Ok(())
+        }
+        Err(e) => Err(format!("{e:#}")),
+    }
 }
 
 fn marker(data: &[u8], p: &[u8]) -> Option<String> {
@@ -550,6 +616,91 @@ mod tests {
         let before = home2.current_target();
         before_start_with(&home2, Some(&pkg2)).unwrap();
         assert_eq!(home2.current_target(), before);
+    }
+
+    fn denied() -> std::io::Error {
+        std::io::Error::from_raw_os_error(5)
+    }
+
+    #[test]
+    fn a_transient_error_is_retried_with_backoff_and_then_succeeds() {
+        let (mut calls, mut slept) = (0, vec![]);
+        let r = retrying(RENAME_RETRY, || { calls += 1; if calls <= 3 { Err(denied()) } else { Ok(calls) } },
+                         |_| true, |d| slept.push(d));
+        assert_eq!(r.unwrap(), 4);
+        assert_eq!(slept, [100, 200, 400].map(Duration::from_millis));
+    }
+
+    #[test]
+    fn retrying_is_bounded_and_leaves_other_errors_alone() {
+        let (mut calls, mut slept) = (0, Duration::ZERO);
+        let r: std::io::Result<()> = retrying(RENAME_RETRY, || { calls += 1; Err(denied()) }, |_| true, |d| slept += d);
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(5));
+        assert_eq!(slept, RENAME_RETRY);
+        assert!(calls > 5 && calls < 20, "{calls}");
+        let mut calls = 0;
+        let r: std::io::Result<()> = retrying(RENAME_RETRY, || { calls += 1; Err(denied()) }, |_| false, |_| panic!("slept"));
+        assert!(r.is_err());
+        assert_eq!(calls, 1);
+        // only Windows' access denied, sharing and lock violations are transient (errno 5 is EIO on Unix)
+        assert_eq!(transient(&denied()), cfg!(windows));
+        assert!(!transient(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+    }
+
+    /// The live 2.11.0 fleet update on Windows: the package's setup and the launcher had made the package's agent current
+    /// and started it, and the update runner's own install then failed to replace the running agent's file (Access is
+    /// denied). Installing the same build again writes nothing and leaves `current` as it is.
+    #[test]
+    fn installing_the_current_build_again_writes_nothing() {
+        let (_t, home, pkg) = world("2.10.4", "2.11.0");
+        let rel = install(&home, &pkg).unwrap();
+        let target = home.current_target().unwrap();
+        assert_eq!(target, install_path(&agent("2.11.0")).unwrap());
+        #[cfg(unix)]
+        {
+            // the version directory and the home refuse writes, as Windows refuses to replace a running program
+            use std::os::unix::fs::PermissionsExt;
+            for d in [home.0.join(&rel), home.0.clone()] {
+                std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+            }
+        }
+        let again = install(&home, &pkg);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for d in [home.0.clone(), home.0.join(&rel)] {
+                std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        assert_eq!(again.unwrap(), rel);
+        assert_eq!(home.current_target().unwrap(), target);
+        assert!(!home.0.join(&rel).join(".oarbank-agent.tmp").exists());
+    }
+
+    #[test]
+    fn pointing_where_current_already_points_is_success() {
+        let (_t, home, _pkg) = world("2.10.4", "2.11.0");
+        let target = home.current_target().unwrap();
+        home.point(&target).unwrap();
+        assert!(!home.0.join(".current.tmp").exists());
+        assert_eq!(home.current_target().unwrap(), target);
+    }
+
+    /// The runner's step is idempotent: a failed install while `current` already names the package's build is success,
+    /// and a failure while it names anything else is still a failure.
+    #[test]
+    fn making_the_packages_agent_current_succeeds_when_it_already_is() {
+        let (_t, home, pkg) = world("2.10.4", "2.11.0");
+        let data = std::fs::read(&pkg).unwrap();
+        let failing = |_: &Home, _: &Path| -> Result<String> { Err(anyhow::anyhow!("Access is denied. (os error 5)")) };
+        let err = make_current(&home, &pkg, &data, failing).unwrap_err();
+        assert!(err.contains("Access is denied"), "{err}");
+        assert_eq!(running(&home), "2.10.4");
+        install(&home, &pkg).unwrap();                                  // the launcher at its start
+        make_current(&home, &pkg, &data, failing).unwrap();
+        assert_eq!(running(&home), "2.11.0");
+        make_current(&home, &pkg, &data, install).unwrap();
+        assert_eq!(running(&home), "2.11.0");
     }
 
     #[test]

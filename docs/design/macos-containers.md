@@ -143,7 +143,13 @@ decides now (Settings → Containers, or `oarbank settings set containers on_dem
   node's modules again (their goldens differ).
 
 `containers` is managed (a machine's policy may set it, tighten-only: `always` < `on_demand` < `off`). The mode is kept
-in `state/containers-setting.json`, so a restarted agent starts no VM before the coordinator has answered.
+in `state/containers-setting.json`, so a restarted agent starts no VM before the coordinator has answered. An agent
+with no kept mode (a new node, or the first start after an upgrade from before 2.11) does not take `always`, the
+default, for the owner's choice either: it starts nothing until the coordinator's first answer says the mode, and an
+`always` node then starts its runtime at once (2.11.0 started the VM at startup on such a node set to `off`). A stop
+(`off`, the on-demand idle stop, a resize, the agent ending) wins over a start still in flight: `colima start` is not
+waited for, and once it ends it stops the VM it brought up (the WSL session host ends its session likewise); a runtime
+made after that stop waits for the start in flight, then starts again.
 
 **The VM's size** is the owner's `vm_mem_gb` and `vm_cpus` (caps, node or fleet), else the RAM-based default, within
 half the host's memory and its processors (`container_runtime::vm_size`). Up to 2.10.4 those settings never reached
