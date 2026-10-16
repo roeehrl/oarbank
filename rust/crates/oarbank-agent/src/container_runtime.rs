@@ -657,6 +657,28 @@ impl MacShared {
     }
 }
 
+/// What every runtime of one Colima profile (one instance directory) shares in this agent process, whichever `pair`
+/// made it: the start lock, so the start of a runtime made after a stop waits for one still in flight, and how many
+/// stops were asked, so a stop asked while a start is in flight wins: that start stops the VM it brought up
+/// (`containers = off`, an idle on-demand runtime, a resize, the agent ending). 2.11.0 let the start finish and left
+/// the VM running with nothing holding it.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct ProfileRun {
+    start: Mutex<()>,
+    stops: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(target_os = "macos")]
+fn profile_run(instance: &Path) -> std::sync::Arc<ProfileRun> {
+    static RUNS: std::sync::OnceLock<Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<ProfileRun>>>> = std::sync::OnceLock::new();
+    RUNS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(instance.to_path_buf()).or_default().clone()
+}
+
+/// Why a start ended without a runtime: a stop was asked while it ran.
+#[cfg(target_os = "macos")]
+const STOPPED_WHILE_STARTING: &str = "the container runtime was stopped while it started";
+
 /// One of the agent-owned Colima profiles (docs/design/macos-containers.md). Only these profiles are ever started or
 /// queried. Colima runs with an environment of its own: the helper `PATH` (Homebrew's directories whatever launchd's
 /// PATH is), `HOME` and `COLIMA_HOME` where the agent's account may write (crate::colima::dirs: a system install's
@@ -680,7 +702,6 @@ pub struct ColimaRuntime {
     /// directory of fakes), and the file whose presence means Rosetta 2 is installed.
     tools: Vec<PathBuf>,
     rosetta: PathBuf,
-    start_lock: std::sync::Arc<Mutex<()>>,
     shared: std::sync::Arc<MacShared>,
 }
 
@@ -718,7 +739,7 @@ impl ColimaRuntime {
             profile, dirs, work: layout.work(), modules_data: layout.module_data(), docker_config: layout.run().join("docker"),
             log: layout.logs().join(format!("colima-{}.log", profile.name())), vm_cpus: cpus, vm_mem_gb: mem,
             arm: cfg!(target_arch = "aarch64"), tools: crate::colima::search_dirs(std::env::var_os("PATH").as_deref()),
-            rosetta: PathBuf::from(crate::colima::ROSETTA_RUNTIME), start_lock: std::sync::Arc::new(Mutex::new(())), shared,
+            rosetta: PathBuf::from(crate::colima::ROSETTA_RUNTIME), shared,
         }
     }
 
@@ -946,11 +967,47 @@ impl ColimaRuntime {
         }
     }
 
+    /// This profile's start lock and stop count (ProfileRun), by its instance directory.
+    fn run_state(&self) -> std::sync::Arc<ProfileRun> {
+        profile_run(&crate::colima::instance_dir(&self.dirs.config, self.profile.name()))
+    }
+
+    /// The stops asked of this profile so far: a start asked now goes ahead only while no other is.
+    fn stops(&self) -> u64 {
+        self.run_state().stops.load(Ordering::SeqCst)
+    }
+
+    /// A stop was asked since the start that holds the start lock was: the VM it brought up (`started`: it ran `colima
+    /// start`), if any, stops again, and the report says stopped, not ready. One that had not started yet starts
+    /// nothing (the VM may be a newer runtime's by then).
+    fn stopped_while_starting(&self, started: bool) -> Result<(), String> {
+        use crate::colima::{GpuState, State};
+        if started {
+            tracing::info!(profile = self.profile.name(), "the container runtime was stopped while it started: stopping its VM");
+            self.stop_vm(VM_STOP_BUDGET);
+        }
+        self.shared.update(|r| match self.profile {
+            Profile::Cpu => (r.state, r.detail, r.platforms, r.actual_mem_gb, r.actual_cpus) = (State::Absent, None, vec![], None, None),
+            Profile::Gpu => (r.gpu_state, r.gpu_detail) = (GpuState::OnDemand, None),
+        });
+        Err(STOPPED_WHILE_STARTING.into())
+    }
+
     /// Bring the CPU profile up (docs/design/macos-containers.md, "Bring-up"): check the prerequisites (missing: the
     /// report says what, with each fix), start the profile, and report ready or failed.
     pub fn bring_up(&self) -> Result<(), String> {
+        self.bring_up_after(self.stops())
+    }
+
+    /// `bring_up` for a start asked when `stops` stops had been asked: one asked since (while it waited for the start
+    /// lock, or while it started) wins, and the profile does not stay up.
+    fn bring_up_after(&self, stops: u64) -> Result<(), String> {
         use crate::colima::{Report, State};
-        let _g = self.start_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let run = self.run_state();
+        let _g = run.start.lock().unwrap_or_else(|e| e.into_inner());
+        if run.stops.load(Ordering::SeqCst) != stops {
+            return self.stopped_while_starting(false);
+        }
         let host = self.host();
         let now = Report::of(&host, State::Starting);
         let keep_gpu = |r: &mut Report, n: &Report| {
@@ -978,6 +1035,9 @@ impl ColimaRuntime {
             (r.missing, r.colima_home) = (vec![], now.colima_home.clone());
         });
         let started = self.start_profile();
+        if run.stops.load(Ordering::SeqCst) != stops {
+            return self.stopped_while_starting(true);
+        }
         // the size the VM runs at (one started before at another size keeps it until it is restarted)
         let actual = started.as_ref().ok().and_then(|_| self.running_size());
         self.shared.update(|r| (r.actual_mem_gb, r.actual_cpus) = (actual.map(|a| a.0), actual.map(|a| a.1)));
@@ -997,7 +1057,12 @@ impl ColimaRuntime {
 
     fn start_gpu(&self) -> Result<(), String> {
         use crate::colima::GpuState;
-        let _g = self.start_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let run = self.run_state();
+        let stops = run.stops.load(Ordering::SeqCst);
+        let _g = run.start.lock().unwrap_or_else(|e| e.into_inner());
+        if run.stops.load(Ordering::SeqCst) != stops {
+            return self.stopped_while_starting(false);
+        }
         if let Some(m) = crate::colima::gpu_missing(&self.host()).first() {
             let line = format!("{}: {} ({})", m.what, m.detail, m.fix);
             self.shared.update(|r| r.gpu_state = GpuState::Unavailable);
@@ -1009,6 +1074,9 @@ impl ColimaRuntime {
         }
         self.shared.update(|r| r.gpu_state = GpuState::Starting);
         let r = self.start_profile().and_then(|_| self.has_render_node());
+        if run.stops.load(Ordering::SeqCst) != stops {
+            return self.stopped_while_starting(true);
+        }
         self.shared.update(|s| match &r {
             Ok(()) => (s.gpu_state, s.gpu_detail) = (GpuState::Ready, None),
             Err(e) => (s.gpu_state, s.gpu_detail) = (GpuState::Failed, Some(e.clone())),
@@ -1137,10 +1205,12 @@ impl ContainerRuntime for ColimaRuntime {
                     State::Failed | State::Absent => {}
                 }
                 self.shared.update(|r| (r.state, r.detail) = (State::Starting, None));
-                let me = self.clone();
+                let (me, stops) = (self.clone(), self.stops());
                 let _ = std::thread::Builder::new().name("colima-bring-up".into()).spawn(move || {
-                    if let Err(e) = me.bring_up() {
-                        tracing::warn!(error = %e, "the container runtime is not ready");
+                    if let Err(e) = me.bring_up_after(stops) {
+                        if e != STOPPED_WHILE_STARTING {
+                            tracing::warn!(error = %e, "the container runtime is not ready");
+                        }
                     } else {
                         tracing::info!(profile = me.profile.name(), "the container runtime is ready");
                     }
@@ -1178,12 +1248,16 @@ impl ContainerRuntime for ColimaRuntime {
         }
     }
 
+    /// The agent ends: its VM stops, and so does one a start in flight brings up.
     fn shutdown(&self, budget: Duration) {
+        self.run_state().stops.fetch_add(1, Ordering::SeqCst);
         self.stop_vm(budget)
     }
 
-    /// Stop the VM now; the report no longer claims a running VM's size.
+    /// Stop the VM now; the report no longer claims a running VM's size. A start in flight (`colima start` can take
+    /// minutes) is not waited for: it stops the VM itself once it ends (ProfileRun).
     fn stop(&self, budget: Duration) {
+        self.run_state().stops.fetch_add(1, Ordering::SeqCst);
         self.stop_vm(budget);
         if self.profile == Profile::Cpu {
             self.shared.update(|r| (r.actual_mem_gb, r.actual_cpus) = (None, None));
@@ -1954,7 +2028,8 @@ pub mod tests {
 
     /// A fake Colima (a shell script) in a short scratch directory, with docker and limactl beside it and the file
     /// that means Rosetta is installed: `calls` records each call; `vz.pid` without `ha.sock` in the instance makes
-    /// `colima start` fail as a node did after an agent restart (`stale` keeps it failing so); `fail` fails every start.
+    /// `colima start` fail as a node did after an agent restart (`stale` keeps it failing so); `fail` fails every start;
+    /// `slow` holds a start until it is removed (a first start downloads the VM image).
     /// Nothing real is started: the runtime looks only in this directory.
     #[cfg(target_os = "macos")]
     struct FakeColima {
@@ -1977,6 +2052,7 @@ status)
   if [ -e "$COLIMA_HOME/$p/running" ]; then echo '{"memory": 8589934592}'; exit 0; fi
   echo "colima $p is not running" >&2; exit 1;;
 start)
+  while [ -e "$d/slow" ]; do sleep 0.05; done
   if [ -e "$d/stale" ] || { [ -e "$i/vz.pid" ] && [ ! -e "$i/ha.sock" ]; }; then
     echo "time=x level=fatal msg=\"errors inspecting instance: [failed to connect to $i/ha.sock: stat $i/ha.sock: no such file or directory]\"" >&2
     echo "error starting vm: error at 'starting': exit status 1" >&2
@@ -2145,6 +2221,52 @@ exit 2
         h.rt.recheck();
         assert_eq!(h.settled(), "failed");
         assert_eq!(h.calls().len(), 1, "{:?}", h.calls());
+    }
+
+    /// A stop asked while `colima start` runs wins (2.11.0: a node set to `containers = off` kept the VM a start at
+    /// startup brought up, though the agent had stopped it): the start stops the VM it brought up and the profile reports
+    /// `absent`, not `ready`. A runtime made after that stop (on demand, work waits again) waits for the start in flight,
+    /// then comes up.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_stop_asked_while_the_vm_starts_wins() {
+        let wait = |what: &dyn Fn() -> bool| {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !what() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(what());
+        };
+        let f = FakeColima::new(true, true);
+        let slow = f.dir.join("bin/slow");
+        std::fs::write(&slow, "").unwrap();
+        f.rt.recheck();                                         // the release wants containers: in the background
+        wait(&|| f.calls().iter().any(|c| c.starts_with("start oarbank ")));
+        assert_eq!(f.state(), "starting");
+        f.rt.stop(VM_STOP_BUDGET);                              // containers = off arrives meanwhile
+        std::fs::remove_file(&slow).unwrap();                   // the start ends
+        assert_eq!(f.settled(), "absent");
+        assert!(!crate::colima::instance_up(&f.instance()), "the VM the start brought up was stopped");
+        assert_eq!(f.calls().last().map(String::as_str), Some("stop oarbank"), "{:?}", f.calls());
+        assert!(f.rt.actual_size().is_none());
+
+        // stopped while starting, then made again before that start ended: the new one comes up after it
+        let g = FakeColima::new(true, true);
+        let slow = g.dir.join("bin/slow");
+        std::fs::write(&slow, "").unwrap();
+        g.rt.recheck();
+        wait(&|| g.calls().iter().any(|c| c.starts_with("start oarbank ")));
+        g.rt.stop(VM_STOP_BUDGET);
+        let again = FakeColima::runtime(&g.dir, &g.dir.join("bin"));
+        again.set_report(crate::colima::Report::of(&again.host(), crate::colima::State::Absent));
+        again.recheck();
+        std::fs::remove_file(&slow).unwrap();
+        assert_eq!(g.settled(), "absent");
+        wait(&|| again.report().unwrap()["state"] == "ready");
+        assert!(crate::colima::instance_up(&g.instance()));
+        let calls = g.calls();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(calls[0].starts_with("start oarbank ") && calls[1] == "stop oarbank" && calls[2].starts_with("start oarbank "), "{calls:?}");
     }
 
     /// A stopping agent stops its VM (gracefully; forced when that takes longer than its budget) so no stale instance

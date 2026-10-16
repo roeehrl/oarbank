@@ -25,6 +25,12 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   already installed is no longer written again, and a `current` that already names the release's agent counts as
   success. Renames that Windows refuses for a moment, while another process such as an antivirus scan has the file
   open, are retried for up to 30 s.
+- **A node set to `containers = off` or `on_demand` no longer starts its container VM when the agent starts.** An
+  agent with no kept `containers` mode (the first start after upgrading to 2.11.0, or a new node) took the default,
+  `always`, and started its Colima VM (or WSL containers session) before the coordinator's first answer. It now starts
+  nothing until that answer says the mode, and an `always` node then starts its runtime at once. A stop asked while the
+  runtime is still starting (`off` arriving, the on-demand idle stop, a resize) now wins: the start stops the VM it
+  brought up. Before, the VM came up anyway and kept running while the node reported containers `disabled`.
 
 ## 2.11.0 (2026-10-15)
 

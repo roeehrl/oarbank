@@ -484,7 +484,7 @@ pub use imp::*;
 mod imp {
     use super::*;
     use crate::container_runtime::{exec, quick, qualified, tokens, ContainerRuntime, Exec, Out, RunResult, RuntimeStatus};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
@@ -611,6 +611,9 @@ mod imp {
         /// Auto-reset: ask the host to (re)create the session (a release wants containers, a session vanished).
         kick: usize,
         stop: usize,
+        /// The agent stopped the runtime (`stop`), not only dropped it as it ends: a session a create in flight brings up
+        /// is ended again, not held (2.11.0 held it, though containers were turned off meanwhile).
+        stop_asked: AtomicBool,
     }
 
     /// The agent's WSLc session and the CLI that drives it.
@@ -644,7 +647,8 @@ mod imp {
             let event = |manual: i32| unsafe { CreateEventW(std::ptr::null(), manual, 0, std::ptr::null()) } as usize;
             let report = Report { state: State::Starting, session: session_name(home), mem_gb, cpus, ..Default::default() };
             WslcRuntime { home: home.to_path_buf(), session: session_name(home), wslc, sdk, mem_gb, cpus,
-                          shared: Arc::new(Shared { report: Mutex::new(report), changed: Condvar::new(), kick: event(0), stop: event(1) }) }
+                          shared: Arc::new(Shared { report: Mutex::new(report), changed: Condvar::new(), kick: event(0), stop: event(1),
+                                                    stop_asked: AtomicBool::new(false) }) }
         }
 
         fn spawn_host(&self) {
@@ -786,6 +790,7 @@ mod imp {
         /// End the session now (an idle on-demand session, containers turned off, a new size): the session host stops
         /// first, so it does not create the session again when it sees it end, then the session is terminated.
         fn stop(&self, budget: Duration) {
+            self.shared.stop_asked.store(true, Ordering::SeqCst);
             unsafe { SetEvent(self.shared.stop as HANDLE) };
             let secs = budget.as_secs().clamp(5, 60);
             match self.cli(&["system", "session", "terminate"], secs) {
@@ -860,7 +865,19 @@ mod imp {
                 if self.shared.report.lock().unwrap().state != State::Missing {
                     self.set(self.report(State::Starting));
                 }
-                match self.create(&sdk) {
+                let made = self.create(&sdk);
+                // a stop asked while the session started (it can take minutes) wins: the session ends again
+                if self.shared.stop_asked.load(Ordering::SeqCst) {
+                    if let Ok(Some(session)) = made {
+                        unsafe { (sdk.release)(session) };
+                    }
+                    if made.is_ok() {
+                        self.end_session();
+                    }
+                    self.set(self.report(State::Absent));
+                    return;
+                }
+                match made {
                     Ok(Some(session)) => {
                         let mut ev: HANDLE = std::ptr::null_mut();
                         let hr = unsafe { (sdk.termination)(session, &mut ev) };
@@ -882,6 +899,16 @@ mod imp {
                         }
                     }
                 }
+            }
+        }
+
+        /// End the session a create brought up after the agent stopped the runtime.
+        fn end_session(&self) {
+            tracing::info!(session = %self.session, "the WSL containers session was stopped while it started: ending it");
+            match wslc_cli(&self.wslc, &self.session, &["system", "session", "terminate"], 60) {
+                Ok(r) if r.ok() => {}
+                Ok(r) => tracing::warn!(session = %self.session, error = %decode(&r.stderr).trim(), "ending the WSL containers session failed"),
+                Err(e) => tracing::warn!(session = %self.session, error = %e, "ending the WSL containers session failed"),
             }
         }
 
