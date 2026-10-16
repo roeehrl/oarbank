@@ -628,7 +628,9 @@ same reason.
 - **`packages/<sha256>`:** two packages are kept.
 - **`available`:** `{"format": 1, "mode", "fleet_id", "owner_version", "pinned_at"}`, written with `trust.json`. The
   state directory is 0711 and this file 0644, the one file the agent's account may read: it is how the agent knows the
-  trust is pinned (`install.updater`). Its absence means no updater.
+  trust is pinned (`install.updater`). Its absence means no updater; a directory the agent may not traverse is
+  reported as such (`install.trust: unreadable`), not as no trust. `update-trust --from-agent` with a trust pinned
+  already, and every runner start, set the directory's modes and write the marker again.
 
 ### Commands
 

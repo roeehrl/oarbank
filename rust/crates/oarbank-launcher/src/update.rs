@@ -304,7 +304,7 @@ impl Installer for OsInstaller {
         if v.as_deref() != Some(release) {
             return Err(format!("{} is version {}, not {release}", bin.display(), v.unwrap_or_else(|| "unknown".into())));
         }
-        crate::install(&self.home, &bin).map(|_| ()).map_err(|e| format!("{e:#}"))
+        crate::make_current(&self.home, &bin, &data, crate::install)
     }
 
     fn current_agent(&self) -> Option<String> {
@@ -384,6 +384,13 @@ pub fn update_run(opts: &[String]) -> Result<i32> {
         return Ok(0);
     };
     crate::handle_stop_requests();
+    // the marker beside a pinned trust, again (ensure_state above made the directory traversable): a node whose install
+    // hid it from the agent heals when the runner next starts (its job's RunAtLoad, a request)
+    if let Some(t) = Spool::new(&agent_home, &state).read_trust() {
+        if let Err(e) = repair(&state, &t) {
+            eprintln!("oarbank-launcher: the update trust's marker could not be written: {e:#}");
+        }
+    }
     // an administrator's install or join left a pin pending (the agent had no owner keys yet): pin them once it has
     if pending(&state) {
         match settle(&agent_home, &state, pin_wait) {
@@ -457,16 +464,32 @@ pub fn pin(state: &Path, t: &Trust) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(spool.trust(), std::fs::Permissions::from_mode(0o600))?;
     }
+    write_marker(state, t)
+}
+
+/// The marker the agent reads, for the trust pinned: written when it is missing or says something else, readable.
+fn write_marker(state: &Path, t: &Trust) -> Result<()> {
     let marker = state.join("available");
     let mode = if t.mode == fleet::Mode::Signed { "signed" } else { "unsigned" };
-    fleet::write_durable(&marker, json!({"format": 1, "mode": mode, "fleet_id": t.fleet_id, "owner_version": t.owner_version,
-                                         "pinned_at": t.pinned_at}).to_string().as_bytes())?;
+    let body = json!({"format": 1, "mode": mode, "fleet_id": t.fleet_id, "owner_version": t.owner_version,
+                      "pinned_at": t.pinned_at}).to_string();
+    if std::fs::read(&marker).ok().as_deref() != Some(body.as_bytes()) {
+        fleet::write_durable(&marker, body.as_bytes())?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))?;
     }
     Ok(())
+}
+
+/// A trust pinned already: the state directory's modes and the agent's marker made again. A 2.10 macOS pkg made the
+/// directory owner-only on every install, so the agent, which may not traverse it, saw no marker and reported no
+/// update trust while one was pinned.
+pub fn repair(state: &Path, t: &Trust) -> Result<()> {
+    ensure_state(state)?;
+    write_marker(state, t)
 }
 
 /// The file an administrator's install or join leaves in the runner's state directory while the agent has no owner
@@ -497,6 +520,7 @@ fn agent_trust(agent_home: &Path, how: &str) -> Option<Trust> {
 /// Pin the owner keys the agent pinned, unless a trust is pinned already; a pin, or one found, settles a pending pin.
 pub fn pin_from_agent(agent_home: &Path, state: &Path, how: &str) -> Result<FromAgent> {
     let r = if let Some(t) = Spool::new(agent_home, state).read_trust() {
+        repair(state, &t)?;
         FromAgent::Already(t)
     } else if let Some(t) = agent_trust(agent_home, how) {
         pin(state, &t)?;
@@ -511,8 +535,8 @@ pub fn pin_from_agent(agent_home: &Path, state: &Path, how: &str) -> Result<From
 /// Leave a pending pin (an administrator's install or join, before the agent has owner keys): root's runner pins them
 /// once the agent has them. Nothing when a trust is pinned already.
 pub fn arm(agent_home: &Path, state: &Path, how: &str) -> Result<()> {
-    if Spool::new(agent_home, state).read_trust().is_some() {
-        return Ok(());
+    if let Some(t) = Spool::new(agent_home, state).read_trust() {
+        return repair(state, &t);
     }
     ensure_state(state)?;
     let p = state.join(PENDING);
@@ -576,7 +600,8 @@ pub fn update_trust(opts: &[String]) -> Result<()> {
     let t = if has(opts, "--from-agent") {
         match pin_from_agent(&agent_home, &state, "update-trust --from-agent")? {
             FromAgent::Already(t) => {
-                println!("update trust already pinned ({}, {} keys); unchanged", t.pinned_by, t.owner_keys.len());
+                println!("update trust already pinned ({}, {} keys); unchanged, its marker readable to the agent", t.pinned_by,
+                         t.owner_keys.len());
                 return Ok(());
             }
             FromAgent::Pinned(t) => t,
@@ -846,6 +871,56 @@ mod tests {
         update_trust(&["--unsigned".into(), "--agent-home".into(), home.display().to_string(), "--state".into(), state.display().to_string()]).unwrap();
         assert!(matches!(settle(&home, &state, Duration::ZERO).unwrap(), FromAgent::Already(t) if t.mode == fleet::Mode::Unsigned));
         assert!(!pending(&state));
+    }
+
+    /// A trust pinned before an install that left the state directory owner-only (2.10's macOS pkg): the agent could not
+    /// read the marker. `update-trust --from-agent` with the trust pinned already, and the runner's own start, make the
+    /// directory traversable and the marker readable again, and leave the trust as it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_trust_repairs_the_state_directory_the_agent_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::Builder::new().prefix("oarbank-launcher-repair-").tempdir().unwrap();
+        let (home, state) = (tmp.path().join("agent"), tmp.path().join("update"));
+        std::fs::create_dir_all(&home).unwrap();
+        let k = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=";
+        std::fs::write(home.join("agent.json"), json!({"coordinator_trust": {"owner_keys": [k], "owner_version": 4}}).to_string()).unwrap();
+        let opts = |a: &[&str]| -> Vec<String> {
+            a.iter().map(|s| s.to_string()).chain(["--agent-home".into(), home.display().to_string(), "--state".into(), state.display().to_string()]).collect()
+        };
+        update_trust(&opts(&["--from-agent"])).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let marker = std::fs::read(state.join("available")).unwrap();
+        let broken = || {
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(state.join("logs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(state.join("available"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let repaired = |what: &str| {
+            assert_eq!(mode(&state), 0o711, "{what}");
+            assert_eq!((mode(&state.join("logs")), mode(&state.join("packages"))), (0o700, 0o700), "{what}");
+            assert_eq!(mode(&state.join("available")), 0o644, "{what}");
+            assert_eq!(std::fs::read(state.join("available")).unwrap(), marker, "{what}");
+            assert_eq!(Spool::new(&home, &state).read_trust().map(|t| t.owner_version), Some(4), "{what}");
+        };
+        // the pkg's postinstall of 2.10: modes reset, then `update-trust --from-agent` finds the trust pinned
+        broken();
+        std::fs::write(home.join("agent.json"), json!({"coordinator_trust": {"owner_keys": [k], "owner_version": 9}}).to_string()).unwrap();
+        assert!(matches!(pin_from_agent(&home, &state, "test").unwrap(), FromAgent::Already(t) if t.owner_version == 4));
+        repaired("pin_from_agent");
+        broken();
+        update_trust(&opts(&["--from-agent"])).unwrap();
+        repaired("update-trust --from-agent");
+        // a missing marker is written again
+        std::fs::remove_file(state.join("available")).unwrap();
+        arm(&home, &state, "test").unwrap();
+        assert!(!pending(&state));
+        repaired("arm");
+        // the runner's start heals a node left so, without anyone running a command
+        broken();
+        std::fs::remove_file(state.join("available")).unwrap();
+        assert_eq!(update_run(&opts(&["--prefix", &tmp.path().join("prefix").display().to_string(), "--once"])).unwrap(), 0);
+        repaired("update-run");
     }
 
     /// The runner started with a pin pending (setup started it as the node joined) pins the agent's keys, then runs.

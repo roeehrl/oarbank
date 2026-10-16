@@ -8,22 +8,57 @@
 # %LOCALAPPDATA%\wslc\settings.yaml (the agent's containers must not reach this machine's loopback services; it is the
 # only change to your settings and removes the host.wslc.internal name from your own wslc containers), runs the live
 # tests and the doctor's probe, and writes everything to dist\verify-windows-containers.log: attach that file to the
-# issue if anything fails. -InstallWsl first installs WSL 3.0.1 from its release (an administrator shell).
+# issue if anything fails. -InstallWsl first installs WSL 3.0.1 from its release (an administrator shell), unless
+# 3.0.1 or newer is installed already (the MSI fails over an installed WSL); it logs the WSL it finds.
 param([switch]$Gpu, [switch]$InstallWsl)
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
 $Arch = & "$PSScriptRoot\windows-arch.ps1"
 New-Item -ItemType Directory -Force "$Repo\dist" | Out-Null
 $Log = "$Repo\dist\verify-windows-containers.log"
+# The version `wsl --version` reports ("WSL version: 3.0.1.0"), or $null without WSL from its release
+function Get-WslVersion {
+  $exe = "$env:ProgramFiles\WSL\wsl.exe"
+  if (-not (Test-Path $exe)) { return $null }
+  $env:WSL_UTF8 = "1"
+  $out = (& $exe --version 2>&1 | Out-String) -replace "`0", ""
+  if ($out -match "WSL[^:\r\n]*:\s*(\d+\.\d+\.\d+(\.\d+)?)") { return [version]$Matches[1] }
+  return $null
+}
 Start-Transcript -Path $Log -Force | Out-Null
 try {
   if ($InstallWsl) {
-    $WslSha256 = @{ x64 = "28B1A0D013640A2AC95898EA705FA186E5B4FF767A1C1B49257161BC106599C6"; arm64 = "857DDBB335EC7D05FFA71D0FD2203750C0E8FC29BB164F8A95DB92BD7BBA4263" }
-    $msi = "$env:TEMP\wsl.3.0.1.0.$Arch.msi"
-    Invoke-WebRequest -UseBasicParsing "https://github.com/microsoft/WSL/releases/download/3.0.1/wsl.3.0.1.0.$Arch.msi" -OutFile $msi
-    if ((Get-FileHash -Algorithm SHA256 $msi).Hash -ne $WslSha256[$Arch]) { throw "wsl.msi does not match its pin" }
-    $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
-    if ($p.ExitCode -notin 0, 3010) { throw "msiexec $($p.ExitCode)" }
+    # what this machine has before installing: the WSL wsl.exe reports, and the WSL packages Windows lists
+    $installed = Get-WslVersion
+    Write-Output "WSL installed: $(if ($installed) { $installed } else { 'none' })"
+    $keys = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match "Subsystem for Linux|^WSL" } |
+      Select-Object DisplayName, DisplayVersion, PSChildName | Format-Table -AutoSize | Out-String | Write-Output
+    Get-AppxPackage -AllUsers -Name "*WindowsSubsystemForLinux*" -ErrorAction SilentlyContinue |
+      Select-Object Name, Version | Format-Table -AutoSize | Out-String | Write-Output
+    if ($installed -and $installed -ge [version]"3.0.1") {
+      # the runner image's own (windows-2025 ships 3.0.1): installing the MSI over the same version reconfigures it,
+      # and its ValidateInstall action fails that (msiexec 1603)
+      Write-Output "WSL $installed is 3.0.1 or newer: not installing WSL 3.0.1"
+    } else {
+      $WslSha256 = @{ x64 = "28B1A0D013640A2AC95898EA705FA186E5B4FF767A1C1B49257161BC106599C6"; arm64 = "857DDBB335EC7D05FFA71D0FD2203750C0E8FC29BB164F8A95DB92BD7BBA4263" }
+      $msi = "$env:TEMP\wsl.3.0.1.0.$Arch.msi"
+      Invoke-WebRequest -UseBasicParsing "https://github.com/microsoft/WSL/releases/download/3.0.1/wsl.3.0.1.0.$Arch.msi" -OutFile $msi
+      if ((Get-FileHash -Algorithm SHA256 $msi).Hash -ne $WslSha256[$Arch]) { throw "wsl.msi does not match its pin" }
+      $msiLog = "$Repo\dist\wsl-msiexec.log"
+      $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$msiLog`"" -Wait -PassThru
+      if ($p.ExitCode -notin 0, 3010) {
+        if (Test-Path $msiLog) {
+          $lines = Get-Content $msiLog
+          Write-Output "msiexec log (dist\wsl-msiexec.log), the lines that say why:"
+          $lines | Select-String -Pattern "Return value 3", "newer version", "downgrade", "error \d{4}", "Error \d{4}", "already installed" |
+            ForEach-Object { $_.Line } | Write-Output
+          Write-Output "its tail:"
+          $lines | Select-Object -Last 60 | Write-Output
+        }
+        throw "msiexec $($p.ExitCode)"
+      }
+    }
   }
   & "$env:ProgramFiles\WSL\wsl.exe" --version
   Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion | Format-Table -AutoSize | Out-String | Write-Output
