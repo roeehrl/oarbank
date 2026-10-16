@@ -513,15 +513,25 @@ TRUST_REMEDY = {
 }
 TRUST_REMEDY_OTHER = "sudo oarbank-launcher update-trust --from-agent"
 NO_TRUST = "no update trust is pinned"
+# A macOS pkg before this fix made the update runner's state directory owner-only on every install, so an agent pinned
+# before it could not read the marker and said "no update trust is pinned". An agent that tells the two apart reports
+# `trust`; for an older one the plan names both, and what makes the directory readable while its launcher cannot.
+UNREADABLE_PKG = ("; if update-trust says the trust is pinned already, the agent cannot read it: "
+                  "sudo chmod 711 '/Library/Application Support/Oarbank/update', or install this release's pkg")
 
 
 def install_of(node: dict) -> dict:
-    """The agent's `install` facts ({format, scope, updater, why}); {} from an agent older than fleet updates. An older
-    agent's "no update trust" names the command without `--from-agent`: shown with the one that pins."""
+    """The agent's `install` facts ({format, scope, updater, why, trust}); {} from an agent older than fleet updates. An
+    older agent's "no update trust" names the command without `--from-agent`: shown with the one that pins; an older
+    macOS agent's may be a pinned trust it cannot read (UNREADABLE_PKG)."""
     inst = jl(node.get("install_json"), {}) or {}
     why = inst.get("why")
-    if isinstance(why, str) and why.startswith(NO_TRUST) and "--from-agent" not in why:
-        inst = {**inst, "why": f"{NO_TRUST}: {TRUST_REMEDY.get(inst.get('format'), TRUST_REMEDY_OTHER)}"}
+    if isinstance(why, str) and why.startswith(NO_TRUST):
+        if "--from-agent" not in why:
+            why = f"{NO_TRUST}: {TRUST_REMEDY.get(inst.get('format'), TRUST_REMEDY_OTHER)}"
+        if inst.get("format") == "pkg" and not inst.get("trust"):
+            why += UNREADABLE_PKG
+        inst = {**inst, "why": why}
     return inst
 
 
@@ -658,7 +668,9 @@ def _clean_install(inst) -> dict | None:
     return {"format": fmt, "scope": inst.get("scope") if inst.get("scope") in ("system", "personal") else None,
             "updater": inst.get("updater") is True, "why": str(inst["why"])[:300] if inst.get("why") else None,
             # the installed package's agent (agents after 2.10.4), which the agent-only channel never goes below (agentbuilds.py)
-            "package_version": pv if isinstance(pv, str) and len(pv) <= 64 and vkey(pv) else None}
+            "package_version": pv if isinstance(pv, str) and len(pv) <= 64 and vkey(pv) else None,
+            # what the agent found of the runner's trust marker (agents after 2.11.0): pinned, missing or unreadable
+            "trust": inst.get("trust") if inst.get("trust") in ("pinned", "missing", "unreadable") else None}
 
 
 def observe(db: DB, node: dict, body: dict, heartbeat: bool = True):

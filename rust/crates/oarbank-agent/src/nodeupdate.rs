@@ -585,31 +585,61 @@ fn package_version_at(path: &Path) -> Option<String> {
     v
 }
 
-/// `install: {format, scope, updater, why, package_version}`: the runner can update this node when the node is a system
-/// install, its trigger is in place and its trust is pinned (`<data root>/update/available`, which `update-trust` writes
-/// readable); `package_version` is the installed package's agent ([`package_version`]), which may differ from the build
-/// this agent runs.
+/// `install: {format, scope, updater, why, trust, package_version}`: the runner can update this node when the node is a
+/// system install, its trigger is in place and its trust is pinned (`<data root>/update/available`, which `update-trust`
+/// writes readable); `trust` is what the agent found there ([`Marker`]); `package_version` is the installed package's
+/// agent ([`package_version`]), which may differ from the build this agent runs.
 pub fn install_facts(home: &Path) -> Value {
     let format = detect_format();
     let system = home == system_data().join("agent");
     let external = std::env::var("OARBANK_UPDATE_TRIGGER").as_deref() == Ok("external");
-    let marker = home.parent().map(|p| p.join("update").join("available"));
-    let pinned = marker.as_ref().and_then(|m| std::fs::read(m).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .is_some_and(|v| v["format"] == 1);
-    let why = why_no_updater(&format, system || external, || trigger_installed(), pinned);
+    let marker = home.parent().map(|p| marker_at(&p.join("update").join("available"))).unwrap_or(Marker::Missing);
+    let why = why_no_updater(&format, system || external, || trigger_installed(), marker);
     json!({"format": format, "scope": if system { "system" } else { "personal" }, "updater": why.is_none(), "why": why,
-           "package_version": package_version()})
+           "trust": marker.name(), "package_version": package_version()})
+}
+
+/// What the agent finds of the runner's trust marker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Marker {
+    Pinned,
+    /// no marker (or not one this agent reads): no trust is pinned
+    Missing,
+    /// the state directory or the marker is closed to the agent: a trust may be pinned behind it (2.10's macOS pkg made
+    /// the directory owner-only on every install)
+    Unreadable,
+}
+
+impl Marker {
+    fn name(self) -> &'static str {
+        match self {
+            Marker::Pinned => "pinned",
+            Marker::Missing => "missing",
+            Marker::Unreadable => "unreadable",
+        }
+    }
+}
+
+fn marker_at(p: &Path) -> Marker {
+    match std::fs::read(p) {
+        Ok(b) if serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["format"] == 1) => Marker::Pinned,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Marker::Unreadable,
+        _ => Marker::Missing,
+    }
 }
 
 /// Why the runner cannot update this node, with what fixes it (the coordinator's update plan shows it): None when it can.
-fn why_no_updater(format: &str, system: bool, trigger: impl FnOnce() -> bool, pinned: bool) -> Option<String> {
+fn why_no_updater(format: &str, system: bool, trigger: impl FnOnce() -> bool, marker: Marker) -> Option<String> {
     if format == "dev" {
         Some("a development build: no package to update (agent-only self-update)".into())
     } else if !system {
         Some("a personal install: only a system install has the update runner".into())
     } else if !trigger() {
         Some("the update runner's trigger is not installed: reinstall the node package".into())
-    } else if !pinned {
+    } else if marker == Marker::Unreadable {
+        Some(format!("the update runner's state directory is not readable by the agent, so it cannot see whether update trust \
+                      is pinned: {}", oarbank_core::fleet::TRUST_REMEDY))
+    } else if marker == Marker::Missing {
         Some(format!("no update trust is pinned: {}", oarbank_core::fleet::TRUST_REMEDY))
     } else {
         None
@@ -648,15 +678,43 @@ mod tests {
     /// `update-trust` only prints its usage).
     #[test]
     fn a_node_without_update_trust_says_the_command_that_pins_it() {
-        let why = why_no_updater("pkg", true, || true, false).unwrap();
+        let why = why_no_updater("pkg", true, || true, Marker::Missing).unwrap();
         assert!(why.starts_with("no update trust is pinned: ") && why.contains("update-trust --from-agent"), "{why}");
         if cfg!(target_os = "macos") {
             assert!(why.ends_with(": sudo /Library/Oarbank/bin/oarbank-launcher update-trust --from-agent"), "{why}");
         }
-        assert_eq!(why_no_updater("pkg", true, || true, true), None);
-        assert!(why_no_updater("pkg", true, || false, false).unwrap().contains("trigger is not installed"));
-        assert!(why_no_updater("deb", false, || panic!("not asked"), false).unwrap().starts_with("a personal install"));
-        assert!(why_no_updater("dev", true, || true, true).unwrap().starts_with("a development build"));
+        assert_eq!(why_no_updater("pkg", true, || true, Marker::Pinned), None);
+        assert!(why_no_updater("pkg", true, || false, Marker::Missing).unwrap().contains("trigger is not installed"));
+        assert!(why_no_updater("deb", false, || panic!("not asked"), Marker::Missing).unwrap().starts_with("a personal install"));
+        assert!(why_no_updater("dev", true, || true, Marker::Pinned).unwrap().starts_with("a development build"));
+        // a marker the agent may not read is not "no trust": the same command repairs the directory
+        let why = why_no_updater("pkg", true, || true, Marker::Unreadable).unwrap();
+        assert!(why.starts_with("the update runner's state directory is not readable by the agent") && why.contains("update-trust --from-agent"),
+                "{why}");
+    }
+
+    /// The marker: pinned, missing (or not one this agent reads), or closed to the agent (a directory it may not traverse).
+    #[cfg(unix)]
+    #[test]
+    fn the_marker_is_pinned_missing_or_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = crate::scratch("nodeupdate-marker");
+        let state = tmp.path().join("update");
+        std::fs::create_dir_all(&state).unwrap();
+        let marker = state.join("available");
+        assert_eq!(marker_at(&marker), Marker::Missing);
+        std::fs::write(&marker, b"{\"format\": 2}").unwrap();
+        assert_eq!(marker_at(&marker), Marker::Missing);
+        std::fs::write(&marker, b"{\"format\": 1, \"mode\": \"signed\"}").unwrap();
+        assert_eq!(marker_at(&marker), Marker::Pinned);
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // root reads through any mode: only an account the mode binds sees it closed
+        let closed = std::fs::read(&marker).is_err();
+        if closed {
+            assert_eq!(marker_at(&marker), Marker::Unreadable);
+        }
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o711)).unwrap();
+        assert_eq!(marker_at(&marker), Marker::Pinned);
     }
 
     #[test]
@@ -870,6 +928,7 @@ mod tests {
         let f = install_facts(&tmp.path().join("agent"));
         assert_eq!(f["updater"], false);
         assert!(f["why"].is_string());
+        assert_eq!(f["trust"], "missing");
         assert_eq!(f["scope"], "personal");
     }
 }

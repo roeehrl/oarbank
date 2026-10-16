@@ -8,6 +8,15 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 
 ### Fixed
 
+- **A Mac node whose update trust was pinned before a package install has its update runner again.** The macOS pkg
+  made the update runner's state directory owner-only on every install, and `update-trust --from-agent`, finding the
+  trust pinned already, left it so. The agent, which reads the trust's marker in that directory, then reported no
+  update trust, and `oarbank update plan` skipped the node ("no update runner on it") while `update-trust` said the
+  trust was pinned. Nodes pinned after their install were not affected. The pkg now leaves the directory traversable,
+  and `update-trust --from-agent` with a trust pinned already, as well as every start of the update runner, sets the
+  directory's modes and writes the marker again, so installing this release's pkg repairs an affected node. An agent
+  that cannot read the directory now says so, with the command that repairs it, instead of "no update trust is
+  pinned"; for an older Mac agent the plan names both causes and the fix.
 - **A Windows node's fleet update is no longer recorded as failed after it installed.** The MSI installed the release,
   and its setup and the restarted launcher made the release's agent current and started it. The update runner then
   installed that agent again, and Windows refuses to replace the file of a running program, so the step failed with
