@@ -81,6 +81,8 @@ pub struct Agent {
     pub gate: crate::containers_gate::Gate,
     /// The VM size settings the runtimes were made with (a change restarts an idle VM at the new size).
     containers_caps: Option<crate::container_runtime::Caps>,
+    /// The containers an earlier run left were looked for (`reap_containers`: once, when this run first has a runtime).
+    reaped: bool,
     /// The heartbeat's `containers`: the runtime's mode, state, startable pools and VM size.
     containers_report: Value,
     /// What a stopped runtime misses to start, looked up at most every RUNTIME_REPROBE.
@@ -195,7 +197,7 @@ impl Agent {
                    draining: false, prot: None, session_hub: false, facts: Value::Null, update: crate::selfupdate::SelfUpdate::open(&layout),
                    node_update: crate::nodeupdate::NodeUpdate::open(&layout), move_state: Value::Null,
                    rescue: Default::default(), coord_clock: Default::default(),
-                   containers: None, gate: Default::default(), containers_caps: None, containers_report: Value::Null,
+                   containers: None, gate: Default::default(), containers_caps: None, reaped: false, containers_report: Value::Null,
                    prerequisites: None, make_runtime: None, runtimes_probed: None, images: None,
                    services: None, services_seen: Default::default(), services_caps: vec![], gpu_apis: Value::Null,
                    folders: crate::folders::Folders::load(&layout.state().join("folders.json")),
@@ -209,7 +211,7 @@ impl Agent {
         a.refresh_managed();                    // the defaults the agent starts from are tightened, too
         // the containers mode of the last run, until the coordinator answers: an on-demand or off node starts no VM now
         a.gate.load(&a.layout.home);
-        a.gate.configure(&json!({}));           // no earlier run: the table's defaults
+        a.gate.configure(&json!({}));           // no earlier run: the table's defaults, but no runtime before it answers
         a.configure_gate();                     // a machine's managed policy may turn containers off before that
         // macOS: the container runtime's report of an earlier run is stale (its VM may be gone); until a release wants
         // containers the facts show what the agent finds now
@@ -493,13 +495,15 @@ impl Agent {
     }
 
     /// The containers mode in force: the coordinator's (once it answered) with this machine's managed settings laid over;
-    /// before the coordinator answers, the last run's, unless a managed policy turns containers off.
+    /// before the coordinator answers, the last run's, unless a managed policy turns containers off. With neither (no
+    /// earlier run of 2.11 or later) the mode is not known yet, and no runtime is made before the coordinator answers.
     fn configure_gate(&mut self) {
         let policy = &self.directives["policy"];
         if self.settings_report.is_null() && crate::containers_gate::Mode::of(policy) != crate::containers_gate::Mode::Off {
             return;
         }
         self.gate.configure(policy);
+        self.gate.known = true;
         self.gate.save(&self.layout.home);
     }
 
@@ -1297,12 +1301,13 @@ impl Agent {
     /// The container runtimes, once a release has a module approved for containers and a runtime exists here (on
     /// Windows and macOS it always does: it reports what is missing itself). With containers = always the runtime is
     /// made (and comes up) here; on demand only when container work needs it (`govern_containers`, `claim`); with
-    /// containers = off never (one still held stops once its container jobs end).
+    /// containers = off never (one still held stops once its container jobs end). Nothing is made while the mode is not
+    /// known yet (a first start, or one after an upgrade from before 2.11, before the coordinator's first answer).
     fn container_runtime(&mut self) -> Option<crate::container_runtime::Containers> {
         if !self.release_wants_containers() {
             return None;
         }
-        if self.containers.is_none() && self.gate.mode != crate::containers_gate::Mode::Off && !self.gate.parked() {
+        if self.containers.is_none() && self.gate.known && self.gate.mode != crate::containers_gate::Mode::Off && !self.gate.parked() {
             self.make_containers();
         }
         self.containers.clone()
@@ -1494,9 +1499,14 @@ impl Agent {
     }
 
     /// At start no attempt is live, so a container still carrying the attempt label was left by an earlier run of the
-    /// agent (one that crashed or was killed while a job ran a container): remove it before any new work starts.
+    /// agent (one that crashed or was killed while a job ran a container): remove it before any new work starts. Once,
+    /// when this run first has a runtime (at start, or once the coordinator said the node runs one), before a claim.
     async fn reap_containers(&mut self) {
+        if self.reaped {
+            return;
+        }
         let Some(rts) = self.container_runtime() else { return };
+        self.reaped = true;
         let _ = tokio::task::spawn_blocking(move || {
             let removed: Vec<String> = rts.all().iter().flat_map(|rt| rt.reap()).collect();
             if !removed.is_empty() {
@@ -1926,6 +1936,7 @@ impl Agent {
                     self.status.put("update", self.node_update.status());
                     self.drain_services().await;
                     self.govern_containers().await;
+                    self.reap_containers().await;           // the first runtime of this run (the mode is known now)
                     if self.detection_due() {
                         self.detect_tools().await;
                         self.sync_services();
@@ -2293,9 +2304,10 @@ pub mod tests {
     async fn with_containers_off_no_runtime_runs_and_the_node_reports_it_disabled() {
         use std::sync::atomic::Ordering::SeqCst;
         let (_tmp, mut agent, made, stops, _) = container_agent("agent-ct-off");
-        assert!(agent.container_runtime().is_some(), "always (the default): made when the release needs containers");
+        agent.after_directives(&settings_directive(json!({"containers": "always"}), json!({}), 1)).await;
+        assert!(agent.container_runtime().is_some(), "always: made when the release needs containers");
         assert_eq!(made.lock().unwrap().len(), 1);
-        agent.after_directives(&settings_directive(json!({"containers": "off"}), json!({}), 1)).await;
+        agent.after_directives(&settings_directive(json!({"containers": "off"}), json!({}), 2)).await;
         assert_eq!(agent.gate.mode, crate::containers_gate::Mode::Off);
         agent.govern_containers().await;
         assert_eq!((stops.load(SeqCst), agent.containers.is_none()), (1, true), "the held runtime stopped");
@@ -2315,11 +2327,51 @@ pub mod tests {
         again.release = agent.release.clone();
         assert!(again.container_runtime().is_none());
         // back on: the override goes, and the runtime is made again
-        agent.after_directives(&settings_directive(json!({"containers": "always"}), json!({}), 2)).await;
+        agent.after_directives(&settings_directive(json!({"containers": "always"}), json!({}), 3)).await;
         assert!(agent.container_runtime().is_some());
         assert!(agent.container_state(agent.containers.clone().as_ref()));
         assert_eq!(agent.containers_report["state"], "running");
         assert_ne!(facts::collect(&agent.layout.home)["containers"]["state"], "disabled");
+    }
+
+    /// Before the coordinator's first answer the agent knows its node's `containers` setting only from the mode its last
+    /// run kept: with none (a new node, or one upgraded from before 2.11) it makes no runtime, nor at startup (2.11.0
+    /// started the VM of a node set to `off` there, as `always`, and then could not stop it). The first answer decides:
+    /// `off` makes none; `always` makes it at once, before any claim, and the next start makes it at startup.
+    #[tokio::test]
+    async fn no_runtime_starts_before_the_nodes_containers_setting_is_known() {
+        let (_tmp, mut agent, made, _, _) = container_agent("agent-ct-unknown");
+        assert!(!agent.gate.known, "no earlier run kept a mode");
+        agent.reap_containers().await;                      // what the agent does at startup
+        assert!(agent.container_runtime().is_none() && !agent.reaped);
+        agent.govern_containers().await;
+        agent.container_runtime();                          // each protection tick asks for it
+        assert!(made.lock().unwrap().is_empty(), "nothing made before the coordinator answers");
+        agent.after_directives(&settings_directive(json!({"containers": "off"}), json!({}), 1)).await;
+        assert!(agent.gate.known);
+        agent.container_runtime();                          // each protection tick asks for it
+        agent.govern_containers().await;
+        agent.reap_containers().await;
+        assert!(made.lock().unwrap().is_empty(), "off: never made");
+        // an `always` node: the runtime is made on the first answer (the next protection tick, then the reap before a claim)
+        let (_tmp2, mut always, made2, _, _) = container_agent("agent-ct-unknown-always");
+        always.reap_containers().await;
+        assert!(made2.lock().unwrap().is_empty());
+        always.after_directives(&settings_directive(json!({"containers": "always"}), json!({}), 1)).await;
+        always.container_runtime();
+        always.reap_containers().await;
+        assert_eq!((made2.lock().unwrap().len(), always.reaped), (1, true));
+        // its next run knows the mode: made at startup, without waiting for the coordinator
+        let mut again = Agent::open(Layout::new(always.layout.home.clone()), Some("https://127.0.0.1:9")).unwrap();
+        assert!(again.gate.known);
+        (again.make_runtime, again.release) = (always.make_runtime.clone(), always.release.clone());
+        again.reap_containers().await;
+        assert_eq!((made2.lock().unwrap().len(), again.reaped), (2, true));
+        // and an `off` node's next run makes none at startup
+        let mut off = Agent::open(Layout::new(agent.layout.home.clone()), Some("https://127.0.0.1:9")).unwrap();
+        (off.make_runtime, off.release) = (agent.make_runtime.clone(), agent.release.clone());
+        off.reap_containers().await;
+        assert!(off.container_runtime().is_none() && made.lock().unwrap().is_empty());
     }
 
     /// containers = on_demand: no runtime until the coordinator says container work waits (or a grant needs it); while

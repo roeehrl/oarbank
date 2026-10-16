@@ -65,6 +65,10 @@ pub enum Do {
 #[derive(Debug, Default)]
 pub struct Gate {
     pub mode: Mode,
+    /// Whether the mode is the owner's: the last run's (its state file), the coordinator's (its first answer) or a
+    /// machine's managed policy. Until then the agent makes no runtime: `always`, the table's default, is only a guess,
+    /// and a node set to `off` or `on_demand` would start its VM at startup.
+    pub known: bool,
     pub idle_stop: Duration,
     /// The coordinator's last `containers_wanted`.
     pub wanted: bool,
@@ -103,6 +107,7 @@ impl Gate {
     pub fn load(&mut self, home: &Path) {
         if let Some(v) = std::fs::read(mode_file(home)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
             self.configure(&v);
+            self.known = v["containers"].is_string();
         }
     }
 
@@ -288,11 +293,12 @@ mod tests {
         g.save(tmp.path());
         let mut h = Gate::default();
         h.load(tmp.path());
-        assert_eq!((h.mode, h.idle_stop), (Mode::Off, Duration::from_secs(120)));
+        assert_eq!((h.mode, h.idle_stop, h.known), (Mode::Off, Duration::from_secs(120), true));
+        // no earlier run (a new node, or one upgraded from before 2.11): the default, but not known to be the owner's
         let mut fresh = Gate::default();
         fresh.load(&tmp.path().join("none"));
         fresh.configure(&json!({}));
-        assert_eq!((fresh.mode, fresh.idle_stop), (Mode::Always, Duration::from_secs(600)));
+        assert_eq!((fresh.mode, fresh.idle_stop, fresh.known), (Mode::Always, Duration::from_secs(600), false));
     }
 
     #[test]

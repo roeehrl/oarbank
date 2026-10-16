@@ -4,6 +4,17 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+### Fixed
+
+- **A node set to `containers = off` or `on_demand` no longer starts its container VM when the agent starts.** An
+  agent with no kept `containers` mode (the first start after upgrading to 2.11.0, or a new node) took the default,
+  `always`, and started its Colima VM (or WSL containers session) before the coordinator's first answer. It now starts
+  nothing until that answer says the mode, and an `always` node then starts its runtime at once. A stop asked while the
+  runtime is still starting (`off` arriving, the on-demand idle stop, a resize) now wins: the start stops the VM it
+  brought up. Before, the VM came up anyway and kept running while the node reported containers `disabled`.
+
 ## 2.11.0 (2026-10-15)
 
 Module SDK: **oarbank-sdk 1.8.0**, which adds the cleanup stage (`stages[].cleanup`, `requires.core >= 2.11`). This
