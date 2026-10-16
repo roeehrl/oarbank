@@ -57,6 +57,26 @@ def bundle(src: Path) -> Path:
     return _BUNDLES[src]
 
 
+COORDINATOR_COMMAND = Path(__file__).parents[1] / "deploy" / "oarbankd" / "coordinator-command.sh"
+
+
+def coordinator_command(dest: Path, current: Path, package: Path, system: str = "Darwin") -> Path:
+    """deploy/oarbankd/coordinator-command.sh (`oarbank` and `oarbank-setup` on a coordinator package's PATH) at `dest`,
+    as `system` (Darwin or Linux) runs it, with PROGRAMS/current and the package's build rewritten into a scratch tree."""
+    text = COORDINATOR_COMMAND.read_text()
+    paths = {"Darwin": ("/Library/Oarbank/Coordinator/current", "/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator"),
+             "Linux": ("/opt/oarbank/coordinator-builds/current", "/opt/oarbank/coordinator")}
+    for real, fake in zip(paths[system], (current, package)):
+        assert text.count(f'"{real}"') == 1, real
+        text = text.replace(f'"{real}"', f'"{fake}"')
+    assert text.count('case "$(uname -s)" in') == 1
+    text = text.replace('case "$(uname -s)" in', f'case {system} in')
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    dest.chmod(0o755)
+    return dest
+
+
 def apple_tool(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     """An Apple toolchain command (xcrun swiftc, xcrun swift) with its scratch in a directory removed when it returns:
     swiftc's driver leaves a TemporaryDirectory.* behind in the temp directory on every run."""

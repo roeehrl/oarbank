@@ -4,6 +4,21 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+### Fixed
+
+- **`oarbank` on the PATH is the running coordinator's CLI after a coordinator self-update.** The macOS pkg linked
+  `/usr/local/bin/oarbank` and `oarbank-setup` into Oarbank Coordinator.app, and the deb and rpm linked `/usr/bin/oarbank`
+  and `oarbank-setup` into `/opt/oarbank/coordinator`. A self-update installs its build under
+  `/Library/Oarbank/Coordinator` (`/opt/oarbank/coordinator-builds` on Linux) and never changes the package, so after
+  the fleet update to 2.11.0 the services ran 2.11.0 while `oarbank` was still 2.10.4 and refused the new options, such
+  as `oarbank node approve --state paused` ("unrecognized arguments"). The commands on the PATH now run the build the
+  services run (`current` there, which the self-update moves and a rollback moves back), and the package's own before
+  setup, as the Windows MSI's `oarbank.cmd` already did. A coordinator installed from an earlier package gets this
+  with its next package install; until then, run `/Library/Oarbank/Coordinator/current/bin/oarbank`
+  (`/opt/oarbank/coordinator-builds/current/bin/oarbank` on Linux).
+
 ## 2.11.0 (2026-10-15)
 
 Module SDK: **oarbank-sdk 1.8.0**, which adds the cleanup stage (`stages[].cleanup`, `requires.core >= 2.11`). This

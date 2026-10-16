@@ -102,10 +102,14 @@ Python, which runs as an app, makes macOS ask about "Python"; the coordinator's 
 answered yet ([architecture.md](design/architecture.md#network-and-access)).
 
 **Command line.** The packages put the coordinator's CLI on the PATH as `oarbank` (open a new terminal after
-installing). On macOS `/usr/local/bin/oarbank` links to
-`/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin/oarbank` (an existing `oarbank` there that is
-not a link is left alone); on Linux `/usr/bin/oarbank` links to `/opt/oarbank/coordinator/bin/oarbank`. On Windows the
-MSI adds `C:\Program Files\Oarbank\Coordinator\package\cli` to the system PATH: its `oarbank.cmd` runs
+installing). It is always the CLI of the build the coordinator's services run, also after the coordinator updated
+itself to a build the package never installed: on macOS `/usr/local/bin/oarbank` links to
+`/Applications/Oarbank Coordinator.app/Contents/Resources/cli/oarbank` (an existing `oarbank` there that is not a link
+is left alone), which runs `/Library/Oarbank/Coordinator/current/bin/oarbank`; on Linux `/usr/bin/oarbank` links to
+`/usr/lib/oarbank/cli/oarbank`, which runs `/opt/oarbank/coordinator-builds/current/bin/oarbank`. Before setup, with no
+`current` yet, they run the package's own (`…/Contents/Resources/coordinator/bin/oarbank`,
+`/opt/oarbank/coordinator/bin/oarbank`). `oarbank-setup` on the PATH does the same. On Windows the MSI adds
+`C:\Program Files\Oarbank\Coordinator\package\cli` to the system PATH: its `oarbank.cmd` runs
 `C:\Program Files\Oarbank\Coordinator\current\bin\oarbank.cmd`, the build the services use (before setup, the
 package's own). `oarbank` and the full path behave the same: the CLI uses the coordinator's local admin channel when
 the account that runs it is one of the coordinator's owners (the owners' group on macOS and Linux; an elevated prompt

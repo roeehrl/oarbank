@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import apple_tool
+from helpers import apple_tool, coordinator_command
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -69,13 +69,16 @@ def test_application_launcher_compiles(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# `oarbank` and `oarbank-setup` on the PATH: the pkg's postinstall links them in /usr/local/bin, refreshes an installed
+# `oarbank` and `oarbank-setup` on the PATH: the pkg's postinstall links them in /usr/local/bin to the app's forwarders
+# (the build the services run, /Library/Oarbank/Coordinator/current, else the app's own), refreshes an installed
 # system service and migrates an earlier release's per-user coordinator. Nothing here installs: the postinstall runs
 # with its system paths rewritten into pytest's temporary directory.
 
 POSTINSTALL = REPO / 'deploy/macos/coordinator/scripts/postinstall'
 PACKAGER = REPO / 'scripts/package-coordinator-macos.sh'
 APP_BIN = '/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator/bin'
+APP_CLI = '/Applications/Oarbank Coordinator.app/Contents/Resources/cli'
+PROGRAMS = '/Library/Oarbank/Coordinator'
 
 
 def test_the_coordinator_pkg_ships_the_postinstall_and_no_usr_local_payload():
@@ -88,6 +91,8 @@ def test_the_coordinator_pkg_ships_the_postinstall_and_no_usr_local_payload():
     assert '$WORK/root/usr' not in text and 'root/usr/local' not in text
     # each command runs through a link to it before it is packaged
     assert 'ln -s "$ROOT/bin/$cmd" "$WORK/linked/$cmd"' in text and '"$WORK/linked/$cmd" --help' in text
+    # the app carries the forwarders the links name, one per command
+    assert 'install -m 755 "$REPO/deploy/oarbankd/coordinator-command.sh" "$APP/Contents/Resources/cli/$cmd"' in text
     if sys.platform != 'win32':                         # no execute bit on Windows
         assert POSTINSTALL.stat().st_mode & 0o111 == 0o111
 
@@ -96,8 +101,8 @@ def test_the_postinstall_links_the_commands_and_only_refreshes_or_migrates():
     assert subprocess.run(['sh', '-n', str(POSTINSTALL)]).returncode == 0
     text = POSTINSTALL.read_text()
     code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
-    assert f'ROOT="{APP_BIN[:-len("/bin")]}"' in code and 'BIN="$ROOT/bin"' in code
-    assert 'for name in oarbank oarbank-setup; do' in code and '/bin/ln -sfn "$BIN/$name" "$link"' in code
+    assert f'ROOT="{APP_BIN[:-len("/bin")]}"' in code and 'BIN="$ROOT/bin"' in code and f'CLI="{APP_CLI}"' in code
+    assert 'for name in oarbank oarbank-setup; do' in code and '/bin/ln -sfn "$CLI/$name" "$link"' in code
     # a first install starts nothing (the wizard does, with the person's address); never a new fleet from here
     # an upgrade's refresh runs this build, also after a coordinator self-update ran another (fleet-updates.md, D58)
     refresh = '/bin/bash "$ROOT/install-oarbankd.sh" --refresh --installed "$ROOT"'
@@ -122,6 +127,8 @@ class Mac:
         self.root = tmp / 'mac with spaces'
         self.bin = self.root / 'usr/local/bin'
         self.app_bin = Path(str(self.root) + APP_BIN)
+        self.app_cli = Path(str(self.root) + APP_CLI)
+        self.programs = Path(str(self.root) + PROGRAMS)
         text = POSTINSTALL.read_text()
         text = text.replace('/usr/local/bin', str(self.bin)).replace('/Applications/', str(self.root) + '/Applications/')
         text = text.replace('/Library/Application Support', str(self.root) + '/Library/Application Support')
@@ -142,6 +149,21 @@ class Mac:
         self.app_bin.mkdir(parents=True)
         _launcher(root, 'oarbank', 'oarbank.cli.main')
         _launcher(root, 'oarbank-setup', 'oarbank.setup')
+        for name in ('oarbank', 'oarbank-setup'):        # as package-coordinator-macos.sh installs them
+            coordinator_command(self.app_cli / name, self.programs / 'current', root)
+        return root
+
+    def unpacked(self, version: str) -> Path:
+        """A build a coordinator self-update unpacked: PROGRAMS/<v>-<sha12> (coordupdate.py), its own launchers."""
+        root = self.programs / f'{version}-0123456789ab'
+        (root / 'python/bin').mkdir(parents=True)
+        (root / 'python/bin/python3.12').write_text(
+            f'#!/bin/sh\necho "interpreter=$0"\necho "version={version}"\nfor a in "$@"; do echo "arg=$a"; done\n')
+        (root / 'python/bin/python3.12').chmod(0o755)
+        (root / 'bin').mkdir()
+        _launcher(root, 'oarbank', 'oarbank.cli.main')
+        _launcher(root, 'oarbank-setup', 'oarbank.setup')
+        (root / 'oarbank-coordinator.json').write_text(json.dumps({'format': 1, 'version': version}))
         return root
 
     def run(self):
@@ -157,8 +179,9 @@ def test_the_postinstall_links_both_commands_and_they_run_the_apps_build(tmp_pat
     out = mac.run()
     assert out.returncode == 0 and out.stdout == '' and out.stderr == '', out
     for name in ('oarbank', 'oarbank-setup'):
-        assert os.readlink(mac.bin / name) == str(mac.app_bin / name)
-    # on the PATH, through the link: the app's interpreter, the CLI's module, the arguments intact
+        assert os.readlink(mac.bin / name) == str(mac.app_cli / name)
+    # on the PATH, through the link, before setup (no PROGRAMS/current): the app's interpreter, the CLI's module, the
+    # arguments intact
     env = {'PATH': f'{mac.bin}:/usr/bin:/bin', 'HOME': str(tmp_path)}
     cli = subprocess.run(['oarbank', 'join-code', '--label', 'a b'], env=env, capture_output=True, text=True, check=True)
     lines = cli.stdout.splitlines()
@@ -172,6 +195,45 @@ def test_the_postinstall_links_both_commands_and_they_run_the_apps_build(tmp_pat
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX shell')
+def test_the_commands_on_the_path_follow_the_build_a_self_update_installed(tmp_path):
+    """After a coordinator self-update the services run PROGRAMS/<v>-<sha12> (PROGRAMS/current names it); the app, and
+    the CLI linked to its bin/, stayed the package's version (2.11.0 and earlier: `oarbank node approve --state paused`
+    was refused by the 2.10.4 CLI on a 2.11.0 coordinator). The commands on the PATH now run the build `current` names,
+    also after a rollback flips it back."""
+    mac = Mac(tmp_path)
+    build = mac.build()
+    assert mac.run().returncode == 0
+    env = {'PATH': f'{mac.bin}:/usr/bin:/bin', 'HOME': str(tmp_path)}
+    (build / 'oarbank-coordinator.json').write_text(json.dumps({'format': 1, 'version': '2.10.4'}))
+
+    def ran(*argv):
+        return subprocess.run(argv, env=env, capture_output=True, text=True, check=True).stdout.splitlines()
+    # the system service on the package's build: install-oarbankd --installed points current at it (absolute)
+    mac.programs.mkdir(parents=True)
+    os.symlink(build, mac.programs / 'current')
+    assert ran('oarbank', 'fleet')[0] == f'interpreter={build.resolve()}/python/bin/python3.12'
+    # the self-update flips current to the build it unpacked (a sibling by name)
+    new = mac.unpacked('2.11.0')
+    tmp = mac.programs / '.current.flip'
+    os.symlink(new.name, tmp)
+    os.replace(tmp, mac.programs / 'current')
+    out = ran('oarbank', 'node', 'approve', 'mini', '--state', 'paused')
+    assert out[:2] == [f'interpreter={new.resolve()}/python/bin/python3.12', 'version=2.11.0'], out
+    assert out[-5:] == ['arg=node', 'arg=approve', 'arg=mini', 'arg=--state', 'arg=paused']
+    assert ran(str(mac.app_cli / 'oarbank'), 'fleet')[:2] == out[:2]           # the forwarder by its full path too
+    setup = ran('oarbank-setup', '--no-browser')
+    assert setup[:2] == out[:2] and setup[-3:] == ['arg=--root', f'arg={new.resolve()}', 'arg=--no-browser'], setup
+    # a rollback flips current back to the package's build
+    os.symlink(build, tmp)
+    os.replace(tmp, mac.programs / 'current')
+    assert ran('oarbank', 'fleet')[0] == f'interpreter={build.resolve()}/python/bin/python3.12'
+    # a current that is no coordinator build (or names nothing) is never run: the app's own
+    os.unlink(mac.programs / 'current')
+    os.symlink(tmp_path / 'nowhere', mac.programs / 'current')
+    assert ran('oarbank', 'fleet')[0] == f'interpreter={build.resolve()}/python/bin/python3.12'
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX shell')
 def test_the_postinstall_replaces_links_keeps_other_files_and_the_directory(tmp_path):
     mac = Mac(tmp_path)
     mac.bin.mkdir(parents=True)
@@ -180,11 +242,11 @@ def test_the_postinstall_replaces_links_keeps_other_files_and_the_directory(tmp_
     (mac.bin / 'oarbank-setup').write_text('#!/bin/sh\necho mine\n')
     out = mac.run()
     assert out.returncode == 0, out
-    assert os.readlink(mac.bin / 'oarbank') == str(mac.app_bin / 'oarbank')
+    assert os.readlink(mac.bin / 'oarbank') == str(mac.app_cli / 'oarbank')
     assert (mac.bin / 'oarbank-setup').read_text() == '#!/bin/sh\necho mine\n'
     assert 'oarbank-setup is not a link and stays as it is' in out.stdout
     assert mac.bin.stat().st_mode & 0o777 == 0o775
-    assert mac.run().returncode == 0 and os.readlink(mac.bin / 'oarbank') == str(mac.app_bin / 'oarbank')  # idempotent
+    assert mac.run().returncode == 0 and os.readlink(mac.bin / 'oarbank') == str(mac.app_cli / 'oarbank')  # idempotent
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX shell')

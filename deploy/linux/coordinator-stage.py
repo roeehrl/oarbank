@@ -79,7 +79,8 @@ def stage(repo: Path, archive: Path, version: str, work: Path) -> None:
     values = {"ARCH": doc["platform"].removeprefix("linux-"), "VERSION": version,
               "ROOT": str(root), "TRAY": str(deploy / "coordinator-tray.py"), "AUTOSTART": str(deploy / "coordinator-autostart.py"), "ICON": str(repo / "docs/assets/logo.svg"), "DESKTOP": str(deploy / "coordinator-desktop.desktop"),
               "REMOVE": str(deploy / "coordinator-remove.py"), "PREREMOVE": str(deploy / "coordinator-preremove.sh"),
-              "POSTINSTALL": str(deploy / "coordinator-postinstall.sh")}
+              "POSTINSTALL": str(deploy / "coordinator-postinstall.sh"),
+              "COMMAND": str(repo / "deploy/oarbankd/coordinator-command.sh")}
     template = (deploy / "coordinator-nfpm.yaml").read_text()
     config = re.sub(r"\$\{(\w+)\}", lambda match: json.dumps(values[match[1]]), template)
     (work / "nfpm.yaml").write_text(config)

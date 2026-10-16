@@ -2,7 +2,7 @@
 # Wrap a compiled coordinator build in a native Installer package. No host installation.
 # scripts/package-coordinator-macos.sh [archive]
 # Its postinstall (deploy/macos/coordinator/scripts) links /usr/local/bin/oarbank and oarbank-setup to the app's
-# launchers, refreshes an installed system service on the new build, and moves an earlier release's per-user
+# Contents/Resources/cli (the running build's commands, PROGRAMS/current, else the app's own), refreshes an installed system service on the new build, and moves an earlier release's per-user
 # coordinator to the system service (docs/design/coordinator-system-service.md); a first install starts no service.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,11 +25,14 @@ tar -xzf "$ARCHIVE" -C "$ROOT"
 PY="$ROOT/python/bin/python3.12"
 "$PY" -I -B -c 'import json, sys; from pathlib import Path; m=json.loads((Path(sys.argv[1])/"oarbank-coordinator.json").read_text()); assert m["format"] == 1 and m["version"] == sys.argv[2] and m["platform"] == sys.argv[3]; import oarbank.setup' "$ROOT" "$VERSION" "$PLATFORM"
 [[ -x "$ROOT/install-oarbankd.sh" && -x "$ROOT/bin/oarbank-setup" ]] || { echo "build has no guided setup" >&2; exit 1; }
-# the postinstall puts these on the PATH as links (/usr/local/bin): each must run through a link to it, as by its path
-mkdir "$WORK/linked"
+# the postinstall puts these on the PATH as links (/usr/local/bin) to cli/<name>, which runs the build the services run
+# (/Library/Oarbank/Coordinator/current, which a coordinator self-update moves) or this one's (deploy/oarbankd/
+# coordinator-command.sh); each launcher must run through a link to it, as by its path
+mkdir "$WORK/linked" "$APP/Contents/Resources/cli"
 for cmd in oarbank oarbank-setup; do
     ln -s "$ROOT/bin/$cmd" "$WORK/linked/$cmd"
     "$WORK/linked/$cmd" --help >/dev/null || { echo "bin/$cmd does not run through a link to it" >&2; exit 1; }
+    install -m 755 "$REPO/deploy/oarbankd/coordinator-command.sh" "$APP/Contents/Resources/cli/$cmd"
 done
 cp "$REPO/deploy/icons/oarbank.icns" "$REPO/deploy/icons/oarbank-coordinator-symbolic.png" "$REPO/deploy/icons/oarbank-coordinator-symbolic@2x.png" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
