@@ -781,6 +781,24 @@ pub async fn launcher_stop_event() {
     }
 }
 
+/// Keep this process's standard handles out of what it starts (Windows). A parent that reads our output hands us
+/// inheritable handles, and every process we start inherits every inheritable handle, whatever its own stdio is: a child
+/// that outlives the agent (a GPU probe stuck in a driver for up to its minute, a doctor or a tool's version command
+/// under its sandbox shim) would hold the agent's stdout and stderr open after it ended, and whoever reads them (the
+/// service's log, a test) would wait for that child. A child given our output on purpose (`Stdio::inherit`) still gets
+/// it: std duplicates the handle for that child alone.
+#[cfg(windows)]
+pub fn keep_std_handles() {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let h = unsafe { GetStdHandle(which) };
+        if !h.is_null() && h != INVALID_HANDLE_VALUE {
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
+}
+
 /// Start `cmd` as the leader of a process container of its own, in it before it runs a line, so nothing it starts is
 /// ever outside: a process group and, on Linux with a delegated cgroup, a cgroup, both entered between fork and exec;
 /// on Windows a Job Object (started suspended, put in the job, resumed). When the container cannot be made the spawn
@@ -982,6 +1000,53 @@ mod tests {
         assert!(nudge.send(0));
         assert_eq!(unsafe { WaitForSingleObject(h, 0) }, WAIT_OBJECT_0);
         assert_eq!(unsafe { WaitForSingleObject(h, 0) }, WAIT_TIMEOUT, "one nudge wakes one wait");
+    }
+
+    /// The test binary in the agent's role (`output_holder_role`), its output read to its end: the pid of the ping it
+    /// left running, and whether that ping was still running when the output ended.
+    fn agent_leaving_a_child(keep: bool, pings: u32) -> (i32, bool) {
+        use std::io::Read;
+        let mut agent = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["sys::tests::output_holder_role", "--exact", "--ignored", "--nocapture", "--quiet"])
+            .env("OARBANK_TEST_OUTPUT_HOLDER", format!("{}:{pings}", if keep { "keep" } else { "leak" }))
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let mut out = String::new();
+        let _ = agent.stdout.take().unwrap().read_to_string(&mut out);            // until no process holds it
+        let _ = agent.wait();
+        let pid = out.lines().find_map(|l| l.strip_prefix("child pid=")).and_then(|p| p.trim().parse::<i32>().ok());
+        let pid = pid.unwrap_or_else(|| panic!("no child pid in {out:?}"));
+        let running = alive(pid);
+        signal_process(pid, Sig::Kill);
+        (pid, running)
+    }
+
+    /// What the agent starts does not hold the agent's output open: its reader sees the end when the agent ends, not
+    /// when a child it left running does. Without `keep_std_handles` the child holds it (the control: the reader sees
+    /// the end only once the short ping has ended).
+    #[test]
+    fn a_child_left_running_does_not_hold_the_agents_output_open() {
+        let (pid, running) = agent_leaving_a_child(true, 120);
+        assert!(running, "the output ended only when the agent's child {pid} did");
+        let (pid, running) = agent_leaving_a_child(false, 3);
+        assert!(!running, "the control: the inherited output stays open while the child {pid} runs");
+    }
+
+    #[test]
+    #[ignore]
+    fn output_holder_role() {
+        let Some((how, pings)) = std::env::var("OARBANK_TEST_OUTPUT_HOLDER").ok().and_then(|v| {
+            v.split_once(':').map(|(h, n)| (h.to_string(), n.to_string()))
+        }) else {
+            return;
+        };
+        if how == "keep" {
+            keep_std_handles();
+        }
+        let ping = format!(r"{}\System32\PING.EXE", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()));
+        let child = std::process::Command::new(ping).args(["-n", pings.as_str(), "127.0.0.1"]).stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        println!("child pid={}", child.id());
     }
 
     /// A console child brings a conhost.exe into its Job Object; with none, the job holds the child alone (a
