@@ -4,6 +4,19 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+### Fixed
+
+- **A Windows node's fleet update is no longer recorded as failed after it installed.** The MSI installed the release,
+  and its setup and the restarted launcher made the release's agent current and started it. The update runner then
+  installed that agent again, and Windows refuses to replace the file of a running program, so the step failed with
+  "the package's agent could not be made current: Access is denied. (os error 5)". The node ran the new release, but
+  the rollout counted a failure against the ring and the runner tried to roll the node back. An agent build that is
+  already installed is no longer written again, and a `current` that already names the release's agent counts as
+  success. Renames that Windows refuses for a moment, while another process such as an antivirus scan has the file
+  open, are retried for up to 30 s.
+
 ## 2.11.0 (2026-10-15)
 
 Module SDK: **oarbank-sdk 1.8.0**, which adds the cleanup stage (`stages[].cleanup`, `requires.core >= 2.11`). This
