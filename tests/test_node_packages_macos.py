@@ -309,9 +309,10 @@ def test_the_update_runner_job_is_loaded_with_its_trust_and_never_booted_out_whi
         # root's trust pinned from the agent's anchors before the job (whose RunAtLoad starts the runner) loads
         assert "oarbank-launcher update-trust --from-agent HOME=" in calls
         assert calls.index("update-trust --from-agent") < calls.index(f"bootstrap system {mac.root}{job}")
-        # its state directory and log directory, root's alone, before launchd creates the log
-        for d in (mac.support / "update", mac.support / "update/logs"):
-            assert d.is_dir() and d.stat().st_mode & 0o777 == 0o700
+        # its state directory, traversable (the agent reads the trust's marker in it), and its log directory, root's
+        # alone, before launchd creates the log
+        for d, mode in ((mac.support / "update", 0o711), (mac.support / "update/logs", 0o700)):
+            assert d.is_dir() and d.stat().st_mode & 0o777 == mode, d
     # the runner installing this very pkg: its job stays as it is (booting it out would end the install)
     mac = Mac(tmp_path / "running")
     out, calls = mac.run(COMMAND_LINE_INSTALL="1", RUNNER_STATE="running")
@@ -319,6 +320,20 @@ def test_the_update_runner_job_is_loaded_with_its_trust_and_never_booted_out_whi
     assert "dev.codonic.oarbank.agent.update" not in calls.replace("launchctl print system/dev.codonic.oarbank.agent.update", "")
     assert "Oarbank: the update runner is running; its job reloads at the next restart" in out.stdout
     assert "update-trust --from-agent" in calls
+
+
+@unix
+def test_an_upgrade_makes_an_owner_only_update_directory_traversable_again(tmp_path):
+    """A 2.10 pkg left the runner's state directory 0700 on every install, hiding the trust's marker from the agent: the
+    next install makes it 0711 again (its logs stay root's alone), before update-trust and the runner's job."""
+    mac = Mac(tmp_path)
+    (mac.support / "update/logs").mkdir(parents=True)
+    (mac.support / "update").chmod(0o700)
+    (mac.support / "update/logs").chmod(0o755)
+    out, calls = mac.run(COMMAND_LINE_INSTALL="1")
+    assert out.returncode == 0 and "update-trust --from-agent" in calls
+    assert (mac.support / "update").stat().st_mode & 0o777 == 0o711
+    assert (mac.support / "update/logs").stat().st_mode & 0o777 == 0o700
 
 
 @unix
