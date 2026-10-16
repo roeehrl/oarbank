@@ -29,11 +29,19 @@ contents:
   - src: ${ROOT}
     dst: /opt/oarbank/coordinator
     type: tree
-  # The operator CLI and the setup helper on the PATH; both launchers follow the link back to the payload.
-  - src: /opt/oarbank/coordinator/bin/oarbank
+  # The operator CLI and the setup helper on the PATH: each runs that command of the build the services run
+  # (/opt/oarbank/coordinator-builds/current, which a coordinator self-update moves), else the payload's own
+  # (deploy/oarbankd/coordinator-command.sh).
+  - src: ${COMMAND}
+    dst: /usr/lib/oarbank/cli/oarbank
+    file_info: {mode: 0755}
+  - src: ${COMMAND}
+    dst: /usr/lib/oarbank/cli/oarbank-setup
+    file_info: {mode: 0755}
+  - src: /usr/lib/oarbank/cli/oarbank
     dst: /usr/bin/oarbank
     type: symlink
-  - src: /opt/oarbank/coordinator/bin/oarbank-setup
+  - src: /usr/lib/oarbank/cli/oarbank-setup
     dst: /usr/bin/oarbank-setup
     type: symlink
   - src: ${DESKTOP}

@@ -175,6 +175,14 @@ never rewrites what it runs. oarbankd only asks, and a runner of root's does the
   runs the new build's `install-oarbankd.sh --refresh --installed <build>`, which writes the services and the record
   for it. A package upgrade's postinstall refreshes with `--installed <its payload>`, so a package installed after a
   self-update runs the package's build, not the self-updated one.
+- **The commands on the PATH follow `current`.** The packages never put a build's own `bin/` on the PATH: `oarbank` and
+  `oarbank-setup` are forwarders of the package's (`deploy/oarbankd/coordinator-command.sh`: the macOS pkg links
+  `/usr/local/bin/<name>` to `Oarbank Coordinator.app/Contents/Resources/cli/<name>`, the deb and rpm link
+  `/usr/bin/<name>` to `/usr/lib/oarbank/cli/<name>`; Windows' `package\cli\oarbank.cmd`) that run
+  `PROGRAMS/current/bin/<name>` when `current` names a coordinator build, else the package's own. A self-update, its
+  rollback and a package upgrade move `current`, and with it the CLI on the PATH: it is always the running coordinator's
+  version. Until 2.11.0 they linked to the package's `bin/`, so after a self-update the CLI on the PATH stayed the
+  package's version.
 - **Its own state, root's.** `<system data>/coordinator-update/` (0700):
   - `trust.json`: the owner keys. `coordupdate trust --from-home` copies them from the home's owner anchors (or its
     pinned release key) only when none are pinned; `install-oarbankd` runs it at every install and refresh, and the

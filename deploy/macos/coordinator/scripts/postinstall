@@ -1,11 +1,13 @@
 #!/bin/sh
 # Oarbank coordinator pkg: runs as root once the payload is in place (docs/design/coordinator-system-service.md).
 #
-#   - The coordinator's commands on the PATH: /usr/local/bin/oarbank -> the app's bundled CLI, /usr/local/bin/oarbank-setup
-#     -> the app's guided-setup helper. Both are shell launchers that follow the link back to the app, so they run the
-#     same as by their full path. A link (an earlier package's, or one made by hand) is replaced; a regular file of the
-#     same name is someone else's and stays. Only the link is created: /usr/local/bin keeps its owner and mode when it
-#     exists (a payload entry would reset them).
+#   - The coordinator's commands on the PATH: /usr/local/bin/oarbank (the CLI) and /usr/local/bin/oarbank-setup (the
+#     guided-setup helper) link to the app's Contents/Resources/cli/<name> (deploy/oarbankd/coordinator-command.sh). Each
+#     runs that command of the build the services run, /Library/Oarbank/Coordinator/current, which a coordinator
+#     self-update moves to the build it unpacked (and a rollback back), and the app's own before setup. Linked to the
+#     app's bin/ (2.11.0 and earlier), they kept running the app's build after a self-update. A link (an earlier
+#     package's, or one made by hand) is replaced; a regular file of the same name is someone else's and stays. Only
+#     the link is created: /usr/local/bin keeps its owner and mode when it exists (a payload entry would reset them).
 #   - An upgrade of the system service (its record exists): the services are written again from the record and restart
 #     on the new build (install-oarbankd.sh --refresh --installed: this build, also after a coordinator self-update ran
 #     another one). The refresh also pins the update runner's trust from the home's owner keys when none is pinned yet
@@ -26,16 +28,17 @@
 set -u
 ROOT="/Applications/Oarbank Coordinator.app/Contents/Resources/coordinator"
 BIN="$ROOT/bin"
+CLI="/Applications/Oarbank Coordinator.app/Contents/Resources/cli"
 LINKS="/usr/local/bin"
 RECORD="/Library/Application Support/Oarbank/coordinator-service.json"
 /bin/mkdir -p "$LINKS"
 for name in oarbank oarbank-setup; do
     link="$LINKS/$name"
     if [ -e "$link" ] && [ ! -L "$link" ]; then
-        echo "Oarbank: $link is not a link and stays as it is; the coordinator's command is $BIN/$name"
+        echo "Oarbank: $link is not a link and stays as it is; the coordinator's command is $CLI/$name"
         continue
     fi
-    /bin/ln -sfn "$BIN/$name" "$link" || echo "Oarbank: could not link $link to $BIN/$name"
+    /bin/ln -sfn "$CLI/$name" "$link" || echo "Oarbank: could not link $link to $CLI/$name"
 done
 
 DATA="/Library/Application Support/Oarbank"

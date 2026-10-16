@@ -101,9 +101,13 @@ class PackagingTests(unittest.TestCase):
         # install and upgrade refresh or migrate an existing coordinator (coordinator-system-service.md); removal stops it
         self.assertIn(f"postinstall: {json.dumps(str(DEPLOY / 'coordinator-postinstall.sh'))}", config)
         self.assertIn("preremove:", config)
-        self.assertIn("dst: /usr/bin/oarbank-setup\n    type: symlink", config)
-        # the operator CLI on the PATH: a link to the payload's launcher, which follows it back (no install hook)
-        self.assertIn("- src: /opt/oarbank/coordinator/bin/oarbank\n    dst: /usr/bin/oarbank\n    type: symlink\n", config)
+        # the operator CLI and the setup helper on the PATH: links to the package's forwarders, which run the build the
+        # services run (PROGRAMS/current, moved by a coordinator self-update), else the payload's (no install hook)
+        command = json.dumps(str(REPO / "deploy/oarbankd/coordinator-command.sh"))
+        for name in ("oarbank", "oarbank-setup"):
+            self.assertIn(f"- src: {command}\n    dst: /usr/lib/oarbank/cli/{name}\n    file_info: {{mode: 0755}}\n", config)
+            self.assertIn(f"- src: /usr/lib/oarbank/cli/{name}\n    dst: /usr/bin/{name}\n    type: symlink\n", config)
+        self.assertNotIn("dst: /usr/bin/oarbank\n", config.replace("- src: /usr/lib/oarbank/cli/oarbank\n    dst: /usr/bin/oarbank\n", ""))
         desktop = (DEPLOY / "coordinator-desktop.desktop").read_text()
         self.assertIn("Name=Oarbank Coordinator\n", desktop)
         self.assertIn("Exec=/usr/bin/oarbank-coordinator\n", desktop)

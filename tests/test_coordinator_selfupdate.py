@@ -27,7 +27,7 @@ from oarbank.coordinator import clock, coordmove, coordself
 from oarbank.coordinator import config as C
 from oarbank.coordinator.db import DB
 
-from helpers import agent_client
+from helpers import agent_client, coordinator_command
 
 PLATFORM = portable.host_platform()
 FLEET_SCHEMA = """
@@ -56,6 +56,7 @@ def archive(path: Path, version: str, platform: str = PLATFORM, behavior: str = 
     members = {"oarbank-coordinator.json": (json.dumps({"format": 1, "version": version, "platform": platform,
                                                         "exec": ["bin/oarbankd"]}), 0o644),
                "bin/oarbankd": (f"#!/bin/sh\necho '{summary}'\nexit {0 if selftest_ok else 1}\n", 0o755),
+               "bin/oarbank": (f"#!/bin/sh\necho 'oarbank {version}' \"$@\"\n", 0o755),
                "behavior": (behavior, 0o644)}
     with tarfile.open(path, "w:gz") as t:
         for name, (text, mode) in members.items():
@@ -714,3 +715,50 @@ def test_links_planted_in_the_spool_send_no_write_or_read_elsewhere(machine):
         os.symlink(victim, m.home / f"oarbank.sqlite3{side}")
     coordupdate._fix_sidecars(m.home / "oarbank.sqlite3", {"uid": 0, "gid": 0, "mode": 0o600})
     assert victim.read_text() == "root's file\n" and m.svc.calls == []
+
+
+@posix_only
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_the_cli_on_the_path_follows_the_self_update_and_its_rollback(machine, system):
+    """A native package installed the system service: `current` names the package's build (an absolute link,
+    install-oarbankd --installed), and the package put `oarbank` on the PATH. After a self-update the services run
+    PROGRAMS/<v>-<sha12>; the package's own build stays its version. The CLI on the PATH runs the build `current` names
+    (deploy/oarbankd/coordinator-command.sh): the new version once the update is committed, the package's again when a
+    probation fails and the runner flips `current` back, and the package's before any setup."""
+    m = machine()
+    package = m.tmp / "package with spaces" / "coordinator"
+    with tarfile.open(archive(m.tmp / "package.tar.gz", "2.10.0")) as t:
+        t.extractall(package, filter="data")
+    os.unlink(m.programs / "current")
+    os.symlink(package, m.programs / "current")
+    m.svc.install(package)
+    m.svc.calls.clear()
+    cli = coordinator_command(m.tmp / "usr" / "bin" / "oarbank", m.programs / "current", package, system)
+
+    def oarbank(*argv):
+        return subprocess.run([str(cli), *argv], capture_output=True, text=True, check=True).stdout.strip()
+    assert oarbank("node", "approve", "mini") == "oarbank 2.10.0 node approve mini"
+    m.request(uid="cu_1")
+    assert m.runner().once() == "done", m.result()
+    assert m.current() == f"2.11.0-{m.sha[:12]}"
+    assert oarbank("node", "approve", "mini", "--state", "paused") == "oarbank 2.11.0 node approve mini --state paused"
+    assert (package / "oarbank-coordinator.json").read_text().count('"2.10.0"') == 1      # the package never changed
+    # the next one fails its probation: `current` back to the 2.11.0 build, and the CLI with it
+    m.request(version="2.12.0", behavior="never", seq=21200, uid="cu_2")
+    assert m.runner().once() == "rolled_back"
+    assert oarbank("fleet") == "oarbank 2.11.0 fleet"
+    # a failed first update from the package's build flips back to it (an absolute link)
+    m2 = machine()
+    package2 = m2.tmp / "package"
+    with tarfile.open(archive(m2.tmp / "package.tar.gz", "2.10.0")) as t:
+        t.extractall(package2, filter="data")
+    os.unlink(m2.programs / "current")
+    os.symlink(package2, m2.programs / "current")
+    m2.svc.install(package2)
+    cli = coordinator_command(m2.tmp / "usr" / "bin" / "oarbank", m2.programs / "current", package2, system)
+    m2.request(behavior="never")
+    assert m2.runner().once() == "rolled_back" and m2.current() == str(package2)
+    assert oarbank("fleet") == "oarbank 2.10.0 fleet"
+    # before setup (no `current`) and once the services are removed: the package's own
+    os.unlink(m2.programs / "current")
+    assert oarbank("fleet") == "oarbank 2.10.0 fleet"

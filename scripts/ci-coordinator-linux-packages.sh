@@ -12,9 +12,11 @@ sudo apt-get install -y "$PACKAGE"
 trap 'sudo dpkg --remove oarbank-coordinator; rm -rf "$scratch"' EXIT
 # Help must resolve the /usr/bin symlink to the payload, without setup or services.
 HOME="$scratch" oarbank-setup --help
-# The CLI resolves from the PATH (the /usr/bin link) to the payload, and behaves as by its full path: the same local
-# admin channel lookup, for the system service's home (docs/design/coordinator-system-service.md).
-[[ "$(command -v oarbank)" == /usr/bin/oarbank && "$(readlink /usr/bin/oarbank)" == /opt/oarbank/coordinator/bin/oarbank ]]
+# The CLI resolves from the PATH (the /usr/bin link to the package's forwarder; with no coordinator-builds/current yet,
+# it runs the payload's), and behaves as by its full path: the same local admin channel lookup, for the system
+# service's home (docs/design/coordinator-system-service.md).
+[[ "$(command -v oarbank)" == /usr/bin/oarbank && "$(readlink /usr/bin/oarbank)" == /usr/lib/oarbank/cli/oarbank ]]
+[[ ! -e /opt/oarbank/coordinator-builds/current ]]
 help="$(HOME="$scratch" oarbank --help)"
 [[ "$help" == "usage: oarbank "* ]]
 token="/var/lib/oarbank/coordinator/admin.token"
@@ -34,7 +36,7 @@ sudo apt-get install -y xvfb dbus-x11
 XDG_CONFIG_HOME="$scratch/config" xvfb-run -a dbus-run-session -- /usr/bin/oarbank-coordinator --self-test
 sudo dpkg --remove oarbank-coordinator
 [[ ! -e /opt/oarbank/coordinator/bin/oarbankd && ! -e /usr/bin/oarbank-setup ]]
-[[ ! -e /usr/bin/oarbank && ! -L /usr/bin/oarbank ]]
+[[ ! -e /usr/bin/oarbank && ! -L /usr/bin/oarbank && ! -e /usr/lib/oarbank/cli/oarbank ]]
 hash -r  # forget where bash found oarbank before
 if command -v oarbank >/dev/null; then echo "oarbank still resolves from the PATH after removal" >&2; exit 1; fi
 [[ ! -e /usr/share/icons/hicolor/scalable/apps/oarbank-coordinator.svg ]]
