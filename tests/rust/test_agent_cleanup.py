@@ -8,7 +8,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest import REPO, agent_env, install_module  # noqa: E402
-from test_agent_session import wait  # noqa: E402
+from test_agent_session import read_json, wait  # noqa: E402
 
 TOY = REPO / "vendor" / "oarbank-sdk" / "examples" / "toy"
 DAY = 86400.0
@@ -31,6 +31,13 @@ def events_of(c, kind):
         if len(page) < 500:
             return out
         after = page[-1]["event_id"]
+
+
+def deletions(home, module):
+    """The deletions the agent recorded for `module` (state/module-cleanup.json, `done`): it records one after it logged
+    it, and after the module's directory is gone, so a recorded deletion is in the agent's output too."""
+    f = home / "state" / "module-cleanup.json"
+    return [d for d in read_json(f).get("done", []) if d.get("module") == module] if f.exists() else []
 
 
 def setting(c, nid, key, value=None, module="", reset=False):
@@ -101,9 +108,10 @@ def test_a_retired_node_is_told_so_stops_and_deletes_what_its_modules_left(agent
         plan = coordinator.api("POST", "/api/v1/ops/nodes.retire", json={"target": nid, "dry_run": True})["plan"]
         coordinator.api("POST", "/api/v1/ops/nodes.retire", json={"plan_id": plan["plan_id"], "reason": "e2e",
                                                                   "confirm": plan["confirm_name"]})
-        wait(lambda: not data.exists(), timeout=90)
-        import json
-        assert json.loads(status.read_text(encoding="utf-8"))["error"]["code"] == "E_RETIRED"
+        # done once recorded: the directory goes first, and Windows ends the agent at once, before a line not yet written
+        wait(lambda: [d for d in deletions(home, "toy") if d["reason"] == "retired"], timeout=90)
+        assert not data.exists()
+        assert read_json(status)["error"]["code"] == "E_RETIRED"
         assert p.poll() is None, "it waits instead of exiting"
         assert not [e for e in coordinator.api("GET", "/api/v1/fleet")["enrollments"] if e["status"] == "pending"]
     finally:
