@@ -1204,10 +1204,20 @@ def test_a_node_without_update_trust_shows_the_command_that_pins_it(db, tmp_path
              ("new", "darwin-arm64", "pkg", "no update trust is pinned: sudo /x/oarbank-launcher update-trust --from-agent",
               "sudo /x/oarbank-launcher update-trust --from-agent")]
     for name, plat, fmt, why, want in cases:
+        # an older macOS agent's "no update trust" may be a pinned trust it cannot read: the plan says so too
+        want += F.UNREADABLE_PKG if fmt == "pkg" else ""
         n = node(db, name, platform=plat, install={"format": fmt, "scope": "system", "updater": False, "why": why})
         _, reason = F.artifact_for(db, NEW, fresh(db, n))
         assert reason == f"no update runner on it: no update trust is pinned: {want}", reason
         assert F.install_of(fresh(db, n))["why"] == f"no update trust is pinned: {want}"
+    # an agent that tells a missing marker from an unreadable one: shown as it says
+    for trust, why in (("missing", "no update trust is pinned: sudo /x/oarbank-launcher update-trust --from-agent"),
+                       ("unreadable", "the update runner's state directory is not readable by the agent, so it cannot see "
+                                      "whether update trust is pinned: sudo /x/oarbank-launcher update-trust --from-agent")):
+        n = node(db, f"tells-{trust}", platform="darwin-arm64",
+                 install={"format": "pkg", "scope": "system", "updater": False, "why": why, "trust": trust})
+        assert F.install_of(fresh(db, n))["why"] == why
+        assert F.artifact_for(db, NEW, fresh(db, n))[1] == f"no update runner on it: {why}"
     # anything else is shown as the agent says it
     n = node(db, "personal", install={"format": "pkg", "scope": "personal", "updater": False, "why": "a personal install"})
     assert F.install_of(fresh(db, n))["why"] == "a personal install"

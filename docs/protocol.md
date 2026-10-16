@@ -715,8 +715,9 @@ without an update runner keeps agent-only self-update.
   directory, from files staged through `POST /api/v1/updates/uploads`, or from `update_source`
   (`<source>/download/v<version>/<asset>`). It checks each artifact's sha256 and size and keeps only the platforms its
   nodes and itself run.
-- **Report.** hello and heartbeat carry `install: {format, scope, updater, why, package_version}` (how the agent was
-  installed, whether the runner's trigger and trust are in place, and the version of the package's agent) and `node_update: {state, release, seq, error, at}`. States:
+- **Report.** hello and heartbeat carry `install: {format, scope, updater, why, trust, package_version}` (how the agent was
+  installed, whether the runner's trigger and trust are in place, what the agent found of the trust's marker: `pinned`,
+  `missing` or `unreadable`, and the version of the package's agent) and `node_update: {state, release, seq, error, at}`. States:
   `idle`, `unsupported`, `staging`, `staged`, `draining`, `deferred`, `installing`, `confirming`, `done`, `failed`,
   `rolled_back`, `refused`.
 - **Directive.** While a node's target differs from the version it runs, every reply carries
