@@ -1144,9 +1144,10 @@ minus the memory guard's soft floor and 1 GB), and of the owner's `mem_gb` cap; 
 Cores are physical (`perf + eff/2`); the formulas and the per-OS readings are in docs/design/protection.md, "Capacity".
 `cpu_slots` and `mem_gb_free` are what fleet jobs may still use; `pools` are what the node's services provide, plus the
 agent's own `containers` pool (its container runtime, while it can run containers: a Windows node whose session is not
-ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI; never on macOS) (a
-node that reports none is offered no pool work). The facts' `containers.gpu` says which: `cdi:<kind>` or
-`undetected`. Where the owner set containers = off the coordinator counts neither pool, whatever the agent reports.
+ready offers none) and `gpu` pool (one token where containers can get the node's GPUs through CDI, or on Linux
+through its DRM devices; never on macOS) (a node that reports none is offered no pool work). The facts'
+`containers.gpu` says which: `cdi:<kind>`, `device:/dev/dri` or `undetected`. Where the owner set containers = off the
+coordinator counts neither pool, whatever the agent reports.
 
 Beside `capacity`, every heartbeat carries the runtime's `containers` (the coordinator keeps it as the capacity's
 `container_runtime`):

@@ -18,12 +18,13 @@ from .failures import failure_view
 def gpu(facts: dict, doctor: dict | None) -> dict:
     """The GPU APIs the node's doctor reports (docs/protocol.md "Doctor"), with the evidence for each API (what was
     found, or why not), and how its containers get the GPU (the facts' `containers.gpu`): `cdi:<kind>` on Linux and
-    Windows, `virtio-gpu:venus` on macOS with krunkit, else none. A node whose facts say it has no container runtime
+    Windows, `device:/dev/dri` on Linux without a CDI spec, `virtio-gpu:venus` on macOS with krunkit, else none. A node whose facts say it has no container runtime
     (`containers.state` absent) has no GPU APIs in containers, whatever an older report says."""
     g = (doctor or {}).get("gpu_apis")
     ct = (facts or {}).get("containers") or {}
     how = "" if ct.get("state") == "absent" else ct.get("gpu") or ""
-    mechanism = f"{how[4:]} (CDI)" if how.startswith("cdi:") else "Venus over virtio-gpu (krunkit)" if how == "virtio-gpu:venus" else None
+    mechanism = f"{how[4:]} (CDI)" if how.startswith("cdi:") else f"{how[7:]} (device)" if how.startswith("device:") \
+        else "Venus over virtio-gpu (krunkit)" if how == "virtio-gpu:venus" else None
     return {"reported": g is not None, "host": list((g or {}).get("host") or []),
             "containers": list((g or {}).get("containers") or []) if ct.get("state") != "absent" else [],
             "evidence": dict((g or {}).get("evidence") or {}), "mechanism": mechanism}

@@ -545,7 +545,8 @@ async fn run(sh: &Arc<Shared>, req: &Value) -> Result<Value, Refusal> {
     let (mut spec, set) = plan(req, &sh.scope)?;
     if spec.gpu_device.is_some() {
         spec.gpu_device = Some(sh.runtime.gpu_device().ok_or_else(|| Refusal::new("gpu_unavailable",
-            "this node's container runtime cannot pass a GPU through (Linux: no CDI spec; macOS: krunkit is not installed)"))?);
+            "this node's container runtime cannot pass a GPU through (Linux: no CDI spec and no DRM render node; \
+             macOS: krunkit is not installed)"))?);
     }
     verified(sh, set, &spec.image, &spec.platform).await?;
     if let Some(s) = set {

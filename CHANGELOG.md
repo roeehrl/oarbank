@@ -4,6 +4,25 @@ What changed in each Oarbank release, for the people who run a fleet. The module
 [roeehrl/oarbank-sdk](https://github.com/roeehrl/oarbank-sdk/blob/main/CHANGELOG.md); the documentation is at
 [docs.codonic.dev/oarbank](https://docs.codonic.dev/oarbank).
 
+## Unreleased
+
+### Fixed
+
+- **A Linux node with an Intel or AMD GPU and no CDI spec passes its GPU into containers.** The agent gave a GPU
+  job's containers the GPU only through a CDI spec (`/etc/cdi`, `/var/run/cdi`), which stock Docker and Podman with an
+  Intel or AMD GPU do not have, so such a node offered no `gpu` pool and `containers doctor --probe --gpu` said "this
+  runtime passes no GPU through" (issue #13). Without a CDI spec, a host with a DRM render node that is not NVIDIA's
+  now runs those containers with `--device /dev/dri`, and `--device /dev/kfd` when it exists, and reports
+  `containers.gpu = "device:/dev/dri"` with `vulkan` (a render node) and `rocm` (`/dev/kfd`) as its containers' GPU
+  APIs. A CDI spec is still preferred, and an NVIDIA GPU still needs one (the NVIDIA Container Toolkit's), since its
+  render node alone gives a container no Vulkan. The doctor's `gpu_device` check, the GPU APIs' evidence and the node
+  page name the mechanism used.
+- **The real-agent GPU placement test fails at once when the GPU module will not certify.** On a host whose GPU APIs
+  fit the `gpuinfo` module, `tests/rust/test_gpu_apis.py` waited four minutes for the module to be certified, whatever
+  its state, and ended with "timed out". It now stops as soon as the module is `undetected`, `doctor_failed` or
+  `golden_failed`, and says why: the module's state and reason, its doctor's checks, the coordinator's explanation and
+  how the node's containers get the GPU.
+
 ## 2.11.1 (2026-10-17)
 
 A fix release for 2.11.0. Module SDK: **oarbank-sdk 1.8.0**, unchanged. Coming from 2.10, read the
