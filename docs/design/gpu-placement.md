@@ -64,9 +64,16 @@ runs only images a module was approved for):
 | Linux CDI, an NVIDIA spec (`nvidia.com/gpu`) | `cdi:nvidia.com/gpu` | `cuda` when the spec mounts `libcuda.so`, `vulkan` when it mounts the NVIDIA Vulkan ICD (`nvidia_icd.json`), `opencl` when it mounts `libnvidia-opencl` |
 | Linux CDI, any other kind (AMD, Intel) | `cdi:<kind>` | `rocm` when it passes `/dev/kfd`, `vulkan` when it passes a DRM render node (the image brings Mesa) |
 | Linux CDI over WSL2 GPU-PV (`/dev/dxg`, an `nvidia-ctk cdi generate --mode=wsl` spec) | `cdi:<kind>` | `cuda` when the spec mounts `libcuda.so` |
+| Linux without a CDI spec, a DRM render node that is not NVIDIA's (stock Docker or Podman with an Intel or AMD GPU): `--device /dev/dri`, and `--device /dev/kfd` when it exists | `device:/dev/dri` | as a CDI spec of another kind: `rocm` with `/dev/kfd`, `vulkan` with the render node (the image brings Mesa) |
 | Windows, the agent's WSL containers session ([windows-containers.md](windows-containers.md)) | `cdi:microsoft.com/wslc` | from the session VM's host driver libraries: `directml` with WSL's D3D12 and DXCore and a hardware GPU (the image brings `libdirectml.so`), `cuda` when the NVIDIA driver provides `libcuda.so.1` |
 | macOS, krunkit (below) | `virtio-gpu:venus` | `vulkan` (the image brings the libkrun build of Mesa's Venus driver) |
 | none | `undetected` | none |
+
+A CDI spec is preferred where one exists. Without one the agent passes the DRM devices themselves (issue #13), but
+never for a host whose render nodes are all NVIDIA's (the PCI vendor in `/sys/class/drm/renderD*/device/vendor`):
+NVIDIA's Vulkan, CUDA and OpenCL need its ICD and driver libraries in the container, which only its CDI spec (the
+NVIDIA Container Toolkit) mounts. The doctor's `gpu_device` check and `gpu_apis.evidence.containers` name the mechanism used
+(`cdi <kind>=all` or `device /dev/dri`).
 
 The image's user space is the module's part: a CDI spec gives the device and the driver's libraries, Venus and Mesa's
 AMD and Intel drivers live in the image. The conformance kit cannot check that (it has no broker), so the reference
@@ -153,9 +160,11 @@ are often amd64-only) and never share a kernel with a VM that has a GPU device.
   user's `default`, or anyone's).
 - `container_runtime::for_node` returns `Containers { cpu, gpu }`: on macOS `gpu` is the `oarbank-gpu` runtime when
   Colima, docker and `krunkit` are installed (Colima looks krunkit up on `PATH`; the agent's helper `PATH` holds
-  Homebrew's directories) on Apple Silicon; on Linux it is the same runtime as `cpu` when a CDI spec exists.
+  Homebrew's directories) on Apple Silicon; on Linux it is the same runtime as `cpu` when a CDI spec exists, or else
+  a DRM render node that is not NVIDIA's.
 - A job that reserved the `gpu` pool gets a broker on `gpu`; every request it makes (status, pull, run) goes to that
-  VM, and `gpus = "all"` adds `--device /dev/dri` (macOS) or `--device <kind>=all` (CDI). Its containers count against
+  VM, and `gpus = "all"` adds `--device /dev/dri` (macOS), `--device <kind>=all` (CDI) or, on Linux without a CDI spec,
+  `--device /dev/dri` (and `--device /dev/kfd` when it exists). Its containers count against
   its `containers` token as before, and the `gpu` pool (one token) serialises GPU jobs on the node, which is also the
   GPU VM's only workload.
 - The GPU VM starts on its first GPU job (as the CPU VM starts on its first container job) and is never stopped by
@@ -190,7 +199,7 @@ device is `Virtio-GPU Venus (Apple …)` and that a compute shader's output is r
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Host APIs | `metal`, `opencl` (Apple Silicon and Intel Macs), `vulkan` with a Vulkan loader and MoltenVK installed | `cuda`, `rocm`, `vulkan`, `opencl` as installed and readable by the agent's account | `cuda`, `rocm` (HIP SDK), `vulkan`, `opencl`, `directml` |
-| Container APIs | `vulkan` with krunkit installed (Apple Silicon, macOS 14+) | from the CDI spec | `directml`, and `cuda` on NVIDIA, from the agent's WSL containers session (D39) |
+| Container APIs | `vulkan` with krunkit installed (Apple Silicon, macOS 14+) | from the CDI spec, else from the render node and `/dev/kfd` passed as devices | `directml`, and `cuda` on NVIDIA, from the agent's WSL containers session (D39) |
 | Cannot | Metal in a Linux container (no such device exists) | – | – |
 
 ## SDK

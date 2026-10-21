@@ -58,7 +58,8 @@ pub struct RunSpec {
     /// The full output, opened by the broker inside the work directory (None: discarded).
     pub stdout: Option<std::fs::File>,
     pub stderr: Option<std::fs::File>,
-    /// Every GPU of the node, as the `--device` value the runtime passes them with (`nvidia.com/gpu=all`, `/dev/dri`).
+    /// Every GPU of the node, as the `--device` value the runtime passes them with (`nvidia.com/gpu=all`, `/dev/dri`);
+    /// several devices are comma-separated (`/dev/dri,/dev/kfd`), each its own `--device`.
     pub gpu_device: Option<String>,
 }
 
@@ -70,7 +71,7 @@ pub fn fmt_num(v: f64) -> String {
 
 impl RunSpec {
     /// Exactly: `run --rm --platform P --network none|bridge --cpus C --memory Mg --label oarbank.attempt_id=<id>
-    /// --label oarbank.module=<name> [--device <gpu device>] [-v src:dst[:ro]]... [--workdir W] [--entrypoint E]
+    /// --label oarbank.module=<name> [--device <gpu device>]... [-v src:dst[:ro]]... [--workdir W] [--entrypoint E]
     /// [-e K=V]... image args...`.
     /// Nothing from the request reaches a flag position except through these fields.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -86,7 +87,7 @@ impl RunSpec {
             "--cpus".into(), fmt_num(self.cpus), "--memory".into(), format!("{}g", fmt_num(self.mem_gb)),
             "--label".into(), format!("{ATTEMPT_LABEL}={}", self.attempt_id), "--label".into(), format!("{MODULE_LABEL}={}", self.module),
         ];
-        if let Some(dev) = self.gpu_device.as_deref().filter(|k| !k.is_empty()) {
+        for dev in self.gpu_device.as_deref().unwrap_or("").split(',').filter(|d| !d.is_empty()) {
             a.extend(["--device".into(), dev.to_string()]);
         }
         for m in &self.mounts {
@@ -224,15 +225,52 @@ impl Containers {
 
 /// How containers on this node get the GPU (docs/design/gpu-placement.md): the facts' `containers.gpu`, the `--device`
 /// value, and the GPU APIs a container then has (Linux; macOS reports it from its runtime's state, crate::colima).
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passthrough {
-    /// `cdi:<kind>`.
+    /// `cdi:<kind>`, or `device:/dev/dri` (the DRM devices themselves).
     pub kind: String,
+    /// The `--device` value(s): `<kind>=all`, or `/dev/dri` (and `/dev/kfd`), comma-separated ([`RunSpec::gpu_device`]).
     pub device: String,
     pub apis: Vec<String>,
     /// What was found, for the doctor report's evidence.
     pub evidence: String,
+}
+
+/// How a Linux host's containers get its GPUs (docs/design/gpu-placement.md, "In containers"): a CDI spec with an `all`
+/// device in `cdi_dirs` when there is one; else, with a DRM render node in `dev`/dri that is not NVIDIA's (its vendor in
+/// `sys`/class/drm), the devices themselves: `--device /dev/dri`, and `--device /dev/kfd` when it exists (ROCm), the
+/// APIs by the same rules as a CDI spec of another kind than NVIDIA's ([`device_apis`]). A host whose render nodes are
+/// all NVIDIA's gets no fallback: NVIDIA's Vulkan needs its ICD and libraries, which only its CDI spec mounts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn linux_gpu(cdi_dirs: &[&Path], dev: &Path, sys: &Path) -> Option<Passthrough> {
+    if let Some(s) = cdi_spec(cdi_dirs) {
+        return Some(Passthrough { device: format!("{}=all", s.kind), evidence: format!("cdi:{}", s.kind), kind: format!("cdi:{}", s.kind),
+                                  apis: s.apis });
+    }
+    let mut nodes: Vec<String> = std::fs::read_dir(dev.join("dri")).into_iter().flatten().flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string)).filter(|n| n.starts_with("renderD")).collect();
+    nodes.sort();
+    let nvidia = |n: &str| std::fs::read_to_string(sys.join("class/drm").join(n).join("device/vendor")).is_ok_and(|v| v.trim() == NVIDIA_VENDOR);
+    let mut paths: Vec<String> = nodes.iter().filter(|n| !nvidia(n)).map(|n| format!("/dev/dri/{n}")).collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let mut devices = vec!["/dev/dri"];
+    if dev.join("kfd").exists() {
+        devices.push("/dev/kfd");
+        paths.push("/dev/kfd".into());
+    }
+    Some(Passthrough { kind: "device:/dev/dri".into(), device: devices.join(","), apis: device_apis(&paths),
+                       evidence: format!("device {} ({})", devices.join(", "), paths.join(", ")) })
+}
+
+/// The PCI vendor id sysfs gives NVIDIA's devices.
+const NVIDIA_VENDOR: &str = "0x10de";
+
+/// How the doctor names a `--device` value: `cdi <kind>=all`, or `device /dev/dri, /dev/kfd`.
+pub fn gpu_mechanism(device: &str) -> String {
+    if device.contains('=') { format!("cdi {device}") } else { format!("device {}", device.replace(',', ", ")) }
 }
 
 /// A CDI spec with an `all` device: its kind and the GPU APIs a container given that device has.
@@ -298,25 +336,32 @@ fn json_paths(v: &serde_json::Value, out: &mut Vec<String>) {
 /// Vulkan ICD and `opencl` when it mounts `libnvidia-opencl`; another kind gives `rocm` with `/dev/kfd` and `vulkan`
 /// with a DRM render node (the image brings Mesa).
 pub fn cdi_apis(kind: &str, paths: &[String]) -> Vec<String> {
+    if !kind.starts_with("nvidia.com/") {
+        return device_apis(paths);
+    }
     let any = |f: &dyn Fn(&str) -> bool| paths.iter().any(|p| f(p));
     let mut apis = vec![];
-    if kind.starts_with("nvidia.com/") {
-        if any(&|p| p.contains("libcuda.so")) {
-            apis.push("cuda");
-        }
-        if any(&|p| p.contains("libnvidia-opencl")) {
-            apis.push("opencl");
-        }
-        if any(&|p| p.ends_with("nvidia_icd.json")) {
-            apis.push("vulkan");
-        }
-    } else {
-        if any(&|p| p == "/dev/kfd") {
-            apis.push("rocm");
-        }
-        if any(&|p| p.starts_with("/dev/dri/renderD")) {
-            apis.push("vulkan");
-        }
+    if any(&|p| p.contains("libcuda.so")) {
+        apis.push("cuda");
+    }
+    if any(&|p| p.contains("libnvidia-opencl")) {
+        apis.push("opencl");
+    }
+    if any(&|p| p.ends_with("nvidia_icd.json")) {
+        apis.push("vulkan");
+    }
+    apis.into_iter().map(String::from).collect()
+}
+
+/// The GPU APIs a container given these device nodes (not NVIDIA's) has: `rocm` with `/dev/kfd`, `vulkan` with a DRM
+/// render node (the image brings Mesa).
+pub fn device_apis(paths: &[String]) -> Vec<String> {
+    let mut apis = vec![];
+    if paths.iter().any(|p| p == "/dev/kfd") {
+        apis.push("rocm");
+    }
+    if paths.iter().any(|p| p.starts_with("/dev/dri/renderD")) {
+        apis.push("vulkan");
     }
     apis.into_iter().map(String::from).collect()
 }
@@ -1287,8 +1332,8 @@ pub struct NativeRuntime {
     pub home: PathBuf,
     pub docker_config: PathBuf,
     pub mem_gb: f64,
-    /// The CDI spec through which containers get every GPU, when the host has one (GPU passthrough).
-    pub gpu: Option<CdiSpec>,
+    /// How containers get every GPU, when the host passes one through: a CDI spec, else its DRM devices ([`linux_gpu`]).
+    pub gpu: Option<Passthrough>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1300,7 +1345,7 @@ impl NativeRuntime {
         let home = engine_home(std::env::var_os("HOME").map(PathBuf::from), &layout.home);
         // the same budget a Mac's VM would get (the owner's vm_mem_gb, else by RAM): its `containers` pool
         let (mem_gb, _, _) = sizing(ram_gb, caps.mem_gb, None);
-        let gpu = cdi_spec(&CDI_DIRS.map(Path::new));
+        let gpu = linux_gpu(&CDI_DIRS.map(Path::new), Path::new("/dev"), Path::new("/sys"));
         Some(NativeRuntime { cli, home, docker_config: layout.run().join("docker"), mem_gb, gpu })
     }
 
@@ -1422,7 +1467,7 @@ impl ContainerRuntime for NativeRuntime {
     }
 
     fn gpu_device(&self) -> Option<String> {
-        self.gpu.as_ref().map(|g| format!("{}=all", g.kind))
+        self.gpu.as_ref().map(|g| g.device.clone())
     }
 }
 
@@ -1480,7 +1525,7 @@ pub fn probe(rts: &Containers, work: &Path, gpu: bool) -> Vec<serde_json::Value>
         let rt = rts.for_job(true);
         let rt = rt.as_ref();
         let kind = rt.gpu_device();
-        if check("gpu_device", kind.is_some(), kind.clone().unwrap_or_else(|| "this runtime passes no GPU through".into()))
+        if check("gpu_device", kind.is_some(), kind.as_deref().map(gpu_mechanism).unwrap_or_else(|| "this runtime passes no GPU through".into()))
             && check("gpu_pull", rt.pull(PROBE_GPU_IMAGE, &platform).is_ok(), PROBE_GPU_IMAGE.into()) {
             let script = "if [ -e /dev/dxg ] || ls /dev/nvidia* >/dev/null 2>&1 || [ -e /dev/kfd ] || [ -d /dev/dri ]; then echo gpu:yes; else echo gpu:no; fi; \
                           if command -v nvidia-smi >/dev/null; then nvidia-smi -L; fi";
@@ -1498,14 +1543,14 @@ pub fn probe(rts: &Containers, work: &Path, gpu: bool) -> Vec<serde_json::Value>
     checks
 }
 
-/// GPU passthrough on Linux: a container engine and a CDI spec with an `all` device.
+/// GPU passthrough on Linux: a container engine and a CDI spec with an `all` device, else a DRM render node that is not
+/// NVIDIA's ([`linux_gpu`]).
 #[cfg(target_os = "linux")]
 pub fn gpu_passthrough() -> Option<Passthrough> {
     let engine = ["/usr/bin", "/usr/local/bin", "/bin"].iter()
         .find_map(|d| ["podman", "docker"].iter().map(|n| Path::new(d).join(n)).find(|p| executable(p)))?;
-    let spec = cdi_spec(&CDI_DIRS.map(Path::new))?;
-    Some(Passthrough { device: format!("{}=all", spec.kind), evidence: format!("cdi:{} ({})", spec.kind, engine.display()),
-                       kind: format!("cdi:{}", spec.kind), apis: spec.apis })
+    let p = linux_gpu(&CDI_DIRS.map(Path::new), Path::new("/dev"), Path::new("/sys"))?;
+    Some(Passthrough { evidence: format!("{} ({})", p.evidence, engine.display()), ..p })
 }
 
 /// The Linux host's container engine, when it has one (the facts' `containers.runtime`): Podman or Docker Engine
@@ -1517,7 +1562,7 @@ pub fn runtime_name() -> Option<String> {
 }
 
 /// This node's container runtimes, if it has any: the agent's Colima profiles on macOS (always: the report says what is
-/// missing; the GPU one on Apple silicon, offered once krunkit is installed and the runtime is ready), the host's engine on Linux (also the GPU runtime where a CDI spec exists), the agent's WSL containers
+/// missing; the GPU one on Apple silicon, offered once krunkit is installed and the runtime is ready), the host's engine on Linux (also the GPU runtime where a CDI spec or a DRM render node passes a GPU through), the agent's WSL containers
 /// session on Windows (one runtime for both; it reports what is missing itself, so it always exists there).
 #[cfg(target_os = "macos")]
 pub fn for_node(layout: &crate::paths::Layout) -> Option<Containers> {
@@ -1937,6 +1982,51 @@ pub mod tests {
         assert_eq!(cdi_spec(&[a.as_path()]).unwrap().apis, ["rocm", "vulkan"]);
         assert!(cdi_apis("nvidia.com/gpu", &["/dev/dri/renderD128".into()]).is_empty(), "NVIDIA's Vulkan is its ICD, not Mesa");
         assert_eq!(cdi_apis("intel.com/gpu", &["/dev/dri/renderD129".into()]), ["vulkan"]);
+    }
+
+    /// Without a CDI spec a host whose DRM render node is not NVIDIA's (an Intel or AMD GPU on stock Docker, issue #13)
+    /// passes its devices through: `--device /dev/dri`, and `/dev/kfd` when it exists, with the APIs a CDI spec of
+    /// another kind would give. A CDI spec stays preferred, and NVIDIA's render node alone is no fallback.
+    #[test]
+    fn without_a_cdi_spec_a_render_node_passes_the_gpu_through() {
+        let (_c, cdi) = temp("dri-cdi");
+        let (_d, dev) = temp("dri-dev");
+        let (_s, sys) = temp("dri-sys");
+        let gpu = || linux_gpu(&[cdi.as_path()], &dev, &sys);
+        assert_eq!(gpu(), None, "no CDI spec, no /dev/dri");
+        std::fs::create_dir_all(dev.join("dri")).unwrap();
+        std::fs::write(dev.join("dri/card1"), "").unwrap();
+        assert_eq!(gpu(), None, "a card node alone gives no render node");
+        std::fs::write(dev.join("dri/renderD128"), "").unwrap();
+        let vendor = |node: &str, v: &str| {
+            std::fs::create_dir_all(sys.join("class/drm").join(node).join("device")).unwrap();
+            std::fs::write(sys.join("class/drm").join(node).join("device/vendor"), format!("{v}\n")).unwrap();
+        };
+        vendor("renderD128", "0x10de");
+        assert_eq!(gpu(), None, "NVIDIA's render node needs its CDI spec for Vulkan");
+        vendor("renderD128", "0x8086");
+        let p = gpu().unwrap();
+        assert_eq!((p.kind.as_str(), p.device.as_str(), p.apis.clone()), ("device:/dev/dri", "/dev/dri", vec!["vulkan".to_string()]));
+        assert_eq!(p.evidence, "device /dev/dri (/dev/dri/renderD128)");
+        // an NVIDIA GPU beside the Intel one: the Intel one still counts
+        std::fs::write(dev.join("dri/renderD129"), "").unwrap();
+        vendor("renderD129", "0x10de");
+        assert_eq!(gpu().unwrap().evidence, "device /dev/dri (/dev/dri/renderD128)");
+        // an AMD GPU: ROCm through /dev/kfd as well
+        std::fs::write(dev.join("kfd"), "").unwrap();
+        let p = gpu().unwrap();
+        assert_eq!((p.device.as_str(), p.apis.clone()), ("/dev/dri,/dev/kfd", vec!["rocm".to_string(), "vulkan".to_string()]));
+        assert_eq!(p.evidence, "device /dev/dri, /dev/kfd (/dev/dri/renderD128, /dev/kfd)");
+        let spec = RunSpec { gpu_device: Some(p.device.clone()), ..spec("x@sha256:00") };
+        let args = spec.docker_args();
+        assert_eq!(args[14..18], ["--device", "/dev/dri", "--device", "/dev/kfd"]);
+        assert_eq!(gpu_mechanism(&p.device), "device /dev/dri, /dev/kfd");
+        // a CDI spec is preferred
+        std::fs::write(cdi.join("amd.json"), r#"{"kind": "amd.com/gpu", "devices": [{"name": "all", "containerEdits":
+            {"deviceNodes": [{"path": "/dev/dri/renderD128"}]}}]}"#).unwrap();
+        let p = gpu().unwrap();
+        assert_eq!((p.kind.as_str(), p.device.as_str(), p.apis.clone()), ("cdi:amd.com/gpu", "amd.com/gpu=all", vec!["vulkan".to_string()]));
+        assert_eq!(gpu_mechanism(&p.device), "cdi amd.com/gpu=all");
     }
 
     #[test]

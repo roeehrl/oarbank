@@ -396,7 +396,7 @@ fn containers(home: &Path) -> (Vec<String>, String) {
 fn runtime_containers(_home: &Path) -> (Vec<String>, String) {
     match crate::container_runtime::gpu_passthrough() {
         Some(p) => (p.apis, p.evidence),
-        None => (vec![], "no GPU in containers: no container engine with a CDI spec for a GPU".into()),
+        None => (vec![], "no GPU in containers: no container engine with a CDI spec or a DRM render node for a GPU".into()),
     }
 }
 

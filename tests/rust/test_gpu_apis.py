@@ -24,6 +24,22 @@ def agent_report(agent_bin, home) -> dict:
     return json.loads(out.stdout)
 
 
+# the module states that are not waiting on anything (the coordinator's RUNNER_STATES but `certifying`)
+FINAL = ("certified", "doctor_failed", "undetected", "golden_failed")
+
+
+def not_certified(coordinator, node: dict, st: dict) -> str:
+    """Why gpuinfo is not certified on a node whose host APIs fit it: its state and reason, its doctor's checks (run in
+    its sandbox), the coordinator's explanation, and how the node's containers get the GPU (`gpu_apis.containers`)."""
+    doc = node.get("doctor") or {}
+    mod = (doc.get("modules") or {}).get("gpuinfo") or {}
+    ex = coordinator.api("GET", f"/api/v1/explain/node/{node['node_id']}")
+    g = doc.get("gpu_apis") or {}
+    return (f"the host's GPU APIs fit gpuinfo but it is {st['state']} ({st.get('reason', '')}): its doctor says "
+            f"{mod.get('health')} {mod.get('checks')}; explain {ex.get('headline')}; containers {g.get('containers')} "
+            f"({(g.get('evidence') or {}).get('containers')})")
+
+
 def test_the_agent_detects_what_the_sdk_detects(agent_bin, tmp_path):
     """One answer from both implementations on this host (the parity a crowd-sourced detection matrix relies on)."""
     a, s = agent_report(agent_bin, tmp_path / "agent"), gpu.detect()
@@ -50,8 +66,10 @@ def test_a_real_agent_reports_its_gpu_apis_and_the_module_is_placed_by_them(agen
         have = doc["gpu_apis"]["host"]
         assert have == gpu.detect()["host"], doc["gpu_apis"]
         if gpu.fits(need["apis"], have):
-            # the runner reaches its API from its sandbox: certified on golden evidence
-            wait(lambda: node_modules(coordinator).get("gpuinfo", {}).get("state") == "certified", timeout=240)
+            # the runner reaches its API from its sandbox: certified on golden evidence. A state that will not become
+            # certified (its sandboxed doctor reaches no API, a golden fails) ends the test at once, saying why.
+            st = wait(lambda: (s := node_modules(coordinator).get("gpuinfo", {})).get("state") in FINAL and s, timeout=240)
+            assert st["state"] == "certified", not_certified(coordinator, node(), st)
         else:
             mod = wait(lambda: (node().get("doctor") or {}).get("modules", {}).get("gpuinfo"), timeout=120)
             assert mod["health"] == "undetected"

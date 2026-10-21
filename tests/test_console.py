@@ -443,6 +443,9 @@ def test_the_node_page_shows_its_gpu_apis_and_how_containers_get_the_gpu(env):
     db.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (_json.dumps({**FACTS, "containers": {"gpu": "cdi:nvidia.com/gpu"}}),
                                                            n["node_id"]))
     assert "GPU in containers nvidia.com/gpu (CDI): vulkan" in node_html(env)[1]
+    db.x("UPDATE nodes SET facts_json=? WHERE node_id=?", (_json.dumps({**FACTS, "containers": {"gpu": "device:/dev/dri"}}),
+                                                           n["node_id"]))
+    assert "GPU in containers /dev/dri (device): vulkan" in node_html(env)[1]
 
 
 def test_a_guarded_node_says_why_it_takes_no_jobs(env):

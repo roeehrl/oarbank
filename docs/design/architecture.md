@@ -347,9 +347,11 @@ facts (`containers.runtime = "colima"`, its state and each missing prerequisite 
 [macos-containers.md](macos-containers.md)), Linux the host's rootless Podman or Docker Engine (platforms from binfmt: any enabled
 handler for x86-64 or AArch64 executables, QEMU's or Rosetta's). GPU passthrough: a Linux node with a CDI spec for its
 GPU offers the `gpu` pool and runs `gpus = "all"` containers with `--device <kind>=all`, its containers' GPU APIs read
-from the spec; a Mac with krunkit runs the containers of jobs that reserved the `gpu` pool in a second agent-owned
-Colima VM, `oarbank-gpu`, whose virtio-gpu device gives them Vulkan on the Mac's GPU (`--device /dev/dri`, Mesa's Venus
-driver in the image, MoltenVK on the host; `containers.gpu = "virtio-gpu:venus"`; [gpu-placement.md](gpu-placement.md)).
+from the spec, and without a spec one with a DRM render node that is not NVIDIA's passes `--device /dev/dri` (and
+`/dev/kfd`; `containers.gpu = "device:/dev/dri"`); a Mac with krunkit runs the containers of jobs that reserved the
+`gpu` pool in a second agent-owned Colima VM, `oarbank-gpu`, whose virtio-gpu device gives them Vulkan on the Mac's
+GPU (`--device /dev/dri`, Mesa's Venus driver in the image, MoltenVK on the host; `containers.gpu = "virtio-gpu:venus"`;
+[gpu-placement.md](gpu-placement.md)).
 Windows uses a WSL containers (WSLc) session the agent creates through the WSLc SDK and drives with `wslc.exe`
 ([windows-containers.md](windows-containers.md), D39): its own name, storage, VM size and settings, no host loopback,
 Windows paths mounted as they are, its host's architecture only, and GPU-PV through the CDI spec its guest writes
