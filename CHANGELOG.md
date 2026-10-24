@@ -17,6 +17,13 @@ What changed in each Oarbank release, for the people who run a fleet. The module
   APIs. A CDI spec is still preferred, and an NVIDIA GPU still needs one (the NVIDIA Container Toolkit's), since its
   render node alone gives a container no Vulkan. The doctor's `gpu_device` check, the GPU APIs' evidence and the node
   page name the mechanism used.
+- **A sandboxed module with the GPU grant reaches Vulkan and OpenCL on a Linux host.** On an Intel GPU, a module's
+  doctor found "no Vulkan GPU device" and "no OpenCL platform (-1001)" where `oarbank-agent gpu-apis` found both, so
+  the `gpuinfo` module stayed `undetected` (issue #13). The Linux sandbox let the module open the render nodes but not
+  read the GPU's sysfs files, which libdrm (and so Mesa's Vulkan drivers) and the Intel compute runtime read to
+  identify the device, and they skipped it. With the GPU grant the sandbox now also allows reading `/sys/class/drm` and
+  the sysfs directory of each GPU device node's device, and nothing else under `/sys`; without the grant nothing
+  changes.
 - **The real-agent GPU placement test fails at once when the GPU module will not certify.** On a host whose GPU APIs
   fit the `gpuinfo` module, `tests/rust/test_gpu_apis.py` waited four minutes for the module to be certified, whatever
   its state, and ended with "timed out". It now stops as soon as the module is `undetected`, `doctor_failed` or
