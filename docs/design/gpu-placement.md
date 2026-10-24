@@ -56,6 +56,20 @@ APIs (docs/install.md says which groups to add). It runs in a child process (`oa
 limit (the child ends itself, so the agent only waits for it), so a driver that crashes or hangs while loading never
 takes the agent with it; a probe that fails names the API as absent with the error as its evidence.
 
+A module's runner and doctor run in the sandbox, and with the GPU grant (`sandbox.devices.gpu = "compute"`, which a
+runner's `gpu.use` needs) must reach the same APIs. On Linux that takes more than the device nodes (read and write
+`/dev/dri`, `/dev/nvidia*`, `/dev/kfd`): the user-space stacks identify a device from sysfs. libdrm's `drmGetDevices2`,
+which Mesa's Vulkan drivers and the device-select layer enumerate with, skips a render node whose `uevent`, `vendor` and
+`device` files under `/sys/dev/char/MAJ:MIN/device` it cannot read, and the Intel compute runtime reads the device's
+`drm/card*` files the same way; Landlock had allowed only `/sys/devices/system/cpu`, so a doctor on an Intel laptop
+found no Vulkan device and no OpenCL platform where the host found both (issue #13). The grant now also allows reading
+(never executing) `/sys/class/drm` and, for each GPU device node, the sysfs directory of its device (the target of
+`/sys/dev/char/MAJ:MIN/device`, else of `/sys/dev/char/MAJ:MIN`, as for `/dev/kfd` and its topology), resolved when the
+sandbox is applied. The rest of sysfs stays closed, and file modes still apply (a PCI device's `config` beyond its
+header and its `resource` files are root's). The loaders' own files need nothing new: the ICD manifests and registries
+(`/usr/share/vulkan`, `/etc/vulkan`, `/etc/OpenCL/vendors`) and the libraries they name (`/usr`, `/opt`) are in the base
+system the sandbox reads and maps, and the seccomp filter refuses no call the stacks make on a DRM device.
+
 **In containers** the APIs come from how the runtime passes the GPU through, never from running an image (the agent
 runs only images a module was approved for):
 
@@ -238,6 +252,7 @@ with `gpus[].apis` removed (nothing is released). `GPU_API_MISSING` is a new rea
 | A service with `apis_any` only starts where its API exists | agent `services.rs`: a service needing `cuda` on a node with `metal` is neither offered nor started and its report says why; it starts once the APIs include it; core: a stage reserving its pool explains `GPU_API_MISSING` |
 | Capacity binding, stranded check, replicas, anti-affinity | `tests/test_gpu_placement.py`: a campaign binds to the only class with the API; a class losing it strands; a replica needs another node with it; a node that failed retries only when no other node has it |
 | Detection per OS | agent `gpuapi.rs`: the CDI rules on recorded specs (NVIDIA, AMD, WSL), the evidence format, the probe's child process and its time limit; live on each OS: the report matches `oarbank_sdk.gpu.detect()` on the same host (core `tests/rust/test_gpu_apis.py`), and on macOS includes `metal` |
+| A sandboxed runner reaches the host's APIs on Linux | agent `sandbox_linux.rs`: the GPU grant's sysfs directories on a recorded sysfs tree (an Intel GPU's PCI device, `/dev/kfd`), none without the grant; live where Landlock and a DRM node exist: a child with the grant reads its node's sysfs device files, one without does not; end to end, `tests/rust/test_gpu_apis.py` certifies gpuinfo on a host that reports an API |
 | The SDK | `tests/test_gpu.py`: rule 21, the floor, the lint, `fits`, `NodeClass.gpu_apis`, the kit's skip and pass on a fake host |
 | GPU in a macOS container | agent `container_runtime.rs`: the GPU profile's start arguments, the broker choosing it for a gpu-pool job, `--device /dev/dri`; live (gated on krunkit and `OARBANK_LIVE_COLIMA=1`): a container job with `gpus = "all"` reports a Venus device on the Apple GPU and a compute shader's output is right |
 | Console and CLI | `tests/test_console.py` (the node page: the APIs with their evidence, how containers get the GPU), `tests/test_gpu_placement.py` (`oarbank fleet`) |
