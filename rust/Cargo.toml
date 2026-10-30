@@ -5,7 +5,7 @@ members = ["crates/oarbank-core", "crates/oarbank-core-py", "crates/oarbank-prot
 [workspace.package]
 version = "2.11.1"
 edition = "2021"
-license = "LicenseRef-Proprietary"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
 authors = ["Codonic"]
 rust-version = "1.85"
 

@@ -8,6 +8,10 @@
 A self-hosted job queue for your Macs, Linux machines and Windows PCs: one coordinator, a node on every computer,
 the owner's own work first, every job in the operating system's sandbox.</p>
 
+<p align="center"><sub><b>Source-available, not open source:</b> free for personal and noncommercial use under
+<a href="LICENSE.md">PolyForm Strict 1.0.0</a>; commercial use needs a licence (<a href="#licence">see below</a>).
+The <a href="https://github.com/roeehrl/oarbank-sdk">module SDK</a> is open source under Apache-2.0.</sub></p>
+
 <p align="center">
   <a href="https://github.com/roeehrl/oarbank/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/roeehrl/oarbank/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE.md"><img alt="Licence: PolyForm Strict 1.0.0 (source-available)" src="https://img.shields.io/badge/licence-PolyForm%20Strict%201.0.0-blue"></a>
@@ -203,8 +207,16 @@ containers session on Windows) and see only the job's folders.
 **What happens if a node goes offline mid-job?** Its lease runs out and the coordinator gives the job to another
 node. An answer from the lost lease is not counted.
 
-**Is it open source?** The core is source-available (see Licence); the [SDK](https://github.com/roeehrl/oarbank-sdk)
-is open source under Apache-2.0, so anyone can build and share modules.
+**Is it open source?** No. The core is source-available under PolyForm Strict 1.0.0: you can read all of it, run it
+and audit it, but not sell it, change it or redistribute it outside a contribution. The
+[SDK](https://github.com/roeehrl/oarbank-sdk) is open source under Apache-2.0, so anyone can build, change and share
+modules.
+
+**Who can use it for free?** Anyone for personal use (hobby projects, home labs, study, research for public knowledge)
+with no anticipated commercial application, and charities, schools and universities, public research organisations
+and government bodies, whatever their funding. See [the licence](LICENSE.md) for the exact terms.
+
+**Can my company use it?** Yes, with a commercial licence from Codonic: write to support@codonic.dev.
 
 ## Contributing
 

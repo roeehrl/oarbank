@@ -1,7 +1,9 @@
 [project]
 name = "oarbank"
 version = "2.11.1"
-description = "Batch orchestrator for a fleet of machines on a tailnet: the coordinator (oarbankd), its console and the admin CLI (oarbank)"
+description = "Self-hosted job queue for the Macs, Linux machines and Windows PCs you own: the coordinator (oarbankd), its console and the admin CLI (oarbank)"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

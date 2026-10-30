@@ -18,7 +18,7 @@ description: |
   and keeps the machine's own work protected.
 vendor: Codonic
 homepage: https://codonic.dev
-license: Proprietary
+license: LicenseRef-PolyForm-Strict-1.0.0
 contents:
   - src: ${BIN_DIR}/oarbank-agent
     dst: /usr/lib/oarbank/oarbank-agent
