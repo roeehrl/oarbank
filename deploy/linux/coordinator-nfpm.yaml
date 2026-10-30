@@ -12,7 +12,7 @@ description: |
   Launch Oarbank Coordinator to set it up.
 vendor: Codonic
 homepage: https://codonic.dev
-license: Proprietary
+license: LicenseRef-PolyForm-Strict-1.0.0
 depends:
   - systemd
   - python3
