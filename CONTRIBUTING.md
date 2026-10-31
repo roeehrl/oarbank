@@ -23,4 +23,4 @@ licenses. You keep the copyright in your work.
 - Open an issue first for anything larger than a small fix, so we can agree on the approach.
 - Keep the existing style; add tests next to the code you change; run `uv run --extra dev pytest` and
   `(cd rust && cargo test --workspace)`.
-- Security problems go to support@codonic.dev, not to a public issue.
+- Security problems go to the [Security tab](https://github.com/roeehrl/oarbank/security/advisories/new) or support@codonic.dev, not to a public issue: see [SECURITY.md](SECURITY.md).

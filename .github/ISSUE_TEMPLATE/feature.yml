@@ -1,0 +1,25 @@
+name: Feature request
+description: Something Oarbank should do that it doesn't.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New kinds of work usually belong in a module rather than the core: the [SDK](https://github.com/roeehrl/oarbank-sdk) and its [tutorial](https://docs.codonic.dev/oarbank/build/tutorial) show how. Open-ended ideas are welcome in [Discussions](https://github.com/roeehrl/oarbank/discussions).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you're trying to do with your fleet, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you'd like it to work, from the console, the CLI or a module.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do now
+      description: Any workaround, or another tool you use for this.

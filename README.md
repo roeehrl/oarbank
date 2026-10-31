@@ -223,7 +223,7 @@ and government bodies, whatever their funding. See [the licence](LICENSE.md) for
 Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: it grants the permission to fork
 and change the code for the purpose of contributing, and your first pull request asks you to sign the
 [Contributor License Agreement](CLA.md) once (you keep the copyright in your work). Open an issue before anything
-larger than a small fix. Security problems go to support@codonic.dev, not to a public issue.
+larger than a small fix. Security problems go to the [Security tab](https://github.com/roeehrl/oarbank/security/advisories/new) or support@codonic.dev, not to a public issue: see [SECURITY.md](SECURITY.md).
 
 ```bash
 uv sync --extra dev
