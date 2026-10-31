@@ -2,7 +2,7 @@
 
 Version 1.0. Based on the Apache Software Foundation's Individual Contributor License Agreement.
 
-By signing this agreement (through the CLA bot on a pull request) you accept these terms for every Contribution you
+By signing this agreement (by commenting "I have read CLA.md and I agree to it." on a pull request) you accept these terms for every Contribution you
 submit to Codonic Dev, LLC ("Codonic") for the Oarbank projects, now and in the future.
 
 1. **Definitions.** "You" means the individual who signs. "Contribution" means any original work of authorship,

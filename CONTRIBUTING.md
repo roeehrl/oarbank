@@ -14,8 +14,8 @@ using it once your contribution is merged or declined. It ends if you break thes
 
 ## The Contributor License Agreement
 
-Before a pull request can be merged you sign the [Contributor License Agreement](CLA.md) (once; the CLA bot asks on
-your first pull request). It lets Codonic ship your contribution under the project's license and its commercial
+Before a pull request can be merged you sign the [Contributor License Agreement](CLA.md), once: on your first pull
+request, add a comment that says "I have read CLA.md and I agree to it." It lets Codonic ship your contribution under the project's license and its commercial
 licenses. You keep the copyright in your work.
 
 ## Making a change
