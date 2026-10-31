@@ -14,8 +14,8 @@ using it once your contribution is merged or declined. It ends if you break thes
 
 ## The Contributor License Agreement
 
-Before a pull request can be merged you sign the [Contributor License Agreement](CLA.md) (once; the CLA bot asks on
-your first pull request). It lets Codonic ship your contribution under the project's license and its commercial
+Before a pull request can be merged you sign the [Contributor License Agreement](CLA.md), once: on your first pull
+request, add a comment that says "I have read CLA.md and I agree to it." It lets Codonic ship your contribution under the project's license and its commercial
 licenses. You keep the copyright in your work.
 
 ## Making a change
@@ -23,4 +23,4 @@ licenses. You keep the copyright in your work.
 - Open an issue first for anything larger than a small fix, so we can agree on the approach.
 - Keep the existing style; add tests next to the code you change; run `uv run --extra dev pytest` and
   `(cd rust && cargo test --workspace)`.
-- Security problems go to support@codonic.dev, not to a public issue.
+- Security problems go to the [Security tab](https://github.com/roeehrl/oarbank/security/advisories/new) or support@codonic.dev, not to a public issue: see [SECURITY.md](SECURITY.md).

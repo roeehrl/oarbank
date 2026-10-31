@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in Oarbank doesn't work as the docs say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go to the [Security tab](https://github.com/roeehrl/oarbank/security/advisories/new), not here. Questions and ideas belong in [Discussions](https://github.com/roeehrl/oarbank/discussions).
+
+        **Before you paste logs or output, remove anything that identifies you or your network:** host names, user names, paths with your user name in them, IP and MAC addresses, join codes and keys.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. oarbank campaign start …
+        2. …
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part
+      options:
+        - Coordinator or console
+        - CLI (oarbank)
+        - Node agent
+        - Installer or update
+        - Host protection
+        - Sandbox, containers or GPU
+        - A module
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Oarbank version
+      description: "`oarbank --version` on the coordinator, and the node's version if it differs."
+      placeholder: "2.11.1"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating systems
+      description: The coordinator's and the affected node's, with versions and architecture.
+      placeholder: "Coordinator: macOS 26.1 arm64; node: Windows 11 x64"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: The relevant lines only. `oarbank node show <node>` and the node's doctor output help for node problems.
+      render: text

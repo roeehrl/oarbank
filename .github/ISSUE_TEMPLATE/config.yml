@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/roeehrl/oarbank/discussions
+    about: Ask how to do something, share a module, or float an idea.
+  - name: Security vulnerability
+    url: https://github.com/roeehrl/oarbank/security/advisories/new
+    about: Report it privately, not in an issue.
+  - name: Documentation
+    url: https://docs.codonic.dev/oarbank/
+    about: Get started, how it works, troubleshooting and the module SDK.
