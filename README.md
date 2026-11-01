@@ -4,6 +4,8 @@
 
 <h1 align="center">Oarbank</h1>
 
+<p align="center"><a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a></p>
+
 <p align="center"><b>Spread batch jobs across the computers you already own.</b><br>
 A self-hosted job queue for your Macs, Linux machines and Windows PCs: one coordinator, a node on every computer,
 the owner's own work first, every job in the operating system's sandbox.</p>
